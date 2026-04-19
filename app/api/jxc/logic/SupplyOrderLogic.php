@@ -20,6 +20,21 @@ class SupplyOrderLogic extends BaseLogic
 
     public static function publish(array $params): array|false
     {
+        // 幂等键检查（事务开始前）
+        $idempotentKey = trim((string)($params['idempotent_key'] ?? ''));
+        if ($idempotentKey !== '') {
+            $tenantId = (int)(request()->tenantId ?? 0);
+            $existing = SupplyOrder::where('tenant_id', $tenantId)
+                ->where('idempotent_key', $idempotentKey)
+                ->find();
+            if ($existing) {
+                return [
+                    'id'       => (int)$existing->id,
+                    'order_sn' => (string)$existing->order_sn,
+                ];
+            }
+        }
+
         $built = self::buildOrderData($params);
         if ($built === false) {
             return false;
@@ -284,6 +299,7 @@ class SupplyOrderLogic extends BaseLogic
         $tenantId = (int)(request()->tenantId ?? 0);
         $adminId = (int)(request()->adminId ?? 0);
         $orderSn = trim((string)($params['order_sn'] ?? ($current['order_sn'] ?? '')));
+        $idempotentKey = trim((string)($params['idempotent_key'] ?? ''));
 
         if ($orderSn === '') {
             $orderSn = self::generateOrderSn();
@@ -306,6 +322,7 @@ class SupplyOrderLogic extends BaseLogic
                 'purpose_type' => trim((string)($params['purpose_type'] ?? $params['purpose'] ?? ($current['purpose_type'] ?? self::DEFAULT_PURPOSE_TYPE))),
                 'remarks' => trim((string)($params['remarks'] ?? $params['remark'] ?? ($current['remarks'] ?? ''))),
                 'admin_id' => $adminId,
+                'idempotent_key' => $idempotentKey,
             ],
             'goods' => $goodsRows,
         ];
@@ -395,11 +412,20 @@ class SupplyOrderLogic extends BaseLogic
 
     protected static function generateOrderSn(): string
     {
-        do {
-            $sn = 'JHD' . date('YmdHis') . random_int(1000, 9999);
-        } while (SupplyOrder::where('order_sn', $sn)->count() > 0);
-
-        return $sn;
+        $tenantId = (int)(request()->tenantId ?? 0);
+        $maxRetries = 3;
+        for ($i = 0; $i < $maxRetries; $i++) {
+            $sn = 'JHD' . date('YmdHis') . str_pad((string)mt_rand(0, 999999), 6, '0', STR_PAD_LEFT);
+            $exists = SupplyOrder::where('tenant_id', $tenantId)
+                ->where('order_sn', $sn)
+                ->count();
+            if ($exists == 0) {
+                return $sn;
+            }
+            usleep(1000);
+        }
+        // 3次冲突后使用微秒级后缀
+        return 'JHD' . date('YmdHis') . substr((string)((int)(microtime(true) * 10000)), -10);
     }
 
     protected static function assertOrderSnUnique(string $orderSn, int $ignoreId = 0): bool

@@ -127,6 +127,7 @@ CREATE TABLE IF NOT EXISTS `lk_sales_order` (
   `purpose_type` varchar(50) NOT NULL DEFAULT 'sales' COMMENT '出库目的类型',
   `remarks` varchar(500) NOT NULL DEFAULT '' COMMENT '备注',
   `admin_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建管理员ID',
+  `idempotent_key` varchar(64) NOT NULL DEFAULT '' COMMENT '幂等键',
   `create_time` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建时间',
   `update_time` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新时间',
   PRIMARY KEY (`id`),
@@ -134,7 +135,8 @@ CREATE TABLE IF NOT EXISTS `lk_sales_order` (
   KEY `idx_tenant_id` (`tenant_id`),
   KEY `idx_customer_id` (`customer_id`),
   KEY `idx_warehouse_id` (`warehouse_id`),
-  KEY `idx_datetimesingle` (`datetimesingle`)
+  KEY `idx_datetimesingle` (`datetimesingle`),
+  KEY `idx_tenant_idempotent` (`tenant_id`, `idempotent_key`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='销售单表';
 
 CREATE TABLE IF NOT EXISTS `lk_order_goods` (
@@ -249,6 +251,7 @@ CREATE TABLE IF NOT EXISTS `lk_sales_return_order` (
   `remarks` varchar(500) NOT NULL DEFAULT '' COMMENT '备注',
   `status` tinyint(1) NOT NULL DEFAULT 1 COMMENT '状态',
   `admin_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建管理员ID',
+  `idempotent_key` varchar(64) NOT NULL DEFAULT '' COMMENT '幂等键',
   `datetimesingle` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '单据日期',
   `create_time` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建时间',
   `update_time` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新时间',
@@ -258,7 +261,8 @@ CREATE TABLE IF NOT EXISTS `lk_sales_return_order` (
   KEY `idx_customer_id` (`customer_id`),
   KEY `idx_warehouse_id` (`warehouse_id`),
   KEY `idx_original_order` (`original_sales_order_id`),
-  KEY `idx_datetimesingle` (`datetimesingle`)
+  KEY `idx_datetimesingle` (`datetimesingle`),
+  KEY `idx_tenant_idempotent` (`tenant_id`, `idempotent_key`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='销售退货单表';
 
 -- ========== Phase 2: 进货单 ==========
@@ -278,6 +282,7 @@ CREATE TABLE IF NOT EXISTS `lk_supply_order` (
   `purpose_type` varchar(50) NOT NULL DEFAULT 'supply' COMMENT '入库目的类型',
   `remarks` varchar(500) NOT NULL DEFAULT '' COMMENT '备注',
   `admin_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建管理员ID',
+  `idempotent_key` varchar(64) NOT NULL DEFAULT '' COMMENT '幂等键',
   `create_time` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建时间',
   `update_time` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新时间',
   PRIMARY KEY (`id`),
@@ -285,7 +290,8 @@ CREATE TABLE IF NOT EXISTS `lk_supply_order` (
   KEY `idx_tenant_id` (`tenant_id`),
   KEY `idx_supplier_id` (`supplier_id`),
   KEY `idx_warehouse_id` (`warehouse_id`),
-  KEY `idx_datetimesingle` (`datetimesingle`)
+  KEY `idx_datetimesingle` (`datetimesingle`),
+  KEY `idx_tenant_idempotent` (`tenant_id`, `idempotent_key`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='进货单表';
 
 -- ========== Phase 2: 订货单 ==========
@@ -305,6 +311,7 @@ CREATE TABLE IF NOT EXISTS `lk_purchase_order` (
   `cancel_reason` varchar(500) NOT NULL DEFAULT '' COMMENT '取消原因',
   `remarks` varchar(500) NOT NULL DEFAULT '' COMMENT '备注',
   `admin_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建管理员ID',
+  `idempotent_key` varchar(64) NOT NULL DEFAULT '' COMMENT '幂等键',
   `create_time` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建时间',
   `update_time` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新时间',
   PRIMARY KEY (`id`),
@@ -313,5 +320,6 @@ CREATE TABLE IF NOT EXISTS `lk_purchase_order` (
   KEY `idx_customer_id` (`customer_id`),
   KEY `idx_warehouse_id` (`warehouse_id`),
   KEY `idx_status` (`status`),
-  KEY `idx_datetimesingle` (`datetimesingle`)
+  KEY `idx_datetimesingle` (`datetimesingle`),
+  KEY `idx_tenant_idempotent` (`tenant_id`, `idempotent_key`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='订货单表';
