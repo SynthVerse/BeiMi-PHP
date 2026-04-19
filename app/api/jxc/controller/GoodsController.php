@@ -1,0 +1,51 @@
+<?php
+
+namespace app\api\jxc\controller;
+
+use app\api\jxc\lists\GoodsLists;
+use app\api\jxc\logic\GoodsLogic;
+use app\api\jxc\validate\GoodsValidate;
+
+class GoodsController extends BaseJxcController
+{
+    public function lists()
+    {
+        return $this->dataLists(GoodsLists::class);
+    }
+
+    public function add()
+    {
+        $params = (new GoodsValidate())->post()->goCheck('add');
+        $result = GoodsLogic::add($params);
+        if ($result === false) {
+            return $this->fail(GoodsLogic::getError());
+        }
+        return $this->success('添加成功', $result, 1, 1);
+    }
+
+    public function edit()
+    {
+        $params = (new GoodsValidate())->post()->goCheck('edit');
+        $result = GoodsLogic::edit($params);
+        if ($result === false) {
+            return $this->fail(GoodsLogic::getError());
+        }
+        return $this->success('编辑成功', [], 1, 1);
+    }
+
+    public function delete()
+    {
+        $params = (new GoodsValidate())->goCheck('delete');
+        $result = GoodsLogic::delete($params);
+        if ($result === false) {
+            return $this->fail(GoodsLogic::getError());
+        }
+        return $this->success('删除成功', [], 1, 1);
+    }
+
+    public function detail()
+    {
+        $params = (new GoodsValidate())->goCheck('detail');
+        return $this->data(GoodsLogic::detail($params));
+    }
+}

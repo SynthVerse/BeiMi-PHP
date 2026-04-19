@@ -1,0 +1,95 @@
+<?php
+
+namespace app\api\jxc\validate;
+
+use app\common\validate\BaseValidate;
+
+class GoodsValidate extends BaseValidate
+{
+    protected $rule = [
+        'id' => 'require|integer|gt:0',
+        'name' => 'requireWithout:product_name|max:200',
+        'product_name' => 'requireWithout:name|max:200',
+        'product_code' => 'max:100',
+        'units' => 'requireWithout:unit|max:50',
+        'unit' => 'requireWithout:units|max:50',
+        'unit_id' => 'integer|egt:0',
+        'units_id' => 'integer|egt:0',
+        'price' => 'float|egt:0',
+        'units_money' => 'float|egt:0',
+        'cost' => 'float|egt:0',
+        'stock' => 'float|egt:0',
+        'category_id' => 'integer|egt:0',
+        'is_disabled' => 'integer|in:0,1',
+        'remark' => 'max:500',
+    ];
+
+    protected $field = [
+        'id' => '商品ID',
+        'name' => '商品名称',
+        'product_name' => '商品名称',
+        'product_code' => '商品编码',
+        'units' => '单位',
+        'unit' => '单位',
+        'unit_id' => '单位ID',
+        'units_id' => '单位ID',
+        'price' => '销售价格',
+        'units_money' => '销售价格',
+        'cost' => '成本价',
+        'stock' => '库存',
+        'category_id' => '分类ID',
+        'is_disabled' => '禁用状态',
+        'remark' => '备注',
+    ];
+
+    public function sceneAdd()
+    {
+        return $this->only([
+            'name',
+            'product_name',
+            'product_code',
+            'units',
+            'unit',
+            'unit_id',
+            'units_id',
+            'price',
+            'units_money',
+            'cost',
+            'stock',
+            'category_id',
+            'is_disabled',
+            'remark',
+        ]);
+    }
+
+    public function sceneEdit()
+    {
+        return $this->only([
+            'id',
+            'name',
+            'product_name',
+            'product_code',
+            'units',
+            'unit',
+            'unit_id',
+            'units_id',
+            'price',
+            'units_money',
+            'cost',
+            'stock',
+            'category_id',
+            'is_disabled',
+            'remark',
+        ]);
+    }
+
+    public function sceneDelete()
+    {
+        return $this->only(['id']);
+    }
+
+    public function sceneDetail()
+    {
+        return $this->only(['id']);
+    }
+}
