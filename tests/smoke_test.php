@@ -514,8 +514,416 @@ if ($orderCustId && $orderWhId) {
 $notFoundRes = httpRequest('GET', "{$BASE_URL}/api/goods/detail", ['id' => 999999], $token);
 assert_code($notFoundRes, 0, '获取不存在商品（期望失败）');
 
-// 9.3 清理前置数据
-echo "\n── 步骤 9.x：清理前置数据 ──\n";
+// ══════════════════════════════════════════════
+// 步骤 10：进货单 CRUD + 库存入库验证
+// ══════════════════════════════════════════════
+echo "\n── 步骤 10：进货单 CRUD + 库存入库验证 ──\n";
+
+// 前置：创建供应商
+$supplySupRes = httpRequest('POST', "{$BASE_URL}/api/supplier/add", [
+    'supplier_name' => 'SMOKE_进货单测试供应商',
+    'contact'       => 'SMOKE_进货联系人',
+    'phone'         => '13700000001',
+], $token);
+assert_code($supplySupRes, 1, '进货单前置-创建供应商');
+$supplySupId = extractId($supplySupRes);
+if ($supplySupId === null) {
+    $tmpList = httpRequest('GET', "{$BASE_URL}/api/supplier/index", [], $token);
+    $supplySupId = findIdInList($tmpList, 'supplier_name', 'SMOKE_进货单测试供应商');
+}
+
+$supplyOrderId = null;
+
+if ($supplySupId && $orderWhId && $orderGoodsId) {
+    // 10.1 创建进货单
+    $supplyAddRes = httpRequest('POST', "{$BASE_URL}/api/supply/publish", [
+        'supplier_id'  => $supplySupId,
+        'warehouse_id' => $orderWhId,
+        'goods'        => [[
+            'goods_id' => $orderGoodsId,
+            'name'     => 'SMOKE_订单测试商品',
+            'number'   => 10,
+            'price'    => 10.50,
+            'units'    => '个',
+        ]],
+    ], $token);
+    assert_code($supplyAddRes, 1, '进货单创建');
+    $supplyOrderId = extractId($supplyAddRes);
+
+    // 10.2 进货单列表
+    $supplyListRes = httpRequest('GET', "{$BASE_URL}/api/supply/lists", [], $token);
+    assert_code($supplyListRes, 1, '进货单列表');
+    if ($supplyOrderId === null) {
+        $supplyOrderId = $supplyListRes['data']['data'][0]['id'] ?? null;
+        if ($supplyOrderId) $supplyOrderId = (int)$supplyOrderId;
+    }
+
+    // 10.3 进货单详情
+    if ($supplyOrderId) {
+        $supplyDetailRes = httpRequest('GET', "{$BASE_URL}/api/supply/details", ['id' => $supplyOrderId], $token);
+        assert_code($supplyDetailRes, 1, '进货单详情');
+
+        // 10.4 编辑进货单
+        $supplyEditRes = httpRequest('POST', "{$BASE_URL}/api/supply/edit", [
+            'id'           => $supplyOrderId,
+            'supplier_id'  => $supplySupId,
+            'warehouse_id' => $orderWhId,
+            'goods'        => [[
+                'goods_id' => $orderGoodsId,
+                'name'     => 'SMOKE_订单测试商品',
+                'number'   => 8,
+                'price'    => 12.00,
+                'units'    => '个',
+            ]],
+        ], $token);
+        assert_code($supplyEditRes, 1, '进货单编辑');
+    }
+
+    // 10.5 进货单统计
+    $supplyStatsRes = httpRequest('GET', "{$BASE_URL}/api/supply/statistics", [], $token);
+    assert_code($supplyStatsRes, 1, '进货单统计');
+
+    // 10.6 删除进货单（回滚库存）
+    if ($supplyOrderId) {
+        $supplyDelRes = httpRequest('DELETE', "{$BASE_URL}/api/supply/remove", ['id' => $supplyOrderId], $token);
+        assert_code($supplyDelRes, 1, '进货单删除');
+        $supplyOrderId = null;
+    }
+} else {
+    echo "[SKIP] 进货单测试：前置数据不足（供应商ID={$supplySupId}, 仓库ID={$orderWhId}, 商品ID={$orderGoodsId}）\n";
+}
+
+// 清理供应商
+if ($supplySupId) {
+    $cleanSupplySup = httpRequest('DELETE', "{$BASE_URL}/api/supplier/del", ['id' => $supplySupId], $token);
+    assert_code($cleanSupplySup, 1, '清理-删除进货单测试供应商');
+}
+
+// ══════════════════════════════════════════════
+// 步骤 11：销售退货单 CRUD
+// ══════════════════════════════════════════════
+echo "\n── 步骤 11：销售退货单 CRUD ──\n";
+
+// 前置：创建销售单作为原单
+$returnSaleOrderId = null;
+$returnOrderId     = null;
+
+if ($orderCustId && $orderWhId && $orderGoodsId) {
+    $returnSaleRes = httpRequest('POST', "{$BASE_URL}/api/order/publish", [
+        'customer_id'  => $orderCustId,
+        'warehouse_id' => $orderWhId,
+        'goods'        => [[
+            'goods_id' => $orderGoodsId,
+            'name'     => 'SMOKE_订单测试商品',
+            'number'   => 5,
+            'price'    => 10.50,
+            'units'    => '个',
+        ]],
+    ], $token);
+    assert_code($returnSaleRes, 1, '退货前置-创建销售单');
+    $returnSaleOrderId = extractId($returnSaleRes);
+
+    // 11.1 创建退货单
+    if ($returnSaleOrderId) {
+        $returnAddRes = httpRequest('POST', "{$BASE_URL}/api/return/publish", [
+            'original_order_id' => $returnSaleOrderId,
+            'customer_id'       => $orderCustId,
+            'warehouse_id'      => $orderWhId,
+            'goods'             => [[
+                'goods_id' => $orderGoodsId,
+                'name'     => 'SMOKE_订单测试商品',
+                'number'   => 2,
+                'price'    => 10.50,
+                'units'    => '个',
+            ]],
+        ], $token);
+        assert_code($returnAddRes, 1, '退货单创建');
+        $returnOrderId = extractId($returnAddRes);
+    }
+
+    // 11.2 退货单列表
+    $returnListRes = httpRequest('GET', "{$BASE_URL}/api/return/lists", [], $token);
+    assert_code($returnListRes, 1, '退货单列表');
+    if ($returnOrderId === null && $returnSaleOrderId) {
+        $returnOrderId = $returnListRes['data']['data'][0]['id'] ?? null;
+        if ($returnOrderId) $returnOrderId = (int)$returnOrderId;
+    }
+
+    // 11.3 退货单详情
+    if ($returnOrderId) {
+        $returnDetailRes = httpRequest('GET', "{$BASE_URL}/api/return/details", ['id' => $returnOrderId], $token);
+        assert_code($returnDetailRes, 1, '退货单详情');
+
+        // 11.4 编辑退货单
+        $returnEditRes = httpRequest('POST', "{$BASE_URL}/api/return/edit", [
+            'id'                => $returnOrderId,
+            'original_order_id' => $returnSaleOrderId,
+            'customer_id'       => $orderCustId,
+            'warehouse_id'      => $orderWhId,
+            'goods'             => [[
+                'goods_id' => $orderGoodsId,
+                'name'     => 'SMOKE_订单测试商品',
+                'number'   => 1,
+                'price'    => 10.50,
+                'units'    => '个',
+            ]],
+        ], $token);
+        assert_code($returnEditRes, 1, '退货单编辑');
+    }
+
+    // 11.5 删除退货单
+    if ($returnOrderId) {
+        $returnDelRes = httpRequest('DELETE', "{$BASE_URL}/api/return/remove", ['id' => $returnOrderId], $token);
+        assert_code($returnDelRes, 1, '退货单删除');
+        $returnOrderId = null;
+    }
+
+    // 清理：删除原销售单
+    if ($returnSaleOrderId) {
+        $returnSaleDelRes = httpRequest('DELETE', "{$BASE_URL}/api/order/remove", ['id' => $returnSaleOrderId], $token);
+        assert_code($returnSaleDelRes, 1, '退货清理-删除销售单');
+    }
+} else {
+    echo "[SKIP] 退货单测试：前置数据不足\n";
+}
+
+// ══════════════════════════════════════════════
+// 步骤 12：订货单 CRUD + 状态推进
+// ══════════════════════════════════════════════
+echo "\n── 步骤 12：订货单 CRUD + 状态推进 ──\n";
+
+// 前置：创建专用客户和商品（避免阻塞其他测试的清理）
+$purchaseCustRes = httpRequest('POST', "{$BASE_URL}/api/customer/add", [
+    'customer_name' => 'SMOKE_订货单测试客户',
+    'contact'       => 'SMOKE_订货联系人',
+    'phone'         => '13800000003',
+], $token);
+assert_code($purchaseCustRes, 1, '订货单前置-创建客户');
+$purchaseCustId = extractId($purchaseCustRes);
+if ($purchaseCustId === null) {
+    $tmpList = httpRequest('GET', "{$BASE_URL}/api/customer/index", [], $token);
+    $purchaseCustId = findIdInList($tmpList, 'customer_name', 'SMOKE_订货单测试客户');
+}
+
+$purchaseGoodsRes = httpRequest('POST', "{$BASE_URL}/api/goods/add", [
+    'name'         => 'SMOKE_订货单测试商品',
+    'product_code' => 'SMOKE_PUR001',
+    'price'        => 20.00,
+    'units'        => '件',
+], $token);
+assert_code($purchaseGoodsRes, 1, '订货单前置-创建商品');
+$purchaseGoodsId = extractId($purchaseGoodsRes);
+if ($purchaseGoodsId === null) {
+    $tmpList = httpRequest('GET', "{$BASE_URL}/api/goods/index", [], $token);
+    $purchaseGoodsId = findIdInList($tmpList, 'name', 'SMOKE_订货单测试商品');
+}
+
+$purchaseOrder1Id = null;
+$purchaseOrder2Id = null;
+$purchaseOrder3Id = null;
+
+if ($purchaseCustId && $purchaseGoodsId) {
+    // 12.1 创建订货单 PO1（draft 状态）
+    $purchaseAdd1Res = httpRequest('POST', "{$BASE_URL}/api/purchase/publish", [
+        'customer_id' => $purchaseCustId,
+        'warehouse_id' => $orderWhId,
+        'goods'       => [[
+            'goods_id' => $purchaseGoodsId,
+            'name'     => 'SMOKE_订货单测试商品',
+            'number'   => 5,
+            'price'    => 20.00,
+            'units'    => '件',
+        ]],
+    ], $token);
+    assert_code($purchaseAdd1Res, 1, '订货单创建-PO1');
+    $purchaseOrder1Id = extractId($purchaseAdd1Res);
+
+    // 12.2 订货单列表
+    $purchaseListRes = httpRequest('GET', "{$BASE_URL}/api/purchase/lists", [], $token);
+    assert_code($purchaseListRes, 1, '订货单列表');
+    if ($purchaseOrder1Id === null) {
+        $purchaseOrder1Id = $purchaseListRes['data']['data'][0]['id'] ?? null;
+        if ($purchaseOrder1Id) $purchaseOrder1Id = (int)$purchaseOrder1Id;
+    }
+
+    // 12.3 订货单详情
+    if ($purchaseOrder1Id) {
+        $purchaseDetailRes = httpRequest('GET', "{$BASE_URL}/api/purchase/details", ['id' => $purchaseOrder1Id], $token);
+        assert_code($purchaseDetailRes, 1, '订货单详情-PO1');
+
+        // 12.4 推进状态 draft → sent
+        $purchaseConfirm1Res = httpRequest('POST', "{$BASE_URL}/api/purchase/confirm", ['id' => $purchaseOrder1Id], $token);
+        assert_code($purchaseConfirm1Res, 1, '订货单确认-draft→sent');
+
+        // 12.5 推进状态 sent → received
+        $purchaseConfirm2Res = httpRequest('POST', "{$BASE_URL}/api/purchase/confirm", ['id' => $purchaseOrder1Id], $token);
+        assert_code($purchaseConfirm2Res, 1, '订货单确认-sent→received');
+    }
+
+    // 12.6 新建 PO2 并取消
+    $purchaseAdd2Res = httpRequest('POST', "{$BASE_URL}/api/purchase/publish", [
+        'customer_id' => $purchaseCustId,
+        'warehouse_id' => $orderWhId,
+        'goods'       => [[
+            'goods_id' => $purchaseGoodsId,
+            'name'     => 'SMOKE_订货单测试商品',
+            'number'   => 3,
+            'price'    => 20.00,
+            'units'    => '件',
+        ]],
+    ], $token);
+    assert_code($purchaseAdd2Res, 1, '订货单创建-PO2');
+    $purchaseOrder2Id = extractId($purchaseAdd2Res);
+
+    if ($purchaseOrder2Id) {
+        $purchaseCancelRes = httpRequest('POST', "{$BASE_URL}/api/purchase/cancel", [
+            'id'            => $purchaseOrder2Id,
+            'cancel_reason' => 'SMOKE_测试取消',
+        ], $token);
+        assert_code($purchaseCancelRes, 1, '订货单取消-PO2');
+    }
+
+    // 12.7 新建 PO3 → 编辑 → 删除
+    $purchaseAdd3Res = httpRequest('POST', "{$BASE_URL}/api/purchase/publish", [
+        'customer_id' => $purchaseCustId,
+        'warehouse_id' => $orderWhId,
+        'goods'       => [[
+            'goods_id' => $purchaseGoodsId,
+            'name'     => 'SMOKE_订货单测试商品',
+            'number'   => 2,
+            'price'    => 20.00,
+            'units'    => '件',
+        ]],
+    ], $token);
+    assert_code($purchaseAdd3Res, 1, '订货单创建-PO3');
+    $purchaseOrder3Id = extractId($purchaseAdd3Res);
+
+    if ($purchaseOrder3Id) {
+        $purchaseEditRes = httpRequest('POST', "{$BASE_URL}/api/purchase/edit", [
+            'id'          => $purchaseOrder3Id,
+            'customer_id' => $purchaseCustId,
+            'warehouse_id' => $orderWhId,
+            'goods'       => [[
+                'goods_id' => $purchaseGoodsId,
+                'name'     => 'SMOKE_订货单测试商品',
+                'number'   => 4,
+                'price'    => 25.00,
+                'units'    => '件',
+            ]],
+        ], $token);
+        assert_code($purchaseEditRes, 1, '订货单编辑-PO3');
+    }
+
+    // 12.8 订货单统计
+    $purchaseStatsRes = httpRequest('GET', "{$BASE_URL}/api/purchase/statistics", [], $token);
+    assert_code($purchaseStatsRes, 1, '订货单统计');
+
+    // 12.9 删除 PO3（draft 状态可删除）
+    if ($purchaseOrder3Id) {
+        $purchaseDelRes = httpRequest('DELETE', "{$BASE_URL}/api/purchase/remove", ['id' => $purchaseOrder3Id], $token);
+        assert_code($purchaseDelRes, 1, '订货单删除-PO3');
+        $purchaseOrder3Id = null;
+    }
+
+    // 清理：取消 PO1（received→cancelled，已取消的订货单无法通过 API 删除）
+    if ($purchaseOrder1Id) {
+        $purchaseCancel1Res = httpRequest('POST', "{$BASE_URL}/api/purchase/cancel", [
+            'id'            => $purchaseOrder1Id,
+            'cancel_reason' => 'SMOKE_测试清理',
+        ], $token);
+        assert_code($purchaseCancel1Res, 1, '清理-取消订货单PO1');
+    }
+    // PO2 已取消，无需再处理
+    echo "[INFO] 已取消的订货单 PO1/PO2 无法通过 API 删除，其关联的测试客户和商品将保留\n";
+} else {
+    echo "[SKIP] 订货单测试：前置数据不足（客户ID={$purchaseCustId}, 商品ID={$purchaseGoodsId}）\n";
+}
+
+// ══════════════════════════════════════════════
+// 步骤 13：店铺模块
+// ══════════════════════════════════════════════
+echo "\n── 步骤 13：店铺模块 ──\n";
+
+// 13.1 获取店铺信息（可能为空）
+$storeInfoRes = httpRequest('GET', "{$BASE_URL}/api/user/store", [], $token);
+assert_code($storeInfoRes, 1, '获取店铺信息');
+
+// 13.2 创建店铺
+$storeOpenRes = httpRequest('POST', "{$BASE_URL}/api/user/open", [
+    'name'    => 'SMOKE_测试店铺',
+    'contact' => 'SMOKE_店主',
+    'phone'   => '13600000001',
+    'address' => 'SMOKE_店铺地址',
+], $token);
+assert_code($storeOpenRes, 1, '创建店铺');
+$storeId = extractId($storeOpenRes);
+
+// 13.3 设置店铺
+if ($storeId) {
+    $storeSetRes = httpRequest('POST', "{$BASE_URL}/api/user/storeset", [
+        'id'      => $storeId,
+        'name'    => 'SMOKE_测试店铺-改',
+        'contact' => 'SMOKE_店主-改',
+    ], $token);
+    assert_code($storeSetRes, 1, '设置店铺');
+
+    // 再次获取店铺信息验证更新
+    $storeInfoRes2 = httpRequest('GET', "{$BASE_URL}/api/user/store", ['id' => $storeId], $token);
+    assert_code($storeInfoRes2, 1, '获取店铺信息(更新后)');
+
+    // 清理：删除测试店铺（店铺本质是 Customer，使用客户删除接口）
+    $storeDelRes = httpRequest('DELETE', "{$BASE_URL}/api/customer/del", ['id' => $storeId], $token);
+    assert_code($storeDelRes, 1, '清理-删除测试店铺');
+} else {
+    echo "[SKIP] 设置店铺：无法获取店铺ID\n";
+}
+
+// ══════════════════════════════════════════════
+// 步骤 14：删除占用校验
+// ══════════════════════════════════════════════
+echo "\n── 步骤 14：删除占用校验 ──\n";
+
+$deletionTestOrderId = null;
+
+if ($orderCustId && $orderWhId && $orderGoodsId) {
+    // 14.1 创建销售单（占用商品、仓库、客户）
+    $deletionTestOrderRes = httpRequest('POST', "{$BASE_URL}/api/order/publish", [
+        'customer_id'  => $orderCustId,
+        'warehouse_id' => $orderWhId,
+        'goods'        => [[
+            'goods_id' => $orderGoodsId,
+            'name'     => 'SMOKE_订单测试商品',
+            'number'   => 3,
+            'price'    => 10.50,
+            'units'    => '个',
+        ]],
+    ], $token);
+    assert_code($deletionTestOrderRes, 1, '删除校验前置-创建销售单');
+    $deletionTestOrderId = extractId($deletionTestOrderRes);
+
+    if ($deletionTestOrderId) {
+        // 14.2 尝试删除被引用的商品（期望失败）
+        $delGoodsRes = httpRequest('DELETE', "{$BASE_URL}/api/goods/del", ['id' => $orderGoodsId], $token);
+        assert_code($delGoodsRes, 0, '删除被引用商品（期望失败）');
+
+        // 14.3 尝试删除被引用的仓库（期望失败）
+        $delWhRes = httpRequest('POST', "{$BASE_URL}/api/warehouse/del", ['id' => $orderWhId], $token);
+        assert_code($delWhRes, 0, '删除被引用仓库（期望失败）');
+
+        // 14.4 尝试删除被引用的客户（期望失败）
+        $delCustRes = httpRequest('DELETE', "{$BASE_URL}/api/customer/del", ['id' => $orderCustId], $token);
+        assert_code($delCustRes, 0, '删除被引用客户（期望失败）');
+
+        // 14.5 清理：删除销售单以释放引用
+        $delTestOrderRes = httpRequest('DELETE', "{$BASE_URL}/api/order/remove", ['id' => $deletionTestOrderId], $token);
+        assert_code($delTestOrderRes, 1, '删除校验清理-删除销售单');
+    }
+} else {
+    echo "[SKIP] 删除占用校验：前置数据不足\n";
+}
+
+// 15. 清理前置数据
+echo "\n── 步骤 15：清理前置数据 ──\n";
 
 if ($orderGoodsId) {
     $cleanGoods = httpRequest('DELETE', "{$BASE_URL}/api/goods/del", ['id' => $orderGoodsId], $token);
@@ -531,9 +939,9 @@ if ($orderCustId) {
 }
 
 // ══════════════════════════════════════════════
-// 步骤 10：退出登录
+// 步骤 16：退出登录
 // ══════════════════════════════════════════════
-echo "\n── 步骤 10：退出登录 ──\n";
+echo "\n── 步骤 16：退出登录 ──\n";
 $logoutRes = httpRequest('POST', "{$BASE_URL}/api/user/logout", [], $token);
 assert_code($logoutRes, 1, '用户退出登录');
 
