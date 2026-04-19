@@ -5,6 +5,7 @@
 .DESCRIPTION
     1. 启动 MySQL（后台进程）
     2. 等待 MySQL 就绪（循环尝试连接，最多 30 秒）
+    2b. 执行数据库迁移
     3. 启动 PHP 内置服务器（后台进程）
     4. 输出提示信息
 .NOTES
@@ -78,6 +79,20 @@ if ($mysqlReady) {
 } else {
     Write-Host '  [ERROR] MySQL 在 30 秒内未就绪，请检查日志。' -ForegroundColor Red
     exit 1
+}
+
+# ── 2b. 执行数据库迁移 ──
+Write-Host ''
+Write-Host '[2b/3] 执行数据库迁移 ...' -ForegroundColor Yellow
+
+$migrateScript = Join-Path $projectRoot 'scripts\migrate.php'
+if (Test-Path $migrateScript) {
+    & $phpPath $migrateScript
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host '  [WARN] 数据库迁移执行出现问题，继续启动...' -ForegroundColor DarkYellow
+    }
+} else {
+    Write-Host '  迁移脚本不存在，跳过。' -ForegroundColor DarkGray
 }
 
 # ── 3. 启动 PHP 内置服务器 ──

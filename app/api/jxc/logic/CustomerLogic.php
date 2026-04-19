@@ -9,6 +9,8 @@ use app\common\model\jxc\SalesOrder;
 use app\common\model\jxc\SalesReturnOrder;
 use app\common\model\jxc\PurchaseOrder;
 use think\facade\Db;
+use think\facade\Log;
+use app\api\jxc\exception\BusinessException;
 
 class CustomerLogic extends BaseLogic
 {
@@ -49,9 +51,18 @@ class CustomerLogic extends BaseLogic
             self::refreshGroupCounts([$saveData['group_id']]);
             Db::commit();
             return self::detail(['id' => (int)$customer->id]);
-        } catch (\Throwable $e) {
+        } catch (BusinessException $e) {
             Db::rollback();
             self::setError($e->getMessage());
+            return false;
+        } catch (\Throwable $e) {
+            Db::rollback();
+            Log::error('客户创建失败: ' . $e->getMessage(), [
+                'file'  => $e->getFile(),
+                'line'  => $e->getLine(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            self::setError('操作失败，请稍后重试');
             return false;
         }
     }
@@ -110,9 +121,18 @@ class CustomerLogic extends BaseLogic
             self::refreshGroupCounts([$oldGroupId, (int)$saveData['group_id']]);
             Db::commit();
             return self::detail(['id' => (int)$model->id]);
-        } catch (\Throwable $e) {
+        } catch (BusinessException $e) {
             Db::rollback();
             self::setError($e->getMessage());
+            return false;
+        } catch (\Throwable $e) {
+            Db::rollback();
+            Log::error('客户编辑失败: ' . $e->getMessage(), [
+                'file'  => $e->getFile(),
+                'line'  => $e->getLine(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            self::setError('操作失败，请稍后重试');
             return false;
         }
     }
@@ -163,9 +183,18 @@ class CustomerLogic extends BaseLogic
                 'id' => $customerId,
                 'affected_store_count' => $affectedStoreCount,
             ];
-        } catch (\Throwable $e) {
+        } catch (BusinessException $e) {
             Db::rollback();
             self::setError($e->getMessage());
+            return false;
+        } catch (\Throwable $e) {
+            Db::rollback();
+            Log::error('客户删除失败: ' . $e->getMessage(), [
+                'file'  => $e->getFile(),
+                'line'  => $e->getLine(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            self::setError('操作失败，请稍后重试');
             return false;
         }
     }
@@ -269,9 +298,18 @@ class CustomerLogic extends BaseLogic
             self::refreshGroupCounts([$oldGroupId, (int)$parent->group_id]);
             Db::commit();
             return self::detail(['id' => $storeId]);
-        } catch (\Throwable $e) {
+        } catch (BusinessException $e) {
             Db::rollback();
             self::setError($e->getMessage());
+            return false;
+        } catch (\Throwable $e) {
+            Db::rollback();
+            Log::error('客户绑定门店失败: ' . $e->getMessage(), [
+                'file'  => $e->getFile(),
+                'line'  => $e->getLine(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            self::setError('操作失败，请稍后重试');
             return false;
         }
     }
@@ -300,9 +338,18 @@ class CustomerLogic extends BaseLogic
             self::refreshChildrenCount($oldParentId);
             Db::commit();
             return self::detail(['id' => $storeId]);
-        } catch (\Throwable $e) {
+        } catch (BusinessException $e) {
             Db::rollback();
             self::setError($e->getMessage());
+            return false;
+        } catch (\Throwable $e) {
+            Db::rollback();
+            Log::error('客户解除门店失败: ' . $e->getMessage(), [
+                'file'  => $e->getFile(),
+                'line'  => $e->getLine(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            self::setError('操作失败，请稍后重试');
             return false;
         }
     }
@@ -334,9 +381,18 @@ class CustomerLogic extends BaseLogic
             self::refreshGroupCounts([$oldGroupId, (int)$group->id]);
             Db::commit();
             return self::detail(['id' => $customerId]);
-        } catch (\Throwable $e) {
+        } catch (BusinessException $e) {
             Db::rollback();
             self::setError($e->getMessage());
+            return false;
+        } catch (\Throwable $e) {
+            Db::rollback();
+            Log::error('客户调整分组失败: ' . $e->getMessage(), [
+                'file'  => $e->getFile(),
+                'line'  => $e->getLine(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            self::setError('操作失败，请稍后重试');
             return false;
         }
     }
@@ -362,9 +418,18 @@ class CustomerLogic extends BaseLogic
             }
             Db::commit();
             return self::detail(['id' => (int)$model->id]);
-        } catch (\Throwable $e) {
+        } catch (BusinessException $e) {
             Db::rollback();
             self::setError($e->getMessage());
+            return false;
+        } catch (\Throwable $e) {
+            Db::rollback();
+            Log::error('客户状态设置失败: ' . $e->getMessage(), [
+                'file'  => $e->getFile(),
+                'line'  => $e->getLine(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            self::setError('操作失败，请稍后重试');
             return false;
         }
     }
@@ -395,9 +460,18 @@ class CustomerLogic extends BaseLogic
             ]);
             Db::commit();
             return self::detail(['id' => $customerId]);
-        } catch (\Throwable $e) {
+        } catch (BusinessException $e) {
             Db::rollback();
             self::setError($e->getMessage());
+            return false;
+        } catch (\Throwable $e) {
+            Db::rollback();
+            Log::error('客户付款失败: ' . $e->getMessage(), [
+                'file'  => $e->getFile(),
+                'line'  => $e->getLine(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            self::setError('操作失败，请稍后重试');
             return false;
         }
     }

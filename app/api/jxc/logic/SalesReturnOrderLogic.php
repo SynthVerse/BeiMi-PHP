@@ -11,8 +11,11 @@ use app\common\model\jxc\SalesOrder;
 use app\common\model\jxc\SalesReturnOrder;
 use app\common\model\jxc\Warehouse;
 use think\facade\Db;
+use think\facade\Log;
 use app\api\jxc\logic\StockService;
 use app\api\jxc\logic\FinanceService;
+use app\api\jxc\logic\AuditService;
+use app\api\jxc\exception\BusinessException;
 
 class SalesReturnOrderLogic extends BaseLogic
 {
@@ -75,13 +78,31 @@ class SalesReturnOrderLogic extends BaseLogic
 
             Db::commit();
 
+            AuditService::log(
+                AuditService::MODULE_RETURN_ORDER,
+                AuditService::ACTION_CREATE,
+                (int)$order->id,
+                (string)$order->order_sn,
+                null,
+                $built['order']
+            );
+
             return [
                 'id' => (int)$order->id,
                 'order_sn' => (string)$order->order_sn,
             ];
-        } catch (\Throwable $e) {
+        } catch (BusinessException $e) {
             Db::rollback();
             self::setError($e->getMessage());
+            return false;
+        } catch (\Throwable $e) {
+            Db::rollback();
+            Log::error('退货单创建失败: ' . $e->getMessage(), [
+                'file'  => $e->getFile(),
+                'line'  => $e->getLine(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            self::setError('操作失败，请稍后重试');
             return false;
         }
     }
@@ -151,10 +172,29 @@ class SalesReturnOrderLogic extends BaseLogic
 
             Db::commit();
 
-            return self::detail(['id' => (int)$order->id]);
-        } catch (\Throwable $e) {
+            $result = self::detail(['id' => (int)$order->id]);
+            AuditService::log(
+                AuditService::MODULE_RETURN_ORDER,
+                AuditService::ACTION_EDIT,
+                (int)$order->id,
+                (string)$order->order_sn,
+                $built['order'],
+                $result
+            );
+
+            return $result;
+        } catch (BusinessException $e) {
             Db::rollback();
             self::setError($e->getMessage());
+            return false;
+        } catch (\Throwable $e) {
+            Db::rollback();
+            Log::error('退货单编辑失败: ' . $e->getMessage(), [
+                'file'  => $e->getFile(),
+                'line'  => $e->getLine(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            self::setError('操作失败，请稍后重试');
             return false;
         }
     }
@@ -194,12 +234,30 @@ class SalesReturnOrderLogic extends BaseLogic
             $order->delete();
             Db::commit();
 
+            AuditService::log(
+                AuditService::MODULE_RETURN_ORDER,
+                AuditService::ACTION_DELETE,
+                (int)$params['id'],
+                $orderSn,
+                ['id' => (int)$params['id'], 'order_sn' => $orderSn, 'customer_id' => $customerId, 'order_money' => $oldOrderMoney],
+                null
+            );
+
             return [
                 'id' => (int)$params['id'],
             ];
-        } catch (\Throwable $e) {
+        } catch (BusinessException $e) {
             Db::rollback();
             self::setError($e->getMessage());
+            return false;
+        } catch (\Throwable $e) {
+            Db::rollback();
+            Log::error('退货单删除失败: ' . $e->getMessage(), [
+                'file'  => $e->getFile(),
+                'line'  => $e->getLine(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            self::setError('操作失败，请稍后重试');
             return false;
         }
     }

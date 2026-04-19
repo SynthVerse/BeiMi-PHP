@@ -93,6 +93,9 @@ Route::group('', function () {
     Route::post('purchase/parse-text',        'jxc.PurchaseOrder/parsePastedText');
     Route::get('purchase/statistics',         'jxc.PurchaseOrder/statistics');
 
+    // === 审计日志 ===
+    Route::get('audit/lists', 'jxc.AuditController/lists');
+
     // === 店铺管理 ===
     Route::get('user/store',     'jxc.Store/detail');
     Route::post('user/storeset', 'jxc.Store/setStore');

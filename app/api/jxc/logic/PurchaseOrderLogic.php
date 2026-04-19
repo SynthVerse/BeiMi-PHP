@@ -9,6 +9,9 @@ use app\common\model\jxc\OrderGoods;
 use app\common\model\jxc\PurchaseOrder;
 use app\common\model\jxc\Warehouse;
 use think\facade\Db;
+use think\facade\Log;
+use app\api\jxc\exception\BusinessException;
+use app\api\jxc\logic\AuditService;
 
 class PurchaseOrderLogic extends BaseLogic
 {
@@ -49,13 +52,31 @@ class PurchaseOrderLogic extends BaseLogic
 
             Db::commit();
 
+            AuditService::log(
+                AuditService::MODULE_PURCHASE_ORDER,
+                AuditService::ACTION_CREATE,
+                (int)$order->id,
+                (string)$order->order_sn,
+                null,
+                $built['order']
+            );
+
             return [
                 'id'       => (int)$order->id,
                 'order_sn' => (string)$order->order_sn,
             ];
-        } catch (\Throwable $e) {
+        } catch (BusinessException $e) {
             Db::rollback();
             self::setError($e->getMessage());
+            return false;
+        } catch (\Throwable $e) {
+            Db::rollback();
+            Log::error('订货单创建失败: ' . $e->getMessage(), [
+                'file'  => $e->getFile(),
+                'line'  => $e->getLine(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            self::setError('操作失败，请稍后重试');
             return false;
         }
     }
@@ -86,10 +107,29 @@ class PurchaseOrderLogic extends BaseLogic
 
             Db::commit();
 
-            return self::detail(['id' => (int)$order->id]);
-        } catch (\Throwable $e) {
+            $result = self::detail(['id' => (int)$order->id]);
+            AuditService::log(
+                AuditService::MODULE_PURCHASE_ORDER,
+                AuditService::ACTION_EDIT,
+                (int)$order->id,
+                (string)$order->order_sn,
+                $built['order'],
+                $result
+            );
+
+            return $result;
+        } catch (BusinessException $e) {
             Db::rollback();
             self::setError($e->getMessage());
+            return false;
+        } catch (\Throwable $e) {
+            Db::rollback();
+            Log::error('订货单编辑失败: ' . $e->getMessage(), [
+                'file'  => $e->getFile(),
+                'line'  => $e->getLine(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            self::setError('操作失败，请稍后重试');
             return false;
         }
     }
@@ -109,6 +149,7 @@ class PurchaseOrderLogic extends BaseLogic
 
         Db::startTrans();
         try {
+            $orderData = $order->toArray();
             OrderGoods::where('order_id', (int)$order->id)
                 ->where('order_type', self::ORDER_TYPE)
                 ->delete();
@@ -116,12 +157,30 @@ class PurchaseOrderLogic extends BaseLogic
 
             Db::commit();
 
+            AuditService::log(
+                AuditService::MODULE_PURCHASE_ORDER,
+                AuditService::ACTION_DELETE,
+                (int)$params['id'],
+                (string)($orderData['order_sn'] ?? ''),
+                $orderData,
+                null
+            );
+
             return [
                 'id' => (int)$params['id'],
             ];
-        } catch (\Throwable $e) {
+        } catch (BusinessException $e) {
             Db::rollback();
             self::setError($e->getMessage());
+            return false;
+        } catch (\Throwable $e) {
+            Db::rollback();
+            Log::error('订货单删除失败: ' . $e->getMessage(), [
+                'file'  => $e->getFile(),
+                'line'  => $e->getLine(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            self::setError('操作失败，请稍后重试');
             return false;
         }
     }
@@ -184,7 +243,17 @@ class PurchaseOrderLogic extends BaseLogic
 
         $order->save(['status' => $newStatus]);
 
-        return self::detail(['id' => (int)$order->id]);
+        $result = self::detail(['id' => (int)$order->id]);
+        AuditService::log(
+            AuditService::MODULE_PURCHASE_ORDER,
+            AuditService::ACTION_CONFIRM,
+            (int)$order->id,
+            (string)$order->order_sn,
+            ['status' => $currentStatus],
+            ['status' => $newStatus]
+        );
+
+        return $result;
     }
 
     public static function cancel(array $params): array|false
@@ -208,7 +277,17 @@ class PurchaseOrderLogic extends BaseLogic
             'cancel_reason' => $cancelReason,
         ]);
 
-        return self::detail(['id' => (int)$order->id]);
+        $result = self::detail(['id' => (int)$order->id]);
+        AuditService::log(
+            AuditService::MODULE_PURCHASE_ORDER,
+            AuditService::ACTION_CANCEL,
+            (int)$order->id,
+            (string)$order->order_sn,
+            ['status' => $currentStatus],
+            ['status' => PurchaseOrder::STATUS_CANCELLED, 'cancel_reason' => $cancelReason]
+        );
+
+        return $result;
     }
 
     public static function convertToSalesOrder(array $params): array|false
@@ -275,13 +354,31 @@ class PurchaseOrderLogic extends BaseLogic
 
             Db::commit();
 
+            AuditService::log(
+                AuditService::MODULE_PURCHASE_ORDER,
+                AuditService::ACTION_CONVERT,
+                (int)$order->id,
+                (string)$order->order_sn,
+                ['status' => $currentStatus],
+                ['sales_order_id' => (int)$salesResult['id'], 'sales_order_sn' => (string)$salesResult['order_sn']]
+            );
+
             return [
                 'sales_order_id' => (int)$salesResult['id'],
                 'sales_order_sn' => (string)$salesResult['order_sn'],
             ];
-        } catch (\Throwable $e) {
+        } catch (BusinessException $e) {
             Db::rollback();
             self::setError($e->getMessage());
+            return false;
+        } catch (\Throwable $e) {
+            Db::rollback();
+            Log::error('订货单转销售失败: ' . $e->getMessage(), [
+                'file'  => $e->getFile(),
+                'line'  => $e->getLine(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            self::setError('操作失败，请稍后重试');
             return false;
         }
     }
@@ -292,6 +389,15 @@ class PurchaseOrderLogic extends BaseLogic
         if ($text === '') {
             return ['goods' => [], 'customerName' => '', 'confidence' => 0];
         }
+
+        // ---- 优先尝试 OpenAI 结构化抽取 ----
+        if (OpenAiService::isAvailable()) {
+            $aiGoods = OpenAiService::parseGoodsText($text);
+            if (is_array($aiGoods) && !empty($aiGoods)) {
+                return self::buildResultFromAiGoods($aiGoods);
+            }
+        }
+        // ---- OpenAI 不可用或返回 null，降级为正则解析 ----
 
         $lines = preg_split('/[\r\n]+/', $text);
         $goodsList = [];
@@ -412,6 +518,63 @@ class PurchaseOrderLogic extends BaseLogic
         return [
             'goods'        => $goodsList,
             'customerName' => $customerName,
+            'confidence'   => $confidence,
+        ];
+    }
+
+    /**
+     * 将 OpenAI 返回的商品数组转换为 parsePastedText 标准返回格式
+     * 地库模糊匹配逻辑保持不变
+     */
+    private static function buildResultFromAiGoods(array $aiGoods): array
+    {
+        $goodsList    = [];
+        $matchedCount = 0;
+
+        foreach ($aiGoods as $item) {
+            $name   = (string)($item['name']   ?? '');
+            $number = (float)($item['number']  ?? 0);
+            $units  = (string)($item['unit']   ?? '');
+            $price  = (float)($item['price']   ?? 0);
+
+            if ($name === '' || $number <= 0) {
+                continue;
+            }
+
+            $amount  = bcmul((string)$number, (string)$price, 2);
+            $goodsId = 0;
+            $matched = false;
+
+            // 商品库模糊匹配（与正则降级逻辑相同）
+            $goodsModel = Goods::whereLike('name', '%' . $name . '%')
+                ->where('is_disabled', 0)
+                ->findOrEmpty();
+            if (!$goodsModel->isEmpty()) {
+                $goodsId = (int)$goodsModel->id;
+                $name    = (string)$goodsModel->name;
+                $units   = $units ?: (string)$goodsModel->units;
+                $price   = $price > 0 ? $price : (float)$goodsModel->price;
+                $amount  = bcmul((string)$number, (string)$price, 2);
+                $matched = true;
+                $matchedCount++;
+            }
+
+            $goodsList[] = [
+                'goods_id' => $goodsId,
+                'name'     => $name,
+                'units'    => $units,
+                'number'   => $number,
+                'price'    => self::money($price),
+                'amount'   => $amount,
+                'matched'  => $matched,
+            ];
+        }
+
+        $confidence = empty($goodsList) ? 0 : (int)round($matchedCount / count($goodsList) * 100);
+
+        return [
+            'goods'        => $goodsList,
+            'customerName' => '',
             'confidence'   => $confidence,
         ];
     }

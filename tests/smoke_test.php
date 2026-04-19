@@ -124,6 +124,49 @@ function findIdInList(array $response, string $field, string $value): ?int
     return null;
 }
 
+/**
+ * 断言两个数值在容差范围内相等（支持字符串和浮点输入）
+ * @param float|string $actual    实际值
+ * @param float|string $expected  期望值
+ * @param string       $testName  测试名称
+ * @param float        $tolerance 容差
+ * @return bool
+ */
+function assert_near($actual, $expected, string $testName, float $tolerance = 0.02): bool
+{
+    global $totalTests, $passTests, $failTests;
+    $totalTests++;
+
+    $diff = abs((float)$actual - (float)$expected);
+    if ($diff <= $tolerance) {
+        echo "[PASS] {$testName} (实际={$actual}, 期望={$expected})\n";
+        $passTests++;
+        return true;
+    }
+
+    echo "[FAIL] {$testName}: 实际={$actual}, 期望={$expected}, 差值=" . number_format($diff, 4) . "\n";
+    $failTests++;
+    return false;
+}
+
+/**
+ * 从商品详情响应中提取库存值
+ */
+function extractStock(array $response): ?string
+{
+    $stock = $response['data']['stock'] ?? null;
+    return $stock !== null ? (string)$stock : null;
+}
+
+/**
+ * 从客户详情响应中提取应收金额
+ */
+function extractReceivable(array $response): ?string
+{
+    $receivable = $response['data']['order_receivable'] ?? null;
+    return $receivable !== null ? (string)$receivable : null;
+}
+
 // ─────────────────────────────────────────────
 // 清理函数（使用 SMOKE_ 前缀定位测试数据）
 // ─────────────────────────────────────────────
@@ -435,6 +478,13 @@ if ($orderGoodsId === null) {
 $orderId = null;
 
 if ($orderCustId && $orderWhId && $orderGoodsId) {
+    // 记录发布前的客户应收和商品库存
+    $custDetailBefore8 = httpRequest('GET', "{$BASE_URL}/api/customer/detail", ['id' => $orderCustId], $token);
+    $custReceivableBefore8 = extractReceivable($custDetailBefore8);
+    $goodsDetailBefore8 = httpRequest('GET', "{$BASE_URL}/api/goods/detail", ['id' => $orderGoodsId], $token);
+    $stockBefore8 = extractStock($goodsDetailBefore8);
+    echo "  [INFO] 销售单发布前客户应收: " . ($custReceivableBefore8 ?? 'N/A') . "，商品库存: " . ($stockBefore8 ?? 'N/A') . "\n";
+
     // 8.1 创建销售单
     $orderAddRes = httpRequest('POST', "{$BASE_URL}/api/order/publish", [
         'customer_id'  => $orderCustId,
@@ -449,6 +499,25 @@ if ($orderCustId && $orderWhId && $orderGoodsId) {
     ], $token);
     assert_code($orderAddRes, 1, '销售单创建');
     $orderId = extractId($orderAddRes);
+
+    // 验证销售单发布后客户应收增加和库存减少（5×10.50=52.50 未付→应收+52.50，出库5→库存-5）
+    $custDetailAfterPublish8 = httpRequest('GET', "{$BASE_URL}/api/customer/detail", ['id' => $orderCustId], $token);
+    $custReceivableAfterPublish8 = extractReceivable($custDetailAfterPublish8);
+    $goodsDetailAfterPublish8 = httpRequest('GET', "{$BASE_URL}/api/goods/detail", ['id' => $orderGoodsId], $token);
+    $stockAfterPublish8 = extractStock($goodsDetailAfterPublish8);
+    echo "  [INFO] 销售单发布后客户应收: " . ($custReceivableAfterPublish8 ?? 'N/A') . "，商品库存: " . ($stockAfterPublish8 ?? 'N/A') . "\n";
+    if ($custReceivableBefore8 !== null && $custReceivableAfterPublish8 !== null) {
+        $diffRec = number_format((float)$custReceivableAfterPublish8 - (float)$custReceivableBefore8, 2, '.', '');
+        assert_near($diffRec, '52.50', '销售单发布-客户应收增加52.50');
+    } else {
+        echo "[SKIP] 销售单发布-客户应收增加验证：无法获取应收数据\n";
+    }
+    if ($stockBefore8 !== null && $stockAfterPublish8 !== null) {
+        $diffStk = number_format((float)$stockAfterPublish8 - (float)$stockBefore8, 2, '.', '');
+        assert_near($diffStk, '-5.00', '销售单发布-商品库存减少5');
+    } else {
+        echo "[SKIP] 销售单发布-商品库存减少验证：无法获取库存数据\n";
+    }
 
     // 8.2 销售单列表
     $orderListRes = httpRequest('GET', "{$BASE_URL}/api/order/lists", [], $token);
@@ -488,6 +557,23 @@ if ($orderCustId && $orderWhId && $orderGoodsId) {
         $orderDelRes = httpRequest('DELETE', "{$BASE_URL}/api/order/remove", ['id' => $orderId], $token);
         assert_code($orderDelRes, 1, '销售单删除');
         $orderId = null;
+    }
+
+    // 验证销售单删除后客户应收和库存回滚
+    $custDetailAfterDelete8 = httpRequest('GET', "{$BASE_URL}/api/customer/detail", ['id' => $orderCustId], $token);
+    $custReceivableAfterDelete8 = extractReceivable($custDetailAfterDelete8);
+    $goodsDetailAfterDelete8 = httpRequest('GET', "{$BASE_URL}/api/goods/detail", ['id' => $orderGoodsId], $token);
+    $stockAfterDelete8 = extractStock($goodsDetailAfterDelete8);
+    echo "  [INFO] 销售单删除后客户应收: " . ($custReceivableAfterDelete8 ?? 'N/A') . "，商品库存: " . ($stockAfterDelete8 ?? 'N/A') . "\n";
+    if ($custReceivableBefore8 !== null && $custReceivableAfterDelete8 !== null) {
+        assert_near($custReceivableAfterDelete8, $custReceivableBefore8, '销售单删除-客户应收回滚');
+    } else {
+        echo "[SKIP] 销售单删除-客户应收回滚验证：无法获取应收数据\n";
+    }
+    if ($stockBefore8 !== null && $stockAfterDelete8 !== null) {
+        assert_near($stockAfterDelete8, $stockBefore8, '销售单删除-商品库存回滚');
+    } else {
+        echo "[SKIP] 销售单删除-商品库存回滚验证：无法获取库存数据\n";
     }
 } else {
     echo "[SKIP] 销售单测试：前置数据创建失败（客户ID={$orderCustId}, 仓库ID={$orderWhId}, 商品ID={$orderGoodsId}）\n";
@@ -535,6 +621,11 @@ if ($supplySupId === null) {
 $supplyOrderId = null;
 
 if ($supplySupId && $orderWhId && $orderGoodsId) {
+    // 记录发布前的商品库存
+    $goodsDetailBefore10 = httpRequest('GET', "{$BASE_URL}/api/goods/detail", ['id' => $orderGoodsId], $token);
+    $stockBefore10 = extractStock($goodsDetailBefore10);
+    echo "  [INFO] 进货单发布前商品库存: " . ($stockBefore10 ?? 'N/A') . "\n";
+
     // 10.1 创建进货单
     $supplyAddRes = httpRequest('POST', "{$BASE_URL}/api/supply/publish", [
         'supplier_id'  => $supplySupId,
@@ -549,6 +640,17 @@ if ($supplySupId && $orderWhId && $orderGoodsId) {
     ], $token);
     assert_code($supplyAddRes, 1, '进货单创建');
     $supplyOrderId = extractId($supplyAddRes);
+
+    // 验证进货单发布后商品库存增加（入库10件→库存+10）
+    $goodsDetailAfterPublish10 = httpRequest('GET', "{$BASE_URL}/api/goods/detail", ['id' => $orderGoodsId], $token);
+    $stockAfterPublish10 = extractStock($goodsDetailAfterPublish10);
+    echo "  [INFO] 进货单发布后商品库存: " . ($stockAfterPublish10 ?? 'N/A') . "\n";
+    if ($stockBefore10 !== null && $stockAfterPublish10 !== null) {
+        $diffStk = number_format((float)$stockAfterPublish10 - (float)$stockBefore10, 2, '.', '');
+        assert_near($diffStk, '10.00', '进货单发布-商品库存增加10');
+    } else {
+        echo "[SKIP] 进货单发布-商品库存增加验证：无法获取库存数据\n";
+    }
 
     // 10.2 进货单列表
     $supplyListRes = httpRequest('GET', "{$BASE_URL}/api/supply/lists", [], $token);
@@ -589,6 +691,16 @@ if ($supplySupId && $orderWhId && $orderGoodsId) {
         assert_code($supplyDelRes, 1, '进货单删除');
         $supplyOrderId = null;
     }
+
+    // 验证进货单删除后商品库存回滚
+    $goodsDetailAfterDelete10 = httpRequest('GET', "{$BASE_URL}/api/goods/detail", ['id' => $orderGoodsId], $token);
+    $stockAfterDelete10 = extractStock($goodsDetailAfterDelete10);
+    echo "  [INFO] 进货单删除后商品库存: " . ($stockAfterDelete10 ?? 'N/A') . "\n";
+    if ($stockBefore10 !== null && $stockAfterDelete10 !== null) {
+        assert_near($stockAfterDelete10, $stockBefore10, '进货单删除-商品库存回滚');
+    } else {
+        echo "[SKIP] 进货单删除-商品库存回滚验证：无法获取库存数据\n";
+    }
 } else {
     echo "[SKIP] 进货单测试：前置数据不足（供应商ID={$supplySupId}, 仓库ID={$orderWhId}, 商品ID={$orderGoodsId}）\n";
 }
@@ -609,6 +721,11 @@ $returnSaleOrderId = null;
 $returnOrderId     = null;
 
 if ($orderCustId && $orderWhId && $orderGoodsId) {
+    // 记录退货测试前的客户应收
+    $custDetailBefore11 = httpRequest('GET', "{$BASE_URL}/api/customer/detail", ['id' => $orderCustId], $token);
+    $custReceivableBefore11 = extractReceivable($custDetailBefore11);
+    echo "  [INFO] 退货测试前客户应收: " . ($custReceivableBefore11 ?? 'N/A') . "\n";
+
     $returnSaleRes = httpRequest('POST', "{$BASE_URL}/api/order/publish", [
         'customer_id'  => $orderCustId,
         'warehouse_id' => $orderWhId,
@@ -622,6 +739,17 @@ if ($orderCustId && $orderWhId && $orderGoodsId) {
     ], $token);
     assert_code($returnSaleRes, 1, '退货前置-创建销售单');
     $returnSaleOrderId = extractId($returnSaleRes);
+
+    // 验证退货前置销售单发布后客户应收增加（5×10.50=52.50）
+    $custDetailAfterSale11 = httpRequest('GET', "{$BASE_URL}/api/customer/detail", ['id' => $orderCustId], $token);
+    $custReceivableAfterSale11 = extractReceivable($custDetailAfterSale11);
+    echo "  [INFO] 退货前置销售单发布后客户应收: " . ($custReceivableAfterSale11 ?? 'N/A') . "\n";
+    if ($custReceivableBefore11 !== null && $custReceivableAfterSale11 !== null) {
+        $diffRec = number_format((float)$custReceivableAfterSale11 - (float)$custReceivableBefore11, 2, '.', '');
+        assert_near($diffRec, '52.50', '退货前置-销售单发布后应收增加52.50');
+    } else {
+        echo "[SKIP] 退货前置-应收增加验证：无法获取应收数据\n";
+    }
 
     // 11.1 创建退货单
     if ($returnSaleOrderId) {
@@ -639,6 +767,17 @@ if ($orderCustId && $orderWhId && $orderGoodsId) {
         ], $token);
         assert_code($returnAddRes, 1, '退货单创建');
         $returnOrderId = extractId($returnAddRes);
+
+        // 验证退货单发布后客户应收减少（2×10.50=21.00）
+        $custDetailAfterReturn11 = httpRequest('GET', "{$BASE_URL}/api/customer/detail", ['id' => $orderCustId], $token);
+        $custReceivableAfterReturn11 = extractReceivable($custDetailAfterReturn11);
+        echo "  [INFO] 退货单发布后客户应收: " . ($custReceivableAfterReturn11 ?? 'N/A') . "\n";
+        if (isset($custReceivableAfterSale11) && $custReceivableAfterReturn11 !== null) {
+            $diffRec = number_format((float)$custReceivableAfterReturn11 - (float)$custReceivableAfterSale11, 2, '.', '');
+            assert_near($diffRec, '-21.00', '退货单发布-客户应收减少21.00');
+        } else {
+            echo "[SKIP] 退货单发布-应收减少验证：无法获取应收数据\n";
+        }
     }
 
     // 11.2 退货单列表
@@ -676,6 +815,16 @@ if ($orderCustId && $orderWhId && $orderGoodsId) {
         $returnDelRes = httpRequest('DELETE', "{$BASE_URL}/api/return/remove", ['id' => $returnOrderId], $token);
         assert_code($returnDelRes, 1, '退货单删除');
         $returnOrderId = null;
+    }
+
+    // 验证退货单删除后客户应收恢复到退货前水平
+    $custDetailAfterReturnDel11 = httpRequest('GET', "{$BASE_URL}/api/customer/detail", ['id' => $orderCustId], $token);
+    $custReceivableAfterReturnDel11 = extractReceivable($custDetailAfterReturnDel11);
+    echo "  [INFO] 退货单删除后客户应收: " . ($custReceivableAfterReturnDel11 ?? 'N/A') . "\n";
+    if (isset($custReceivableAfterSale11) && $custReceivableAfterReturnDel11 !== null) {
+        assert_near($custReceivableAfterReturnDel11, $custReceivableAfterSale11, '退货单删除-客户应收恢复');
+    } else {
+        echo "[SKIP] 退货单删除-客户应收恢复验证：无法获取应收数据\n";
     }
 
     // 清理：删除原销售单
@@ -922,8 +1071,29 @@ if ($orderCustId && $orderWhId && $orderGoodsId) {
     echo "[SKIP] 删除占用校验：前置数据不足\n";
 }
 
-// 15. 清理前置数据
-echo "\n── 步骤 15：清理前置数据 ──\n";
+// ══════════════════════════════════════════════
+// 步骤 15：审计日志验证
+// ══════════════════════════════════════════════
+echo "\n── 步骤 15：审计日志验证 ──\n";
+
+$auditListsRes = httpRequest('GET', "{$BASE_URL}/api/audit/lists", ['pagesize' => 50], $token);
+assert_code($auditListsRes, 1, '审计日志列表');
+$auditItems = $auditListsRes['data']['data'] ?? $auditListsRes['data'] ?? [];
+if (is_array($auditItems) && count($auditItems) > 0) {
+    echo "  [INFO] 审计日志条数: " . count($auditItems) . "\n";
+    $totalTests++;
+    $passTests++;
+    echo "[PASS] 审计日志非空\n";
+} else {
+    $totalTests++;
+    $failTests++;
+    echo "[FAIL] 审计日志非空（日志列表为空）\n";
+}
+
+// ══════════════════════════════════════════════
+// 步骤 16：清理前置数据
+// ══════════════════════════════════════════════
+echo "\n── 步骤 16：清理前置数据 ──\n";
 
 if ($orderGoodsId) {
     $cleanGoods = httpRequest('DELETE', "{$BASE_URL}/api/goods/del", ['id' => $orderGoodsId], $token);
@@ -939,9 +1109,9 @@ if ($orderCustId) {
 }
 
 // ══════════════════════════════════════════════
-// 步骤 16：退出登录
+// 步骤 17：退出登录
 // ══════════════════════════════════════════════
-echo "\n── 步骤 16：退出登录 ──\n";
+echo "\n── 步骤 17：退出登录 ──\n";
 $logoutRes = httpRequest('POST', "{$BASE_URL}/api/user/logout", [], $token);
 assert_code($logoutRes, 1, '用户退出登录');
 
