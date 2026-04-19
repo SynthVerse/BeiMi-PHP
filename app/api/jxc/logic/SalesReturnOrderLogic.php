@@ -6,17 +6,19 @@ use app\common\logic\BaseLogic;
 use app\common\model\jxc\Customer;
 use app\common\model\jxc\Goods;
 use app\common\model\jxc\OrderGoods;
+use app\common\model\jxc\ReceivableFlow;
 use app\common\model\jxc\SalesOrder;
+use app\common\model\jxc\SalesReturnOrder;
 use app\common\model\jxc\Warehouse;
 use think\facade\Db;
 use app\api\jxc\logic\StockService;
 use app\api\jxc\logic\FinanceService;
 
-class SalesOrderLogic extends BaseLogic
+class SalesReturnOrderLogic extends BaseLogic
 {
-    private const ORDER_TYPE = 'sales';
-    private const DEFAULT_PURPOSE = '销售出库';
-    private const DEFAULT_PURPOSE_TYPE = 'sales';
+    private const ORDER_TYPE = 'sales-return';
+    private const DEFAULT_PURPOSE = '销售退货';
+    private const DEFAULT_PURPOSE_TYPE = 'sales-return';
 
     public static function publish(array $params): array|false
     {
@@ -27,30 +29,32 @@ class SalesOrderLogic extends BaseLogic
 
         Db::startTrans();
         try {
-            $order = SalesOrder::create($built['order']);
+            $order = SalesReturnOrder::create($built['order']);
             self::replaceGoods((int)$order->id, $built['goods']);
 
-            // === 库存出库 ===
+            // === 库存入库（退货收回商品）===
             foreach ($built['goods'] as $row) {
-                StockService::outbound(
+                StockService::inbound(
                     (int)$built['order']['warehouse_id'],
                     (int)$row['goods_id'],
                     (string)$row['number'],
                     (int)$order->id,
-                    'sales',
+                    'sales-return',
                     $built['order']['order_sn']
                 );
             }
 
-            // === 应收增加 ===
-            $arrearsMoney = (string)$built['order']['order_arrears_money'];
-            if (bccomp($arrearsMoney, '0', 2) > 0) {
-                FinanceService::addReceivable(
+            // === 应收减少（退货导致应收降低）===
+            $orderMoney = (string)$built['order']['order_money'];
+            if (bccomp($orderMoney, '0', 2) > 0) {
+                FinanceService::reduceReceivable(
                     (int)$built['order']['customer_id'],
-                    $arrearsMoney,
+                    $orderMoney,
                     (int)$order->id,
-                    'sales',
-                    $built['order']['order_sn']
+                    'sales-return',
+                    $built['order']['order_sn'],
+                    ReceivableFlow::TYPE_RETURN_REDUCE,
+                    '销售退货应收减少-' . $built['order']['order_sn']
                 );
             }
 
@@ -69,11 +73,15 @@ class SalesOrderLogic extends BaseLogic
 
     public static function edit(array $params): array|false
     {
-        $order = SalesOrder::findOrEmpty((int)$params['id']);
+        $order = SalesReturnOrder::findOrEmpty((int)$params['id']);
         if ($order->isEmpty()) {
-            self::setError('销售单不存在');
+            self::setError('退货单不存在');
             return false;
         }
+
+        $oldOrderMoney = (string)$order->order_money;
+        $oldCustomerId = (int)$order->customer_id;
+        $oldOrderSn = (string)$order->order_sn;
 
         $built = self::buildOrderData($params, $order->toArray());
         if ($built === false) {
@@ -82,34 +90,47 @@ class SalesOrderLogic extends BaseLogic
 
         Db::startTrans();
         try {
-            // === 回滚旧库存和旧应收 ===
-            StockService::rollback((int)$order->id, 'sales');
-            FinanceService::rollbackReceivable((int)$order->id, 'sales');
+            // === 回滚旧库存 ===
+            StockService::rollback((int)$order->id, 'sales-return');
+
+            // === 恢复旧应收（退货单之前减少了应收，回滚时需要加回去）===
+            if (bccomp($oldOrderMoney, '0', 2) > 0) {
+                FinanceService::addReceivable(
+                    $oldCustomerId,
+                    $oldOrderMoney,
+                    (int)$order->id,
+                    'sales-return',
+                    $oldOrderSn,
+                    '退货单编辑回滚应收-' . $oldOrderSn
+                );
+            }
 
             $order->save($built['order']);
             self::replaceGoods((int)$order->id, $built['goods']);
 
-            // === 重新出库 ===
+            // === 重新入库 ===
             foreach ($built['goods'] as $row) {
-                StockService::outbound(
+                StockService::inbound(
                     (int)$built['order']['warehouse_id'],
                     (int)$row['goods_id'],
                     (string)$row['number'],
                     (int)$order->id,
-                    'sales',
+                    'sales-return',
                     $order->order_sn
                 );
             }
 
-            // === 重新计算应收 ===
-            $arrearsMoney = (string)$built['order']['order_arrears_money'];
-            if (bccomp($arrearsMoney, '0', 2) > 0) {
-                FinanceService::addReceivable(
+            // === 重新减少应收 ===
+            $newOrderMoney = (string)$built['order']['order_money'];
+            if (bccomp($newOrderMoney, '0', 2) > 0) {
+                FinanceService::reduceReceivable(
                     (int)$built['order']['customer_id'],
-                    $arrearsMoney,
+                    $newOrderMoney,
                     (int)$order->id,
-                    'sales',
-                    $order->order_sn
+                    'sales-return',
+                    $order->order_sn,
+                    ReceivableFlow::TYPE_RETURN_REDUCE,
+                    '销售退货应收减少-' . $order->order_sn
                 );
             }
 
@@ -125,17 +146,32 @@ class SalesOrderLogic extends BaseLogic
 
     public static function remove(array $params): array|false
     {
-        $order = SalesOrder::findOrEmpty((int)$params['id']);
+        $order = SalesReturnOrder::findOrEmpty((int)$params['id']);
         if ($order->isEmpty()) {
-            self::setError('销售单不存在');
+            self::setError('退货单不存在');
             return false;
         }
 
+        $oldOrderMoney = (string)$order->order_money;
+        $customerId = (int)$order->customer_id;
+        $orderSn = (string)$order->order_sn;
+
         Db::startTrans();
         try {
-            // === 回滚库存和应收 ===
-            StockService::rollback((int)$order->id, 'sales');
-            FinanceService::rollbackReceivable((int)$order->id, 'sales');
+            // === 回滚库存 ===
+            StockService::rollback((int)$order->id, 'sales-return');
+
+            // === 恢复应收（退货作废，应收加回）===
+            if (bccomp($oldOrderMoney, '0', 2) > 0) {
+                FinanceService::addReceivable(
+                    $customerId,
+                    $oldOrderMoney,
+                    (int)$order->id,
+                    'sales-return',
+                    $orderSn,
+                    '退货作废恢复应收-' . $orderSn
+                );
+            }
 
             OrderGoods::where('order_id', (int)$order->id)
                 ->where('order_type', self::ORDER_TYPE)
@@ -155,7 +191,7 @@ class SalesOrderLogic extends BaseLogic
 
     public static function detail(array $params): array
     {
-        $order = SalesOrder::findOrEmpty((int)$params['id']);
+        $order = SalesReturnOrder::findOrEmpty((int)$params['id']);
         if ($order->isEmpty()) {
             return [];
         }
@@ -167,19 +203,30 @@ class SalesOrderLogic extends BaseLogic
             ->select()
             ->toArray());
 
+        // 关联原销售单信息
+        $originalOrderId = (int)($order->original_sales_order_id ?? 0);
+        if ($originalOrderId > 0) {
+            $originalOrder = SalesOrder::findOrEmpty($originalOrderId);
+            $item['original_sales_order'] = $originalOrder->isEmpty() ? null : [
+                'id' => (int)$originalOrder->id,
+                'order_sn' => (string)$originalOrder->order_sn,
+                'order_money' => self::money($originalOrder->order_money),
+            ];
+        } else {
+            $item['original_sales_order'] = null;
+        }
+
         return $item;
     }
 
     public static function statistics(array $params): array
     {
-        $query = SalesOrder::field(['id', 'order_money', 'order_pay_money', 'order_arrears_money', 'datetimesingle']);
+        $query = SalesReturnOrder::field(['id', 'order_money', 'datetimesingle']);
         self::applyTimeRange($query, $params);
 
         return [
             'number' => (int)$query->count(),
             'order_money' => self::money((float)$query->sum('order_money')),
-            'order_pay_money' => self::money((float)$query->sum('order_pay_money')),
-            'order_arrears_money' => self::money((float)$query->sum('order_arrears_money')),
         ];
     }
 
@@ -241,14 +288,15 @@ class SalesOrderLogic extends BaseLogic
             'warehouse_name' => $warehouseName,
             'warehouse' => $warehouseName,
             'warehouse_info' => $warehouse,
+            'original_sales_order_id' => (int)($item['original_sales_order_id'] ?? 0),
+            'original_order_sn' => (string)($item['original_order_sn'] ?? ''),
             'order_money' => self::money($item['order_money'] ?? 0),
-            'order_pay_money' => self::money($item['order_pay_money'] ?? 0),
-            'order_arrears_money' => self::money($item['order_arrears_money'] ?? 0),
+            'return_reason' => (string)($item['return_reason'] ?? ''),
             'datetimesingle' => $datetimesingle,
             'createdate' => self::dateText($datetimesingle ?: ($item['create_time'] ?? 0)),
             'status' => (int)($item['status'] ?? 1),
             'purpose' => self::DEFAULT_PURPOSE,
-            'purpose_type' => (string)($item['purpose_type'] ?? self::DEFAULT_PURPOSE_TYPE),
+            'purpose_type' => self::DEFAULT_PURPOSE_TYPE,
             'remarks' => (string)($item['remarks'] ?? ''),
             'remark' => (string)($item['remarks'] ?? ''),
             'admin_id' => (int)($item['admin_id'] ?? 0),
@@ -265,7 +313,7 @@ class SalesOrderLogic extends BaseLogic
             return false;
         }
         if ((int)$customer->is_disabled === 1) {
-            self::setError('停用客户不可开销售单');
+            self::setError('停用客户不可开退货单');
             return false;
         }
 
@@ -274,14 +322,28 @@ class SalesOrderLogic extends BaseLogic
             return false;
         }
 
+        // 验证原销售单存在且 customer_id 匹配
+        $originalOrderId = (int)($params['original_order_id'] ?? ($current['original_sales_order_id'] ?? 0));
+        if ($originalOrderId <= 0) {
+            self::setError('原销售单ID不能为空');
+            return false;
+        }
+        $originalOrder = SalesOrder::findOrEmpty($originalOrderId);
+        if ($originalOrder->isEmpty()) {
+            self::setError('原销售单不存在');
+            return false;
+        }
+        if ((int)$originalOrder->customer_id !== (int)$customer->id) {
+            self::setError('原销售单客户与退货客户不匹配');
+            return false;
+        }
+
         $goodsRows = self::buildGoodsRows($params['goods'] ?? []);
         if ($goodsRows === false) {
             return false;
         }
 
-        $orderMoney = array_reduce($goodsRows, fn($sum, $row) => bcadd($sum, (string)$row['amount'], 2), '0.00');
-        $rawPay = (string)max(0, (float)($params['order_pay_money'] ?? ($current['order_pay_money'] ?? 0)));
-        $orderPayMoney = bccomp($rawPay, (string)$orderMoney, 2) > 0 ? (string)$orderMoney : $rawPay;
+        $orderMoney = array_reduce($goodsRows, fn($sum, $row) => $sum + (float)$row['amount'], 0.0);
         $tenantId = (int)(request()->tenantId ?? 0);
         $adminId = (int)(request()->adminId ?? 0);
         $orderSn = trim((string)($params['order_sn'] ?? ($current['order_sn'] ?? '')));
@@ -292,6 +354,8 @@ class SalesOrderLogic extends BaseLogic
             return false;
         }
 
+        $originalOrderSn = trim((string)($params['original_order_sn'] ?? ($current['original_order_sn'] ?? $originalOrder->order_sn)));
+
         return [
             'order' => [
                 'tenant_id' => $tenantId,
@@ -299,12 +363,12 @@ class SalesOrderLogic extends BaseLogic
                 'customer_id' => (int)$customer->id,
                 'customer_name' => (string)$customer->customer_name,
                 'warehouse_id' => (int)$warehouse->id,
+                'original_sales_order_id' => $originalOrderId,
+                'original_order_sn' => $originalOrderSn,
                 'order_money' => self::money($orderMoney),
-                'order_pay_money' => self::money($orderPayMoney),
-                'order_arrears_money' => bcsub((string)$orderMoney, (string)$orderPayMoney, 2),
+                'return_reason' => trim((string)($params['return_reason'] ?? ($current['return_reason'] ?? ''))),
                 'datetimesingle' => (int)($params['datetimesingle'] ?? ($current['datetimesingle'] ?? time())),
                 'status' => (int)($current['status'] ?? 1),
-                'purpose_type' => trim((string)($params['purpose_type'] ?? $params['purpose'] ?? ($current['purpose_type'] ?? self::DEFAULT_PURPOSE_TYPE))),
                 'remarks' => trim((string)($params['remarks'] ?? $params['remark'] ?? ($current['remarks'] ?? ''))),
                 'admin_id' => $adminId,
             ],
@@ -333,7 +397,7 @@ class SalesOrderLogic extends BaseLogic
                 return false;
             }
             if ((int)$goodsModel->is_disabled === 1) {
-                self::setError('停用商品不可开销售单');
+                self::setError('停用商品不可开退货单');
                 return false;
             }
 
@@ -344,7 +408,7 @@ class SalesOrderLogic extends BaseLogic
             }
 
             $price = self::money($item['price'] ?? $item['units_money'] ?? $goodsModel->price);
-            $amount = bcmul((string)$number, (string)$price, 2);
+            $amount = self::money($number * (float)$price);
             $rows[] = [
                 'tenant_id' => (int)(request()->tenantId ?? 0),
                 'order_type' => self::ORDER_TYPE,
@@ -387,7 +451,7 @@ class SalesOrderLogic extends BaseLogic
             return null;
         }
         if ((int)$warehouse->is_enabled !== 1) {
-            self::setError('停用仓库不可开销售单');
+            self::setError('停用仓库不可开退货单');
             return null;
         }
 
@@ -397,20 +461,20 @@ class SalesOrderLogic extends BaseLogic
     protected static function generateOrderSn(): string
     {
         do {
-            $sn = 'XSD' . date('YmdHis') . random_int(1000, 9999);
-        } while (SalesOrder::where('order_sn', $sn)->count() > 0);
+            $sn = 'THD' . date('YmdHis') . random_int(1000, 9999);
+        } while (SalesReturnOrder::where('order_sn', $sn)->count() > 0);
 
         return $sn;
     }
 
     protected static function assertOrderSnUnique(string $orderSn, int $ignoreId = 0): bool
     {
-        $query = SalesOrder::where('order_sn', $orderSn);
+        $query = SalesReturnOrder::where('order_sn', $orderSn);
         if ($ignoreId > 0) {
             $query->where('id', '<>', $ignoreId);
         }
         if ($query->count() > 0) {
-            self::setError('销售单号已存在');
+            self::setError('退货单号已存在');
             return false;
         }
         return true;

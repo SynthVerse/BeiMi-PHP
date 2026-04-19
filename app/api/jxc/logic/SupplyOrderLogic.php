@@ -3,20 +3,20 @@
 namespace app\api\jxc\logic;
 
 use app\common\logic\BaseLogic;
-use app\common\model\jxc\Customer;
+use app\common\model\jxc\Vendor;
 use app\common\model\jxc\Goods;
 use app\common\model\jxc\OrderGoods;
-use app\common\model\jxc\SalesOrder;
+use app\common\model\jxc\SupplyOrder;
 use app\common\model\jxc\Warehouse;
 use think\facade\Db;
 use app\api\jxc\logic\StockService;
 use app\api\jxc\logic\FinanceService;
 
-class SalesOrderLogic extends BaseLogic
+class SupplyOrderLogic extends BaseLogic
 {
-    private const ORDER_TYPE = 'sales';
-    private const DEFAULT_PURPOSE = '销售出库';
-    private const DEFAULT_PURPOSE_TYPE = 'sales';
+    private const ORDER_TYPE = 'supply';
+    private const DEFAULT_PURPOSE = '采购入库';
+    private const DEFAULT_PURPOSE_TYPE = 'supply';
 
     public static function publish(array $params): array|false
     {
@@ -27,29 +27,29 @@ class SalesOrderLogic extends BaseLogic
 
         Db::startTrans();
         try {
-            $order = SalesOrder::create($built['order']);
+            $order = SupplyOrder::create($built['order']);
             self::replaceGoods((int)$order->id, $built['goods']);
 
-            // === 库存出库 ===
+            // === 库存入库 ===
             foreach ($built['goods'] as $row) {
-                StockService::outbound(
+                StockService::inbound(
                     (int)$built['order']['warehouse_id'],
                     (int)$row['goods_id'],
                     (string)$row['number'],
                     (int)$order->id,
-                    'sales',
+                    'supply',
                     $built['order']['order_sn']
                 );
             }
 
-            // === 应收增加 ===
+            // === 应付增加 ===
             $arrearsMoney = (string)$built['order']['order_arrears_money'];
             if (bccomp($arrearsMoney, '0', 2) > 0) {
-                FinanceService::addReceivable(
-                    (int)$built['order']['customer_id'],
+                FinanceService::addPayable(
+                    (int)$built['order']['supplier_id'],
                     $arrearsMoney,
                     (int)$order->id,
-                    'sales',
+                    'supply',
                     $built['order']['order_sn']
                 );
             }
@@ -69,9 +69,9 @@ class SalesOrderLogic extends BaseLogic
 
     public static function edit(array $params): array|false
     {
-        $order = SalesOrder::findOrEmpty((int)$params['id']);
+        $order = SupplyOrder::findOrEmpty((int)$params['id']);
         if ($order->isEmpty()) {
-            self::setError('销售单不存在');
+            self::setError('进货单不存在');
             return false;
         }
 
@@ -82,33 +82,33 @@ class SalesOrderLogic extends BaseLogic
 
         Db::startTrans();
         try {
-            // === 回滚旧库存和旧应收 ===
-            StockService::rollback((int)$order->id, 'sales');
-            FinanceService::rollbackReceivable((int)$order->id, 'sales');
+            // === 回滚旧库存和旧应付 ===
+            StockService::rollback((int)$order->id, 'supply');
+            FinanceService::rollbackPayable((int)$order->id, 'supply');
 
             $order->save($built['order']);
             self::replaceGoods((int)$order->id, $built['goods']);
 
-            // === 重新出库 ===
+            // === 重新入库 ===
             foreach ($built['goods'] as $row) {
-                StockService::outbound(
+                StockService::inbound(
                     (int)$built['order']['warehouse_id'],
                     (int)$row['goods_id'],
                     (string)$row['number'],
                     (int)$order->id,
-                    'sales',
+                    'supply',
                     $order->order_sn
                 );
             }
 
-            // === 重新计算应收 ===
+            // === 重新计算应付 ===
             $arrearsMoney = (string)$built['order']['order_arrears_money'];
             if (bccomp($arrearsMoney, '0', 2) > 0) {
-                FinanceService::addReceivable(
-                    (int)$built['order']['customer_id'],
+                FinanceService::addPayable(
+                    (int)$built['order']['supplier_id'],
                     $arrearsMoney,
                     (int)$order->id,
-                    'sales',
+                    'supply',
                     $order->order_sn
                 );
             }
@@ -125,17 +125,17 @@ class SalesOrderLogic extends BaseLogic
 
     public static function remove(array $params): array|false
     {
-        $order = SalesOrder::findOrEmpty((int)$params['id']);
+        $order = SupplyOrder::findOrEmpty((int)$params['id']);
         if ($order->isEmpty()) {
-            self::setError('销售单不存在');
+            self::setError('进货单不存在');
             return false;
         }
 
         Db::startTrans();
         try {
-            // === 回滚库存和应收 ===
-            StockService::rollback((int)$order->id, 'sales');
-            FinanceService::rollbackReceivable((int)$order->id, 'sales');
+            // === 回滚库存和应付 ===
+            StockService::rollback((int)$order->id, 'supply');
+            FinanceService::rollbackPayable((int)$order->id, 'supply');
 
             OrderGoods::where('order_id', (int)$order->id)
                 ->where('order_type', self::ORDER_TYPE)
@@ -155,7 +155,7 @@ class SalesOrderLogic extends BaseLogic
 
     public static function detail(array $params): array
     {
-        $order = SalesOrder::findOrEmpty((int)$params['id']);
+        $order = SupplyOrder::findOrEmpty((int)$params['id']);
         if ($order->isEmpty()) {
             return [];
         }
@@ -172,7 +172,7 @@ class SalesOrderLogic extends BaseLogic
 
     public static function statistics(array $params): array
     {
-        $query = SalesOrder::field(['id', 'order_money', 'order_pay_money', 'order_arrears_money', 'datetimesingle']);
+        $query = SupplyOrder::field(['id', 'order_money', 'order_pay_money', 'order_arrears_money', 'datetimesingle']);
         self::applyTimeRange($query, $params);
 
         return [
@@ -189,15 +189,15 @@ class SalesOrderLogic extends BaseLogic
             return [];
         }
 
-        $customerIds = array_values(array_unique(array_filter(array_map(fn($item) => (int)($item['customer_id'] ?? 0), $items))));
+        $supplierIds = array_values(array_unique(array_filter(array_map(fn($item) => (int)($item['supplier_id'] ?? 0), $items))));
         $warehouseIds = array_values(array_unique(array_filter(array_map(fn($item) => (int)($item['warehouse_id'] ?? 0), $items))));
 
-        $customerRows = empty($customerIds) ? [] : Customer::whereIn('id', $customerIds)->select()->toArray();
+        $supplierRows = empty($supplierIds) ? [] : Vendor::whereIn('id', $supplierIds)->select()->toArray();
         $warehouseRows = empty($warehouseIds) ? [] : Warehouse::whereIn('id', $warehouseIds)->select()->toArray();
 
-        $customerMap = [];
-        foreach ($customerRows as $customer) {
-            $customerMap[(int)$customer['id']] = CustomerLogic::formatItem($customer);
+        $supplierMap = [];
+        foreach ($supplierRows as $supplier) {
+            $supplierMap[(int)$supplier['id']] = SupplierLogic::formatItem($supplier);
         }
 
         $warehouseMap = [];
@@ -205,37 +205,37 @@ class SalesOrderLogic extends BaseLogic
             $warehouseMap[(int)$warehouse['id']] = WarehouseLogic::formatItem($warehouse);
         }
 
-        return array_map(fn($item) => self::formatItem($item, false, $customerMap, $warehouseMap), $items);
+        return array_map(fn($item) => self::formatItem($item, false, $supplierMap, $warehouseMap), $items);
     }
 
-    public static function formatItem(array $item, bool $includeCustomer = false, array $customerMap = [], array $warehouseMap = []): array
+    public static function formatItem(array $item, bool $includeSupplier = false, array $supplierMap = [], array $warehouseMap = []): array
     {
-        $customerId = (int)($item['customer_id'] ?? 0);
+        $supplierId = (int)($item['supplier_id'] ?? 0);
         $warehouseId = (int)($item['warehouse_id'] ?? 0);
-        $customer = $customerMap[$customerId] ?? null;
-        if ($includeCustomer && !$customer && $customerId > 0) {
-            $customerModel = Customer::findOrEmpty($customerId);
-            $customer = $customerModel->isEmpty() ? null : CustomerLogic::formatItem($customerModel->toArray());
+        $supplier = $supplierMap[$supplierId] ?? null;
+        if ($includeSupplier && !$supplier && $supplierId > 0) {
+            $supplierModel = Vendor::findOrEmpty($supplierId);
+            $supplier = $supplierModel->isEmpty() ? null : SupplierLogic::formatItem($supplierModel->toArray());
         }
 
         $warehouse = $warehouseMap[$warehouseId] ?? null;
-        if ($includeCustomer && !$warehouse && $warehouseId > 0) {
+        if ($includeSupplier && !$warehouse && $warehouseId > 0) {
             $warehouseModel = Warehouse::findOrEmpty($warehouseId);
             $warehouse = $warehouseModel->isEmpty() ? null : WarehouseLogic::formatItem($warehouseModel->toArray());
         }
 
-        $customerName = (string)($customer['customer_name'] ?? $item['customer_name'] ?? '');
+        $supplierName = (string)($supplier['supplier_name'] ?? $item['supplier_name'] ?? '');
         $warehouseName = (string)($warehouse['name'] ?? '');
         $datetimesingle = (int)($item['datetimesingle'] ?? 0);
 
         return [
             'id' => (int)($item['id'] ?? 0),
             'order_sn' => (string)($item['order_sn'] ?? ''),
-            'customer_id' => $customerId,
-            'customer_name' => $customerName,
-            'customer' => $customer ?: [
-                'id' => $customerId,
-                'customer_name' => $customerName,
+            'supplier_id' => $supplierId,
+            'supplier_name' => $supplierName,
+            'supplier' => $supplier ?: [
+                'id' => $supplierId,
+                'supplier_name' => $supplierName,
             ],
             'warehouse_id' => $warehouseId,
             'warehouse_name' => $warehouseName,
@@ -259,13 +259,13 @@ class SalesOrderLogic extends BaseLogic
 
     protected static function buildOrderData(array $params, array $current = []): array|false
     {
-        $customer = Customer::findOrEmpty((int)$params['customer_id']);
-        if ($customer->isEmpty()) {
-            self::setError('客户不存在');
+        $vendor = Vendor::findOrEmpty((int)$params['supplier_id']);
+        if ($vendor->isEmpty()) {
+            self::setError('供应商不存在');
             return false;
         }
-        if ((int)$customer->is_disabled === 1) {
-            self::setError('停用客户不可开销售单');
+        if ((int)$vendor->is_disabled === 1) {
+            self::setError('停用供应商不可开进货单');
             return false;
         }
 
@@ -279,9 +279,8 @@ class SalesOrderLogic extends BaseLogic
             return false;
         }
 
-        $orderMoney = array_reduce($goodsRows, fn($sum, $row) => bcadd($sum, (string)$row['amount'], 2), '0.00');
-        $rawPay = (string)max(0, (float)($params['order_pay_money'] ?? ($current['order_pay_money'] ?? 0)));
-        $orderPayMoney = bccomp($rawPay, (string)$orderMoney, 2) > 0 ? (string)$orderMoney : $rawPay;
+        $orderMoney = array_reduce($goodsRows, fn($sum, $row) => $sum + (float)$row['amount'], 0.0);
+        $orderPayMoney = min($orderMoney, max(0, (float)($params['order_pay_money'] ?? ($current['order_pay_money'] ?? 0))));
         $tenantId = (int)(request()->tenantId ?? 0);
         $adminId = (int)(request()->adminId ?? 0);
         $orderSn = trim((string)($params['order_sn'] ?? ($current['order_sn'] ?? '')));
@@ -296,12 +295,12 @@ class SalesOrderLogic extends BaseLogic
             'order' => [
                 'tenant_id' => $tenantId,
                 'order_sn' => $orderSn,
-                'customer_id' => (int)$customer->id,
-                'customer_name' => (string)$customer->customer_name,
+                'supplier_id' => (int)$vendor->id,
+                'supplier_name' => (string)$vendor->supplier_name,
                 'warehouse_id' => (int)$warehouse->id,
                 'order_money' => self::money($orderMoney),
                 'order_pay_money' => self::money($orderPayMoney),
-                'order_arrears_money' => bcsub((string)$orderMoney, (string)$orderPayMoney, 2),
+                'order_arrears_money' => self::money($orderMoney - $orderPayMoney),
                 'datetimesingle' => (int)($params['datetimesingle'] ?? ($current['datetimesingle'] ?? time())),
                 'status' => (int)($current['status'] ?? 1),
                 'purpose_type' => trim((string)($params['purpose_type'] ?? $params['purpose'] ?? ($current['purpose_type'] ?? self::DEFAULT_PURPOSE_TYPE))),
@@ -333,7 +332,7 @@ class SalesOrderLogic extends BaseLogic
                 return false;
             }
             if ((int)$goodsModel->is_disabled === 1) {
-                self::setError('停用商品不可开销售单');
+                self::setError('停用商品不可开进货单');
                 return false;
             }
 
@@ -344,7 +343,7 @@ class SalesOrderLogic extends BaseLogic
             }
 
             $price = self::money($item['price'] ?? $item['units_money'] ?? $goodsModel->price);
-            $amount = bcmul((string)$number, (string)$price, 2);
+            $amount = self::money($number * (float)$price);
             $rows[] = [
                 'tenant_id' => (int)(request()->tenantId ?? 0),
                 'order_type' => self::ORDER_TYPE,
@@ -387,7 +386,7 @@ class SalesOrderLogic extends BaseLogic
             return null;
         }
         if ((int)$warehouse->is_enabled !== 1) {
-            self::setError('停用仓库不可开销售单');
+            self::setError('停用仓库不可开进货单');
             return null;
         }
 
@@ -397,20 +396,20 @@ class SalesOrderLogic extends BaseLogic
     protected static function generateOrderSn(): string
     {
         do {
-            $sn = 'XSD' . date('YmdHis') . random_int(1000, 9999);
-        } while (SalesOrder::where('order_sn', $sn)->count() > 0);
+            $sn = 'JHD' . date('YmdHis') . random_int(1000, 9999);
+        } while (SupplyOrder::where('order_sn', $sn)->count() > 0);
 
         return $sn;
     }
 
     protected static function assertOrderSnUnique(string $orderSn, int $ignoreId = 0): bool
     {
-        $query = SalesOrder::where('order_sn', $orderSn);
+        $query = SupplyOrder::where('order_sn', $orderSn);
         if ($ignoreId > 0) {
             $query->where('id', '<>', $ignoreId);
         }
         if ($query->count() > 0) {
-            self::setError('销售单号已存在');
+            self::setError('进货单号已存在');
             return false;
         }
         return true;

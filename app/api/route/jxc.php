@@ -65,4 +65,36 @@ Route::group('', function () {
     Route::delete('order/remove', 'jxc.SalesOrder/remove');
     Route::post('order/remove', 'jxc.SalesOrder/remove');
     Route::get('order/lists', 'jxc.SalesOrder/lists');
+
+    // === 进货单（供货单）===
+    Route::get('supply/lists',      'jxc.SupplyOrder/lists');
+    Route::post('supply/publish',   'jxc.SupplyOrder/publish');
+    Route::post('supply/edit',      'jxc.SupplyOrder/edit');
+    Route::delete('supply/remove',  'jxc.SupplyOrder/remove');
+    Route::get('supply/details',    'jxc.SupplyOrder/detail');
+    Route::get('supply/statistics', 'jxc.SupplyOrder/statistics');
+
+    // === 销售退货单 ===
+    Route::get('return/lists',      'jxc.SalesReturnOrder/lists');
+    Route::post('return/publish',   'jxc.SalesReturnOrder/publish');
+    Route::post('return/edit',      'jxc.SalesReturnOrder/edit');
+    Route::delete('return/remove',  'jxc.SalesReturnOrder/remove');
+    Route::get('return/details',    'jxc.SalesReturnOrder/detail');
+
+    // === 订货单 ===
+    Route::get('purchase/lists',              'jxc.PurchaseOrder/lists');
+    Route::get('purchase/details',            'jxc.PurchaseOrder/detail');
+    Route::post('purchase/publish',           'jxc.PurchaseOrder/add');
+    Route::post('purchase/edit',              'jxc.PurchaseOrder/edit');
+    Route::delete('purchase/remove',          'jxc.PurchaseOrder/remove');
+    Route::post('purchase/confirm',           'jxc.PurchaseOrder/confirm');
+    Route::post('purchase/cancel',            'jxc.PurchaseOrder/cancel');
+    Route::post('purchase/convert-to-sales',  'jxc.PurchaseOrder/convertToSalesOrder');
+    Route::post('purchase/parse-text',        'jxc.PurchaseOrder/parsePastedText');
+    Route::get('purchase/statistics',         'jxc.PurchaseOrder/statistics');
+
+    // === 店铺管理 ===
+    Route::get('user/store',     'jxc.Store/detail');
+    Route::post('user/storeset', 'jxc.Store/setStore');
+    Route::post('user/open',     'jxc.Store/createStore');
 })->middleware(\app\api\jxc\middleware\JxcLoginMiddleware::class);

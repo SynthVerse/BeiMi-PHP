@@ -3,6 +3,7 @@
 namespace app\api\jxc\logic;
 
 use app\common\logic\BaseLogic;
+use app\common\model\jxc\SupplyOrder;
 use app\common\model\jxc\Vendor;
 use think\facade\Db;
 
@@ -60,6 +61,12 @@ class SupplierLogic extends BaseLogic
         $model = Vendor::findOrEmpty((int)$params['id']);
         if ($model->isEmpty()) {
             self::setError('供应商不存在');
+            return false;
+        }
+
+        $supplyCount = SupplyOrder::where('supplier_id', (int)$model->id)->count();
+        if ($supplyCount > 0) {
+            self::setError('该供应商已被进货单使用，请先删除相关订单后再删除');
             return false;
         }
 

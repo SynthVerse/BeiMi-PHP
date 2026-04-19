@@ -3,6 +3,7 @@
 namespace app\api\jxc\logic;
 
 use app\common\logic\BaseLogic;
+use app\common\model\jxc\Goods;
 use app\common\model\jxc\GoodsUnit;
 use think\facade\Db;
 
@@ -81,6 +82,12 @@ class GoodsUnitLogic extends BaseLogic
         $model = GoodsUnit::findOrEmpty((int)$params['id']);
         if ($model->isEmpty()) {
             self::setError('单位不存在');
+            return false;
+        }
+
+        $goodsCount = Goods::where('unit_id', (int)$model->id)->count();
+        if ($goodsCount > 0) {
+            self::setError('该单位已被商品使用，请先更换商品单位后再删除');
             return false;
         }
 

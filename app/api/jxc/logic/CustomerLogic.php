@@ -5,6 +5,9 @@ namespace app\api\jxc\logic;
 use app\common\logic\BaseLogic;
 use app\common\model\jxc\Customer;
 use app\common\model\jxc\CustomerGroup;
+use app\common\model\jxc\SalesOrder;
+use app\common\model\jxc\SalesReturnOrder;
+use app\common\model\jxc\PurchaseOrder;
 use think\facade\Db;
 
 class CustomerLogic extends BaseLogic
@@ -127,6 +130,23 @@ class CustomerLogic extends BaseLogic
         $groupId = (int)$model->group_id;
         $affectedStoreCount = self::childrenCount($customerId);
 
+        // 业务占用检查
+        $salesCount = SalesOrder::where('customer_id', $customerId)->count();
+        if ($salesCount > 0) {
+            self::setError('该客户有关联销售单，请先删除相关订单后再删除');
+            return false;
+        }
+        $returnCount = SalesReturnOrder::where('customer_id', $customerId)->count();
+        if ($returnCount > 0) {
+            self::setError('该客户有关联退货单，请先删除相关订单后再删除');
+            return false;
+        }
+        $purchaseCount = PurchaseOrder::where('customer_id', $customerId)->count();
+        if ($purchaseCount > 0) {
+            self::setError('该客户有关联订货单，请先删除相关订单后再删除');
+            return false;
+        }
+
         Db::startTrans();
         try {
             if ($affectedStoreCount > 0) {
@@ -179,14 +199,14 @@ class CustomerLogic extends BaseLogic
         $parentId = (int)$params['parent_id'];
         $target = Customer::findOrEmpty($parentId);
         $children = self::formatList(Customer::where('parent_id', $parentId)->select()->toArray());
-        $selfAmount = $target->isEmpty() ? 0 : (float)$target->order_receivable;
+        $selfAmount = $target->isEmpty() ? '0.00' : (string)$target->order_receivable;
         $storeAmount = array_reduce($children, function ($sum, $item) {
-            return $sum + (float)($item['order_receivable'] ?? 0);
-        }, 0.0);
+            return bcadd($sum, (string)($item['order_receivable'] ?? '0.00'), 2);
+        }, '0.00');
 
         return [
             'parent_id' => $parentId,
-            'total_amount' => self::money($selfAmount + $storeAmount),
+            'total_amount' => bcadd($selfAmount, $storeAmount, 2),
             'self_amount' => self::money($selfAmount),
             'store_amount' => self::money($storeAmount),
             'detail' => array_map(function ($item) {
@@ -384,17 +404,50 @@ class CustomerLogic extends BaseLogic
 
     public static function salesHistory(array $params): array
     {
+        $customerId = (int)($params['customer_id'] ?? 0);
+        if ($customerId <= 0) {
+            return ['data' => [], 'total' => 0, 'page' => 1, 'pagesize' => 15];
+        }
+
         $page = max(1, (int)($params['page'] ?? 1));
-        $pageSize = max(1, (int)($params['pagesize'] ?? 15));
+        $pageSize = max(1, min(100, (int)($params['pagesize'] ?? 15)));
+
+        $query = SalesOrder::where('customer_id', $customerId)
+            ->order(['datetimesingle' => 'desc', 'id' => 'desc']);
+
+        // 可选时间范围
+        $startTime = (int)($params['start_time'] ?? 0);
+        $endTime = (int)($params['end_time'] ?? 0);
+        if ($startTime > 0) {
+            $query->where('datetimesingle', '>=', $startTime);
+        }
+        if ($endTime > 0) {
+            $query->where('datetimesingle', '<=', $endTime);
+        }
+
+        $total = $query->count();
+        $items = $query->page($page, $pageSize)->select()->toArray();
+
+        // 格式化输出
+        $data = array_map(function ($item) {
+            return [
+                'id' => (int)$item['id'],
+                'order_sn' => (string)$item['order_sn'],
+                'order_money' => number_format(max(0, (float)($item['order_money'] ?? 0)), 2, '.', ''),
+                'order_pay_money' => number_format(max(0, (float)($item['order_pay_money'] ?? 0)), 2, '.', ''),
+                'order_arrears_money' => number_format(max(0, (float)($item['order_arrears_money'] ?? 0)), 2, '.', ''),
+                'datetimesingle' => (int)($item['datetimesingle'] ?? 0),
+                'createdate' => ((int)($item['datetimesingle'] ?? 0)) > 0 ? date('Y-m-d', (int)$item['datetimesingle']) : '',
+                'status' => (int)($item['status'] ?? 1),
+                'remarks' => (string)($item['remarks'] ?? ''),
+            ];
+        }, $items);
 
         return [
-            'data' => [],
-            'current_page' => $page,
+            'data' => $data,
+            'total' => $total,
             'page' => $page,
-            'last_page' => 1,
-            'total' => 0,
             'pagesize' => $pageSize,
-            'has_more' => false,
         ];
     }
 
@@ -418,8 +471,8 @@ class CustomerLogic extends BaseLogic
             ->toArray();
         $customers = self::formatList($rows, true);
         $totalAmount = array_reduce($customers, function ($sum, $item) {
-            return $sum + (float)($item['total_receivable'] ?? $item['order_receivable'] ?? 0);
-        }, 0.0);
+            return bcadd($sum, (string)($item['total_receivable'] ?? $item['order_receivable'] ?? '0.00'), 2);
+        }, '0.00');
         $storeCount = array_reduce($customers, function ($sum, $item) {
             return $sum + (int)($item['children_count'] ?? 0);
         }, 0);
@@ -459,10 +512,10 @@ class CustomerLogic extends BaseLogic
             : [];
         $children = $includeChildren ? self::formatList($childrenRows, false) : null;
         $childrenCount = count($childrenRows) ?: (int)($item['children_count'] ?? 0);
-        $selfReceivable = (float)($item['order_receivable'] ?? 0);
+        $selfReceivable = (string)($item['order_receivable'] ?? '0.00');
         $childrenReceivable = array_reduce($children ?: [], function ($sum, $child) {
-            return $sum + (float)($child['order_receivable'] ?? 0);
-        }, 0.0);
+            return bcadd($sum, (string)($child['order_receivable'] ?? '0.00'), 2);
+        }, '0.00');
         $isDisabled = (int)($item['is_disabled'] ?? 0);
 
         return [
@@ -490,7 +543,7 @@ class CustomerLogic extends BaseLogic
             'order_receivable' => self::money($selfReceivable),
             'order_money' => self::money($item['order_money'] ?? 0),
             'order_pay_money' => self::money($item['order_pay_money'] ?? 0),
-            'total_receivable' => self::money($selfReceivable + $childrenReceivable),
+            'total_receivable' => bcadd($selfReceivable, $childrenReceivable, 2),
             'last_transaction_date' => self::dateText($item['update_time'] ?? $item['create_time'] ?? ''),
             'create_time' => $item['create_time'] ?? '',
             'update_time' => $item['update_time'] ?? '',

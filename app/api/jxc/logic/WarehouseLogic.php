@@ -3,6 +3,10 @@
 namespace app\api\jxc\logic;
 
 use app\common\logic\BaseLogic;
+use app\common\model\jxc\PurchaseOrder;
+use app\common\model\jxc\SalesOrder;
+use app\common\model\jxc\SalesReturnOrder;
+use app\common\model\jxc\SupplyOrder;
 use app\common\model\jxc\Warehouse;
 use think\facade\Db;
 
@@ -60,6 +64,15 @@ class WarehouseLogic extends BaseLogic
         $model = Warehouse::findOrEmpty((int)$params['id']);
         if ($model->isEmpty()) {
             self::setError('仓库不存在');
+            return false;
+        }
+
+        $orderCount = SalesOrder::where('warehouse_id', (int)$model->id)->count()
+            + SupplyOrder::where('warehouse_id', (int)$model->id)->count()
+            + PurchaseOrder::where('warehouse_id', (int)$model->id)->count()
+            + SalesReturnOrder::where('warehouse_id', (int)$model->id)->count();
+        if ($orderCount > 0) {
+            self::setError('该仓库已被订单使用，请先处理相关订单后再删除');
             return false;
         }
 

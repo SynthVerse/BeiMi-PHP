@@ -5,6 +5,7 @@ namespace app\api\jxc\logic;
 use app\common\logic\BaseLogic;
 use app\common\model\jxc\Goods;
 use app\common\model\jxc\GoodsUnit;
+use app\common\model\jxc\OrderGoods;
 use think\facade\Db;
 
 class GoodsLogic extends BaseLogic
@@ -60,6 +61,12 @@ class GoodsLogic extends BaseLogic
         $model = Goods::findOrEmpty((int)$params['id']);
         if ($model->isEmpty()) {
             self::setError('商品不存在');
+            return false;
+        }
+
+        $orderGoodsCount = OrderGoods::where('goods_id', (int)$model->id)->count();
+        if ($orderGoodsCount > 0) {
+            self::setError('该商品已被订单明细使用，请先删除相关订单后再删除');
             return false;
         }
 
