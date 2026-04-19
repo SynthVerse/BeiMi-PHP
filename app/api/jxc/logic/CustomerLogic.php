@@ -8,6 +8,7 @@ use app\common\model\jxc\CustomerGroup;
 use app\common\model\jxc\SalesOrder;
 use app\common\model\jxc\SalesReturnOrder;
 use app\common\model\jxc\PurchaseOrder;
+use app\common\model\jxc\OrderGoods;
 use think\facade\Db;
 use think\facade\Log;
 use app\api\jxc\exception\BusinessException;
@@ -486,7 +487,22 @@ class CustomerLogic extends BaseLogic
         $page = max(1, (int)($params['page'] ?? 1));
         $pageSize = max(1, min(100, (int)($params['pagesize'] ?? 15)));
 
-        $query = SalesOrder::where('customer_id', $customerId)
+        // 查询客户信息，判断是否为主客户（parent_id=0）
+        $customer = Customer::findOrEmpty($customerId);
+        if ($customer->isEmpty()) {
+            return ['data' => [], 'total' => 0, 'page' => $page, 'pagesize' => $pageSize];
+        }
+
+        // 构建 customer_id 查询条件：主客户包含所有门店的销售单
+        $customerIds = [$customerId];
+        if ((int)$customer->parent_id === 0) {
+            $childIds = Customer::where('parent_id', $customerId)->column('id');
+            if (!empty($childIds)) {
+                $customerIds = array_merge($customerIds, array_map('intval', $childIds));
+            }
+        }
+
+        $query = SalesOrder::whereIn('customer_id', $customerIds)
             ->order(['datetimesingle' => 'desc', 'id' => 'desc']);
 
         // 可选时间范围
@@ -502,18 +518,44 @@ class CustomerLogic extends BaseLogic
         $total = $query->count();
         $items = $query->page($page, $pageSize)->select()->toArray();
 
+        // 批量查询订单商品明细
+        $orderIds = array_map(fn($item) => (int)$item['id'], $items);
+        $goodsMap = [];
+        if (!empty($orderIds)) {
+            $goodsRows = OrderGoods::where('order_type', 'sales')
+                ->whereIn('order_id', $orderIds)
+                ->order(['sort' => 'asc', 'id' => 'asc'])
+                ->select()
+                ->toArray();
+            foreach ($goodsRows as $row) {
+                $orderId = (int)$row['order_id'];
+                $goodsMap[$orderId][] = [
+                    'goods_id' => (int)($row['goods_id'] ?? 0),
+                    'name' => (string)($row['name'] ?? ''),
+                    'units' => (string)($row['units'] ?? ''),
+                    'number' => rtrim(rtrim(number_format(max(0, (float)($row['number'] ?? 0)), 4, '.', ''), '0'), '.'),
+                    'price' => self::money($row['price'] ?? 0),
+                    'amount' => self::money($row['amount'] ?? 0),
+                ];
+            }
+        }
+
         // 格式化输出
-        $data = array_map(function ($item) {
+        $data = array_map(function ($item) use ($goodsMap) {
+            $datetimeInt = (int)($item['datetimesingle'] ?? 0);
             return [
                 'id' => (int)$item['id'],
                 'order_sn' => (string)$item['order_sn'],
                 'order_money' => number_format(max(0, (float)($item['order_money'] ?? 0)), 2, '.', ''),
                 'order_pay_money' => number_format(max(0, (float)($item['order_pay_money'] ?? 0)), 2, '.', ''),
                 'order_arrears_money' => number_format(max(0, (float)($item['order_arrears_money'] ?? 0)), 2, '.', ''),
-                'datetimesingle' => (int)($item['datetimesingle'] ?? 0),
-                'createdate' => ((int)($item['datetimesingle'] ?? 0)) > 0 ? date('Y-m-d', (int)$item['datetimesingle']) : '',
+                'customer_name' => (string)($item['customer_name'] ?? ''),
+                'datetimesingle' => $datetimeInt,
+                'created_at' => $datetimeInt > 0 ? date('Y-m-d', $datetimeInt) : '',
+                'createdate' => $datetimeInt > 0 ? date('Y-m-d', $datetimeInt) : '',
                 'status' => (int)($item['status'] ?? 1),
                 'remarks' => (string)($item['remarks'] ?? ''),
+                'goods' => $goodsMap[(int)$item['id']] ?? [],
             ];
         }, $items);
 
