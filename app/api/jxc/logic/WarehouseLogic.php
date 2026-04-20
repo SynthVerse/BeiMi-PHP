@@ -33,7 +33,9 @@ class WarehouseLogic extends BaseLogic
 
     public static function edit(array $params): bool
     {
-        $model = Warehouse::findOrEmpty((int)$params['id']);
+        $model = Warehouse::where('id', (int)$params['id'])
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->findOrEmpty();
         if ($model->isEmpty()) {
             self::setError('仓库不存在');
             return false;

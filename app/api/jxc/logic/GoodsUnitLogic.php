@@ -34,7 +34,9 @@ class GoodsUnitLogic extends BaseLogic
 
     public static function edit(array $params): bool
     {
-        $model = GoodsUnit::findOrEmpty((int)$params['id']);
+        $model = GoodsUnit::where('id', (int)$params['id'])
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->findOrEmpty();
         if ($model->isEmpty()) {
             self::setError('单位不存在');
             return false;

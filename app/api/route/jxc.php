@@ -94,7 +94,7 @@ Route::group('', function () {
     Route::get('purchase/statistics',         'jxc.PurchaseOrder/statistics');
 
     // === 审计日志 ===
-    Route::get('audit/lists', 'jxc.AuditController/lists');
+    Route::get('audit/lists', 'jxc.Audit/lists');
 
     // === 店铺管理 ===
     Route::get('user/store',     'jxc.Store/detail');

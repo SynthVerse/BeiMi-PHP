@@ -70,7 +70,9 @@ class CustomerLogic extends BaseLogic
 
     public static function edit(array $params): array|false
     {
-        $model = Customer::findOrEmpty((int)$params['id']);
+        $model = Customer::where('id', (int)$params['id'])
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->findOrEmpty();
         if ($model->isEmpty()) {
             self::setError('客户不存在');
             return false;

@@ -105,7 +105,9 @@ class SalesOrderLogic extends BaseLogic
 
     public static function edit(array $params): array|false
     {
-        $order = SalesOrder::findOrEmpty((int)$params['id']);
+        $order = SalesOrder::where('id', (int)$params['id'])
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->findOrEmpty();
         if ($order->isEmpty()) {
             self::setError('销售单不存在');
             return false;

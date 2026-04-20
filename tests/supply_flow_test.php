@@ -30,7 +30,7 @@ function httpRequest(string $method, string $url, array $data = [], string $toke
         $headers[] = 'token: ' . $token;
     }
 
-    if ($method === 'GET' && !empty($data)) {
+    if (($method === 'GET' || $method === 'DELETE') && !empty($data)) {
         $url .= '?' . http_build_query($data);
     }
 
@@ -47,7 +47,6 @@ function httpRequest(string $method, string $url, array $data = [], string $toke
             break;
         case 'DELETE':
             curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'DELETE');
-            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data, JSON_UNESCAPED_UNICODE));
             break;
         case 'GET':
         default:
@@ -226,7 +225,7 @@ if (empty($token)) {
 $ts = time();
 
 // 创建单位
-$unitName = "FLOW_测试单位_{$ts}";
+$unitName = 'SF' . substr((string)$ts, -8);
 $unitAddRes = http_post("{$BASE_URL}/api/units/add", ['name' => $unitName], $token);
 assert_code($unitAddRes, 1, '创建单位');
 $unitId = extractId($unitAddRes);

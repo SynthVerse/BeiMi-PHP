@@ -83,7 +83,9 @@ class PurchaseOrderLogic extends BaseLogic
 
     public static function edit(array $params): array|false
     {
-        $order = PurchaseOrder::findOrEmpty((int)$params['id']);
+        $order = PurchaseOrder::where('id', (int)$params['id'])
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->findOrEmpty();
         if ($order->isEmpty()) {
             self::setError('订货单不存在');
             return false;

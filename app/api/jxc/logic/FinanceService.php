@@ -237,19 +237,52 @@ class FinanceService
             ->where('order_type', $orderType)
             ->select();
 
+        $netAmounts = [];
+        $orderSns = [];
         foreach ($flows as $flow) {
-            $vendor = Vendor::where('id', $flow->supplier_id)->lock(true)->find();
-            if (!$vendor) continue;
+            $supplierId = (int)$flow->supplier_id;
+            $netAmounts[$supplierId] ??= '0.00';
+            $orderSns[$supplierId] ??= (string)$flow->order_sn;
 
             if ($flow->flow_type == PayableFlow::TYPE_SUPPLY_ADD) {
-                $beforeAmount = (string)($vendor->order_payable ?? '0.00');
-                $afterAmount = bcsub($beforeAmount, (string)$flow->amount, 2);
-                Vendor::where('id', $flow->supplier_id)->update([
-                    'order_payable' => $afterAmount,
-                    'order_money' => bcsub((string)$vendor->order_money, (string)$flow->amount, 2),
-                    'update_time' => time(),
-                ]);
+                $netAmounts[$supplierId] = bcadd($netAmounts[$supplierId], (string)$flow->amount, 2);
+            } elseif ($flow->flow_type == PayableFlow::TYPE_PAYMENT) {
+                $netAmounts[$supplierId] = bcsub($netAmounts[$supplierId], (string)$flow->amount, 2);
             }
+        }
+
+        foreach ($netAmounts as $supplierId => $amount) {
+            if (bccomp((string)$amount, '0', 2) <= 0) {
+                continue;
+            }
+
+            $vendor = Vendor::where('id', $supplierId)->lock(true)->find();
+            if (!$vendor) {
+                continue;
+            }
+
+            $beforeAmount = (string)($vendor->order_payable ?? '0.00');
+            $afterAmount = bcsub($beforeAmount, (string)$amount, 2);
+            Vendor::where('id', $supplierId)->update([
+                'order_payable' => $afterAmount,
+                'order_money' => bcsub((string)$vendor->order_money, (string)$amount, 2),
+                'update_time' => time(),
+            ]);
+
+            PayableFlow::create([
+                'tenant_id'     => (int)(request()->tenantId ?? 0),
+                'supplier_id'   => $supplierId,
+                'order_id'      => $orderId,
+                'order_type'    => $orderType,
+                'order_sn'      => $orderSns[$supplierId] ?? '',
+                'flow_type'     => PayableFlow::TYPE_PAYMENT,
+                'amount'        => (string)$amount,
+                'before_amount' => $beforeAmount,
+                'after_amount'  => $afterAmount,
+                'admin_id'      => (int)(request()->adminId ?? 0),
+                'remark'        => '回滚应付-' . $orderType,
+                'create_time'   => time(),
+            ]);
         }
 
         return true;

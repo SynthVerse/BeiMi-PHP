@@ -134,7 +134,9 @@ class CustomerGroupLogic extends BaseLogic
 
     public static function detail(array $params): array
     {
-        $model = CustomerGroup::findOrEmpty((int)$params['id']);
+        $model = CustomerGroup::where('id', (int)$params['id'])
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->findOrEmpty();
         if ($model->isEmpty()) {
             return [];
         }

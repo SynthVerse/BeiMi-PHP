@@ -6,6 +6,7 @@
  */
 
 $BASE_URL = isset($argv[1]) ? rtrim($argv[1], '/') : 'http://127.0.0.1:8787';
+$RUN_ID = date('YmdHis') . '_' . random_int(1000, 9999);
 
 // ─────────────────────────────────────────────
 // 全局计数器
@@ -21,6 +22,18 @@ $failTests  = 0;
 /**
  * 发起 HTTP 请求
  */
+function testName(string $name): string
+{
+    global $RUN_ID;
+    return $name . '_' . $RUN_ID;
+}
+
+function shortTestName(string $prefix): string
+{
+    global $RUN_ID;
+    return $prefix . substr(preg_replace('/\D/', '', $RUN_ID), -8);
+}
+
 function httpRequest(string $method, string $url, array $data = [], string $token = ''): array
 {
     $ch = curl_init();
@@ -30,7 +43,7 @@ function httpRequest(string $method, string $url, array $data = [], string $toke
         $headers[] = 'token: ' . $token;
     }
 
-    if ($method === 'GET' && !empty($data)) {
+    if (($method === 'GET' || $method === 'DELETE') && !empty($data)) {
         $url .= '?' . http_build_query($data);
     }
 
@@ -47,7 +60,6 @@ function httpRequest(string $method, string $url, array $data = [], string $toke
             break;
         case 'DELETE':
             curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'DELETE');
-            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data, JSON_UNESCAPED_UNICODE));
             break;
         case 'GET':
         default:
@@ -153,6 +165,18 @@ function listContainsId(array $items, int $targetId): bool
     return false;
 }
 
+function detailHiddenFromTenant(array $response, int $targetId): bool
+{
+    $data = $response['data'] ?? [];
+    if ((int)($response['code'] ?? 0) !== 1) {
+        return true;
+    }
+    if (!is_array($data) || empty($data)) {
+        return true;
+    }
+    return (int)($data['id'] ?? 0) !== $targetId;
+}
+
 /**
  * 从列表响应中找到第一条包含特定字段值的记录 id
  */
@@ -227,7 +251,7 @@ function ensureSecondTenant(): array
     $pdo = getPdo();
     $now = time();
 
-    $testTenantId = 9999;
+    $testTenantId = 99;
     $testAccount  = 'iso_test_admin_b';
 
     // 1. 确保第二租户存在
@@ -274,6 +298,13 @@ SQL
             'update_time' => $now,
         ]);
         $existingAdminId = $pdo->lastInsertId();
+    } else {
+        $updateAdmin = $pdo->prepare("UPDATE `{$adminTable}` SET tenant_id = :tenant_id, update_time = :update_time WHERE id = :id");
+        $updateAdmin->execute([
+            'tenant_id' => $testTenantId,
+            'update_time' => $now,
+            'id' => $existingAdminId,
+        ]);
     }
 
     // 3. 清除该管理员的旧 session（避免 token 冲突）
@@ -302,7 +333,7 @@ function cleanupSecondTenant(): void
     $tenantTable = $prefix . 'tenant';
 
     $testAccount  = 'iso_test_admin_b';
-    $testTenantId = 9999;
+    $testTenantId = 99;
 
     // 清理管理员 session
     $stmt = $pdo->prepare("DELETE FROM `{$sessionTable}` WHERE admin_id IN (SELECT id FROM `{$adminTable}` WHERE account = :account)");
@@ -420,6 +451,22 @@ $idsB = [
     'sales_order'   => null,
     'supply_order'  => null,
 ];
+$namesA = [
+    'unit' => shortTestName('IA'),
+    'warehouse' => testName('ISO_A_隔离测试仓库'),
+    'customer' => testName('ISO_A_隔离测试客户'),
+    'supplier' => testName('ISO_A_隔离测试供应商'),
+    'goods' => testName('ISO_A_隔离测试商品'),
+    'goods_code' => testName('ISO_A_001'),
+];
+$namesB = [
+    'unit' => shortTestName('IB'),
+    'warehouse' => testName('ISO_B_隔离测试仓库'),
+    'customer' => testName('ISO_B_隔离测试客户'),
+    'supplier' => testName('ISO_B_隔离测试供应商'),
+    'goods' => testName('ISO_B_隔离测试商品'),
+    'goods_code' => testName('ISO_B_001'),
+];
 
 // ══════════════════════════════════════════════
 // Step 3：租户A创建测试数据
@@ -428,23 +475,23 @@ echo "Step 3: 租户A创建测试数据 ... ";
 
 // 单位
 $unitA = httpRequest('POST', "{$BASE_URL}/api/units/add", [
-    'name' => 'ISO_A_隔离测试单位',
+    'name' => $namesA['unit'],
 ], $tokenA);
 assert_code($unitA, 1, '租户A创建单位');
 $idsA['unit'] = extractId($unitA);
 
 // 仓库
 $whA = httpRequest('POST', "{$BASE_URL}/api/warehouse/add", [
-    'name' => 'ISO_A_隔离测试仓库',
-    'address' => 'ISO_A_仓库地址',
+    'name' => $namesA['warehouse'],
+    'address' => testName('ISO_A_仓库地址'),
 ], $tokenA);
 assert_code($whA, 1, '租户A创建仓库');
 $idsA['warehouse'] = extractId($whA);
 
 // 客户
 $custA = httpRequest('POST', "{$BASE_URL}/api/customer/add", [
-    'customer_name' => 'ISO_A_隔离测试客户',
-    'contact' => 'ISO_A_联系人',
+    'customer_name' => $namesA['customer'],
+    'contact' => testName('ISO_A_联系人'),
     'phone'   => '13100000001',
 ], $tokenA);
 assert_code($custA, 1, '租户A创建客户');
@@ -452,8 +499,8 @@ $idsA['customer'] = extractId($custA);
 
 // 供应商
 $supA = httpRequest('POST', "{$BASE_URL}/api/supplier/add", [
-    'supplier_name' => 'ISO_A_隔离测试供应商',
-    'contact' => 'ISO_A_供应商联系人',
+    'supplier_name' => $namesA['supplier'],
+    'contact' => testName('ISO_A_供应商联系人'),
     'phone'   => '13200000001',
 ], $tokenA);
 assert_code($supA, 1, '租户A创建供应商');
@@ -461,8 +508,8 @@ $idsA['supplier'] = extractId($supA);
 
 // 商品
 $goodsA = httpRequest('POST', "{$BASE_URL}/api/goods/add", [
-    'name'         => 'ISO_A_隔离测试商品',
-    'product_code' => 'ISO_A_001',
+    'name'         => $namesA['goods'],
+    'product_code' => $namesA['goods_code'],
     'price'        => 10.00,
     'units'        => '个',
 ], $tokenA);
@@ -476,7 +523,7 @@ if ($idsA['customer'] && $idsA['warehouse'] && $idsA['goods']) {
         'warehouse_id' => $idsA['warehouse'],
         'goods'        => [[
             'goods_id' => $idsA['goods'],
-            'name'     => 'ISO_A_隔离测试商品',
+            'name'     => $namesA['goods'],
             'number'   => 3,
             'price'    => 10.00,
             'units'    => '个',
@@ -493,7 +540,7 @@ if ($idsA['supplier'] && $idsA['warehouse'] && $idsA['goods']) {
         'warehouse_id' => $idsA['warehouse'],
         'goods'        => [[
             'goods_id' => $idsA['goods'],
-            'name'     => 'ISO_A_隔离测试商品',
+            'name'     => $namesA['goods'],
             'number'   => 5,
             'price'    => 10.00,
             'units'    => '个',
@@ -512,23 +559,23 @@ echo "Step 4: 租户B创建测试数据 ... ";
 
 // 单位
 $unitB = httpRequest('POST', "{$BASE_URL}/api/units/add", [
-    'name' => 'ISO_B_隔离测试单位',
+    'name' => $namesB['unit'],
 ], $tokenB);
 assert_code($unitB, 1, '租户B创建单位');
 $idsB['unit'] = extractId($unitB);
 
 // 仓库
 $whB = httpRequest('POST', "{$BASE_URL}/api/warehouse/add", [
-    'name' => 'ISO_B_隔离测试仓库',
-    'address' => 'ISO_B_仓库地址',
+    'name' => $namesB['warehouse'],
+    'address' => testName('ISO_B_仓库地址'),
 ], $tokenB);
 assert_code($whB, 1, '租户B创建仓库');
 $idsB['warehouse'] = extractId($whB);
 
 // 客户
 $custB = httpRequest('POST', "{$BASE_URL}/api/customer/add", [
-    'customer_name' => 'ISO_B_隔离测试客户',
-    'contact' => 'ISO_B_联系人',
+    'customer_name' => $namesB['customer'],
+    'contact' => testName('ISO_B_联系人'),
     'phone'   => '14100000001',
 ], $tokenB);
 assert_code($custB, 1, '租户B创建客户');
@@ -536,8 +583,8 @@ $idsB['customer'] = extractId($custB);
 
 // 供应商
 $supB = httpRequest('POST', "{$BASE_URL}/api/supplier/add", [
-    'supplier_name' => 'ISO_B_隔离测试供应商',
-    'contact' => 'ISO_B_供应商联系人',
+    'supplier_name' => $namesB['supplier'],
+    'contact' => testName('ISO_B_供应商联系人'),
     'phone'   => '14200000001',
 ], $tokenB);
 assert_code($supB, 1, '租户B创建供应商');
@@ -545,8 +592,8 @@ $idsB['supplier'] = extractId($supB);
 
 // 商品
 $goodsB = httpRequest('POST', "{$BASE_URL}/api/goods/add", [
-    'name'         => 'ISO_B_隔离测试商品',
-    'product_code' => 'ISO_B_001',
+    'name'         => $namesB['goods'],
+    'product_code' => $namesB['goods_code'],
     'price'        => 20.00,
     'units'        => '件',
 ], $tokenB);
@@ -560,7 +607,7 @@ if ($idsB['customer'] && $idsB['warehouse'] && $idsB['goods']) {
         'warehouse_id' => $idsB['warehouse'],
         'goods'        => [[
             'goods_id' => $idsB['goods'],
-            'name'     => 'ISO_B_隔离测试商品',
+            'name'     => $namesB['goods'],
             'number'   => 2,
             'price'    => 20.00,
             'units'    => '件',
@@ -577,7 +624,7 @@ if ($idsB['supplier'] && $idsB['warehouse'] && $idsB['goods']) {
         'warehouse_id' => $idsB['warehouse'],
         'goods'        => [[
             'goods_id' => $idsB['goods'],
-            'name'     => 'ISO_B_隔离测试商品',
+            'name'     => $namesB['goods'],
             'number'   => 4,
             'price'    => 20.00,
             'units'    => '件',
@@ -598,14 +645,14 @@ echo "Step 5: 交叉验证-客户隔离 ... ";
 $custListA = httpRequest('GET', "{$BASE_URL}/api/customer/index", [], $tokenA);
 $itemsA = extractList($custListA);
 
-$leakA = listContains($itemsA, 'customer_name', 'ISO_B_隔离测试客户');
+$leakA = listContains($itemsA, 'customer_name', $namesB['customer']);
 assert_true(!$leakA, '租户A客户列表不含租户B的客户');
 
 // 用租户B的 token 查询客户列表
 $custListB = httpRequest('GET', "{$BASE_URL}/api/customer/index", [], $tokenB);
 $itemsB = extractList($custListB);
 
-$leakB = listContains($itemsB, 'customer_name', 'ISO_A_隔离测试客户');
+$leakB = listContains($itemsB, 'customer_name', $namesA['customer']);
 assert_true(!$leakB, '租户B客户列表不含租户A的客户');
 
 echo "OK\n";
@@ -617,12 +664,12 @@ echo "Step 6: 交叉验证-商品隔离 ... ";
 
 $goodsListA = httpRequest('GET', "{$BASE_URL}/api/goods/index", [], $tokenA);
 $goodsItemsA = extractList($goodsListA);
-$leakGoodsA = listContains($goodsItemsA, 'name', 'ISO_B_隔离测试商品');
+$leakGoodsA = listContains($goodsItemsA, 'name', $namesB['goods']);
 assert_true(!$leakGoodsA, '租户A商品列表不含租户B的商品');
 
 $goodsListB = httpRequest('GET', "{$BASE_URL}/api/goods/index", [], $tokenB);
 $goodsItemsB = extractList($goodsListB);
-$leakGoodsB = listContains($goodsItemsB, 'name', 'ISO_A_隔离测试商品');
+$leakGoodsB = listContains($goodsItemsB, 'name', $namesA['goods']);
 assert_true(!$leakGoodsB, '租户B商品列表不含租户A的商品');
 
 echo "OK\n";
@@ -634,12 +681,12 @@ echo "Step 7: 交叉验证-仓库隔离 ... ";
 
 $whListA = httpRequest('GET', "{$BASE_URL}/api/warehouse/index", [], $tokenA);
 $whItemsA = extractList($whListA);
-$leakWhA = listContains($whItemsA, 'name', 'ISO_B_隔离测试仓库');
+$leakWhA = listContains($whItemsA, 'name', $namesB['warehouse']);
 assert_true(!$leakWhA, '租户A仓库列表不含租户B的仓库');
 
 $whListB = httpRequest('GET', "{$BASE_URL}/api/warehouse/index", [], $tokenB);
 $whItemsB = extractList($whListB);
-$leakWhB = listContains($whItemsB, 'name', 'ISO_A_隔离测试仓库');
+$leakWhB = listContains($whItemsB, 'name', $namesA['warehouse']);
 assert_true(!$leakWhB, '租户B仓库列表不含租户A的仓库');
 
 echo "OK\n";
@@ -651,12 +698,12 @@ echo "Step 8: 交叉验证-单位隔离 ... ";
 
 $unitListA = httpRequest('GET', "{$BASE_URL}/api/units/index", [], $tokenA);
 $unitItemsA = extractList($unitListA);
-$leakUnitA = listContains($unitItemsA, 'name', 'ISO_B_隔离测试单位');
+$leakUnitA = listContains($unitItemsA, 'name', $namesB['unit']);
 assert_true(!$leakUnitA, '租户A单位列表不含租户B的单位');
 
 $unitListB = httpRequest('GET', "{$BASE_URL}/api/units/index", [], $tokenB);
 $unitItemsB = extractList($unitListB);
-$leakUnitB = listContains($unitItemsB, 'name', 'ISO_A_隔离测试单位');
+$leakUnitB = listContains($unitItemsB, 'name', $namesA['unit']);
 assert_true(!$leakUnitB, '租户B单位列表不含租户A的单位');
 
 echo "OK\n";
@@ -668,12 +715,12 @@ echo "Step 9: 交叉验证-供应商隔离 ... ";
 
 $supListA = httpRequest('GET', "{$BASE_URL}/api/supplier/index", [], $tokenA);
 $supItemsA = extractList($supListA);
-$leakSupA = listContains($supItemsA, 'supplier_name', 'ISO_B_隔离测试供应商');
+$leakSupA = listContains($supItemsA, 'supplier_name', $namesB['supplier']);
 assert_true(!$leakSupA, '租户A供应商列表不含租户B的供应商');
 
 $supListB = httpRequest('GET', "{$BASE_URL}/api/supplier/index", [], $tokenB);
 $supItemsB = extractList($supListB);
-$leakSupB = listContains($supItemsB, 'supplier_name', 'ISO_A_隔离测试供应商');
+$leakSupB = listContains($supItemsB, 'supplier_name', $namesA['supplier']);
 assert_true(!$leakSupB, '租户B供应商列表不含租户A的供应商');
 
 echo "OK\n";
@@ -737,29 +784,25 @@ echo "Step 12: 交叉验证-详情越权访问 ... ";
 // 用租户B的token查看租户A的客户详情（期望失败：code=0 或 找不到）
 if ($idsA['customer']) {
     $crossCustDetail = httpRequest('GET', "{$BASE_URL}/api/customer/detail", ['id' => $idsA['customer']], $tokenB);
-    $crossCode = (int)($crossCustDetail['code'] ?? 0);
-    assert_true($crossCode !== 1, '租户B无法查看租户A的客户详情');
+    assert_true(detailHiddenFromTenant($crossCustDetail, $idsA['customer']), '租户B无法查看租户A的客户详情');
 }
 
 // 用租户A的token查看租户B的商品详情（期望失败）
 if ($idsB['goods']) {
     $crossGoodsDetail = httpRequest('GET', "{$BASE_URL}/api/goods/detail", ['id' => $idsB['goods']], $tokenA);
-    $crossCode = (int)($crossGoodsDetail['code'] ?? 0);
-    assert_true($crossCode !== 1, '租户A无法查看租户B的商品详情');
+    assert_true(detailHiddenFromTenant($crossGoodsDetail, $idsB['goods']), '租户A无法查看租户B的商品详情');
 }
 
 // 用租户B的token查看租户A的销售单详情（期望失败）
 if ($idsA['sales_order']) {
     $crossOrderDetail = httpRequest('GET', "{$BASE_URL}/api/order/details", ['id' => $idsA['sales_order']], $tokenB);
-    $crossCode = (int)($crossOrderDetail['code'] ?? 0);
-    assert_true($crossCode !== 1, '租户B无法查看租户A的销售单详情');
+    assert_true(detailHiddenFromTenant($crossOrderDetail, $idsA['sales_order']), '租户B无法查看租户A的销售单详情');
 }
 
 // 用租户A的token查看租户B的进货单详情（期望失败）
 if ($idsB['supply_order']) {
     $crossSupplyDetail = httpRequest('GET', "{$BASE_URL}/api/supply/details", ['id' => $idsB['supply_order']], $tokenA);
-    $crossCode = (int)($crossSupplyDetail['code'] ?? 0);
-    assert_true($crossCode !== 1, '租户A无法查看租户B的进货单详情');
+    assert_true(detailHiddenFromTenant($crossSupplyDetail, $idsB['supply_order']), '租户A无法查看租户B的进货单详情');
 }
 
 echo "OK\n";

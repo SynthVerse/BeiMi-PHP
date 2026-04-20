@@ -41,7 +41,7 @@ function httpRequest(string $method, string $url, array $data = [], string $toke
         $headers[] = 'token: ' . $token;
     }
 
-    if ($method === 'GET' && !empty($data)) {
+    if (($method === 'GET' || $method === 'DELETE') && !empty($data)) {
         $url .= '?' . http_build_query($data);
     }
 
@@ -58,7 +58,6 @@ function httpRequest(string $method, string $url, array $data = [], string $toke
             break;
         case 'DELETE':
             curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'DELETE');
-            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data, JSON_UNESCAPED_UNICODE));
             break;
         case 'GET':
         default:
@@ -159,6 +158,22 @@ function assert_int($actual, $expected, string $testName): bool
     }
 
     echo "[FAIL] {$testName}: 实际=" . (int)$actual . ", 期望=" . (int)$expected . "\n";
+    $failTests++;
+    return false;
+}
+
+function assert_true(bool $condition, string $testName): bool
+{
+    global $totalTests, $passTests, $failTests;
+    $totalTests++;
+
+    if ($condition) {
+        echo "[PASS] {$testName}\n";
+        $passTests++;
+        return true;
+    }
+
+    echo "[FAIL] {$testName}\n";
     $failTests++;
     return false;
 }
@@ -295,6 +310,7 @@ $s1['goodsId'] = extractId($goodsRes);
 
 $s1_initOk = ($s1['whId'] && $s1['custId'] && $s1['supId'] && $s1['goodsId']);
 echo $s1_initOk ? "OK\n" : "FAIL (whId={$s1['whId']}, custId={$s1['custId']}, supId={$s1['supId']}, goodsId={$s1['goodsId']})\n";
+assert_true($s1_initOk, '场景1前置数据创建成功');
 
 if ($s1_initOk) {
     // Step 2: 进货入库（使商品有库存：入库20件）
@@ -521,6 +537,7 @@ $s2['goodsId'] = extractId($goodsRes2);
 
 $s2_initOk = ($s2['whId'] && $s2['custId'] && $s2['goodsId']);
 echo $s2_initOk ? "OK\n" : "FAIL\n";
+assert_true($s2_initOk, '场景2前置数据创建成功');
 
 if ($s2_initOk) {
     // 记录初始库存和应收
@@ -640,6 +657,7 @@ $s3['goodsId'] = extractId($goodsRes3);
 
 $s3_initOk = ($s3['whId'] && $s3['custId'] && $s3['goodsId']);
 echo $s3_initOk ? "OK\n" : "FAIL\n";
+assert_true($s3_initOk, '场景3前置数据创建成功');
 
 if ($s3_initOk) {
     // Step 2: 创建订货单A（draft），直接尝试转销售单（期望失败）

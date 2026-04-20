@@ -33,7 +33,9 @@ class GoodsLogic extends BaseLogic
 
     public static function edit(array $params): bool
     {
-        $model = Goods::findOrEmpty((int)$params['id']);
+        $model = Goods::where('id', (int)$params['id'])
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->findOrEmpty();
         if ($model->isEmpty()) {
             self::setError('商品不存在');
             return false;
