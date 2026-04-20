@@ -10,6 +10,7 @@
  */
 
 $BASE_URL = isset($argv[1]) ? rtrim($argv[1], '/') : 'http://127.0.0.1:8787';
+$RUN_ID = date('YmdHis') . '_' . random_int(1000, 9999);
 
 // ─────────────────────────────────────────────
 // 全局计数器
@@ -21,6 +22,12 @@ $failTests  = 0;
 // ─────────────────────────────────────────────
 // 辅助函数
 // ─────────────────────────────────────────────
+
+function testName(string $name): string
+{
+    global $RUN_ID;
+    return $name . '_' . $RUN_ID;
+}
 
 /**
  * 发起 HTTP 请求
@@ -267,22 +274,22 @@ $s1 = [
 echo "Step 1: 初始化数据 ... ";
 
 $whRes = httpRequest('POST', "{$BASE_URL}/api/warehouse/add", [
-    'name' => 'PCT_S1_仓库', 'address' => 'PCT_S1_地址',
+    'name' => testName('PCT_S1_仓库'), 'address' => 'PCT_S1_地址',
 ], $token);
 $s1['whId'] = extractId($whRes);
 
 $custRes = httpRequest('POST', "{$BASE_URL}/api/customer/add", [
-    'customer_name' => 'PCT_S1_客户', 'contact' => 'PCT_S1_联系人', 'phone' => '13810010001',
+    'customer_name' => testName('PCT_S1_客户'), 'contact' => 'PCT_S1_联系人', 'phone' => '13810010001',
 ], $token);
 $s1['custId'] = extractId($custRes);
 
 $supRes = httpRequest('POST', "{$BASE_URL}/api/supplier/add", [
-    'supplier_name' => 'PCT_S1_供应商', 'contact' => 'PCT_S1_供应联系人', 'phone' => '13810010002',
+    'supplier_name' => testName('PCT_S1_供应商'), 'contact' => 'PCT_S1_供应联系人', 'phone' => '13810010002',
 ], $token);
 $s1['supId'] = extractId($supRes);
 
 $goodsRes = httpRequest('POST', "{$BASE_URL}/api/goods/add", [
-    'name' => 'PCT_S1_商品', 'product_code' => 'PCT_S1_001', 'price' => 50, 'units' => '个',
+    'name' => testName('PCT_S1_商品'), 'product_code' => testName('PCT_S1_001'), 'price' => 50, 'units' => '个',
 ], $token);
 $s1['goodsId'] = extractId($goodsRes);
 
@@ -447,6 +454,14 @@ if ($s1_initOk) {
         $poD_final = httpRequest('GET', "{$BASE_URL}/api/purchase/details", ['id' => $s1['purchaseOrderId']], $token);
         $statusFinal = extractPurchaseStatus($poD_final);
         assert_str($statusFinal, 'completed', '订货单转单后状态=completed');
+
+        // Step 8: 重复转单应被拒绝，避免双击/并发重试生成第二张销售单
+        echo "Step 8: 重复转销售单防护 ... ";
+        $duplicateConvertRes = httpRequest('POST', "{$BASE_URL}/api/purchase/convert-to-sales", [
+            'id'           => $s1['purchaseOrderId'],
+            'warehouse_id' => $s1['whId'],
+        ], $token);
+        assert_code($duplicateConvertRes, 0, 'completed 订货单重复转销售单被拒绝');
     }
 } else {
     echo "[SKIP] 场景1: 前置数据创建失败\n";
@@ -490,17 +505,17 @@ $s2 = [
 echo "Step 1: 初始化数据 ... ";
 
 $whRes2 = httpRequest('POST', "{$BASE_URL}/api/warehouse/add", [
-    'name' => 'PCT_S2_仓库', 'address' => 'PCT_S2_地址',
+    'name' => testName('PCT_S2_仓库'), 'address' => 'PCT_S2_地址',
 ], $token);
 $s2['whId'] = extractId($whRes2);
 
 $custRes2 = httpRequest('POST', "{$BASE_URL}/api/customer/add", [
-    'customer_name' => 'PCT_S2_客户', 'contact' => 'PCT_S2_联系人', 'phone' => '13810020001',
+    'customer_name' => testName('PCT_S2_客户'), 'contact' => 'PCT_S2_联系人', 'phone' => '13810020001',
 ], $token);
 $s2['custId'] = extractId($custRes2);
 
 $goodsRes2 = httpRequest('POST', "{$BASE_URL}/api/goods/add", [
-    'name' => 'PCT_S2_商品', 'product_code' => 'PCT_S2_001', 'price' => 30, 'units' => '件',
+    'name' => testName('PCT_S2_商品'), 'product_code' => testName('PCT_S2_001'), 'price' => 30, 'units' => '件',
 ], $token);
 $s2['goodsId'] = extractId($goodsRes2);
 
@@ -609,17 +624,17 @@ $s3 = [
 echo "Step 1: 初始化数据 ... ";
 
 $whRes3 = httpRequest('POST', "{$BASE_URL}/api/warehouse/add", [
-    'name' => 'PCT_S3_仓库', 'address' => 'PCT_S3_地址',
+    'name' => testName('PCT_S3_仓库'), 'address' => 'PCT_S3_地址',
 ], $token);
 $s3['whId'] = extractId($whRes3);
 
 $custRes3 = httpRequest('POST', "{$BASE_URL}/api/customer/add", [
-    'customer_name' => 'PCT_S3_客户', 'contact' => 'PCT_S3_联系人', 'phone' => '13810030001',
+    'customer_name' => testName('PCT_S3_客户'), 'contact' => 'PCT_S3_联系人', 'phone' => '13810030001',
 ], $token);
 $s3['custId'] = extractId($custRes3);
 
 $goodsRes3 = httpRequest('POST', "{$BASE_URL}/api/goods/add", [
-    'name' => 'PCT_S3_商品', 'product_code' => 'PCT_S3_001', 'price' => 20, 'units' => '套',
+    'name' => testName('PCT_S3_商品'), 'product_code' => testName('PCT_S3_001'), 'price' => 20, 'units' => '套',
 ], $token);
 $s3['goodsId'] = extractId($goodsRes3);
 

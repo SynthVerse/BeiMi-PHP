@@ -9,7 +9,7 @@ use think\facade\Db;
 
 class SupplierLogic extends BaseLogic
 {
-    public static function add(array $params): bool
+    public static function add(array $params): array|false
     {
         if (Vendor::where('supplier_name', trim($params['supplier_name']))->count() > 0) {
             self::setError('供应商名称已存在');
@@ -18,9 +18,9 @@ class SupplierLogic extends BaseLogic
 
         Db::startTrans();
         try {
-            Vendor::create(self::buildSaveData($params));
+            $supplier = Vendor::create(self::buildSaveData($params));
             Db::commit();
-            return true;
+            return ['id' => (int)$supplier->id];
         } catch (\Throwable $e) {
             Db::rollback();
             self::setError($e->getMessage());

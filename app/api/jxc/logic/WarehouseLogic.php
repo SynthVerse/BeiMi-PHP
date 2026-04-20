@@ -12,7 +12,7 @@ use think\facade\Db;
 
 class WarehouseLogic extends BaseLogic
 {
-    public static function add(array $params): bool
+    public static function add(array $params): array|false
     {
         if (Warehouse::where('name', trim($params['name']))->count() > 0) {
             self::setError('仓库名称已存在');
@@ -21,9 +21,9 @@ class WarehouseLogic extends BaseLogic
 
         Db::startTrans();
         try {
-            Warehouse::create(self::buildSaveData($params));
+            $warehouse = Warehouse::create(self::buildSaveData($params));
             Db::commit();
-            return true;
+            return ['id' => (int)$warehouse->id];
         } catch (\Throwable $e) {
             Db::rollback();
             self::setError($e->getMessage());

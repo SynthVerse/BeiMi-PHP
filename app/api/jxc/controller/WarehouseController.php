@@ -26,7 +26,7 @@ class WarehouseController extends BaseJxcController
         if ($result === false) {
             return $this->fail(WarehouseLogic::getError());
         }
-        return $this->success('添加成功', [], 1, 1);
+        return $this->success('添加成功', $result, 1, 1);
     }
 
     public function edit()

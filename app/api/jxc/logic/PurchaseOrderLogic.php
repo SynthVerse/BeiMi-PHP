@@ -292,57 +292,52 @@ class PurchaseOrderLogic extends BaseLogic
 
     public static function convertToSalesOrder(array $params): array|false
     {
-        $order = PurchaseOrder::findOrEmpty((int)$params['id']);
-        if ($order->isEmpty()) {
-            self::setError('订货单不存在');
-            return false;
-        }
-
-        $currentStatus = (int)$order->status;
-        if (!in_array($currentStatus, [PurchaseOrder::STATUS_SENT, PurchaseOrder::STATUS_RECEIVED])) {
-            self::setError('只有已发送或已收货状态的订货单可以转为销售单');
-            return false;
-        }
-
-        // 读取订货单商品明细
-        $goodsRows = OrderGoods::where('order_id', (int)$order->id)
-            ->where('order_type', self::ORDER_TYPE)
-            ->order(['sort' => 'asc', 'id' => 'asc'])
-            ->select()
-            ->toArray();
-
-        if (empty($goodsRows)) {
-            self::setError('订货单没有商品明细');
-            return false;
-        }
-
-        // 构建销售单商品参数
-        $salesGoods = array_map(function ($row) {
-            return [
-                'goods_id' => (int)$row['goods_id'],
-                'name'     => (string)$row['name'],
-                'units'    => (string)$row['units'],
-                'number'   => (float)$row['number'],
-                'price'    => (float)$row['price'],
-            ];
-        }, $goodsRows);
-
-        // 决定仓库ID
-        $warehouseId = !empty($params['warehouse_id']) ? $params['warehouse_id'] : $order->warehouse_id;
-
-        // 构建销售单参数
-        $salesParams = [
-            'customer_id'             => (int)$order->customer_id,
-            'warehouse_id'            => $warehouseId,
-            'goods'                   => $salesGoods,
-            'order_pay_money'         => (float)$order->order_pay_money,
-            'datetimesingle'          => time(),
-            'remarks'                 => '由订货单 ' . $order->order_sn . ' 转入',
-            'from_purchase_order_id'  => (int)$order->id,
-        ];
-
         Db::startTrans();
         try {
+            $order = PurchaseOrder::where('id', (int)$params['id'])
+                ->lock(true)
+                ->findOrEmpty();
+            if ($order->isEmpty()) {
+                throw new BusinessException('订货单不存在');
+            }
+
+            $currentStatus = (int)$order->status;
+            if (!in_array($currentStatus, [PurchaseOrder::STATUS_SENT, PurchaseOrder::STATUS_RECEIVED])) {
+                throw new BusinessException('只有已发送或已收货状态的订货单可以转为销售单');
+            }
+
+            $goodsRows = OrderGoods::where('order_id', (int)$order->id)
+                ->where('order_type', self::ORDER_TYPE)
+                ->order(['sort' => 'asc', 'id' => 'asc'])
+                ->select()
+                ->toArray();
+
+            if (empty($goodsRows)) {
+                throw new BusinessException('订货单没有商品明细');
+            }
+
+            $salesGoods = array_map(function ($row) {
+                return [
+                    'goods_id' => (int)$row['goods_id'],
+                    'name'     => (string)$row['name'],
+                    'units'    => (string)$row['units'],
+                    'number'   => (float)$row['number'],
+                    'price'    => (float)$row['price'],
+                ];
+            }, $goodsRows);
+
+            $warehouseId = !empty($params['warehouse_id']) ? $params['warehouse_id'] : $order->warehouse_id;
+            $salesParams = [
+                'customer_id'             => (int)$order->customer_id,
+                'warehouse_id'            => $warehouseId,
+                'goods'                   => $salesGoods,
+                'order_pay_money'         => (float)$order->order_pay_money,
+                'datetimesingle'          => time(),
+                'remarks'                 => '由订货单 ' . $order->order_sn . ' 转入',
+                'from_purchase_order_id'  => (int)$order->id,
+                'idempotent_key'          => 'purchase_convert:' . (int)$order->id,
+            ];
+
             $salesResult = SalesOrderLogic::publish($salesParams);
             if ($salesResult === false) {
                 self::setError(SalesOrderLogic::getError());
