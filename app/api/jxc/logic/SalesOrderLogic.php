@@ -381,6 +381,7 @@ class SalesOrderLogic extends BaseLogic
                 'status' => (int)($current['status'] ?? 1),
                 'purpose_type' => trim((string)($params['purpose_type'] ?? $params['purpose'] ?? ($current['purpose_type'] ?? self::DEFAULT_PURPOSE_TYPE))),
                 'remarks' => trim((string)($params['remarks'] ?? $params['remark'] ?? ($current['remarks'] ?? ''))),
+                'from_purchase_order_id' => (int)($params['from_purchase_order_id'] ?? ($current['from_purchase_order_id'] ?? 0)),
                 'admin_id' => $adminId,
                 'idempotent_key' => $idempotentKey,
             ],

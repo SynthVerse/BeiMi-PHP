@@ -123,6 +123,7 @@ CREATE TABLE IF NOT EXISTS `lk_sales_order` (
   `order_pay_money` decimal(12,2) NOT NULL DEFAULT 0.00 COMMENT '已收金额',
   `order_arrears_money` decimal(12,2) NOT NULL DEFAULT 0.00 COMMENT '未收金额',
   `datetimesingle` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '单据日期',
+  `from_purchase_order_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '来源订货单ID（0=非转换）',
   `status` tinyint(1) NOT NULL DEFAULT 1 COMMENT '状态',
   `purpose_type` varchar(50) NOT NULL DEFAULT 'sales' COMMENT '出库目的类型',
   `remarks` varchar(500) NOT NULL DEFAULT '' COMMENT '备注',
@@ -136,6 +137,7 @@ CREATE TABLE IF NOT EXISTS `lk_sales_order` (
   KEY `idx_customer_id` (`customer_id`),
   KEY `idx_warehouse_id` (`warehouse_id`),
   KEY `idx_datetimesingle` (`datetimesingle`),
+  KEY `idx_from_purchase` (`from_purchase_order_id`),
   KEY `idx_tenant_idempotent` (`tenant_id`, `idempotent_key`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='销售单表';
 

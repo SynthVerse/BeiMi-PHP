@@ -332,12 +332,13 @@ class PurchaseOrderLogic extends BaseLogic
 
         // 构建销售单参数
         $salesParams = [
-            'customer_id'     => (int)$order->customer_id,
-            'warehouse_id'    => $warehouseId,
-            'goods'           => $salesGoods,
-            'order_pay_money' => (float)$order->order_pay_money,
-            'datetimesingle'  => time(),
-            'remarks'         => '由订货单 ' . $order->order_sn . ' 转入',
+            'customer_id'             => (int)$order->customer_id,
+            'warehouse_id'            => $warehouseId,
+            'goods'                   => $salesGoods,
+            'order_pay_money'         => (float)$order->order_pay_money,
+            'datetimesingle'          => time(),
+            'remarks'                 => '由订货单 ' . $order->order_sn . ' 转入',
+            'from_purchase_order_id'  => (int)$order->id,
         ];
 
         Db::startTrans();
