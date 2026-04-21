@@ -34,14 +34,8 @@ class StoreLogic extends BaseLogic
      */
     public static function setStore(array $params): array|false
     {
-        $storeId = (int)($params['id'] ?? 0);
-        $store = Customer::where('id', $storeId)->where('is_store', 1)->findOrEmpty();
-        if ($store->isEmpty()) {
-            self::setError('店铺不存在');
-            return false;
-        }
-
         $updateData = [];
+        if (isset($params['store_name'])) $updateData['customer_name'] = trim((string)$params['store_name']);
         if (isset($params['customer_name'])) $updateData['customer_name'] = trim((string)$params['customer_name']);
         if (isset($params['name'])) $updateData['customer_name'] = trim((string)$params['name']);
         if (isset($params['contact'])) $updateData['contact'] = trim((string)$params['contact']);
@@ -49,13 +43,32 @@ class StoreLogic extends BaseLogic
         if (isset($params['address'])) $updateData['address'] = trim((string)$params['address']);
         if (isset($params['remark'])) $updateData['remark'] = trim((string)$params['remark']);
 
+        $settings = self::extractSettings($params);
+        if (empty($updateData) && !empty($settings)) {
+            return ['settings' => $settings];
+        }
         if (empty($updateData)) {
             self::setError('无更新内容');
             return false;
         }
 
+        $storeId = (int)($params['id'] ?? $params['store_id'] ?? 0);
+        if ($storeId > 0) {
+            $store = Customer::where('id', $storeId)->where('is_store', 1)->findOrEmpty();
+        } else {
+            $store = Customer::where('is_store', 1)->findOrEmpty();
+        }
+        if ($store->isEmpty()) {
+            self::setError('店铺不存在');
+            return false;
+        }
+
         $store->save($updateData);
-        return self::formatStore($store->toArray());
+        $result = self::formatStore($store->toArray());
+        if (!empty($settings)) {
+            $result['settings'] = $settings;
+        }
+        return $result;
     }
 
     /**
@@ -64,7 +77,7 @@ class StoreLogic extends BaseLogic
     public static function createStore(array $params): array|false
     {
         $parentId = (int)($params['parent_id'] ?? $params['customer_id'] ?? 0);
-        $name = trim((string)($params['name'] ?? $params['customer_name'] ?? ''));
+        $name = trim((string)($params['store_name'] ?? $params['customer_name'] ?? $params['name'] ?? ''));
 
         if (empty($name)) {
             self::setError('店铺名称不能为空');
@@ -83,7 +96,7 @@ class StoreLogic extends BaseLogic
         $store = Customer::create([
             'tenant_id' => (int)(request()->tenantId ?? 0),
             'customer_name' => $name,
-            'contact' => trim((string)($params['contact'] ?? '')),
+            'contact' => trim((string)($params['contact'] ?? (isset($params['store_name']) ? ($params['name'] ?? '') : ''))),
             'phone' => trim((string)($params['phone'] ?? '')),
             'address' => trim((string)($params['address'] ?? '')),
             'remark' => trim((string)($params['remark'] ?? '')),
@@ -117,5 +130,26 @@ class StoreLogic extends BaseLogic
             'create_time' => $item['create_time'] ?? '',
             'update_time' => $item['update_time'] ?? '',
         ];
+    }
+
+    protected static function extractSettings(array $params): array
+    {
+        $allowedKeys = [
+            'fontsize',
+            'show_one',
+            'show_qian',
+            'show_sale',
+            'print_fontsize',
+            'print_bill_style',
+        ];
+
+        $settings = [];
+        foreach ($allowedKeys as $key) {
+            if (array_key_exists($key, $params)) {
+                $settings[$key] = $params[$key];
+            }
+        }
+
+        return $settings;
     }
 }

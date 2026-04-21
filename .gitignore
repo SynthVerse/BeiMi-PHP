@@ -8,4 +8,6 @@
 !/runtime/index.html
 /config/install.lock
 /vendor/
+composer.phar
+.phpunit.result.cache
 /.local/

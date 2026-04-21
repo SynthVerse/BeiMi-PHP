@@ -22,12 +22,9 @@ $failTests  = 0;
 // ─────────────────────────────────────────────
 
 /**
- * 发起 HTTP 请求
- * @param string $method  GET / POST / DELETE
- * @param string $url     完整 URL
- * @param array  $data    请求体（POST/DELETE）或查询参数（GET）
- * @param string $token   认证 token
- * @return array          解码后的响应数组
+ * 生成带运行ID后缀的测试名称
+ * @param string $name 基础名称
+ * @return string
  */
 function testName(string $name): string
 {
@@ -35,12 +32,25 @@ function testName(string $name): string
     return $name . '_' . $RUN_ID;
 }
 
+/**
+ * 生成短测试名称（前缀+数字后8位）
+ * @param string $prefix 前缀
+ * @return string
+ */
 function shortTestName(string $prefix): string
 {
     global $RUN_ID;
     return $prefix . substr(preg_replace('/\D/', '', $RUN_ID), -8);
 }
 
+/**
+ * 发起 HTTP 请求
+ * @param string $method  GET / POST / DELETE
+ * @param string $url     完整 URL
+ * @param array  $data    请求体（POST/DELETE）或查询参数（GET）
+ * @param string $token   认证 token
+ * @return array          解码后的响应数组
+ */
 function httpRequest(string $method, string $url, array $data = [], string $token = ''): array
 {
     $ch = curl_init();

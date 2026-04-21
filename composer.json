@@ -21,19 +21,19 @@
     ],
     "require": {
         "php": ">=8.0",
-        "topthink/framework": "^8.0.2",
+        "topthink/framework": "^8.1.4",
         "topthink/think-orm": "^3.0",
         "topthink/think-multi-app": "^1.0",
         "topthink/think-view": "^2.0",
         "dragonmantank/cron-expression": "^3.3",
-        "phpoffice/phpspreadsheet": "^1.22",
+        "phpoffice/phpspreadsheet": "^1.30.4",
         "qiniu/php-sdk": "7.4",
         "ext-iconv": "*",
         "qcloud/cos-sdk-v5": "^2.5",
         "aliyuncs/oss-sdk-php": "^2.4",
         "alibabacloud/client": "^1.5",
         "rmccue/requests": "^2.0",
-        "w7corp/easywechat": "^6.8",
+        "w7corp/easywechat": "^6.19.1",
         "tencentcloud/sms": "^3.0",
         "alipaysdk/easysdk": "^2.2",
         "ext-curl": "*",
@@ -41,7 +41,8 @@
     },
     "require-dev": {
         "symfony/var-dumper": ">=4.2",
-        "topthink/think-trace":"^1.0"
+        "topthink/think-trace":"^1.0",
+        "phpunit/phpunit": "^9.6"
     },
     "autoload": {
         "psr-4": {
