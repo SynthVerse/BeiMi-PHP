@@ -1,3 +1,5 @@
+> **旧副本提示**：本文件位于 `BeiMi-PHP/docs/`，可能落后于权威根目录文档。请优先查看 `E:\object\BeiMi\docs\project-progress-report-20260419.md`，后续仅按需同步关键提示。
+
 # BeiMi 进销存项目进度报告
 
 > 报告日期：2026-04-19  

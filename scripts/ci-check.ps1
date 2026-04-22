@@ -6,16 +6,23 @@
     1. PHP 语法检查（扫描 app/ 下所有 .php 文件）
     2. 路由完整性检查（验证 jxc.php 路由引用的 Controller 存在）
     3. Model-Schema 一致性检查（验证 Model 对应数据表存在）
+    4. 可选 PHPUnit 单元测试
+    5. 可选 Composer 安全审计
 .PARAMETER Quick
     仅执行 PHP 语法检查
 .PARAMETER Full
     执行全部检查并额外运行冒烟测试（需要 MySQL 运行）
+.PARAMETER WithPhpUnit
+    追加执行 PHPUnit 单元测试（需要 vendor/ 已安装）
+.PARAMETER WithComposerAudit
+    追加执行 composer audit --locked（可能需要网络访问）
 .PARAMETER Help
     显示帮助信息
 .EXAMPLE
     scripts/ci-check.ps1
     scripts/ci-check.ps1 -Quick
     scripts/ci-check.ps1 -Full
+    scripts/ci-check.ps1 -WithPhpUnit -WithComposerAudit
 .NOTES
     编码：UTF-8
 #>
@@ -23,22 +30,32 @@
 param(
     [switch]$Quick,
     [switch]$Full,
+    [switch]$WithPhpUnit,
+    [switch]$WithComposerAudit,
     [switch]$Help
 )
 
 # ── 配置 ──
-$phpPath     = 'C:\Users\ASUS\AppData\Local\Programs\PHP\8.2\php.exe'
 $projectRoot = $PSScriptRoot | Split-Path -Parent   # scripts/ 的上一级
+$phpPath     = 'C:\Users\ASUS\AppData\Local\Programs\PHP\8.2\php.exe'
+if (-not (Test-Path $phpPath)) {
+    $phpCommand = Get-Command php -ErrorAction SilentlyContinue
+    if ($phpCommand) {
+        $phpPath = $phpCommand.Source
+    }
+}
 
 # ── 帮助信息 ──
 if ($Help) {
     Write-Host ""
-    Write-Host "用法：scripts/ci-check.ps1 [-Quick] [-Full] [-Help]" -ForegroundColor Cyan
+    Write-Host "用法：scripts/ci-check.ps1 [-Quick] [-Full] [-WithPhpUnit] [-WithComposerAudit] [-Help]" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "  无参数    执行：语法检查 + 路由检查 + Model检查"
-    Write-Host "  -Quick    仅执行 PHP 语法检查"
-    Write-Host "  -Full     执行全部检查 + 冒烟测试（需要 MySQL 运行）"
-    Write-Host "  -Help     显示此帮助信息"
+    Write-Host "  无参数              执行：语法检查 + 路由检查 + Model检查"
+    Write-Host "  -Quick              仅执行 PHP 语法检查"
+    Write-Host "  -Full               执行全部检查 + 冒烟测试（需要 MySQL 运行）"
+    Write-Host "  -WithPhpUnit        追加 PHPUnit 单元测试（需要 vendor/ 已安装）"
+    Write-Host "  -WithComposerAudit  追加 composer audit --locked（可能需要网络访问）"
+    Write-Host "  -Help               显示此帮助信息"
     Write-Host ""
     exit 0
 }
@@ -162,23 +179,37 @@ function Invoke-RouteCheck {
 function Invoke-ModelSchemaCheck {
     Write-Info "Checking model-table mapping..."
 
-    $modelDir   = Join-Path $projectRoot 'app\common\model\jxc'
-    $schemaFile = Join-Path $projectRoot 'database\sql\jxc_phase1_schema.sql'
+    $modelDir      = Join-Path $projectRoot 'app\common\model\jxc'
+    $sqlDir        = Join-Path $projectRoot 'database\sql'
+    $migrationsDir = Join-Path $projectRoot 'database\migrations'
 
     if (-not (Test-Path $modelDir)) {
         Write-Fail "Model 目录不存在: $modelDir"
         return 1
     }
-    if (-not (Test-Path $schemaFile)) {
-        Write-Fail "Schema 文件不存在: $schemaFile"
+
+    $schemaFiles = @()
+    if (Test-Path $sqlDir) {
+        $schemaFiles += Get-ChildItem -Path $sqlDir -Filter '*.sql' -File
+    }
+    if (Test-Path $migrationsDir) {
+        $schemaFiles += Get-ChildItem -Path $migrationsDir -Filter '*.sql' -File
+    }
+
+    if ($schemaFiles.Count -eq 0) {
+        Write-Fail "未找到 Schema 或迁移 SQL 文件"
         return 1
     }
 
-    # 读取 SQL 文件，提取所有 CREATE TABLE 表名（去掉前缀 lk_）
-    $sqlContent   = Get-Content $schemaFile -Raw -Encoding UTF8
-    $tablePattern = 'CREATE TABLE IF NOT EXISTS `lk_([a-z0-9_]+)`'
-    $tableMatches = [regex]::Matches($sqlContent, $tablePattern)
-    $schemaTables = $tableMatches | ForEach-Object { $_.Groups[1].Value }
+    # 读取主 Schema 与迁移 SQL，提取所有 CREATE TABLE 表名（去掉前缀 lk_）
+    $tablePattern = 'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?`?lk_([a-z0-9_]+)`?'
+    $schemaTables = @()
+    foreach ($schemaFile in $schemaFiles) {
+        $sqlContent   = Get-Content $schemaFile.FullName -Raw -Encoding UTF8
+        $tableMatches = [regex]::Matches($sqlContent, $tablePattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        $schemaTables += $tableMatches | ForEach-Object { $_.Groups[1].Value }
+    }
+    $schemaTables = $schemaTables | Sort-Object -Unique
 
     $errors   = 0
     $warnings = 0
@@ -209,7 +240,7 @@ function Invoke-ModelSchemaCheck {
     }
 
     if ($warnings -eq 0) {
-        Write-Pass "$checked models verified"
+        Write-Pass "$checked models verified against $($schemaFiles.Count) schema/migration file(s)"
     } else {
         Write-Host "  $([char]0x2713) $checked models checked, $warnings warning(s)" -ForegroundColor DarkYellow
     }
@@ -238,6 +269,87 @@ function Invoke-SmokeTest {
         Write-Pass "冒烟测试通过"
         return 0
     }
+}
+
+# ════════════════════════════════════════════════════════════
+#  可选检查：PHPUnit 单元测试
+# ════════════════════════════════════════════════════════════
+function Invoke-PhpUnitCheck {
+    Write-Info "Running PHPUnit..."
+
+    $phpunitBat = Join-Path $projectRoot 'vendor\bin\phpunit.bat'
+    $phpunitBin = Join-Path $projectRoot 'vendor\bin\phpunit'
+    $phpunitXml = Join-Path $projectRoot 'phpunit.xml'
+
+    if (-not (Test-Path $phpunitXml)) {
+        Write-Fail "phpunit.xml 不存在: $phpunitXml"
+        return 1
+    }
+
+    if (Test-Path $phpunitBat) {
+        $result = & $phpunitBat --configuration $phpunitXml 2>&1
+    } elseif (Test-Path $phpunitBin) {
+        $result = & $phpunitBin --configuration $phpunitXml 2>&1
+    } else {
+        Write-Fail "找不到 PHPUnit 可执行文件，请先安装 composer dev 依赖"
+        return 1
+    }
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail "PHPUnit 单元测试失败"
+        Write-Host $result -ForegroundColor Red
+        return 1
+    }
+
+    Write-Host $result
+    Write-Pass "PHPUnit 单元测试通过"
+    return 0
+}
+
+# ════════════════════════════════════════════════════════════
+#  可选检查：Composer 安全审计
+# ════════════════════════════════════════════════════════════
+function Invoke-ComposerAuditCheck {
+    Write-Info "Running composer audit --locked..."
+
+    $composerPhar = Join-Path $projectRoot 'composer.phar'
+    $composerLock = Join-Path $projectRoot 'composer.lock'
+
+    if (-not (Test-Path $composerLock)) {
+        Write-Fail "composer.lock 不存在: $composerLock"
+        return 1
+    }
+
+    if ((Test-Path $composerPhar) -and (Test-Path $phpPath)) {
+        $composerCacheDir = Join-Path $projectRoot 'runtime\composer-cache'
+        if (-not (Test-Path $composerCacheDir)) {
+            New-Item -ItemType Directory -Path $composerCacheDir -Force | Out-Null
+        }
+        $env:COMPOSER_CACHE_DIR = $composerCacheDir
+        $result = & $phpPath $composerPhar audit --locked 2>&1
+    } else {
+        $composerCmd = Get-Command composer -ErrorAction SilentlyContinue
+        if (-not $composerCmd) {
+            Write-Fail "找不到 composer.phar 或全局 composer 命令"
+            return 1
+        }
+        $composerCacheDir = Join-Path $projectRoot 'runtime\composer-cache'
+        if (-not (Test-Path $composerCacheDir)) {
+            New-Item -ItemType Directory -Path $composerCacheDir -Force | Out-Null
+        }
+        $env:COMPOSER_CACHE_DIR = $composerCacheDir
+        $result = & $composerCmd.Source audit --locked 2>&1
+    }
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail "Composer 安全审计失败"
+        Write-Host $result -ForegroundColor Red
+        return 1
+    }
+
+    Write-Host $result
+    Write-Pass "Composer 安全审计通过"
+    return 0
 }
 
 # ════════════════════════════════════════════════════════════
@@ -275,6 +387,16 @@ if ($Quick) {
 
     Write-Step "3/3" "Model-Schema Check..."
     $globalErrors += Invoke-ModelSchemaCheck
+}
+
+if ($WithPhpUnit) {
+    Write-Step "Optional" "PHPUnit Unit Tests..."
+    $globalErrors += Invoke-PhpUnitCheck
+}
+
+if ($WithComposerAudit) {
+    Write-Step "Optional" "Composer Audit..."
+    $globalErrors += Invoke-ComposerAuditCheck
 }
 
 # ── 最终结果 ──

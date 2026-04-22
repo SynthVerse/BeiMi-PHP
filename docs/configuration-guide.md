@@ -1,3 +1,5 @@
+> **旧副本提示**：本文件位于 `BeiMi-PHP/docs/`，可能落后于权威根目录文档。请优先查看 `E:\object\BeiMi\docs\configuration-guide.md`，后续仅按需同步关键提示。
+
 # BeiMi JXC 进销存 SaaS 系统 — 配置管理文档
 
 ## 1. 配置文件概览

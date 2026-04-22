@@ -1,3 +1,5 @@
+> **旧副本提示**：本文件位于 `BeiMi-PHP/docs/`，可能落后于权威根目录文档。请优先查看 `E:\object\BeiMi\docs\performance-baseline.md`，后续仅按需同步关键提示。
+
 # BeiMi JXC 性能基准
 
 ## 测试环境
