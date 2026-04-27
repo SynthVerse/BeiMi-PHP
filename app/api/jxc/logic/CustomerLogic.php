@@ -441,15 +441,6 @@ class CustomerLogic extends BaseLogic
     {
         $customerId = (int)$params['customer_id'];
         $amount = max(0, (float)($params['money'] ?? $params['amount'] ?? 0));
-        $model = Customer::findOrEmpty($customerId);
-        if ($model->isEmpty()) {
-            self::setError('客户不存在');
-            return false;
-        }
-        if ((int)$model->is_disabled === 1) {
-            self::setError('停用客户不可付款，请先启用');
-            return false;
-        }
         if ($amount <= 0) {
             self::setError('请输入付款金额');
             return false;
@@ -457,9 +448,25 @@ class CustomerLogic extends BaseLogic
 
         Db::startTrans();
         try {
+            $model = Customer::where('id', $customerId)
+                ->lock(true)
+                ->findOrEmpty();
+            if ($model->isEmpty()) {
+                self::setError('客户不存在');
+                Db::rollback();
+                return false;
+            }
+            if ((int)$model->is_disabled === 1) {
+                self::setError('停用客户不可付款，请先启用');
+                Db::rollback();
+                return false;
+            }
+
+            $beforeReceivable = (float)($model->order_receivable ?? 0);
+            $beforePaid = (float)($model->order_pay_money ?? 0);
             $model->save([
-                'order_receivable' => self::money(max(0, (float)$model->order_receivable - $amount)),
-                'order_pay_money' => self::money((float)$model->order_pay_money + $amount),
+                'order_receivable' => self::money(max(0, $beforeReceivable - $amount)),
+                'order_pay_money' => self::money($beforePaid + $amount),
             ]);
             Db::commit();
             return self::detail(['id' => $customerId]);
