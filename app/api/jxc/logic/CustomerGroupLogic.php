@@ -3,6 +3,7 @@
 namespace app\api\jxc\logic;
 
 use app\common\logic\BaseLogic;
+use app\common\model\jxc\Customer;
 use app\common\model\jxc\CustomerGroup;
 use think\facade\Config;
 use think\facade\Db;
@@ -134,14 +135,24 @@ class CustomerGroupLogic extends BaseLogic
 
     public static function detail(array $params): array
     {
+        $tenantId = (int)(request()->tenantId ?? 0);
         $model = CustomerGroup::where('id', (int)$params['id'])
-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->where('tenant_id', $tenantId)
             ->findOrEmpty();
         if ($model->isEmpty()) {
             return [];
         }
 
-        return self::formatItem($model->toArray());
+        $group = self::formatItem($model->toArray());
+        $customers = Customer::where('tenant_id', $tenantId)
+            ->where('group_id', (int)$model->id)
+            ->where('parent_id', 0)
+            ->order(['customer_name' => 'asc', 'id' => 'desc'])
+            ->select()
+            ->toArray();
+        $group['customers'] = CustomerLogic::formatList($customers, true);
+        $group['customer_count'] = count($group['customers']);
+        return $group;
     }
 
     public static function formatItem(array $item): array

@@ -19,6 +19,8 @@ class SupplierLists extends BaseDataLists
             'remark',
             'is_disabled',
             'order_money',
+            'order_payable',
+            'order_paid_money',
             'create_time',
             'update_time',
         ]);
@@ -38,7 +40,7 @@ class SupplierLists extends BaseDataLists
             $query->where('is_disabled', (int)$status);
         }
 
-        return $query->order(['id' => 'desc']);
+        return $query->order(['order_payable' => 'desc', 'id' => 'desc']);
     }
 
     public function lists(): array

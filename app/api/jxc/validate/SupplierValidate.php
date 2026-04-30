@@ -14,6 +14,9 @@ class SupplierValidate extends BaseValidate
         'address' => 'max:255',
         'remark' => 'max:500',
         'is_disabled' => 'integer|in:0,1',
+        'supplier_id' => 'integer|gt:0',
+        'money' => 'float|egt:0',
+        'amount' => 'float|egt:0',
     ];
 
     protected $field = [
@@ -24,6 +27,9 @@ class SupplierValidate extends BaseValidate
         'address' => '地址',
         'remark' => '备注',
         'is_disabled' => '禁用状态',
+        'supplier_id' => '供应商ID',
+        'money' => '付款金额',
+        'amount' => '付款金额',
     ];
 
     public function sceneAdd()
@@ -44,5 +50,11 @@ class SupplierValidate extends BaseValidate
     public function sceneDetail()
     {
         return $this->only(['id']);
+    }
+
+    public function scenePaymoney()
+    {
+        return $this->only(['id', 'supplier_id', 'money', 'amount', 'remark'])
+            ->remove('id', 'require');
     }
 }

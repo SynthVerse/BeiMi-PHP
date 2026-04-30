@@ -24,6 +24,7 @@ Route::group('', function () {
 
     Route::get('supplier/index', 'jxc.Supplier/lists');
     Route::get('supplier/details', 'jxc.Supplier/detail');
+    Route::post('supplier/paymoney', 'jxc.Supplier/paymoney');
     Route::post('supplier/add', 'jxc.Supplier/add');
     Route::post('supplier/edit', 'jxc.Supplier/edit');
     Route::delete('supplier/del', 'jxc.Supplier/delete');

@@ -85,6 +85,70 @@ class SupplierLogic extends BaseLogic
         return self::formatItem($model->toArray());
     }
 
+    public static function paymoney(array $params): array|false
+    {
+        $supplierId = (int)($params['supplier_id'] ?? $params['id'] ?? 0);
+        $amount = self::money(max(0, (float)($params['money'] ?? $params['amount'] ?? 0)));
+        if ($supplierId <= 0) {
+            self::setError('供应商不存在');
+            return false;
+        }
+        if (bccomp($amount, '0', 2) <= 0) {
+            self::setError('请输入付款金额');
+            return false;
+        }
+
+        Db::startTrans();
+        try {
+            $model = Vendor::where('id', $supplierId)->lock(true)->findOrEmpty();
+            if ($model->isEmpty()) {
+                self::setError('供应商不存在');
+                Db::rollback();
+                return false;
+            }
+            if ((int)($model->is_disabled ?? 0) === 1) {
+                self::setError('停用供应商不可付款，请先启用');
+                Db::rollback();
+                return false;
+            }
+
+            $currentPayable = (string)($model->order_payable ?? '0.00');
+            if (bccomp($currentPayable, '0', 2) <= 0) {
+                self::setError('当前无可付款金额');
+                Db::rollback();
+                return false;
+            }
+            if (bccomp($amount, $currentPayable, 2) > 0) {
+                self::setError('付款金额不能超过当前欠额');
+                Db::rollback();
+                return false;
+            }
+
+            $orderSn = 'PAY-' . date('YmdHis') . '-' . $supplierId . '-' . random_int(1000, 9999);
+            $remark = trim((string)($params['remark'] ?? '供应商付款'));
+            $reduced = FinanceService::reducePayable(
+                $supplierId,
+                $amount,
+                0,
+                'manual_payment',
+                $orderSn,
+                $remark
+            );
+            if (!$reduced) {
+                self::setError('付款失败，请稍后重试');
+                Db::rollback();
+                return false;
+            }
+
+            Db::commit();
+            return self::detail(['id' => $supplierId]);
+        } catch (\Throwable $e) {
+            Db::rollback();
+            self::setError($e->getMessage());
+            return false;
+        }
+    }
+
     public static function formatItem(array $item): array
     {
         $item['supplier_name'] = $item['supplier_name'] ?? '';
@@ -96,6 +160,8 @@ class SupplierLogic extends BaseLogic
         $item['is_disabled'] = (int)($item['is_disabled'] ?? 0);
         $item['status'] = $item['is_disabled'] === 1 ? 0 : 1;
         $item['order_money'] = (string)($item['order_money'] ?? '0.00');
+        $item['order_payable'] = (string)($item['order_payable'] ?? '0.00');
+        $item['order_paid_money'] = (string)($item['order_paid_money'] ?? '0.00');
         return $item;
     }
 
@@ -109,5 +175,10 @@ class SupplierLogic extends BaseLogic
             'remark' => trim((string)($params['remark'] ?? ($current['remark'] ?? ''))),
             'is_disabled' => (int)($params['is_disabled'] ?? ($current['is_disabled'] ?? 0)),
         ];
+    }
+
+    protected static function money(mixed $value): string
+    {
+        return number_format(max(0, (float)$value), 2, '.', '');
     }
 }
