@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS `lk_goods_unit` (
+CREATE TABLE IF NOT EXISTS `la_goods_unit` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '单位ID',
   `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
   `name` varchar(50) NOT NULL DEFAULT '' COMMENT '单位名称',
@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS `lk_goods_unit` (
   KEY `idx_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='商品单位表';
 
-CREATE TABLE IF NOT EXISTS `lk_warehouse` (
+CREATE TABLE IF NOT EXISTS `la_warehouse` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '仓库ID',
   `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
   `name` varchar(100) NOT NULL DEFAULT '' COMMENT '仓库名称',
@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS `lk_warehouse` (
   KEY `idx_is_enabled` (`is_enabled`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='仓库表';
 
-CREATE TABLE IF NOT EXISTS `lk_vendor` (
+CREATE TABLE IF NOT EXISTS `la_vendor` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '供应商ID',
   `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
   `supplier_name` varchar(100) NOT NULL DEFAULT '' COMMENT '供应商名称',
@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS `lk_vendor` (
   KEY `idx_is_disabled` (`is_disabled`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='供应商表';
 
-CREATE TABLE IF NOT EXISTS `lk_goods` (
+CREATE TABLE IF NOT EXISTS `la_goods` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '商品ID',
   `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
   `name` varchar(200) NOT NULL DEFAULT '' COMMENT '商品名称',
@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS `lk_goods` (
   KEY `idx_product_code` (`product_code`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='商品表';
 
-CREATE TABLE IF NOT EXISTS `lk_customer` (
+CREATE TABLE IF NOT EXISTS `la_customer` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '客户ID',
   `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
   `customer_name` varchar(100) NOT NULL DEFAULT '' COMMENT '客户名称',
@@ -99,7 +99,7 @@ CREATE TABLE IF NOT EXISTS `lk_customer` (
   KEY `idx_is_disabled` (`is_disabled`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='客户表';
 
-CREATE TABLE IF NOT EXISTS `lk_customer_group` (
+CREATE TABLE IF NOT EXISTS `la_customer_group` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '分组ID',
   `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
   `group_name` varchar(100) NOT NULL DEFAULT '' COMMENT '分组名称',
@@ -112,7 +112,7 @@ CREATE TABLE IF NOT EXISTS `lk_customer_group` (
   KEY `idx_group_name` (`group_name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='客户分组表';
 
-CREATE TABLE IF NOT EXISTS `lk_sales_order` (
+CREATE TABLE IF NOT EXISTS `la_sales_order` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '销售单ID',
   `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
   `order_sn` varchar(64) NOT NULL DEFAULT '' COMMENT '销售单号',
@@ -141,7 +141,7 @@ CREATE TABLE IF NOT EXISTS `lk_sales_order` (
   KEY `idx_tenant_idempotent` (`tenant_id`, `idempotent_key`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='销售单表';
 
-CREATE TABLE IF NOT EXISTS `lk_order_goods` (
+CREATE TABLE IF NOT EXISTS `la_order_goods` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '单据商品明细ID',
   `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
   `order_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '单据ID',
@@ -165,7 +165,7 @@ CREATE TABLE IF NOT EXISTS `lk_order_goods` (
 -- ========================================
 -- 库存流水表
 -- ========================================
-CREATE TABLE IF NOT EXISTS `lk_stock_flow` (
+CREATE TABLE IF NOT EXISTS `la_stock_flow` (
   `id`            int(11) UNSIGNED NOT NULL AUTO_INCREMENT,
   `tenant_id`     int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
   `warehouse_id`  int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '仓库ID',
@@ -189,7 +189,7 @@ CREATE TABLE IF NOT EXISTS `lk_stock_flow` (
 -- ========================================
 -- 客户应收流水表
 -- ========================================
-CREATE TABLE IF NOT EXISTS `lk_receivable_flow` (
+CREATE TABLE IF NOT EXISTS `la_receivable_flow` (
   `id`             int(11) UNSIGNED NOT NULL AUTO_INCREMENT,
   `tenant_id`      int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
   `customer_id`    int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '客户ID',
@@ -211,7 +211,7 @@ CREATE TABLE IF NOT EXISTS `lk_receivable_flow` (
 -- ========================================
 -- 供应商应付流水表
 -- ========================================
-CREATE TABLE IF NOT EXISTS `lk_payable_flow` (
+CREATE TABLE IF NOT EXISTS `la_payable_flow` (
   `id`             int(11) UNSIGNED NOT NULL AUTO_INCREMENT,
   `tenant_id`      int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
   `supplier_id`    int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '供应商ID',
@@ -233,13 +233,13 @@ CREATE TABLE IF NOT EXISTS `lk_payable_flow` (
 -- ========================================
 -- 供应商表补充应付字段
 -- ========================================
-ALTER TABLE `lk_vendor`
+ALTER TABLE `la_vendor`
   ADD COLUMN `order_payable` decimal(12,2) NOT NULL DEFAULT 0.00 COMMENT '累计应付金额' AFTER `order_money`,
   ADD COLUMN `order_paid_money` decimal(12,2) NOT NULL DEFAULT 0.00 COMMENT '累计已付金额' AFTER `order_payable`;
 
 -- ========== Phase 2: 销售退货单 ==========
 
-CREATE TABLE IF NOT EXISTS `lk_sales_return_order` (
+CREATE TABLE IF NOT EXISTS `la_sales_return_order` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '退货单ID',
   `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
   `order_sn` varchar(64) NOT NULL DEFAULT '' COMMENT '退货单号',
@@ -269,7 +269,7 @@ CREATE TABLE IF NOT EXISTS `lk_sales_return_order` (
 
 -- ========== Phase 2: 进货单 ==========
 
-CREATE TABLE IF NOT EXISTS `lk_supply_order` (
+CREATE TABLE IF NOT EXISTS `la_supply_order` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '进货单ID',
   `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
   `order_sn` varchar(64) NOT NULL DEFAULT '' COMMENT '进货单号',
@@ -298,7 +298,7 @@ CREATE TABLE IF NOT EXISTS `lk_supply_order` (
 
 -- ========== Phase 2: 订货单 ==========
 
-CREATE TABLE IF NOT EXISTS `lk_purchase_order` (
+CREATE TABLE IF NOT EXISTS `la_purchase_order` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '订货单ID',
   `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
   `order_sn` varchar(64) NOT NULL DEFAULT '' COMMENT '订货单号',

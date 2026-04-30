@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS lk_audit_log (
+CREATE TABLE IF NOT EXISTS la_audit_log (
     id int unsigned NOT NULL AUTO_INCREMENT,
     tenant_id int unsigned NOT NULL DEFAULT 0 COMMENT '租户ID',
     admin_id int unsigned NOT NULL DEFAULT 0 COMMENT '操作人ID',

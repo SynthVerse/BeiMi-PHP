@@ -38,6 +38,7 @@ $name   = (string)($db['DATABASE'] ?? '');
 $user   = (string)($db['USERNAME'] ?? '');
 $pass   = (string)($db['PASSWORD'] ?? '');
 $charset = (string)($db['CHARSET'] ?? 'utf8mb4');
+$prefix = (string)($db['PREFIX'] ?? 'la_');
 
 // ── 连接数据库 ──
 $dsn = sprintf('mysql:host=%s;port=%s;dbname=%s;charset=%s', $host, $port, $name, $charset);
@@ -53,8 +54,9 @@ try {
 }
 
 // ── 确保 migration_history 表存在 ──
+$migrationHistoryTable = $prefix . 'migration_history';
 $migrationHistoryDDL = <<<'SQL'
-CREATE TABLE IF NOT EXISTS lk_migration_history (
+CREATE TABLE IF NOT EXISTS `%s` (
     id int unsigned NOT NULL AUTO_INCREMENT,
     version varchar(128) NOT NULL COMMENT '迁移版本号（文件名）',
     applied_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '应用时间',
@@ -63,10 +65,10 @@ CREATE TABLE IF NOT EXISTS lk_migration_history (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='数据库迁移历史'
 SQL;
 
-$pdo->exec($migrationHistoryDDL);
+$pdo->exec(sprintf($migrationHistoryDDL, $migrationHistoryTable));
 
 // ── 获取已执行的迁移 ──
-$appliedRows = $pdo->query("SELECT version FROM lk_migration_history ORDER BY version")->fetchAll();
+$appliedRows = $pdo->query("SELECT version FROM `{$migrationHistoryTable}` ORDER BY version")->fetchAll();
 $appliedVersions = array_column($appliedRows, 'version');
 
 // ── 扫描迁移文件 ──
@@ -182,7 +184,7 @@ foreach ($pending as $version => $path) {
         }
 
         // 记录到迁移历史
-        $stmt = $pdo->prepare("INSERT INTO lk_migration_history (version) VALUES (?)");
+        $stmt = $pdo->prepare("INSERT INTO `{$migrationHistoryTable}` (version) VALUES (?)");
         $stmt->execute([$version]);
 
         echo "✓ 成功\n";
