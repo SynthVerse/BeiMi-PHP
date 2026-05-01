@@ -53,9 +53,10 @@ class UserTokenService
             $userSession->save();
         } else {
             //找不到在该终端的token记录，创建token记录
+            // tenant_id 字段由 la_user_session 表 DEFAULT 0 提供，无需显式传入
+            // （la_user 跨租户公用用户池，不强制归属租户）
             $userSession = UserSession::create([
                 'user_id' => $user->id,
-                'tenant_id' => $user->tenant_id,
                 'terminal' => $terminal,
                 'token' => create_token($user->id),
                 'expire_time' => $expireTime

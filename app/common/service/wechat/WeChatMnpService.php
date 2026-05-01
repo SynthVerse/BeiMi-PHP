@@ -14,7 +14,7 @@
 namespace app\common\service\wechat;
 
 
-use app\common\service\wechat\WeChatConfigService;
+use app\common\model\Config;
 use EasyWeChat\Kernel\Exceptions\Exception;
 use EasyWeChat\MiniApp\Application;
 
@@ -39,19 +39,39 @@ class WeChatMnpService
 
 
     /**
-     * @notes 配置
+     * @notes 配置加载：登录阶段不依赖租户上下文
+     * 优先级：.env 环境变量 > 平台级 la_config 表
      * @return array
      * @throws \Exception
-     * @author 段誉
-     * @date 2023/2/27 12:03
      */
     protected function getConfig()
     {
-        $config = WeChatConfigService::getMnpConfig();
-        if (empty($config['app_id']) || empty($config['secret'])) {
-            throw new \Exception('请先设置小程序配置');
+        // 登录阶段优先从 .env 读取（[PROJECT] section 下的键以 project. 前缀访问），
+        // 同时兼容顶层无 section 写法，避免多租户 tenantId 为空导致查询失败
+        $appId = env('project.wechat_mnp_app_id', env('WECHAT_MNP_APP_ID', ''));
+        $secret = env('project.wechat_mnp_app_secret', env('WECHAT_MNP_APP_SECRET', ''));
+
+        // .env 为空时尝试从平台级配置表查询（绕过租户隔离）
+        if (empty($appId)) {
+            $appId = Config::where(['type' => 'mnp_setting', 'name' => 'app_id'])->value('value', '');
         }
-        return $config;
+        if (empty($secret)) {
+            $secret = Config::where(['type' => 'mnp_setting', 'name' => 'app_secret'])->value('value', '');
+        }
+
+        if (empty($appId) || empty($secret)) {
+            throw new \Exception('请先设置小程序配置（AppID/AppSecret）');
+        }
+
+        return [
+            'app_id' => $appId,
+            'secret' => $secret,
+            'response_type' => 'array',
+            'log' => [
+                'level' => 'debug',
+                'file' => app()->getRootPath() . 'runtime/wechat/' . date('Ym') . '/' . date('d') . '.log'
+            ],
+        ];
     }
 
 
