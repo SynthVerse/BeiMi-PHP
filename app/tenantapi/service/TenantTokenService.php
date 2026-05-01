@@ -89,7 +89,7 @@ class TenantTokenService
             return false;
         }
         //延长token过期时间
-        $adminSession->expire_time = $time + Config::get('project.admin_token.expire_duration');
+        $adminSession->expire_time = $time + Config::get('project.tenant_token.expire_duration');
         $adminSession->update_time = $time;
         $adminSession->save();
         return (new TenantAdminTokenCache())->setAdminInfo($adminSession->token);

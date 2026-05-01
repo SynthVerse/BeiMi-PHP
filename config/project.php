@@ -66,7 +66,7 @@ return [
 
     // 租户后台管理员token（登录令牌）配置
     'tenant_token' => [
-        'expire_duration' => 3600 * 8,//管理后台token过期时长(单位秒）
+        'expire_duration' => 3600 * 24,//租户后台token过期时长24小时(单位秒）
         'be_expire_duration' => 3600,//管理后台token临时过期前时长，自动续期
     ],
 

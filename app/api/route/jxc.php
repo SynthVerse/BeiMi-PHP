@@ -3,6 +3,7 @@
 use think\facade\Route;
 
 Route::post('user/login', 'jxc.Auth/login');
+Route::post('user/mnpLogin', 'login/mnpLogin');
 
 Route::group('', function () {
     Route::get('user/info', 'jxc.Auth/info');

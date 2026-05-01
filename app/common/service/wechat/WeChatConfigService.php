@@ -35,8 +35,8 @@ class WeChatConfigService
     public static function getMnpConfig()
     {
         return [
-            'app_id' => ConfigService::get('mnp_setting', 'app_id'),
-            'secret' => ConfigService::get('mnp_setting', 'app_secret'),
+            'app_id' => ConfigService::get('mnp_setting', 'app_id') ?: env('WECHAT_MNP_APP_ID', ''),
+            'secret' => ConfigService::get('mnp_setting', 'app_secret') ?: env('WECHAT_MNP_APP_SECRET', ''),
             'response_type' => 'array',
             'log' => [
                 'level' => 'debug',

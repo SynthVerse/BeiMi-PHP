@@ -14,7 +14,7 @@
 
 namespace app\api\controller;
 
-use app\api\validate\{LoginAccountValidate, RegisterValidate, WebScanLoginValidate, WechatLoginValidate};
+use app\api\validate\{LoginAccountValidate, RegisterValidate, WechatLoginValidate};
 use app\api\logic\LoginLogic;
 
 /**
@@ -25,7 +25,7 @@ use app\api\logic\LoginLogic;
 class LoginController extends BaseApiController
 {
 
-    public array $notNeedLogin = ['register', 'account', 'logout', 'codeUrl', 'oaLogin',  'mnpLogin', 'getScanCode', 'scanLogin'];
+    public array $notNeedLogin = ['register', 'account', 'logout', 'mnpLogin'];
 
 
     /**
@@ -79,38 +79,6 @@ class LoginController extends BaseApiController
 
 
     /**
-     * @notes 获取微信请求code的链接
-     * @return \think\response\Json
-     * @author 段誉
-     * @date 2022/9/15 18:27
-     */
-    public function codeUrl()
-    {
-        $url = $this->request->get('url');
-        $result = ['url' => LoginLogic::codeUrl($url)];
-        return $this->success('获取成功', $result);
-    }
-
-
-    /**
-     * @notes 公众号登录
-     * @return \think\response\Json
-     * @throws \GuzzleHttp\Exception\GuzzleException
-     * @author 段誉
-     * @date 2022/9/20 19:48
-     */
-    public function oaLogin()
-    {
-        $params = (new WechatLoginValidate())->post()->goCheck('oa');
-        $res = LoginLogic::oaLogin($params);
-        if (false === $res) {
-            return $this->fail(LoginLogic::getError());
-        }
-        return $this->success('', $res);
-    }
-
-
-    /**
      * @notes 小程序-登录接口
      * @return \think\response\Json
      * @author 段誉
@@ -124,78 +92,6 @@ class LoginController extends BaseApiController
             return $this->fail(LoginLogic::getError());
         }
         return $this->success('', $res);
-    }
-
-
-    /**
-     * @notes 小程序绑定微信
-     * @return \think\response\Json
-     * @author 段誉
-     * @date 2022/9/20 19:48
-     */
-    public function mnpAuthBind()
-    {
-        $params = (new WechatLoginValidate())->post()->goCheck("wechatAuth");
-        $params['user_id'] = $this->userId;
-        $result = LoginLogic::mnpAuthLogin($params);
-        if ($result === false) {
-            return $this->fail(LoginLogic::getError());
-        }
-        return $this->success('绑定成功', [], 1, 1);
-    }
-
-
-
-    /**
-     * @notes 公众号绑定微信
-     * @return \think\response\Json
-     * @throws \GuzzleHttp\Exception\GuzzleException
-     * @author 段誉
-     * @date 2022/9/20 19:48
-     */
-    public function oaAuthBind()
-    {
-        $params = (new WechatLoginValidate())->post()->goCheck("wechatAuth");
-        $params['user_id'] = $this->userId;
-        $result = LoginLogic::oaAuthLogin($params);
-        if ($result === false) {
-            return $this->fail(LoginLogic::getError());
-        }
-        return $this->success('绑定成功', [], 1, 1);
-    }
-
-
-    /**
-     * @notes 获取扫码地址
-     * @return \think\response\Json
-     * @author 段誉
-     * @date 2022/10/20 18:25
-     */
-    public function getScanCode()
-    {
-        $redirectUri = $this->request->get('url/s');
-        $result = LoginLogic::getScanCode($redirectUri);
-        if (false === $result) {
-            return $this->fail(LoginLogic::getError() ?? '未知错误');
-        }
-        return $this->success('', $result);
-    }
-
-
-    /**
-     * @notes 网站扫码登录
-     * @return \think\response\Json
-     * @author 段誉
-     * @date 2022/10/21 10:28
-     */
-    public function scanLogin()
-    {
-        $params = (new WebScanLoginValidate())->post()->goCheck();
-        $result = LoginLogic::scanLogin($params);
-        if (false === $result) {
-            return $this->fail(LoginLogic::getError() ?? '登录失败');
-        }
-        return $this->success('', $result);
     }
 
 

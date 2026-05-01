@@ -211,7 +211,10 @@ class WechatUserService
      */
     private function getToken(): void
     {
-        $user = UserTokenService::setToken($this->user->id, $this->terminal);
+        // 传入 User 模型对象，而非 $this->user->id；
+        // UserTokenService::setToken() 内部使用 $user->id / $user->tenant_id 等属性，
+        // 传 int 会触发 PHP 8 “Attempt to read property on int” 错误。
+        $user = UserTokenService::setToken($this->user, $this->terminal);
         $this->user->token = $user['token'];
     }
 
