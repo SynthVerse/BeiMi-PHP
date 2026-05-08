@@ -5,10 +5,13 @@ use think\facade\Route;
 Route::post('user/login', 'jxc.Auth/login');
 Route::post('user/mnpLogin', 'login/mnpLogin');
 
+// JXC 业务接口 —— 使用 JxcLoginMiddleware（双 Token 查询）
 Route::group('', function () {
+    // === 用户接口 ===
     Route::get('user/info', 'jxc.Auth/info');
     Route::post('user/logout', 'jxc.Auth/logout');
 
+    // === 单位管理 ===
     Route::get('units/index', 'jxc.GoodsUnit/lists');
     Route::get('units/detail', 'jxc.GoodsUnit/detail');
     Route::post('units/add', 'jxc.GoodsUnit/add');
