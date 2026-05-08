@@ -3,6 +3,7 @@ namespace app\platformapi\controller\tenant;
 
 use app\common\model\dept\TenantDept;
 use app\common\model\user\UserGroup;
+use app\common\service\jxc\DefaultDataInitService;
 use app\platformapi\controller\BaseAdminController;
 use app\platformapi\lists\tenant\TenantLists;
 use app\platformapi\logic\setting\pay\PayConfigLogic;
@@ -90,6 +91,8 @@ class TenantController extends BaseAdminController
                 //初始化客户组
                 UserGroupLogic::initialization($tenant['id']);
             }
+            // 初始化 JXC 默认基础数据（默认仓库/客户/供应商/计量单位）
+            DefaultDataInitService::initForTenant((int)$tenant['id']);
             // 提交事务
             DB::commit();
             // 返回成功

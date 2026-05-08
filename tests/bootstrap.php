@@ -10,3 +10,7 @@ if (!is_file($autoload)) {
 }
 
 require $autoload;
+
+// Boot ThinkPHP application for tests that need facades (Db, Config, etc.)
+$app = new \think\App(dirname(__DIR__));
+$app->initialize();

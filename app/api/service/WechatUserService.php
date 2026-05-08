@@ -41,6 +41,12 @@ class WechatUserService
     protected ?string $headimgurl = null;
     protected User $user;
 
+    /**
+     * 是否为本次登录创建的新用户
+     * 在 authUserLogin() 内部置 true，供外层登录流程判断是否需要执行一人一租户的自动建户逻辑。
+     */
+    protected bool $isNewUser = false;
+
 
     public function __construct(array $response, int $terminal)
     {
@@ -231,10 +237,29 @@ class WechatUserService
     {
         if ($this->user->isEmpty()) {
             $this->createUser();
+            $this->isNewUser = true;
         } else {
             $this->updateUser();
         }
         return $this;
+    }
+
+    /**
+     * @notes 当前登录流程中的用户是否为新创建用户
+     * @return bool
+     */
+    public function isNewUser(): bool
+    {
+        return $this->isNewUser;
+    }
+
+    /**
+     * @notes 返回当前内部 User 模型实例，用于外层服务（如租户预置）将 tenant_id 回写到同一实例
+     * @return User
+     */
+    public function getUserModel(): User
+    {
+        return $this->user;
     }
 
 
