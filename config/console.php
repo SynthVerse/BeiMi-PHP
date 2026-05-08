@@ -9,5 +9,7 @@ return [
         'crontab' => 'app\common\command\Crontab',
         // 退款查询
         'query_refund' => 'app\common\command\QueryRefund',
+        // JXC 默认基础数据补建
+        'jxc:init-defaults' => 'app\common\command\JxcInitDefaults',
     ],
 ];

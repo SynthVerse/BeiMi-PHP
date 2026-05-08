@@ -20,6 +20,7 @@ use app\common\enum\user\UserTerminalEnum;
 use app\common\model\user\User;
 use app\common\service\ConfigService;
 use app\common\service\FileService;
+use app\common\service\jxc\TenantProvisionService;
 use app\api\service\{UserTokenService, WechatUserService};
 use app\common\enum\{YesNoEnum};
 use app\common\service\{
@@ -153,7 +154,19 @@ class LoginLogic extends BaseLogic
             //通过code获取微信 openid
             $response = (new WeChatMnpService())->getMnpResByCode($params['code']);
             $userServer = new WechatUserService($response, UserTerminalEnum::WECHAT_MMP);
-            $userInfo = $userServer->getResopnseByUserInfo()->authUserLogin()->getUserInfo();
+            $userServer->getResopnseByUserInfo()->authUserLogin();
+
+            // 新用户自动预置租户（一人一租户）并初始化 JXC 默认数据；
+            // 若为老用户且已具备 tenant_id，TenantProvisionService 仅补齐默认数据（幂等）。
+            if ($userServer->isNewUser()) {
+                TenantProvisionService::provisionForWechatUser(
+                    $userServer->getUserModel(),
+                    $response['openid'] ?? null
+                );
+            }
+
+            // 获取登录用户信息（包含 Token）
+            $userInfo = $userServer->getUserInfo();
 
             // 更新登录信息
             self::updateLoginInfo($userInfo['id']);
