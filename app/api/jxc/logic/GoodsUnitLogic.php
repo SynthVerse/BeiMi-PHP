@@ -108,9 +108,6 @@ class GoodsUnitLogic extends BaseLogic
 
     public static function formatItem(array $item): array
     {
-        $basicUnits = ['件', '千克', '克', '升', '毫升', '米', '厘米', '毫米', '个', '只'];
-        $name = $item['name'] ?? '';
-        $item['type'] = in_array($name, $basicUnits) ? '基本单位' : '衍生单位';
         $item['status'] = (int)($item['status'] ?? 1);
         $item['sort'] = (int)($item['sort'] ?? 0);
         return $item;

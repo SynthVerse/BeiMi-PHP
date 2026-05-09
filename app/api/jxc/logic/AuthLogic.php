@@ -26,7 +26,6 @@ class AuthLogic extends BaseLogic
         return [
             'token' => $userInfo['token'],
             'user_info' => $userInfo,
-            'userinfo' => $userInfo,
         ];
     }
 
@@ -45,7 +44,6 @@ class AuthLogic extends BaseLogic
         return [
             'token' => $userInfo['token'],
             'user_info' => $userInfo,
-            'userinfo' => $userInfo,
         ];
     }
 

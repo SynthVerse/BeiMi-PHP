@@ -103,8 +103,13 @@ class TenantUnitsLogic extends BaseLogic
      * @author likeadmin
      * @date 2025/12/24 09:09
      */
-    public static function all(): array
+    public static function all($tenantId = null): array
     {
-        return TenantUnits::where(['is_show' => 0])->order(['sort' => 'desc', 'id' => 'desc'])->field(["id", "name"])->select()->toArray();
+        $query = TenantUnits::where(['is_show' => 0]);
+        if ($tenantId) {
+            $query->where('tenant_id', $tenantId);
+        }
+        return $query->order(['sort' => 'desc', 'id' => 'desc'])
+            ->field(["id", "name"])->select()->toArray();
     }
 }

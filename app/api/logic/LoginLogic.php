@@ -157,10 +157,11 @@ class LoginLogic extends BaseLogic
             $userServer->getResopnseByUserInfo()->authUserLogin();
 
             // 新用户自动预置租户（一人一租户）并初始化 JXC 默认数据；
-            // 若为老用户且已具备 tenant_id，TenantProvisionService 仅补齐默认数据（幂等）。
-            if ($userServer->isNewUser()) {
+            // 存量用户若 tenant_id 为 0 也触发预置（TenantProvisionService 已有幂等保护）。
+            $userModel = $userServer->getUserModel();
+            if ($userServer->isNewUser() || (int)($userModel->tenant_id ?? 0) <= 0) {
                 TenantProvisionService::provisionForWechatUser(
-                    $userServer->getUserModel(),
+                    $userModel,
                     $response['openid'] ?? null
                 );
             }
