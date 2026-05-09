@@ -99,7 +99,7 @@ class TenantUnitsController extends BaseAdminController
      */
     public function all()
     {
-        $result = TenantUnitsLogic::all();
+        $result = TenantUnitsLogic::all($this->tenantId);
         return $this->data($result);
     }
 }
