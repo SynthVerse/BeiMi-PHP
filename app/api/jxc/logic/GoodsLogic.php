@@ -13,6 +13,10 @@ class GoodsLogic extends BaseLogic
     public static function add(array $params): array|false
     {
         $saveData = self::buildSaveData($params);
+        if ((int)$saveData['tenant_id'] <= 0) {
+            self::setError('商品租户上下文缺失，请重新登录');
+            return false;
+        }
         if (!self::assertUnique($saveData)) {
             return false;
         }
@@ -42,6 +46,10 @@ class GoodsLogic extends BaseLogic
         }
 
         $saveData = self::buildSaveData($params, $model->toArray());
+        if ((int)$saveData['tenant_id'] <= 0) {
+            self::setError('商品租户上下文缺失，请重新登录');
+            return false;
+        }
         if (!self::assertUnique($saveData, (int)$params['id'])) {
             return false;
         }
@@ -118,6 +126,7 @@ class GoodsLogic extends BaseLogic
         }
 
         return [
+            'tenant_id' => (int)(request()->tenantId ?? ($current['tenant_id'] ?? 0)),
             'name' => $name,
             'product_code' => trim((string)($params['product_code'] ?? ($current['product_code'] ?? ''))),
             'units' => $units,
