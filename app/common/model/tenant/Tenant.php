@@ -18,7 +18,6 @@ namespace app\common\model\tenant;
 
 use app\common\enum\YesNoEnum;
 use app\common\model\BaseModel;
-use app\common\model\user\User;
 use app\common\service\FileService;
 use think\model\concern\SoftDelete;
 use think\facade\Request;
@@ -41,7 +40,9 @@ class Tenant extends BaseModel
      */
     public function users()
     {
-        return $this->hasMany(User::class, 'tenant_id', 'id');
+        return $this->hasMany(TenantMember::class, 'tenant_id', 'id')
+            ->where('status', 1)
+            ->whereNull('delete_time');
     }
 
     /**

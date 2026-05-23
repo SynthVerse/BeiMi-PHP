@@ -102,7 +102,24 @@ Route::group('', function () {
     Route::get('audit/lists', 'jxc.Audit/lists');
 
     // === 店铺管理 ===
+    Route::get('user/store/status', 'jxc.Store/status');
     Route::get('user/store',     'jxc.Store/detail');
+    Route::get('user/store/current', 'jxc.Store/detail');
+    Route::get('user/stores',    'jxc.Store/lists');
     Route::post('user/storeset', 'jxc.Store/setStore');
     Route::post('user/open',     'jxc.Store/createStore');
+    Route::post('user/store/create', 'jxc.Store/createStore');
+    Route::post('user/store/switch', 'jxc.Store/switchStore');
+    Route::post('user/store/join',   'jxc.Store/join');
+    Route::post('store/invite/accept', 'jxc.Store/join');
+    Route::get('user/store/invite',  'jxc.Store/invite');
+    Route::get('user/store/member-invite', 'jxc.Store/memberInvite');
+    Route::post('user/store/member-invite/accept', 'jxc.Store/acceptMemberInvite');
+    Route::get('user/store/hierarchy', 'jxc.Store/hierarchy');
+    Route::get('user/store/hierarchy/children', 'jxc.Store/hierarchyChildren');
+    Route::get('user/store/hierarchy/tree', 'jxc.Store/hierarchyTree');
+    Route::get('user/store/hierarchy/invite/preview', 'jxc.Store/hierarchyInvitePreview');
+    Route::post('user/store/hierarchy/invite', 'jxc.Store/createHierarchyInvite');
+    Route::post('user/store/hierarchy/invite/accept', 'jxc.Store/acceptHierarchyInvite');
+    Route::post('user/store/hierarchy/unbind', 'jxc.Store/unbindHierarchy');
 })->middleware(\app\api\jxc\middleware\JxcLoginMiddleware::class);
