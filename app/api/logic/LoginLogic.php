@@ -20,7 +20,6 @@ use app\common\enum\user\UserTerminalEnum;
 use app\common\model\user\User;
 use app\common\service\ConfigService;
 use app\common\service\FileService;
-use app\common\service\jxc\TenantProvisionService;
 use app\api\service\{UserTokenService, WechatUserService};
 use app\common\enum\{YesNoEnum};
 use app\common\service\{
@@ -155,16 +154,6 @@ class LoginLogic extends BaseLogic
             $response = (new WeChatMnpService())->getMnpResByCode($params['code']);
             $userServer = new WechatUserService($response, UserTerminalEnum::WECHAT_MMP);
             $userServer->getResopnseByUserInfo()->authUserLogin();
-
-            // 新用户自动预置租户（一人一租户）并初始化 JXC 默认数据；
-            // 存量用户若 tenant_id 为 0 也触发预置（TenantProvisionService 已有幂等保护）。
-            $userModel = $userServer->getUserModel();
-            if ($userServer->isNewUser() || (int)($userModel->tenant_id ?? 0) <= 0) {
-                TenantProvisionService::provisionForWechatUser(
-                    $userModel,
-                    $response['openid'] ?? null
-                );
-            }
 
             // 获取登录用户信息（包含 Token）
             $userInfo = $userServer->getUserInfo();

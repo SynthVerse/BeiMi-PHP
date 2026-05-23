@@ -56,7 +56,8 @@ class LoginMiddleware
                 }
             }
 
-            if ($userInfo['tenant_id'] !== $request->tenantId) {
+            $requestTenantId = (int)($request->tenantId ?? 0);
+            if ($requestTenantId > 0 && (int)($userInfo['tenant_id'] ?? 0) > 0 && (int)$userInfo['tenant_id'] !== $requestTenantId) {
                 if (!$isNotNeedLogin) {
                     UserTokenService::expireToken($token);
                     return JsonService::fail('非该站点用户禁止访问', [], -1);

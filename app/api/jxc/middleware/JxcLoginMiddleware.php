@@ -6,7 +6,9 @@ namespace app\api\jxc\middleware;
 
 use app\common\cache\TenantAdminTokenCache;
 use app\common\cache\UserTokenCache;
+use app\api\jxc\logic\StoreLogic;
 use app\common\service\JsonService;
+use app\common\service\jxc\StoreMembershipService;
 use app\tenantapi\service\TenantTokenService;
 use think\facade\Config;
 
@@ -31,6 +33,7 @@ class JxcLoginMiddleware
             }
             $adminInfo = [
                 'admin_id'    => $userInfo['user_id'],
+                'user_id'     => $userInfo['user_id'],
                 'tenant_id'   => $userInfo['tenant_id'] ?? 0,
                 'root'        => 0,
                 'name'        => $userInfo['nickname'] ?? '',
@@ -56,9 +59,24 @@ class JxcLoginMiddleware
             }
         }
 
-        $request->tenantId = (int)($adminInfo['tenant_id'] ?? 0);
+        $tenantId = (int)($adminInfo['tenant_id'] ?? 0);
+        $request->tenantId = $tenantId;
         $request->adminInfo = $adminInfo;
         $request->adminId = (int)($adminInfo['admin_id'] ?? 0);
+        $request->userId = (int)($adminInfo['user_id'] ?? 0);
+        $request->jxcFromUserToken = $fromUserToken;
+
+        if ($fromUserToken) {
+            $userId = (int)($adminInfo['user_id'] ?? $adminInfo['admin_id'] ?? 0);
+            $action = strtolower((string)$request->action());
+            $controller = strtolower((string)$request->controller());
+            $storeEntryActions = ['status', 'createstore', 'join', 'acceptmemberinvite', 'lists', 'switchstore'];
+            $isStoreEntryAction = str_ends_with($controller, 'store') && in_array($action, $storeEntryActions, true);
+
+            if (!$isStoreEntryAction && !StoreMembershipService::requireCurrentMembership($userId, $tenantId)) {
+                return JsonService::fail('请先创建或切换到有效店铺', StoreLogic::status(), 0, 0);
+            }
+        }
 
         return $next($request);
     }

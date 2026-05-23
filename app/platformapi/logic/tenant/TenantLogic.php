@@ -4,8 +4,8 @@ namespace app\platformapi\logic\tenant;
 use app\common\enum\user\UserTerminalEnum;
 use app\common\logic\BaseLogic;
 use app\common\model\tenant\Tenant;
-use app\common\model\user\User;
 use Exception;
+use think\facade\Db;
 
 /**
  * 用户逻辑层
@@ -56,7 +56,11 @@ class TenantLogic extends BaseLogic
             $field = "id,sn,name,avatar,tel,domain_alias,domain_alias_enable,disable,expired_time,create_time,notes";
 
             $user = Tenant::where(['id' => $userId])->field($field)->findOrEmpty();
-            $user['user_total'] = User::where(['tenant_id' => $userId])->count();
+            $user['user_total'] = Db::name('tenant_member')
+                ->where('tenant_id', $userId)
+                ->where('status', 1)
+                ->whereNull('delete_time')
+                ->count();
 
             $domain = request()->domain();
             $user['default_domain'] = $domain . '/admin/';
