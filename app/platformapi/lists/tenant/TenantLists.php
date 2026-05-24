@@ -1,10 +1,10 @@
 <?php
 namespace app\platformapi\lists\tenant;
 
-use app\tenantapi\lists\BaseAdminDataLists;
-use app\common\enum\user\UserTerminalEnum;
 use app\common\lists\ListsExcelInterface;
 use app\common\model\tenant\Tenant;
+use app\platformapi\lists\BaseAdminDataLists;
+use think\facade\Db;
 
 
 /**
@@ -39,19 +39,19 @@ class TenantLists extends BaseAdminDataLists implements ListsExcelInterface
      */
     public function lists(): array
     {
-        $field = "id,sn,name,avatar,disable,create_time,domain_alias,domain_alias_enable,notes,tel";
+        $field = "id,sn,name,avatar,disable,create_time,expired_time,domain_alias,domain_alias_enable,notes,tel";
 
-        $lists = Tenant::withCount(['users'])
-            ->withSearch($this->setSearch(), $this->params)
+        $lists = Tenant::withSearch($this->setSearch(), $this->params)
             ->limit($this->limitOffset, $this->limitLength)
             ->field($field)
             ->order('id desc')
             ->select()->toArray();
 
+        $userCounts = $this->getUserCounts(array_column($lists, 'id'));
         $domain = self::getRootDmain(request()->domain());
 
         // 遍历结果，添加 link 字段
-        return array_map(function ($item) use ($domain) {
+        return array_map(function ($item) use ($domain, $userCounts) {
             // 拼接租户的链接 http://[sn].likeadmin-saas.localhost/admin/
             $http_prefix = self::checkHttp() ? 'https://' : 'http://';
             $item['default_domain'] = $http_prefix . $item['sn'] . '.' . $domain . '/admin/';
@@ -63,6 +63,7 @@ class TenantLists extends BaseAdminDataLists implements ListsExcelInterface
             }
 
             $item['expired_time'] = date("Y-m-d",$item['expired_time']);
+            $item['users_count'] = (int)($userCounts[(int)$item['id']] ?? 0);
             return $item;
         }, $lists);
     }
@@ -154,5 +155,38 @@ class TenantLists extends BaseAdminDataLists implements ListsExcelInterface
         }
 
         return $host; // 当域名本身就是根域名时，直接返回
+    }
+
+    private function getUserCounts(array $tenantIds): array
+    {
+        $tenantIds = array_values(array_filter(array_unique(array_map('intval', $tenantIds))));
+        if (!$tenantIds) {
+            return [];
+        }
+
+        try {
+            $rows = Db::name('tenant_member')
+                ->whereIn('tenant_id', $tenantIds)
+                ->where('status', 1)
+                ->whereNull('delete_time')
+                ->field('tenant_id,COUNT(*) AS user_count')
+                ->group('tenant_id')
+                ->select()
+                ->toArray();
+        } catch (\Throwable $e) {
+            $rows = Db::name('user')
+                ->whereIn('tenant_id', $tenantIds)
+                ->whereNull('delete_time')
+                ->field('tenant_id,COUNT(*) AS user_count')
+                ->group('tenant_id')
+                ->select()
+                ->toArray();
+        }
+
+        $counts = [];
+        foreach ($rows as $row) {
+            $counts[(int)$row['tenant_id']] = (int)$row['user_count'];
+        }
+        return $counts;
     }
 }
