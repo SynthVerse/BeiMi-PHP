@@ -1109,11 +1109,14 @@ INSERT INTO `la_system_menu`
 VALUES (116, 115, 'A', '保存', '', 0, 'setting.user.user/setRegisterConfig', '', '', '', '', 0, 1, 0, 1663903852,
         1663903852);
 INSERT INTO `la_system_menu`
-VALUES (117, 0, 'M', '租户管理', 'local-icon-user_biaoqian', 900, '', 'tenant', '', '', '', 0, 1, 0, 1663904351,
+VALUES (117, 0, 'M', '店铺管理', 'local-icon-user_biaoqian', 900, '', 'tenant', '', '', '', 0, 1, 0, 1663904351,
         1724998415);
 INSERT INTO `la_system_menu`
-VALUES (118, 117, 'C', '租户列表', 'local-icon-user_guanli', 100, 'user.user/lists', 'lists', 'tenant/lists/index',
+VALUES (118, 117, 'C', '店铺列表', 'local-icon-user_guanli', 100, 'tenant.tenant/lists', 'lists', 'tenant/lists/index',
         '', '', 0, 1, 0, 1663904392, 1724998428);
+INSERT INTO `la_system_menu`
+VALUES (170, 117, 'C', '微信用户列表', 'local-icon-user_guanli', 90, 'user.user/lists', 'wechat_user', 'tenant/wechat_user/index',
+        '', '', 0, 1, 0, 1779566400, 1779566400);
 INSERT INTO `la_system_menu`
 VALUES (143, 35, 'C', '定时任务', '', 100, 'crontab.crontab/lists', 'scheduled_task',
         'setting/system/scheduled_task/index', '', '', 0, 1, 0, 1669357509, 1710473246);
@@ -1143,11 +1146,11 @@ INSERT INTO `la_system_menu`
 VALUES (165, 163, 'A', '配置', '', 0, 'setting.pay.pay_config/setConfig', '', '', '', '', 0, 1, 0, 1677219655,
         1677219655);
 INSERT INTO `la_system_menu`
-VALUES (166, 118, 'A', '新增租户', '', 0, 'tenant.tenant/add', '', '', '', '', 1, 1, 0, 1726822307, 1726822435);
+VALUES (166, 118, 'A', '新增店铺', '', 0, 'tenant.tenant/add', '', '', '', '', 1, 1, 0, 1726822307, 1726822435);
 INSERT INTO `la_system_menu`
-VALUES (167, 118, 'A', '编辑租户', '', 0, 'tenant.tenant/edit', '', '', '', '', 1, 1, 0, 1726822372, 1726822440);
+VALUES (167, 118, 'A', '编辑店铺', '', 0, 'tenant.tenant/edit', '', '', '', '', 1, 1, 0, 1726822372, 1726822440);
 INSERT INTO `la_system_menu`
-VALUES (168, 118, 'A', '租户详情', '', 0, 'tenant.tenant/detail', '', '', '', '', 1, 1, 0, 1726822396, 1726822444);
+VALUES (168, 118, 'A', '店铺详情', '', 0, 'tenant.tenant/detail', '', '', '', '', 1, 1, 0, 1726822396, 1726822444);
 INSERT INTO `la_system_menu`
 VALUES (169, 118, 'A', '删除租户', '', 0, 'tenant.tenant/delete', '', '', '', '', 1, 1, 0, 1726822416, 1726822449);
 COMMIT;
