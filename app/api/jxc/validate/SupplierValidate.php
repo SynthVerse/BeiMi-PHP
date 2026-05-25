@@ -15,6 +15,10 @@ class SupplierValidate extends BaseValidate
         'remark' => 'max:500',
         'is_disabled' => 'integer|in:0,1',
         'supplier_id' => 'integer|gt:0',
+        'page' => 'integer|gt:0',
+        'pagesize' => 'integer|gt:0',
+        'page_no' => 'integer|gt:0',
+        'page_size' => 'integer|gt:0',
         'money' => 'float|egt:0',
         'amount' => 'float|egt:0',
     ];
@@ -28,6 +32,10 @@ class SupplierValidate extends BaseValidate
         'remark' => '备注',
         'is_disabled' => '禁用状态',
         'supplier_id' => '供应商ID',
+        'page' => '页码',
+        'pagesize' => '每页数量',
+        'page_no' => '页码',
+        'page_size' => '每页数量',
         'money' => '付款金额',
         'amount' => '付款金额',
     ];
@@ -50,6 +58,12 @@ class SupplierValidate extends BaseValidate
     public function sceneDetail()
     {
         return $this->only(['id']);
+    }
+
+    public function sceneGoods()
+    {
+        return $this->only(['id', 'supplier_id', 'page', 'pagesize', 'page_no', 'page_size'])
+            ->remove('id', 'require');
     }
 
     public function scenePaymoney()

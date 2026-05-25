@@ -8,6 +8,7 @@ class GoodsValidate extends BaseValidate
 {
     protected $rule = [
         'id' => 'require|integer|gt:0',
+        'goods_id' => 'integer|gt:0',
         'name' => 'requireWithout:product_name|max:200',
         'product_name' => 'requireWithout:name|max:200',
         'product_code' => 'max:100',
@@ -20,12 +21,19 @@ class GoodsValidate extends BaseValidate
         'cost' => 'float|egt:0',
         'stock' => 'float|egt:0',
         'category_id' => 'integer|egt:0',
+        'primary_supplier_id' => 'integer|egt:0',
+        'supplier_id' => 'integer|gt:0',
+        'suppliers' => 'array',
+        'supplier_relation' => 'max:20',
+        'stock_status' => 'max:20',
+        'status' => 'max:20',
         'is_disabled' => 'integer|in:0,1',
         'remark' => 'max:500',
     ];
 
     protected $field = [
         'id' => '商品ID',
+        'goods_id' => '商品ID',
         'name' => '商品名称',
         'product_name' => '商品名称',
         'product_code' => '商品编码',
@@ -38,6 +46,12 @@ class GoodsValidate extends BaseValidate
         'cost' => '成本价',
         'stock' => '库存',
         'category_id' => '分类ID',
+        'primary_supplier_id' => '默认供应商ID',
+        'supplier_id' => '供应商ID',
+        'suppliers' => '供应商列表',
+        'supplier_relation' => '供应商关联类型',
+        'stock_status' => '库存状态',
+        'status' => '商品状态',
         'is_disabled' => '禁用状态',
         'remark' => '备注',
     ];
@@ -57,6 +71,7 @@ class GoodsValidate extends BaseValidate
             'cost',
             'stock',
             'category_id',
+            'primary_supplier_id',
             'is_disabled',
             'remark',
         ]);
@@ -78,6 +93,7 @@ class GoodsValidate extends BaseValidate
             'cost',
             'stock',
             'category_id',
+            'primary_supplier_id',
             'is_disabled',
             'remark',
         ]);
@@ -91,5 +107,17 @@ class GoodsValidate extends BaseValidate
     public function sceneDetail()
     {
         return $this->only(['id']);
+    }
+
+    public function sceneSuppliers()
+    {
+        return $this->only(['id', 'goods_id'])
+            ->remove('id', 'require');
+    }
+
+    public function sceneSaveSuppliers()
+    {
+        return $this->only(['id', 'goods_id', 'primary_supplier_id', 'suppliers'])
+            ->remove('id', 'require');
     }
 }

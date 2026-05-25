@@ -48,4 +48,20 @@ class GoodsController extends BaseJxcController
         $params = (new GoodsValidate())->goCheck('detail');
         return $this->data(GoodsLogic::detail($params));
     }
+
+    public function suppliers()
+    {
+        $params = (new GoodsValidate())->goCheck('suppliers');
+        return $this->data(GoodsLogic::supplierList($params));
+    }
+
+    public function saveSuppliers()
+    {
+        $params = (new GoodsValidate())->post()->goCheck('saveSuppliers');
+        $result = GoodsLogic::saveSuppliers($params);
+        if ($result === false) {
+            return $this->fail(GoodsLogic::getError());
+        }
+        return $this->success('保存成功', $result, 1, 1);
+    }
 }

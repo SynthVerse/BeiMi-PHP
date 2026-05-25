@@ -49,6 +49,12 @@ class SupplierController extends BaseJxcController
         return $this->data(SupplierLogic::detail($params));
     }
 
+    public function goods()
+    {
+        $params = (new SupplierValidate())->goCheck('goods');
+        return $this->data(SupplierLogic::goods($params));
+    }
+
     public function paymoney()
     {
         $params = (new SupplierValidate())->post()->goCheck('paymoney');

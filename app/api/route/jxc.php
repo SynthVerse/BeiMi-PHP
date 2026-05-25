@@ -28,6 +28,7 @@ Route::group('', function () {
 
     Route::get('supplier/index', 'jxc.Supplier/lists');
     Route::get('supplier/details', 'jxc.Supplier/detail');
+    Route::get('supplier/goods', 'jxc.Supplier/goods');
     Route::post('supplier/paymoney', 'jxc.Supplier/paymoney');
     Route::post('supplier/add', 'jxc.Supplier/add');
     Route::post('supplier/edit', 'jxc.Supplier/edit');
@@ -36,6 +37,8 @@ Route::group('', function () {
 
     Route::get('goods/index', 'jxc.Goods/lists');
     Route::get('goods/detail', 'jxc.Goods/detail');
+    Route::get('goods/suppliers', 'jxc.Goods/suppliers');
+    Route::post('goods/suppliers/save', 'jxc.Goods/saveSuppliers');
     Route::post('goods/add', 'jxc.Goods/add');
     Route::post('goods/edit', 'jxc.Goods/edit');
     Route::delete('goods/del', 'jxc.Goods/delete');
