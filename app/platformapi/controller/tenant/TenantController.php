@@ -6,6 +6,7 @@ use app\common\model\user\UserGroup;
 use app\common\service\jxc\DefaultDataInitService;
 use app\platformapi\controller\BaseAdminController;
 use app\platformapi\lists\tenant\TenantLists;
+use app\platformapi\lists\tenant\TenantRecycleLists;
 use app\platformapi\logic\setting\pay\PayConfigLogic;
 use app\platformapi\logic\setting\pay\PayWayLogic;
 use app\platformapi\logic\tenant\TenantAdminLogic;
@@ -36,6 +37,15 @@ class TenantController extends BaseAdminController
     public function lists()
     {
         return $this->dataLists(new TenantLists());
+    }
+
+    /**
+     * @notes 店铺回收站列表
+     * @return \think\response\Json
+     */
+    public function recycleLists()
+    {
+        return $this->dataLists(new TenantRecycleLists());
     }
 
 
@@ -69,7 +79,11 @@ class TenantController extends BaseAdminController
             DB::startTrans();
             // 验证参数
             // 创建租户基本信息
-            $params['expired_time'] = time();
+            $expiredTime = empty($params['expired_time']) ? time() : strtotime((string)$params['expired_time']);
+            if (false === $expiredTime) {
+                throw new \Exception('有效期格式错误');
+            }
+            $params['expired_time'] = $expiredTime;
             $tenant = TenantLogic::add($params);
             // 判断用户是否采用分表模式
             if (isset($params['tactics']) && $params['tactics'] == '1') {
@@ -96,7 +110,7 @@ class TenantController extends BaseAdminController
             // 提交事务
             DB::commit();
             // 返回成功
-            return $this->success('新增成功', [], 1, 1);
+            return $this->success('新增成功', ['id' => (int)$tenant['id']], 1, 1);
         } catch (\Exception $e) {
             // 回滚事务
             DB::rollBack();
@@ -122,7 +136,7 @@ class TenantController extends BaseAdminController
     }
 
     /**
-     * @notes 删除租户
+     * @notes 放入回收站
      * @return \think\response\Json
      * @author JXDN
      * @date 2024/09/03 17:02
@@ -132,7 +146,21 @@ class TenantController extends BaseAdminController
         $params = (new TenantValidate())->post()->goCheck('delete');
         $result = TenantLogic::delete($params);
         if (true === $result) {
-            return $this->success('删除成功', [], 1, 1);
+            return $this->success('已放入回收站', [], 1, 1);
+        }
+        return $this->fail(TenantLogic::getError());
+    }
+
+    /**
+     * @notes 恢复回收站店铺
+     * @return \think\response\Json
+     */
+    public function restore()
+    {
+        $params = (new TenantValidate())->post()->goCheck('restore');
+        $result = TenantLogic::restore($params);
+        if (true === $result) {
+            return $this->success('恢复成功', [], 1, 1);
         }
         return $this->fail(TenantLogic::getError());
     }

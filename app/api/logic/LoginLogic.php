@@ -152,6 +152,11 @@ class LoginLogic extends BaseLogic
         try {
             //通过code获取微信 openid
             $response = (new WeChatMnpService())->getMnpResByCode($params['code']);
+            $nickname = $params['nickname'] ?? $params['nickName'] ?? '';
+            $response['nickname'] = is_scalar($nickname) ? (string)$nickname : '';
+            $headimgurl = $params['headimgurl'] ?? $params['avatar'] ?? $params['avatarUrl'] ?? '';
+            $headimgurl = is_scalar($headimgurl) ? (string)$headimgurl : '';
+            $response['headimgurl'] = preg_match('/^https?:\/\//i', $headimgurl) ? $headimgurl : '';
             $userServer = new WechatUserService($response, UserTerminalEnum::WECHAT_MMP);
             $userServer->getResopnseByUserInfo()->authUserLogin();
 

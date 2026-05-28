@@ -1118,6 +1118,9 @@ INSERT INTO `la_system_menu`
 VALUES (170, 117, 'C', '微信用户列表', 'local-icon-user_guanli', 90, 'user.user/lists', 'wechat_user', 'tenant/wechat_user/index',
         '', '', 0, 1, 0, 1779566400, 1779566400);
 INSERT INTO `la_system_menu`
+VALUES (171, 117, 'C', '店铺回收站列表', 'local-icon-user_guanli', 80, 'tenant.tenant/recycleLists', 'recycle',
+        'tenant/recycle/index', '', '', 0, 1, 0, 1779566400, 1779566400);
+INSERT INTO `la_system_menu`
 VALUES (143, 35, 'C', '定时任务', '', 100, 'crontab.crontab/lists', 'scheduled_task',
         'setting/system/scheduled_task/index', '', '', 0, 1, 0, 1669357509, 1710473246);
 INSERT INTO `la_system_menu`
@@ -1152,7 +1155,10 @@ VALUES (167, 118, 'A', '编辑店铺', '', 0, 'tenant.tenant/edit', '', '', '', 
 INSERT INTO `la_system_menu`
 VALUES (168, 118, 'A', '店铺详情', '', 0, 'tenant.tenant/detail', '', '', '', '', 1, 1, 0, 1726822396, 1726822444);
 INSERT INTO `la_system_menu`
-VALUES (169, 118, 'A', '删除租户', '', 0, 'tenant.tenant/delete', '', '', '', '', 1, 1, 0, 1726822416, 1726822449);
+VALUES (169, 118, 'A', '放入回收站', '', 0, 'tenant.tenant/delete', '', '', '', '', 1, 1, 0, 1726822416, 1726822449);
+INSERT INTO `la_system_menu`
+VALUES (172, 171, 'A', '恢复店铺', '', 0, 'tenant.tenant/restore', '', '', '', '', 1, 1, 0, 1779566400,
+        1779566400);
 COMMIT;
 
 -- ----------------------------

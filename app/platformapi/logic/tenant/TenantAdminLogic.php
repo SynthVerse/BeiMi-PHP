@@ -330,9 +330,9 @@ class TenantAdminLogic extends BaseLogic
         // 初始化管理员账号
         return TenantAdmin::create([
             'tenant_id' => $id,
-            'account'   => $params['account'] ?: $sn,
+            'account'   => ($params['account'] ?? '') ?: $sn,
             'name'      => '超级管理员',
-            'password'  => self::createPassword($params['password'] ?: $defaultPassword),
+            'password'  => self::createPassword(($params['password'] ?? '') ?: $defaultPassword),
             'avatar'    => '',
             'disable'   => 0,
             'root'      => 1

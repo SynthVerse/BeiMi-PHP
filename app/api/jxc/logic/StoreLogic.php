@@ -250,6 +250,7 @@ class StoreLogic extends BaseLogic
         $hasStore = $storeCount > 0 || !empty($currentStore);
         $needsStoreSetup = !$hasStore;
         $needsStoreSwitch = $hasStore && empty($currentStore);
+        $canCreateStore = !StoreMembershipService::hasCreatedStore($userId);
 
         return self::formatStoreStatus([
             'has_store' => $hasStore,
@@ -259,7 +260,7 @@ class StoreLogic extends BaseLogic
             'current_store_id' => (int)($currentStore['id'] ?? $currentStore['tenant_id'] ?? 0),
             'current_store' => $currentStore,
             'actions' => [
-                'create' => true,
+                'create' => $canCreateStore,
                 'join' => true,
                 'switch' => $needsStoreSwitch || $storeCount > 1,
             ],

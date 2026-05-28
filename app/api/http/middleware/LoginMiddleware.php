@@ -20,9 +20,35 @@ class LoginMiddleware
      * @author 令狐冲
      * @date 2021/7/1 17:33
      */
-    public function handle($request, \Closure $next)
+    public function handle($request, \Closure $next, string $mode = '')
     {
-        if (($request->controllerObject ?? null) instanceof BaseJxcController) {
+        $isJxc = ($request->controllerObject ?? null) instanceof BaseJxcController;
+
+        // JXC 控制器在模块级（非 enforce 模式）：尝试 UserTokenCache 软验证，不拒绝请求
+        if ($isJxc && $mode !== 'enforce') {
+            $token = $request->header('token');
+            if (!empty($token)) {
+                $userInfo = (new UserTokenCache())->getUserInfo($token);
+                if (!empty($userInfo)) {
+                    $request->userInfo = $userInfo;
+                    $request->userId = $userInfo['user_id'] ?? 0;
+                    $request->adminInfo = [
+                        'admin_id'    => $userInfo['user_id'],
+                        'user_id'     => $userInfo['user_id'],
+                        'tenant_id'   => $userInfo['tenant_id'] ?? 0,
+                        'root'        => 0,
+                        'name'        => $userInfo['nickname'] ?? '',
+                        'account'     => $userInfo['mobile'] ?? '',
+                        'role_name'   => '',
+                        'role_id'     => [],
+                        'token'       => $userInfo['token'] ?? $token,
+                        'terminal'    => $userInfo['terminal'] ?? '',
+                        'expire_time' => $userInfo['expire_time'] ?? 0,
+                    ];
+                    $request->adminId = (int)($userInfo['user_id'] ?? 0);
+                    $request->tenantId = (int)($userInfo['tenant_id'] ?? 0);
+                }
+            }
             return $next($request);
         }
 
@@ -56,11 +82,13 @@ class LoginMiddleware
                 }
             }
 
-            $requestTenantId = (int)($request->tenantId ?? 0);
-            if ($requestTenantId > 0 && (int)($userInfo['tenant_id'] ?? 0) > 0 && (int)$userInfo['tenant_id'] !== $requestTenantId) {
-                if (!$isNotNeedLogin) {
-                    UserTokenService::expireToken($token);
-                    return JsonService::fail('非该站点用户禁止访问', [], -1);
+            if (!$isJxc) {
+                $requestTenantId = (int)($request->tenantId ?? 0);
+                if ($requestTenantId > 0 && (int)($userInfo['tenant_id'] ?? 0) > 0 && (int)$userInfo['tenant_id'] !== $requestTenantId) {
+                    if (!$isNotNeedLogin) {
+                        UserTokenService::expireToken($token);
+                        return JsonService::fail('非该站点用户禁止访问', [], -1);
+                    }
                 }
             }
         }
@@ -68,6 +96,25 @@ class LoginMiddleware
         //给request赋值，用于控制器
         $request->userInfo = $userInfo;
         $request->userId = $userInfo['user_id'] ?? 0;
+
+        // JXC 控制器 enforce 模式：额外映射 adminInfo 供 BaseJxcController 使用
+        if ($isJxc && $userInfo) {
+            $request->adminInfo = [
+                'admin_id'    => $userInfo['user_id'],
+                'user_id'     => $userInfo['user_id'],
+                'tenant_id'   => $userInfo['tenant_id'] ?? 0,
+                'root'        => 0,
+                'name'        => $userInfo['nickname'] ?? '',
+                'account'     => $userInfo['mobile'] ?? '',
+                'role_name'   => '',
+                'role_id'     => [],
+                'token'       => $userInfo['token'] ?? $token,
+                'terminal'    => $userInfo['terminal'] ?? '',
+                'expire_time' => $userInfo['expire_time'] ?? 0,
+            ];
+            $request->adminId = (int)($userInfo['user_id'] ?? 0);
+            $request->tenantId = (int)($userInfo['tenant_id'] ?? 0);
+        }
 
         return $next($request);
     }
