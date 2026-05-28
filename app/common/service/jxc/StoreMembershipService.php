@@ -11,6 +11,8 @@ use think\facade\Log;
 
 class StoreMembershipService
 {
+    private const AUTO_PROVISION_NOTE = '微信小程序用户自动创建';
+
     public const ROLE_OWNER = 'owner';
     public const ROLE_ADMIN = 'admin';
     public const ROLE_MEMBER = 'member';
@@ -29,6 +31,14 @@ class StoreMembershipService
         }
 
         return Db::transaction(function () use ($userId, $params, $name, $token) {
+            $lockedUserId = (int)Db::name('user')->where('id', $userId)->lock(true)->value('id');
+            if ($lockedUserId <= 0) {
+                throw new \RuntimeException('请先登录');
+            }
+            if (self::hasCreatedStore($userId)) {
+                throw new \RuntimeException('已有店铺，请勿重复创建');
+            }
+
             $time = time();
             $sn = Tenant::createUserSn();
             $tenantId = (int)Db::name('tenant')->insertGetId([
@@ -155,6 +165,24 @@ class StoreMembershipService
             ->toArray();
 
         return array_map(fn($row) => self::formatTenant((array)$row, $userId), $rows);
+    }
+
+    public static function hasCreatedStore(int $userId): bool
+    {
+        if ($userId <= 0) {
+            return false;
+        }
+
+        return Db::name('tenant_member')
+            ->alias('m')
+            ->join('tenant t', 't.id = m.tenant_id')
+            ->where('m.user_id', $userId)
+            ->where('m.role', self::ROLE_OWNER)
+            ->where('m.status', self::STATUS_ACTIVE)
+            ->whereNull('m.delete_time')
+            ->whereNull('t.delete_time')
+            ->whereRaw('(`t`.`notes` IS NULL OR `t`.`notes` <> ?)', [self::AUTO_PROVISION_NOTE])
+            ->count() > 0;
     }
 
     public static function currentTenant(int $userId, int $tenantId): array

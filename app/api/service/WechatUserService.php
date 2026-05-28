@@ -66,7 +66,7 @@ class WechatUserService
         $this->response = $response;
         $this->openid = $response['openid'];
         $this->unionid = $response['unionid'] ?? '';
-        $this->nickname = $response['nickname'] ?? '';
+        $this->nickname = $this->sanitizeNickname($response['nickname'] ?? '');
         $this->headimgurl = $response['headimgurl'] ?? '';
     }
 
@@ -153,14 +153,10 @@ class WechatUserService
         $userSn = User::createUserSn();
         $this->user->sn = $userSn;
         $this->user->account = 'u' . $userSn;
-        $this->user->nickname = "用户" . $userSn;
+        $this->user->nickname = !empty($this->nickname) ? $this->nickname : "用户" . $userSn;
         $this->user->avatar = $avatar;
         $this->user->channel = $this->terminal;
         $this->user->is_new_user = YesNoEnum::YES;
-
-        if ($this->terminal != UserTerminalEnum::WECHAT_MMP && !empty($this->nickname)) {
-            $this->user->nickname = $this->nickname;
-        }
 
         $this->user->save();
 
@@ -182,9 +178,20 @@ class WechatUserService
      */
     private function updateUser(): void
     {
+        $needSave = false;
+
+        if (!empty($this->nickname) && $this->shouldUpdateNickname((string)$this->user->nickname)) {
+            $this->user->nickname = $this->nickname;
+            $needSave = true;
+        }
+
         // 无头像需要更新头像
-        if (empty($this->user->avatar)) {
+        if (empty($this->user->avatar) && !empty($this->headimgurl)) {
             $this->user->avatar = $this->getAvatarByWechat();
+            $needSave = true;
+        }
+
+        if ($needSave) {
             $this->user->save();
         }
 
@@ -292,6 +299,27 @@ class WechatUserService
             }
         }
         return $avatar;
+    }
+
+    private function sanitizeNickname($nickname): string
+    {
+        if (!is_scalar($nickname)) {
+            return '';
+        }
+        $nickname = trim(strip_tags((string)$nickname));
+        if ($nickname === '') {
+            return '';
+        }
+        return function_exists('mb_substr') ? mb_substr($nickname, 0, 30) : substr($nickname, 0, 90);
+    }
+
+    private function shouldUpdateNickname(string $currentNickname): bool
+    {
+        $currentNickname = trim($currentNickname);
+        if ($currentNickname === '') {
+            return true;
+        }
+        return preg_match('/^用户\d+$/u', $currentNickname) === 1;
     }
 
 

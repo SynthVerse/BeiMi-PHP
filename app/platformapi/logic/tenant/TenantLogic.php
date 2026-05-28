@@ -1,6 +1,8 @@
 <?php
 namespace app\platformapi\logic\tenant;
 
+use app\common\cache\TenantAdminAuthCache;
+use app\common\cache\TenantAdminTokenCache;
 use app\common\enum\user\UserTerminalEnum;
 use app\common\logic\BaseLogic;
 use app\common\model\tenant\Tenant;
@@ -14,6 +16,8 @@ use think\facade\Db;
  */
 class TenantLogic extends BaseLogic
 {
+    private const AUTO_PROVISION_NOTE = '微信小程序用户自动创建';
+
     /**
      * @notes 新增租户
      * @param array $params
@@ -24,8 +28,9 @@ class TenantLogic extends BaseLogic
      */
     public static function add(array $params)
     {
-        $domain_alias = preg_replace('/^https?:\/\/|\/$/', '', $params['domain_alias']);
-        $sn = $params['host_name'] ?? Tenant::createUserSn();
+        $domain_alias = self::formatDomainAlias((string)($params['domain_alias'] ?? ''));
+        $hostName = trim((string)($params['host_name'] ?? $params['sn'] ?? ''));
+        $sn = $hostName === '' ? Tenant::createUserSn() : $hostName;
         $exists = (new Tenant())->where('sn', $sn)->find();
         if (!empty($exists)) {
             throw new Exception('主机名已被占用，请更换');
@@ -33,13 +38,14 @@ class TenantLogic extends BaseLogic
         return Tenant::create([
             'sn'                  => $sn,
             'name'                => $params['name'],
-            'avatar'              => $params['avatar'],
-            'tel'                 => $params['tel'],
+            'avatar'              => $params['avatar'] ?? '',
+            'tel'                 => $params['tel'] ?? '',
             'domain_alias'        => $domain_alias,
-            'domain_alias_enable' => $params['domain_alias_enable'],
+            'domain_alias_enable' => (int)($params['domain_alias_enable'] ?? 1),
             'disable'             => $params['disable'] ?? 0,
             'notes'               => $params['notes'] ?? '',
             'tactics'             => $params['tactics'] ?? 0,
+            'expired_time'        => (int)($params['expired_time'] ?? time()),
         ]);
     }
 
@@ -62,9 +68,12 @@ class TenantLogic extends BaseLogic
                 ->whereNull('delete_time')
                 ->count();
 
-            $domain = request()->domain();
-            $user['default_domain'] = $domain . '/admin/';
-            $user['domain'] = $domain . '/admin/';
+            $http_prefix = self::checkHttp() ? 'https://' : 'http://';
+            $domain = self::getRootDmain(request()->domain());
+            $user['default_domain'] = $http_prefix . $user['sn'] . '.' . $domain . '/admin/';
+            $user['domain'] = (int)$user['domain_alias_enable'] === 0 && !empty($user['domain_alias'])
+                ? $http_prefix . $user['domain_alias'] . '/admin/'
+                : $user['default_domain'];
             $user['expired_time'] = date("Y-m-d",$user['expired_time']);
             return $user->toArray();
         } catch (\Exception $e) {
@@ -84,16 +93,20 @@ class TenantLogic extends BaseLogic
     public static function edit(array $params)
     {
         try {
-            $domain_alias = preg_replace('/^https?:\/\/|\/$/', '', $params['domain_alias']);
-            $params["expired_time"] = strtotime($params["expired_time"]);
+            $domain_alias = self::formatDomainAlias((string)($params['domain_alias'] ?? ''));
+            $expiredTime = empty($params['expired_time']) ? time() : strtotime((string)$params['expired_time']);
+            if (false === $expiredTime) {
+                throw new Exception('有效期格式错误');
+            }
+            $params["expired_time"] = $expiredTime;
             Tenant::update([
                 'name'                => $params['name'],
-                'avatar'              => $params['avatar'],
+                'avatar'              => $params['avatar'] ?? '',
                 'disable'             => $params['disable'] ?? 0,
-                'tel'                 => $params['tel'],
+                'tel'                 => $params['tel'] ?? '',
                 'expired_time'        => $params['expired_time'],
                 'domain_alias'        => $domain_alias,
-                'domain_alias_enable' => $params['domain_alias_enable'],
+                'domain_alias_enable' => (int)($params['domain_alias_enable'] ?? 1),
                 'notes'               => $params['notes'] ?? '',
             ], ['id' => $params['id']]);
             return true;
@@ -104,7 +117,7 @@ class TenantLogic extends BaseLogic
     }
 
     /**
-     * @notes 删除租户
+     * @notes 放入回收站
      * @param array $params
      * @return bool
      * @author JXDN
@@ -113,7 +126,108 @@ class TenantLogic extends BaseLogic
     public static function delete(array $params)
     {
         try {
-            Tenant::destroy($params['id']);
+            Db::transaction(function () use ($params) {
+                $tenantId = (int)$params['id'];
+                Tenant::destroy($tenantId);
+
+                $adminIds = Db::name('tenant_admin')
+                    ->where('tenant_id', $tenantId)
+                    ->whereNull('delete_time')
+                    ->column('id');
+
+                if (!$adminIds) {
+                    return;
+                }
+
+                $time = time();
+                Db::name('tenant_admin')
+                    ->whereIn('id', $adminIds)
+                    ->update([
+                        'disable' => 1,
+                        'update_time' => $time,
+                    ]);
+
+                $tokens = Db::name('tenant_admin_session')
+                    ->whereIn('admin_id', $adminIds)
+                    ->column('token');
+                Db::name('tenant_admin_session')
+                    ->whereIn('admin_id', $adminIds)
+                    ->update([
+                        'expire_time' => $time,
+                        'update_time' => $time,
+                    ]);
+
+                $tokenCache = new TenantAdminTokenCache();
+                foreach ($tokens as $token) {
+                    $tokenCache->deleteAdminInfo($token);
+                }
+                foreach ($adminIds as $adminId) {
+                    (new TenantAdminAuthCache($adminId))->clearAuthCache();
+                }
+            });
+            return true;
+        } catch (\Exception $e) {
+            self::setError($e->getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * @notes 恢复回收站店铺
+     * @param array $params
+     * @return bool
+     */
+    public static function restore(array $params)
+    {
+        try {
+            Db::transaction(function () use ($params) {
+                $tenantId = (int)$params['id'];
+                $tenant = Tenant::onlyTrashed()->where('id', $tenantId)->findOrEmpty();
+                if ($tenant->isEmpty() || ($tenant['notes'] ?? '') === self::AUTO_PROVISION_NOTE) {
+                    throw new Exception('回收站店铺不存在');
+                }
+
+                $snExists = Tenant::where('sn', $tenant['sn'])
+                    ->where('id', '<>', $tenantId)
+                    ->findOrEmpty();
+                if (!$snExists->isEmpty()) {
+                    throw new Exception('店铺编号已被占用，无法恢复');
+                }
+
+                $domainAlias = self::formatDomainAlias((string)($tenant['domain_alias'] ?? ''));
+                if ((int)$tenant['domain_alias_enable'] === 0 && $domainAlias !== '') {
+                    $domainExists = Tenant::where('domain_alias', $domainAlias)
+                        ->where('id', '<>', $tenantId)
+                        ->findOrEmpty();
+                    if (!$domainExists->isEmpty()) {
+                        throw new Exception('域名别名已被占用，无法恢复');
+                    }
+                }
+
+                if (false === $tenant->restore()) {
+                    throw new Exception('恢复失败');
+                }
+
+                $adminIds = Db::name('tenant_admin')
+                    ->where('tenant_id', $tenantId)
+                    ->whereNull('delete_time')
+                    ->column('id');
+
+                if (!$adminIds) {
+                    return;
+                }
+
+                Db::name('tenant_admin')
+                    ->whereIn('id', $adminIds)
+                    ->update([
+                        'disable' => 0,
+                        'update_time' => time(),
+                    ]);
+
+                foreach ($adminIds as $adminId) {
+                    (new TenantAdminAuthCache($adminId))->clearAuthCache();
+                }
+            });
             return true;
         } catch (\Exception $e) {
             self::setError($e->getMessage());
@@ -166,5 +280,10 @@ class TenantLogic extends BaseLogic
         }
 
         return $host; // 当域名本身就是根域名时，直接返回
+    }
+
+    private static function formatDomainAlias(string $domainAlias): string
+    {
+        return preg_replace('/^https?:\/\//i', '', rtrim(trim($domainAlias), '/'));
     }
 }

@@ -14,6 +14,7 @@ use think\facade\Db;
  */
 class TenantLists extends BaseAdminDataLists implements ListsExcelInterface
 {
+    private const AUTO_PROVISION_NOTE = '微信小程序用户自动创建';
 
     /**
      * @notes 搜索条件
@@ -41,7 +42,7 @@ class TenantLists extends BaseAdminDataLists implements ListsExcelInterface
     {
         $field = "id,sn,name,avatar,disable,create_time,expired_time,domain_alias,domain_alias_enable,notes,tel";
 
-        $lists = Tenant::withSearch($this->setSearch(), $this->params)
+        $lists = $this->queryRealStores()
             ->limit($this->limitOffset, $this->limitLength)
             ->field($field)
             ->order('id desc')
@@ -77,7 +78,7 @@ class TenantLists extends BaseAdminDataLists implements ListsExcelInterface
      */
     public function count(): int
     {
-        return Tenant::withSearch($this->setSearch(), $this->params)->count();
+        return $this->queryRealStores()->count();
     }
 
 
@@ -188,5 +189,13 @@ class TenantLists extends BaseAdminDataLists implements ListsExcelInterface
             $counts[(int)$row['tenant_id']] = (int)$row['user_count'];
         }
         return $counts;
+    }
+
+    private function queryRealStores()
+    {
+        return Tenant::withSearch($this->setSearch(), $this->params)
+            ->where(function ($query) {
+                $query->whereNull('notes')->whereOr('notes', '<>', self::AUTO_PROVISION_NOTE);
+            });
     }
 }
