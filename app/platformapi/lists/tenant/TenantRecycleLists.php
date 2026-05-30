@@ -13,8 +13,6 @@ use think\facade\Db;
  */
 class TenantRecycleLists extends BaseAdminDataLists implements ListsExcelInterface
 {
-    private const AUTO_PROVISION_NOTE = '微信小程序用户自动创建';
-
     /**
      * @notes 搜索条件
      * @return array
@@ -124,9 +122,6 @@ class TenantRecycleLists extends BaseAdminDataLists implements ListsExcelInterfa
     private function queryRecycleStores()
     {
         return Tenant::onlyTrashed()
-            ->withSearch($this->setSearch(), $this->params)
-            ->where(function ($query) {
-                $query->whereNull('notes')->whereOr('notes', '<>', self::AUTO_PROVISION_NOTE);
-            });
+            ->withSearch($this->setSearch(), $this->params);
     }
 }
