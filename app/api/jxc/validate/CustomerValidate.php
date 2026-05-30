@@ -11,6 +11,8 @@ class CustomerValidate extends BaseValidate
         'customer_id' => 'integer|gt:0',
         'store_id' => 'integer|gt:0',
         'parent_id' => 'integer|egt:0',
+        'customer_type' => 'max:30|in:customer,store,parent,master,independent,independent_customer,sub_customer,child,children',
+        'customer_type_label' => 'max:20',
         'customer_name' => 'require|max:100',
         'contact' => 'max:50',
         'phone' => 'max:20',
@@ -34,8 +36,10 @@ class CustomerValidate extends BaseValidate
     protected $field = [
         'id' => '客户ID',
         'customer_id' => '客户ID',
-        'store_id' => '门店ID',
+        'store_id' => '子客户ID',
         'parent_id' => '父级客户ID',
+        'customer_type' => '客户类型',
+        'customer_type_label' => '客户类型标签',
         'customer_name' => '客户名称',
         'contact' => '联系人',
         'phone' => '联系电话',
@@ -63,6 +67,8 @@ class CustomerValidate extends BaseValidate
             'group_id',
             'group_name',
             'parent_id',
+            'customer_type',
+            'customer_type_label',
             'is_disabled',
             'status',
         ]);
@@ -81,6 +87,8 @@ class CustomerValidate extends BaseValidate
             'group_id',
             'group_name',
             'parent_id',
+            'customer_type',
+            'customer_type_label',
             'is_disabled',
             'status',
         ])->remove('customer_name', 'require');

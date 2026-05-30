@@ -38,6 +38,9 @@ Route::group('', function () {
     Route::post('supplier/del', 'jxc.Supplier/delete');
 
     Route::get('goods/index', 'jxc.Goods/lists');
+    Route::get('goods/cloud/index', 'jxc.CloudGoods/lists');
+    Route::get('goods/cloud/detail', 'jxc.CloudGoods/detail');
+    Route::post('goods/cloud/load', 'jxc.CloudGoods/load');
     Route::get('goods/detail', 'jxc.Goods/detail');
     Route::get('goods/suppliers', 'jxc.Goods/suppliers');
     Route::post('goods/suppliers/save', 'jxc.Goods/saveSuppliers');

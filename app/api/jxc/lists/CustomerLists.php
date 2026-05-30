@@ -53,11 +53,25 @@ class CustomerLists extends BaseDataLists
             $query->where('parent_id', (int)$this->params['parent_id']);
         }
 
-        $filter = (string)($this->params['filter'] ?? $this->params['hierarchyFilter'] ?? $this->params['customer_type'] ?? 'all');
-        if (in_array($filter, ['parent', 'customer', 'master'], true)) {
-            $query->where('parent_id', 0);
-        } elseif ($filter === 'store') {
-            $query->where('parent_id', '>', 0);
+        $filter = strtolower(trim((string)($this->params['filter'] ?? $this->params['hierarchyFilter'] ?? $this->params['customer_type'] ?? 'all')));
+        if (in_array($filter, ['parent', 'customer', 'master', 'independent', 'independent_customer'], true)) {
+            $query->where('parent_id', 0)->where('is_store', 0);
+        } elseif (in_array($filter, ['store', 'sub_customer', 'child', 'children'], true)) {
+            $query->where(function ($builder) {
+                $builder->where('parent_id', '>', 0)
+                    ->whereOr('is_store', 1);
+            });
+        }
+
+        if (array_key_exists('is_store', $this->params) && $this->params['is_store'] !== '') {
+            if ((int)$this->params['is_store'] === 1) {
+                $query->where(function ($builder) {
+                    $builder->where('parent_id', '>', 0)
+                        ->whereOr('is_store', 1);
+                });
+            } else {
+                $query->where('parent_id', 0)->where('is_store', 0);
+            }
         }
 
         $status = $this->params['status'] ?? $this->params['is_disabled'] ?? '';
