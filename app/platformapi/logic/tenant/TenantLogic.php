@@ -16,8 +16,6 @@ use think\facade\Db;
  */
 class TenantLogic extends BaseLogic
 {
-    private const AUTO_PROVISION_NOTE = '微信小程序用户自动创建';
-
     /**
      * @notes 新增租户
      * @param array $params
@@ -183,7 +181,7 @@ class TenantLogic extends BaseLogic
             Db::transaction(function () use ($params) {
                 $tenantId = (int)$params['id'];
                 $tenant = Tenant::onlyTrashed()->where('id', $tenantId)->findOrEmpty();
-                if ($tenant->isEmpty() || ($tenant['notes'] ?? '') === self::AUTO_PROVISION_NOTE) {
+                if ($tenant->isEmpty()) {
                     throw new Exception('回收站店铺不存在');
                 }
 
