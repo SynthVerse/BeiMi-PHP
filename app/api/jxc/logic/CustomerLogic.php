@@ -19,6 +19,10 @@ class CustomerLogic extends BaseLogic
 
     public static function add(array $params): array|false
     {
+        $params = self::normalizeCustomerTypeParams($params);
+        if ($params === false) {
+            return false;
+        }
         $saveData = self::buildSaveData($params);
         if (!self::assertCustomerNameUnique($saveData['customer_name'])) {
             return false;
@@ -32,7 +36,7 @@ class CustomerLogic extends BaseLogic
                 return false;
             }
             if ((int)$parent->is_disabled === 1) {
-                self::setError('停用客户不可绑定门店，请先启用');
+                self::setError('停用客户不可绑定子客户，请先启用');
                 return false;
             }
             $saveData['group_id'] = (int)$parent->group_id;
@@ -70,6 +74,10 @@ class CustomerLogic extends BaseLogic
 
     public static function edit(array $params): array|false
     {
+        $params = self::normalizeCustomerTypeParams($params);
+        if ($params === false) {
+            return false;
+        }
         $model = Customer::where('id', (int)$params['id'])
             ->where('tenant_id', (int)(request()->tenantId ?? 0))
             ->findOrEmpty();
@@ -94,7 +102,7 @@ class CustomerLogic extends BaseLogic
                 return false;
             }
             if (self::childrenCount((int)$model->id) > 0) {
-                self::setError('当前客户已拥有下属门店，暂不支持再次绑定');
+                self::setError('当前客户已拥有下属子客户，暂不支持再次绑定');
                 return false;
             }
             $parent = Customer::findOrEmpty($newParentId);
@@ -269,23 +277,23 @@ class CustomerLogic extends BaseLogic
             return false;
         }
         if ((int)$parent->parent_id > 0) {
-            self::setError('门店不可作为所属客户');
+            self::setError('子客户不可作为所属客户');
             return false;
         }
         if ((int)$store->parent_id > 0) {
-            self::setError('该客户已绑定为门店');
+            self::setError('该客户已绑定为子客户');
             return false;
         }
         if (self::childrenCount($storeId) > 0) {
-            self::setError('当前客户已拥有下属门店，暂不支持再次绑定');
+            self::setError('当前客户已拥有下属子客户，暂不支持再次绑定');
             return false;
         }
         if ((int)$parent->is_disabled === 1) {
-            self::setError('停用客户不可绑定门店，请先启用');
+            self::setError('停用客户不可绑定子客户，请先启用');
             return false;
         }
         if ((int)$store->is_disabled === 1) {
-            self::setError('停用客户不可绑定为门店，请先启用');
+            self::setError('停用客户不可绑定为子客户，请先启用');
             return false;
         }
 
@@ -307,7 +315,7 @@ class CustomerLogic extends BaseLogic
             return false;
         } catch (\Throwable $e) {
             Db::rollback();
-            Log::error('客户绑定门店失败: ' . $e->getMessage(), [
+            Log::error('客户绑定子客户失败: ' . $e->getMessage(), [
                 'file'  => $e->getFile(),
                 'line'  => $e->getLine(),
                 'trace' => $e->getTraceAsString(),
@@ -321,13 +329,13 @@ class CustomerLogic extends BaseLogic
     {
         $storeId = (int)($params['store_id'] ?? $params['id'] ?? 0);
         if ($storeId <= 0) {
-            self::setError('门店不存在');
+            self::setError('子客户不存在');
             return false;
         }
 
         $store = Customer::findOrEmpty($storeId);
         if ($store->isEmpty()) {
-            self::setError('门店不存在');
+            self::setError('子客户不存在');
             return false;
         }
 
@@ -347,7 +355,7 @@ class CustomerLogic extends BaseLogic
             return false;
         } catch (\Throwable $e) {
             Db::rollback();
-            Log::error('客户解除门店失败: ' . $e->getMessage(), [
+            Log::error('客户解除子客户失败: ' . $e->getMessage(), [
                 'file'  => $e->getFile(),
                 'line'  => $e->getLine(),
                 'trace' => $e->getTraceAsString(),
@@ -366,7 +374,7 @@ class CustomerLogic extends BaseLogic
             return false;
         }
         if ((int)$customer->parent_id > 0) {
-            self::setError('门店不支持直接调整分组，请调整所属客户');
+            self::setError('子客户不支持直接调整分组，请调整所属客户');
             return false;
         }
 
@@ -502,7 +510,7 @@ class CustomerLogic extends BaseLogic
             return ['data' => [], 'total' => 0, 'page' => $page, 'pagesize' => $pageSize];
         }
 
-        // 构建 customer_id 查询条件：主客户包含所有门店的销售单
+        // 构建 customer_id 查询条件：主客户包含所有子客户的销售单
         $customerIds = [$customerId];
         if ((int)$customer->parent_id === 0) {
             $childIds = Customer::where('parent_id', $customerId)->column('id');
@@ -642,6 +650,8 @@ class CustomerLogic extends BaseLogic
             return bcadd($sum, (string)($child['order_receivable'] ?? '0.00'), 2);
         }, '0.00');
         $isDisabled = (int)($item['is_disabled'] ?? 0);
+        $isStore = $parentId > 0 || (int)($item['is_store'] ?? 0) === 1;
+        $customerType = $isStore ? 'store' : 'customer';
 
         return [
             'id' => $id,
@@ -656,7 +666,7 @@ class CustomerLogic extends BaseLogic
             'group_name' => $groupName !== '' ? $groupName : '未分组',
             'parent_id' => $parentId > 0 ? $parentId : null,
             'parent_name' => $parentMap[$parentId] ?? '',
-            'is_store' => $parentId > 0 ? 1 : 0,
+            'is_store' => $isStore ? 1 : 0,
             'children_count' => $childrenCount,
             'children' => $includeChildren ? $children : null,
             'stores' => $includeChildren ? $children : null,
@@ -664,7 +674,8 @@ class CustomerLogic extends BaseLogic
             'status' => $isDisabled === 1 ? 'disabled' : 'enabled',
             'status_text' => $isDisabled === 1 ? '停用' : '启用',
             'is_enabled' => $isDisabled === 1 ? 0 : 1,
-            'customer_type' => $parentId > 0 ? 'store' : 'customer',
+            'customer_type' => $customerType,
+            'customer_type_label' => self::customerTypeLabel($customerType),
             'order_receivable' => self::money($selfReceivable),
             'order_money' => self::money($item['order_money'] ?? 0),
             'order_pay_money' => self::money($item['order_pay_money'] ?? 0),
@@ -720,6 +731,42 @@ class CustomerLogic extends BaseLogic
             return 1;
         }
         return 0;
+    }
+
+    protected static function normalizeCustomerTypeParams(array $params): array|false
+    {
+        $customerType = self::normalizeCustomerType((string)($params['customer_type'] ?? ''));
+        if ($customerType === '') {
+            return $params;
+        }
+
+        $parentId = (int)($params['parent_id'] ?? 0);
+        if ($customerType === 'store' && $parentId <= 0) {
+            self::setError('请选择所属独立客户');
+            return false;
+        }
+        if ($customerType === 'customer' && (!array_key_exists('parent_id', $params) || $params['parent_id'] === '')) {
+            $params['parent_id'] = 0;
+        }
+
+        return $params;
+    }
+
+    protected static function normalizeCustomerType(string $type): string
+    {
+        $type = strtolower(trim($type));
+        if (in_array($type, ['customer', 'parent', 'master', 'independent', 'independent_customer'], true)) {
+            return 'customer';
+        }
+        if (in_array($type, ['store', 'sub_customer', 'child', 'children'], true)) {
+            return 'store';
+        }
+        return '';
+    }
+
+    protected static function customerTypeLabel(string $type): string
+    {
+        return $type === 'store' ? '子客户' : '独立客户';
     }
 
     protected static function buildSaveData(array $params, array $current = []): array
