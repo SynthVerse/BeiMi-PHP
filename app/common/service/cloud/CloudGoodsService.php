@@ -8,35 +8,14 @@ use app\common\model\cloud\CloudGoods;
 use app\common\model\cloud\CloudGoodsImport;
 use app\common\model\goods\TenantGoodscat;
 use app\common\model\jxc\Goods;
-use app\common\model\jxc\GoodsSupplier;
 use app\common\model\jxc\GoodsUnit;
-use app\common\model\jxc\Vendor;
 use think\facade\Db;
 
 class CloudGoodsService extends BaseLogic
 {
-    public static function visibleQuery(int $tenantId, mixed $scope = null)
+    public static function visibleQuery(int $tenantId)
     {
-        $query = CloudGoods::where(function ($builder) use ($tenantId) {
-            $builder->where(function ($public) {
-                $public->where('scope', CloudGoods::SCOPE_PUBLIC)
-                    ->where('tenant_id', 0)
-                    ->where('status', CloudGoods::STATUS_ENABLED);
-            });
-
-            if ($tenantId > 0) {
-                $builder->whereOr(function ($private) use ($tenantId) {
-                    $private->where('scope', CloudGoods::SCOPE_PRIVATE)
-                        ->where('tenant_id', $tenantId);
-                });
-            }
-        });
-
-        $scope = self::normalizeScope($scope);
-        if ($scope > 0) {
-            $query->where('scope', $scope);
-        }
-        return $query;
+        return self::publicQuery()->where('status', CloudGoods::STATUS_ENABLED);
     }
 
     public static function publicQuery()
@@ -44,17 +23,12 @@ class CloudGoodsService extends BaseLogic
         return CloudGoods::where('scope', CloudGoods::SCOPE_PUBLIC)->where('tenant_id', 0);
     }
 
-    public static function privateQuery(int $tenantId)
-    {
-        return CloudGoods::where('scope', CloudGoods::SCOPE_PRIVATE)->where('tenant_id', $tenantId);
-    }
-
     public static function listVisible(array $params, int $tenantId, int $offset, int $limit): array
     {
         $cacheParams = self::cacheParams('visible', $params, $tenantId, $offset, $limit);
         $cache = new CloudGoodsCache();
         $rows = $cache->rememberValue($cache->listKey($cacheParams), function () use ($params, $tenantId, $offset, $limit) {
-            return self::applyFilters(self::visibleQuery($tenantId, $params['scope'] ?? null), $params)
+            return self::applyFilters(self::visibleQuery($tenantId), $params)
                 ->field(self::fields())
                 ->limit($offset, $limit)
                 ->order(['sort' => 'desc', 'id' => 'desc'])
@@ -69,7 +43,7 @@ class CloudGoodsService extends BaseLogic
         $cacheParams = self::cacheParams('visible_count', $params, $tenantId, 0, 0);
         $cache = new CloudGoodsCache();
         return (int)$cache->rememberValue($cache->listKey($cacheParams), function () use ($params, $tenantId) {
-            return self::applyFilters(self::visibleQuery($tenantId, $params['scope'] ?? null), $params)->count();
+            return self::applyFilters(self::visibleQuery($tenantId), $params)->count();
         });
     }
 
@@ -79,7 +53,7 @@ class CloudGoodsService extends BaseLogic
         $cache = new CloudGoodsCache();
         return $cache->rememberValue($cache->listKey($cacheParams), function () use ($params, $offset, $limit) {
             return self::applyFilters(self::publicQuery(), $params)
-                ->field(self::fields())
+                ->field(self::publicListFields())
                 ->limit($offset, $limit)
                 ->order(['sort' => 'desc', 'id' => 'desc'])
                 ->select()
@@ -96,20 +70,10 @@ class CloudGoodsService extends BaseLogic
         });
     }
 
-    public static function listPrivateWithPublic(array $params, int $tenantId, int $offset, int $limit): array
-    {
-        return self::listVisible($params, $tenantId, $offset, $limit);
-    }
-
-    public static function countPrivateWithPublic(array $params, int $tenantId): int
-    {
-        return self::countVisible($params, $tenantId);
-    }
-
     public static function detailVisible(int $id, int $tenantId): array
     {
         $cache = new CloudGoodsCache();
-        $row = $cache->rememberValue($cache->detailKey($id, $tenantId), function () use ($id, $tenantId) {
+        $row = $cache->rememberValue($cache->detailKey($id, 0), function () use ($id, $tenantId) {
             $model = self::visibleQuery($tenantId)->where('id', $id)->findOrEmpty();
             return $model->isEmpty() ? [] : $model->append(['scope_desc', 'status_desc'])->toArray();
         });
@@ -123,11 +87,6 @@ class CloudGoodsService extends BaseLogic
     {
         $model = self::publicQuery()->where('id', $id)->findOrEmpty();
         return $model->isEmpty() ? [] : $model->append(['scope_desc', 'status_desc'])->toArray();
-    }
-
-    public static function detailPrivateOrPublic(int $id, int $tenantId): array
-    {
-        return self::detailVisible($id, $tenantId);
     }
 
     public static function addPublic(array $params, int $adminId = 0): array|false
@@ -145,33 +104,6 @@ class CloudGoodsService extends BaseLogic
         return self::deleteCloudGoods((array)($params['id'] ?? []), CloudGoods::SCOPE_PUBLIC, 0);
     }
 
-    public static function addPrivate(array $params, int $tenantId, int $adminId = 0): array|false
-    {
-        if ($tenantId <= 0) {
-            self::setError('租户上下文缺失，请重新登录');
-            return false;
-        }
-        return self::saveCloudGoods($params, CloudGoods::SCOPE_PRIVATE, $tenantId, $adminId);
-    }
-
-    public static function editPrivate(array $params, int $tenantId, int $adminId = 0): bool
-    {
-        if ($tenantId <= 0) {
-            self::setError('租户上下文缺失，请重新登录');
-            return false;
-        }
-        return self::updateCloudGoods($params, CloudGoods::SCOPE_PRIVATE, $tenantId, $adminId);
-    }
-
-    public static function deletePrivate(array $params, int $tenantId): bool
-    {
-        if ($tenantId <= 0) {
-            self::setError('租户上下文缺失，请重新登录');
-            return false;
-        }
-        return self::deleteCloudGoods((array)($params['id'] ?? []), CloudGoods::SCOPE_PRIVATE, $tenantId);
-    }
-
     public static function loadToTenant(array $params, int $tenantId, int $userId = 0, int $adminId = 0): array|false
     {
         if ($tenantId <= 0) {
@@ -182,9 +114,8 @@ class CloudGoodsService extends BaseLogic
         $cloudGoodsId = (int)($params['cloud_goods_id'] ?? $params['id'] ?? 0);
         $unitId = (int)($params['unit_id'] ?? $params['units_id'] ?? 0);
         $categoryId = (int)($params['category_id'] ?? 0);
-        $supplierId = (int)($params['primary_supplier_id'] ?? $params['supplier_id'] ?? 0);
 
-        $cloudGoods = self::visibleQuery($tenantId)->where('id', $cloudGoodsId)->findOrEmpty();
+        $cloudGoods = self::visibleQuery($tenantId)->field(self::fields())->where('id', $cloudGoodsId)->findOrEmpty();
         if ($cloudGoods->isEmpty()) {
             self::setError('云端商品不存在或无权限访问');
             return false;
@@ -200,14 +131,6 @@ class CloudGoodsService extends BaseLogic
             $category = TenantGoodscat::where('id', $categoryId)->where('tenant_id', $tenantId)->findOrEmpty();
             if ($category->isEmpty()) {
                 self::setError('商品分类不存在');
-                return false;
-            }
-        }
-
-        if ($supplierId > 0) {
-            $supplier = Vendor::where('id', $supplierId)->where('tenant_id', $tenantId)->findOrEmpty();
-            if ($supplier->isEmpty()) {
-                self::setError('供应商不存在');
                 return false;
             }
         }
@@ -234,21 +157,9 @@ class CloudGoodsService extends BaseLogic
                 'cost' => self::normalizeDecimal($source['cost'] ?? 0),
                 'stock' => self::normalizeDecimal($source['stock'] ?? 0),
                 'category_id' => $categoryId,
-                'primary_supplier_id' => $supplierId,
                 'is_disabled' => (int)($source['is_disabled'] ?? 0),
                 'remark' => (string)($source['remark'] ?? ''),
             ]);
-
-            if ($supplierId > 0) {
-                GoodsSupplier::create([
-                    'tenant_id' => $tenantId,
-                    'goods_id' => (int)$goods->id,
-                    'supplier_id' => $supplierId,
-                    'is_primary' => 1,
-                    'purchase_price' => self::normalizeDecimal($source['cost'] ?? 0),
-                    'status' => 1,
-                ]);
-            }
 
             CloudGoodsImport::create([
                 'tenant_id' => $tenantId,
@@ -259,7 +170,6 @@ class CloudGoodsService extends BaseLogic
                 'source_scope' => (int)$source['scope'],
                 'load_unit_id' => $unitId,
                 'load_category_id' => $categoryId,
-                'load_supplier_id' => $supplierId,
                 'load_snapshot' => json_encode($source, JSON_UNESCAPED_UNICODE),
             ]);
 
@@ -280,6 +190,9 @@ class CloudGoodsService extends BaseLogic
     protected static function saveCloudGoods(array $params, int $scope, int $tenantId, int $adminId = 0): array|false
     {
         $data = self::buildSaveData($params, $scope, $tenantId, $adminId);
+        if ($data === false) {
+            return false;
+        }
         if ($data['name'] === '') {
             self::setError('商品名称不能为空');
             return false;
@@ -309,6 +222,9 @@ class CloudGoodsService extends BaseLogic
         }
 
         $data = self::buildSaveData($params, $scope, $tenantId, $adminId, $model->toArray());
+        if ($data === false) {
+            return false;
+        }
         if ($data['name'] === '') {
             self::setError('商品名称不能为空');
             return false;
@@ -346,12 +262,16 @@ class CloudGoodsService extends BaseLogic
         }
     }
 
-    protected static function buildSaveData(array $params, int $scope, int $tenantId, int $adminId = 0, array $current = []): array
+    protected static function buildSaveData(array $params, int $scope, int $tenantId, int $adminId = 0, array $current = []): array|false
     {
         $status = (int)($params['status'] ?? ($current['status'] ?? CloudGoods::STATUS_ENABLED));
         $isDisabled = (int)($params['is_disabled'] ?? ($current['is_disabled'] ?? 0));
         $name = trim((string)($params['name'] ?? $params['product_name'] ?? ($current['name'] ?? '')));
         $units = trim((string)($params['units'] ?? $params['unit'] ?? ($current['units'] ?? '')));
+        $category = self::resolvePublicCategory($params, $current);
+        if ($category === false) {
+            return false;
+        }
 
         return [
             'scope' => $scope,
@@ -364,12 +284,38 @@ class CloudGoodsService extends BaseLogic
             'price' => self::normalizeDecimal($params['price'] ?? $params['units_money'] ?? ($current['price'] ?? 0)),
             'cost' => self::normalizeDecimal($params['cost'] ?? $params['purchase_price'] ?? ($current['cost'] ?? 0)),
             'stock' => self::normalizeDecimal($params['stock'] ?? ($current['stock'] ?? 0)),
-            'category_name' => trim((string)($params['category_name'] ?? ($current['category_name'] ?? ''))),
-            'supplier_name' => trim((string)($params['supplier_name'] ?? ($current['supplier_name'] ?? ''))),
+            'category_id' => $category['id'],
+            'category_name' => $category['name'],
             'is_disabled' => $isDisabled === 1 ? 1 : 0,
             'status' => $status === CloudGoods::STATUS_DISABLED ? CloudGoods::STATUS_DISABLED : CloudGoods::STATUS_ENABLED,
             'sort' => (int)($params['sort'] ?? ($current['sort'] ?? 0)),
             'remark' => trim((string)($params['remark'] ?? ($current['remark'] ?? ''))),
+        ];
+    }
+
+    protected static function resolvePublicCategory(array $params, array $current = []): array|false
+    {
+        $categoryId = array_key_exists('category_id', $params)
+            ? (int)$params['category_id']
+            : (int)($current['category_id'] ?? 0);
+        $categoryName = trim((string)($params['category_name'] ?? ($current['category_name'] ?? '')));
+
+        if ($categoryId <= 0) {
+            return ['id' => 0, 'name' => $categoryName];
+        }
+
+        $category = TenantGoodscat::where('id', $categoryId)
+            ->where('tenant_id', 0)
+            ->field(['id', 'name'])
+            ->findOrEmpty();
+        if ($category->isEmpty()) {
+            self::setError('请选择有效的商品分类');
+            return false;
+        }
+
+        return [
+            'id' => (int)$category->id,
+            'name' => (string)$category->name,
         ];
     }
 
@@ -381,8 +327,7 @@ class CloudGoodsService extends BaseLogic
                 $builder->whereLike('name', '%' . $keyword . '%')
                     ->whereOr('product_code', 'like', '%' . $keyword . '%')
                     ->whereOr('units', 'like', '%' . $keyword . '%')
-                    ->whereOr('category_name', 'like', '%' . $keyword . '%')
-                    ->whereOr('supplier_name', 'like', '%' . $keyword . '%');
+                    ->whereOr('category_name', 'like', '%' . $keyword . '%');
             });
         }
 
@@ -411,9 +356,6 @@ class CloudGoodsService extends BaseLogic
         foreach ($rows as &$row) {
             $row['scope'] = (int)($row['scope'] ?? 0);
             $row['tenant_id'] = (int)($row['tenant_id'] ?? 0);
-            $row['is_public'] = $row['scope'] === CloudGoods::SCOPE_PUBLIC ? 1 : 0;
-            $row['is_private'] = $row['scope'] === CloudGoods::SCOPE_PRIVATE ? 1 : 0;
-            $row['scope_desc'] = $row['scope'] === CloudGoods::SCOPE_PUBLIC ? '公共库' : '私有库';
             $row['status_desc'] = (int)($row['status'] ?? 0) === CloudGoods::STATUS_ENABLED ? '启用' : '停用';
             $row['loaded'] = isset($loaded[(int)$row['id']]);
             $row['loaded_goods_id'] = $loaded[(int)$row['id']] ?? 0;
@@ -472,27 +414,12 @@ class CloudGoodsService extends BaseLogic
         return true;
     }
 
-    protected static function normalizeScope(mixed $scope): int
-    {
-        if ($scope === '' || $scope === null) {
-            return 0;
-        }
-        $scopeValue = is_string($scope) ? strtolower(trim($scope)) : $scope;
-        if (in_array($scopeValue, ['public', 'platform', '1', 1], true)) {
-            return CloudGoods::SCOPE_PUBLIC;
-        }
-        if (in_array($scopeValue, ['private', 'tenant', '2', 2], true)) {
-            return CloudGoods::SCOPE_PRIVATE;
-        }
-        return 0;
-    }
-
     protected static function cacheParams(string $type, array $params, int $tenantId, int $offset, int $limit): array
     {
         return [
             'type' => $type,
             'tenant_id' => $tenantId,
-            'scope' => self::normalizeScope($params['scope'] ?? null),
+            'scope' => CloudGoods::SCOPE_PUBLIC,
             'keyword' => trim((string)($params['keyword'] ?? $params['name'] ?? $params['product_name'] ?? '')),
             'status' => (string)($params['status'] ?? ''),
             'offset' => $offset,
@@ -514,8 +441,30 @@ class CloudGoodsService extends BaseLogic
             'price',
             'cost',
             'stock',
+            'category_id',
             'category_name',
-            'supplier_name',
+            'is_disabled',
+            'status',
+            'sort',
+            'remark',
+            'create_time',
+            'update_time',
+        ];
+    }
+
+    protected static function publicListFields(): array
+    {
+        return [
+            'id',
+            'scope',
+            'tenant_id',
+            'owner_admin_id',
+            'owner_user_id',
+            'name',
+            'product_code',
+            'units',
+            'category_id',
+            'category_name',
             'is_disabled',
             'status',
             'sort',
