@@ -195,6 +195,72 @@ CREATE TABLE `la_article_collect`
   COLLATE = utf8mb4_general_ci COMMENT = '文章收藏表'
   ROW_FORMAT = Dynamic;
 -- ----------------------------
+-- Table structure for la_cloud_goods
+-- ----------------------------
+DROP TABLE IF EXISTS `la_cloud_goods`;
+CREATE TABLE `la_cloud_goods`
+(
+    `id`             int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '云端商品ID',
+    `scope`          tinyint(1) UNSIGNED NOT NULL DEFAULT 1 COMMENT '商品库类型：1=平台公共',
+    `tenant_id`      int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID，公共库为0',
+    `owner_admin_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '维护管理员ID',
+    `owner_user_id`  int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '维护用户ID',
+    `name`           varchar(200) NOT NULL DEFAULT '' COMMENT '商品名称',
+    `product_code`   varchar(100) NOT NULL DEFAULT '' COMMENT '商品编码',
+    `units`          varchar(50) NOT NULL DEFAULT '' COMMENT '默认单位名称',
+    `price`          decimal(12, 2) NOT NULL DEFAULT 0.00 COMMENT '销售价格',
+    `cost`           decimal(12, 2) NOT NULL DEFAULT 0.00 COMMENT '成本价',
+    `stock`          decimal(12, 2) NOT NULL DEFAULT 0.00 COMMENT '默认库存',
+    `category_id`    int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '分类ID',
+    `category_name`  varchar(100) NOT NULL DEFAULT '' COMMENT '云端分类名称快照',
+    `supplier_name`  varchar(100) NOT NULL DEFAULT '' COMMENT '云端供应商名称快照',
+    `is_disabled`   tinyint(1) NOT NULL DEFAULT 0 COMMENT '加载后是否停用',
+    `status`         tinyint(1) NOT NULL DEFAULT 1 COMMENT '云端状态：0=停用，1=启用',
+    `sort`           int(11) NOT NULL DEFAULT 0 COMMENT '排序',
+    `remark`         varchar(500) NOT NULL DEFAULT '' COMMENT '备注',
+    `create_time`    int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建时间',
+    `update_time`    int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    KEY `idx_scope_tenant_status` (`scope`, `tenant_id`, `status`),
+    KEY `idx_tenant_name_units` (`tenant_id`, `name`, `units`),
+    KEY `idx_product_code` (`product_code`),
+    KEY `idx_category_id` (`category_id`),
+    KEY `idx_sort` (`sort`)
+) ENGINE = InnoDB
+  CHARACTER SET = utf8mb4
+  COLLATE = utf8mb4_general_ci COMMENT = '云端商品库表'
+  ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for la_cloud_goods_import
+-- ----------------------------
+DROP TABLE IF EXISTS `la_cloud_goods_import`;
+CREATE TABLE `la_cloud_goods_import`
+(
+    `id`               int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '导入记录ID',
+    `tenant_id`        int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
+    `cloud_goods_id`   int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '云端商品ID',
+    `goods_id`         int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '本地商品ID',
+    `user_id`          int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '操作用户ID',
+    `admin_id`         int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '操作管理员ID',
+    `source_scope`     tinyint(1) UNSIGNED NOT NULL DEFAULT 1 COMMENT '来源类型：1=平台公共',
+    `load_unit_id`     int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '加载时选择的单位ID',
+    `load_category_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '加载时选择的分类ID',
+    `load_supplier_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '加载时选择的供应商ID',
+    `load_snapshot`   longtext NULL COMMENT '加载时云端商品快照',
+    `create_time`      int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建时间',
+    `update_time`      int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    KEY `idx_tenant_cloud_goods` (`tenant_id`, `cloud_goods_id`),
+    KEY `idx_tenant_goods` (`tenant_id`, `goods_id`),
+    KEY `idx_admin_id` (`admin_id`),
+    KEY `idx_user_id` (`user_id`)
+) ENGINE = InnoDB
+  CHARACTER SET = utf8mb4
+  COLLATE = utf8mb4_general_ci COMMENT = '云端商品加载记录表'
+  ROW_FORMAT = Dynamic;
+
+-- ----------------------------
 -- Table structure for la_config
 -- ----------------------------
 DROP TABLE IF EXISTS `la_config`;
@@ -1159,6 +1225,38 @@ VALUES (169, 118, 'A', '放入回收站', '', 0, 'tenant.tenant/delete', '', '',
 INSERT INTO `la_system_menu`
 VALUES (172, 171, 'A', '恢复店铺', '', 0, 'tenant.tenant/restore', '', '', '', '', 1, 1, 0, 1779566400,
         1779566400);
+INSERT INTO `la_system_menu`
+VALUES (173, 0, 'M', '商品管理', 'local-icon-goods', 700, '', 'goods', '', '', '', 0, 1, 0, 1780156800, 1780156800);
+INSERT INTO `la_system_menu`
+VALUES (174, 173, 'C', '公共商品库', 'local-icon-goods', 70, 'goods.cloud_goods/lists', 'cloud_goods',
+        'goods/cloud_goods/index', '', '', 0, 1, 0, 1780156800, 1780156800);
+INSERT INTO `la_system_menu`
+VALUES (175, 174, 'A', '新增', '', 0, 'goods.cloud_goods/add', '', '', '', '', 1, 1, 0, 1780156800,
+        1780156800);
+INSERT INTO `la_system_menu`
+VALUES (176, 174, 'A', '编辑', '', 0, 'goods.cloud_goods/edit', '', '', '', '', 1, 1, 0, 1780156800,
+        1780156800);
+INSERT INTO `la_system_menu`
+VALUES (177, 174, 'A', '删除', '', 0, 'goods.cloud_goods/delete', '', '', '', '', 1, 1, 0, 1780156800,
+        1780156800);
+INSERT INTO `la_system_menu`
+VALUES (178, 173, 'C', '分类管理', 'local-icon-goods', 60, 'goods.tenant_goodscat/lists', 'cate',
+        'goods/cate/index', '', '', 0, 1, 0, 1780156800, 1780156800);
+INSERT INTO `la_system_menu`
+VALUES (179, 178, 'A', '新增', '', 0, 'goods.tenant_goodscat/add', '', '', '', '', 1, 1, 0, 1780156800,
+        1780156800);
+INSERT INTO `la_system_menu`
+VALUES (180, 178, 'A', '编辑', '', 0, 'goods.tenant_goodscat/edit', '', '', '', '', 1, 1, 0, 1780156800,
+        1780156800);
+INSERT INTO `la_system_menu`
+VALUES (181, 178, 'A', '删除', '', 0, 'goods.tenant_goodscat/delete', '', '', '', '', 1, 1, 0, 1780156800,
+        1780156800);
+INSERT INTO `la_system_menu`
+VALUES (182, 178, 'A', '详情', '', 0, 'goods.tenant_goodscat/detail', '', '', '', '', 1, 1, 0, 1780156800,
+        1780156800);
+INSERT INTO `la_system_menu`
+VALUES (183, 178, 'A', '全部分类', '', 0, 'goods.tenant_goodscat/all', '', '', '', '', 1, 1, 0, 1780156800,
+        1780156800);
 COMMIT;
 
 -- ----------------------------
@@ -1353,6 +1451,27 @@ CREATE TABLE `la_tenant_dept`
   AUTO_INCREMENT = 2
   CHARACTER SET = utf8mb4
   COLLATE = utf8mb4_general_ci COMMENT = '租户部门表'
+  ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for la_tenant_goodscat
+-- ----------------------------
+DROP TABLE IF EXISTS `la_tenant_goodscat`;
+CREATE TABLE `la_tenant_goodscat`
+(
+    `id`          int(11) UNSIGNED                                             NOT NULL AUTO_INCREMENT COMMENT '主键',
+    `tenant_id`   int(11) UNSIGNED                                             NOT NULL DEFAULT 0 COMMENT '租户ID',
+    `name`        varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT '' COMMENT '分类名称',
+    `sort`        int(11)                                                      NOT NULL DEFAULT 0 COMMENT '排序',
+    `is_show`     tinyint(1)                                                   NOT NULL DEFAULT 0 COMMENT '是否隐藏：0-显示；1-隐藏',
+    `create_time` int(10)                                                      NULL     DEFAULT NULL COMMENT '创建时间',
+    `update_time` int(10)                                                      NULL     DEFAULT NULL COMMENT '更新时间',
+    `delete_time` int(10)                                                      NULL     DEFAULT NULL COMMENT '删除时间',
+    PRIMARY KEY (`id`) USING BTREE,
+    INDEX `idx_tenant_show_sort` (`tenant_id`, `is_show`, `sort`, `id`) USING BTREE
+) ENGINE = InnoDB
+  CHARACTER SET = utf8mb4
+  COLLATE = utf8mb4_general_ci COMMENT = '租户商品分类表'
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------

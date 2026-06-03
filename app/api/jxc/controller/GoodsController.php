@@ -2,6 +2,7 @@
 
 namespace app\api\jxc\controller;
 
+use app\api\jxc\lists\GoodsCategoryLists;
 use app\api\jxc\lists\GoodsLists;
 use app\api\jxc\logic\GoodsLogic;
 use app\api\jxc\validate\GoodsValidate;
@@ -47,6 +48,11 @@ class GoodsController extends BaseJxcController
     {
         $params = (new GoodsValidate())->goCheck('detail');
         return $this->data(GoodsLogic::detail($params));
+    }
+
+    public function categories()
+    {
+        return $this->dataLists(GoodsCategoryLists::class);
     }
 
     public function suppliers()

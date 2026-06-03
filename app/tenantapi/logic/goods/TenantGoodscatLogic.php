@@ -29,6 +29,7 @@ class TenantGoodscatLogic extends BaseLogic
         Db::startTrans();
         try {
             TenantGoodscat::create([
+                'tenant_id' => (int)(request()->tenantId ?? 0),
                 'name' => $params['name'],
                 'sort' => $params['sort'],
                 'is_show' => $params['is_show']
@@ -55,7 +56,9 @@ class TenantGoodscatLogic extends BaseLogic
     {
         Db::startTrans();
         try {
-            TenantGoodscat::where('id', $params['id'])->update([
+            TenantGoodscat::where('id', $params['id'])
+                ->where('tenant_id', (int)(request()->tenantId ?? 0))
+                ->update([
                 'name' => $params['name'],
                 'sort' => $params['sort'],
                 'is_show' => $params['is_show']
@@ -80,7 +83,9 @@ class TenantGoodscatLogic extends BaseLogic
      */
     public static function delete(array $params): bool
     {
-        return TenantGoodscat::destroy($params['id']);
+        return TenantGoodscat::where('id', $params['id'])
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->delete();
     }
 
 
@@ -93,7 +98,10 @@ class TenantGoodscatLogic extends BaseLogic
      */
     public static function detail($params): array
     {
-        return TenantGoodscat::findOrEmpty($params['id'])->toArray();
+        return TenantGoodscat::where('id', $params['id'])
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->findOrEmpty()
+            ->toArray();
     }
 
     /**
@@ -105,6 +113,11 @@ class TenantGoodscatLogic extends BaseLogic
      */
     public static function all(): array
     {
-        return TenantGoodscat::where(['is_show' => 0])->order(['sort' => 'desc', 'id' => 'desc'])->field(["id", "name"])->select()->toArray();
+        return TenantGoodscat::where(['is_show' => 0])
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->order(['sort' => 'desc', 'id' => 'desc'])
+            ->field(["id", "name"])
+            ->select()
+            ->toArray();
     }
 }

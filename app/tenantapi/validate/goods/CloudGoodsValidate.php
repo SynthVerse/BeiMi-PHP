@@ -20,18 +20,14 @@ class CloudGoodsValidate extends BaseValidate
         'purchase_price' => 'float|egt:0',
         'stock' => 'float|egt:0',
         'category_name' => 'max:100',
-        'supplier_name' => 'max:100',
         'is_disabled' => 'integer|in:0,1',
         'status' => 'integer|in:0,1',
         'sort' => 'integer|egt:0',
         'remark' => 'max:500',
         'keyword' => 'max:100',
-        'scope' => 'max:20',
         'unit_id' => 'integer|gt:0',
         'units_id' => 'integer|gt:0',
         'category_id' => 'integer|egt:0',
-        'primary_supplier_id' => 'integer|egt:0',
-        'supplier_id' => 'integer|egt:0',
     ];
 
     protected $field = [
@@ -48,23 +44,19 @@ class CloudGoodsValidate extends BaseValidate
         'purchase_price' => '成本价',
         'stock' => '库存',
         'category_name' => '分类名称',
-        'supplier_name' => '供应商名称',
         'is_disabled' => '停用状态',
         'status' => '状态',
         'sort' => '排序',
         'remark' => '备注',
         'keyword' => '关键词',
-        'scope' => '商品库类型',
         'unit_id' => '单位ID',
         'units_id' => '单位ID',
         'category_id' => '分类ID',
-        'primary_supplier_id' => '供应商ID',
-        'supplier_id' => '供应商ID',
     ];
 
     public function sceneLists()
     {
-        return $this->only(['keyword', 'status', 'scope']);
+        return $this->only(['keyword', 'status']);
     }
 
     public function sceneAdd()
@@ -81,7 +73,6 @@ class CloudGoodsValidate extends BaseValidate
             'purchase_price',
             'stock',
             'category_name',
-            'supplier_name',
             'is_disabled',
             'status',
             'sort',
@@ -104,7 +95,6 @@ class CloudGoodsValidate extends BaseValidate
             'purchase_price',
             'stock',
             'category_name',
-            'supplier_name',
             'is_disabled',
             'status',
             'sort',
@@ -124,7 +114,7 @@ class CloudGoodsValidate extends BaseValidate
 
     public function sceneLoad()
     {
-        return $this->only(['cloud_goods_id', 'unit_id', 'units_id', 'category_id', 'primary_supplier_id', 'supplier_id'])
+        return $this->only(['cloud_goods_id', 'unit_id', 'units_id', 'category_id'])
             ->remove('unit_id', 'require');
     }
 }

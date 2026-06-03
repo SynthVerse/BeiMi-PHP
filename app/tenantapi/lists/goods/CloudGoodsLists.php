@@ -9,7 +9,7 @@ class CloudGoodsLists extends BaseAdminDataLists
 {
     public function lists(): array
     {
-        return CloudGoodsService::listPrivateWithPublic(
+        return CloudGoodsService::listVisible(
             $this->params,
             $this->tenantId(),
             $this->limitOffset,
@@ -19,7 +19,7 @@ class CloudGoodsLists extends BaseAdminDataLists
 
     public function count(): int
     {
-        return CloudGoodsService::countPrivateWithPublic($this->params, $this->tenantId());
+        return CloudGoodsService::countVisible($this->params, $this->tenantId());
     }
 
     protected function tenantId(): int
