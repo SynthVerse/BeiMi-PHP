@@ -10,6 +10,7 @@ class CloudGoods extends Model
 
     public const STATUS_DISABLED = 0;
     public const STATUS_ENABLED = 1;
+    public const STATUS_ARCHIVED = 2;
 
     protected $name = 'cloud_goods';
 
@@ -20,6 +21,10 @@ class CloudGoods extends Model
 
     public function getStatusDescAttr($value, $data): string
     {
-        return (int)($data['status'] ?? 0) === self::STATUS_ENABLED ? '启用' : '停用';
+        return match ((int)($data['status'] ?? 0)) {
+            self::STATUS_ENABLED => '启用',
+            self::STATUS_ARCHIVED => '已归档',
+            default => '停用',
+        };
     }
 }

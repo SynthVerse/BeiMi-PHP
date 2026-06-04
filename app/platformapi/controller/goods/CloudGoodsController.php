@@ -3,6 +3,7 @@
 namespace app\platformapi\controller\goods;
 
 use app\platformapi\controller\BaseAdminController;
+use app\platformapi\lists\goods\CloudGoodsArchiveLists;
 use app\platformapi\lists\goods\CloudGoodsLists;
 use app\platformapi\logic\goods\CloudGoodsLogic;
 use app\platformapi\validate\goods\CloudGoodsValidate;
@@ -13,6 +14,12 @@ class CloudGoodsController extends BaseAdminController
     {
         (new CloudGoodsValidate())->get()->goCheck('lists');
         return $this->dataLists(new CloudGoodsLists());
+    }
+
+    public function archive()
+    {
+        (new CloudGoodsValidate())->get()->goCheck('lists');
+        return $this->dataLists(new CloudGoodsArchiveLists());
     }
 
     public function add()
@@ -42,7 +49,7 @@ class CloudGoodsController extends BaseAdminController
         if ($result === false) {
             return $this->fail(CloudGoodsLogic::getError());
         }
-        return $this->success('删除成功', [], 1, 1);
+        return $this->success('归档成功', [], 1, 1);
     }
 
     public function detail()

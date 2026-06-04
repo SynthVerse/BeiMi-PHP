@@ -5,6 +5,7 @@ namespace app\api\jxc\logic;
 use app\common\logic\BaseLogic;
 use app\common\model\jxc\Goods;
 use app\common\model\jxc\GoodsSupplier;
+use app\common\model\jxc\GoodsSku;
 use app\common\model\jxc\GoodsUnit;
 use app\common\model\jxc\OrderGoods;
 use app\common\model\jxc\Vendor;
@@ -125,6 +126,9 @@ class GoodsLogic extends BaseLogic
         $item['primary_supplier'] = $supplierData['primary_supplier'] ?? null;
         $item['suppliers'] = $supplierData['suppliers'] ?? [];
         $item['supplier_count'] = $supplierData['supplier_count'] ?? 0;
+        $item['skus'] = GoodsSkuLogic::lists(['goods_id' => (int)$item['id']]);
+        $item['sku_count'] = count($item['skus']);
+        $item['supplier_matrix'] = GoodsSupplierMatrixLogic::lists(['goods_id' => (int)$item['id']]);
         $item['recent_supply_orders'] = self::recentSupplyOrders((int)$item['id']);
         $item['stats'] = self::purchaseStats((int)$item['id'], (int)$item['supplier_count']);
         return $item;
@@ -260,6 +264,9 @@ class GoodsLogic extends BaseLogic
         foreach ($formatted as &$item) {
             $relations = $relationsByGoods[(int)$item['id']] ?? [];
             $item['supplier_count'] = count($relations);
+            $item['sku_count'] = (int)GoodsSku::where('tenant_id', self::tenantId())
+                ->where('goods_id', (int)$item['id'])
+                ->count();
             $item['primary_supplier'] = null;
             foreach ($relations as $relation) {
                 if ((int)$relation['supplier_id'] === (int)$item['primary_supplier_id'] || (int)$relation['is_primary'] === 1) {
@@ -430,15 +437,23 @@ class GoodsLogic extends BaseLogic
             $result[] = [
                 'id' => (int)($row['id'] ?? 0),
                 'goods_id' => (int)($row['goods_id'] ?? 0),
+                'sku_id' => (int)($row['sku_id'] ?? 0),
                 'supplier_id' => $supplierId,
                 'supplier_name' => (string)($vendor['supplier_name'] ?? ''),
                 'name' => (string)($vendor['supplier_name'] ?? ''),
                 'contact' => (string)($vendor['contact'] ?? ''),
                 'phone' => (string)($vendor['phone'] ?? ''),
                 'is_primary' => (int)($row['is_primary'] ?? 0),
+                'is_preferred' => (int)($row['is_preferred'] ?? $row['is_primary'] ?? 0),
                 'supplier_product_code' => (string)($row['supplier_product_code'] ?? ''),
+                'supplier_goods_name' => (string)($row['supplier_goods_name'] ?? ''),
                 'purchase_price' => (string)($row['purchase_price'] ?? '0.00'),
+                'purchase_unit_id' => (int)($row['purchase_unit_id'] ?? 0),
+                'purchase_unit_name' => (string)($row['purchase_unit_name'] ?? ''),
+                'settlement_unit_id' => (int)($row['settlement_unit_id'] ?? 0),
+                'settlement_unit_name' => (string)($row['settlement_unit_name'] ?? ''),
                 'min_purchase_qty' => (string)($row['min_purchase_qty'] ?? '0.0000'),
+                'daily_capacity_qty' => (string)($row['daily_capacity_qty'] ?? '0.0000'),
                 'lead_time_days' => (int)($row['lead_time_days'] ?? 0),
                 'last_purchase_price' => (string)($row['last_purchase_price'] ?? '0.00'),
                 'last_purchase_time' => (int)($row['last_purchase_time'] ?? 0),

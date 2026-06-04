@@ -5,6 +5,7 @@ namespace app\api\jxc\logic;
 use app\common\logic\BaseLogic;
 use app\common\model\jxc\Vendor;
 use app\common\model\jxc\Goods;
+use app\common\model\jxc\GoodsSku;
 use app\common\model\jxc\OrderGoods;
 use app\common\model\jxc\SupplyOrder;
 use app\common\model\jxc\Warehouse;
@@ -46,17 +47,23 @@ class SupplyOrderLogic extends BaseLogic
         Db::startTrans();
         try {
             $order = SupplyOrder::create($built['order']);
-            self::replaceGoods((int)$order->id, $built['goods']);
+            $createdGoods = self::replaceGoods((int)$order->id, $built['goods']);
+            $createdGoods = PurchaseArrivalService::rebuildForSupplyOrder(array_merge($built['order'], [
+                'id' => (int)$order->id,
+            ]), $createdGoods);
 
             // === 库存入库 ===
-            foreach ($built['goods'] as $row) {
+            foreach ($createdGoods as $row) {
                 StockService::inbound(
                     (int)$built['order']['warehouse_id'],
                     (int)$row['goods_id'],
                     (string)$row['number'],
                     (int)$order->id,
                     'supply',
-                    $built['order']['order_sn']
+                    $built['order']['order_sn'],
+                    '采购入库-' . (string)($row['sku_name'] ?: $row['name']),
+                    (int)($row['sku_id'] ?? 0),
+                    (int)($row['batch_id'] ?? 0)
                 );
             }
 
@@ -123,19 +130,27 @@ class SupplyOrderLogic extends BaseLogic
             // === 回滚旧库存和旧应付 ===
             StockService::rollback((int)$order->id, 'supply');
             FinanceService::rollbackPayable((int)$order->id, 'supply');
+            PurchaseArrivalService::deleteBySupplyOrder((int)$order->id);
 
             $order->save($built['order']);
-            self::replaceGoods((int)$order->id, $built['goods']);
+            $createdGoods = self::replaceGoods((int)$order->id, $built['goods']);
+            $createdGoods = PurchaseArrivalService::rebuildForSupplyOrder(array_merge($built['order'], [
+                'id' => (int)$order->id,
+                'order_sn' => (string)$order->order_sn,
+            ]), $createdGoods);
 
             // === 重新入库 ===
-            foreach ($built['goods'] as $row) {
+            foreach ($createdGoods as $row) {
                 StockService::inbound(
                     (int)$built['order']['warehouse_id'],
                     (int)$row['goods_id'],
                     (string)$row['number'],
                     (int)$order->id,
                     'supply',
-                    $order->order_sn
+                    $order->order_sn,
+                    '采购入库-' . (string)($row['sku_name'] ?: $row['name']),
+                    (int)($row['sku_id'] ?? 0),
+                    (int)($row['batch_id'] ?? 0)
                 );
             }
 
@@ -182,7 +197,9 @@ class SupplyOrderLogic extends BaseLogic
 
     public static function remove(array $params): array|false
     {
-        $order = SupplyOrder::findOrEmpty((int)$params['id']);
+        $order = SupplyOrder::where('id', (int)$params['id'])
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->findOrEmpty();
         if ($order->isEmpty()) {
             self::setError('进货单不存在');
             return false;
@@ -193,10 +210,12 @@ class SupplyOrderLogic extends BaseLogic
             // === 回滚库存和应付 ===
             StockService::rollback((int)$order->id, 'supply');
             FinanceService::rollbackPayable((int)$order->id, 'supply');
+            PurchaseArrivalService::deleteBySupplyOrder((int)$order->id);
 
             $orderData = $order->toArray();
             OrderGoods::where('order_id', (int)$order->id)
                 ->where('order_type', self::ORDER_TYPE)
+                ->where('tenant_id', (int)(request()->tenantId ?? 0))
                 ->delete();
             $order->delete();
             Db::commit();
@@ -231,7 +250,9 @@ class SupplyOrderLogic extends BaseLogic
 
     public static function detail(array $params): array
     {
-        $order = SupplyOrder::findOrEmpty((int)$params['id']);
+        $order = SupplyOrder::where('id', (int)$params['id'])
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->findOrEmpty();
         if ($order->isEmpty()) {
             return [];
         }
@@ -239,6 +260,7 @@ class SupplyOrderLogic extends BaseLogic
         $item = self::formatItem($order->toArray(), true);
         $item['goods'] = self::formatGoodsRows(OrderGoods::where('order_id', (int)$order->id)
             ->where('order_type', self::ORDER_TYPE)
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
             ->order(['sort' => 'asc', 'id' => 'asc'])
             ->select()
             ->toArray());
@@ -248,7 +270,8 @@ class SupplyOrderLogic extends BaseLogic
 
     public static function statistics(array $params): array
     {
-        $query = SupplyOrder::field(['id', 'order_money', 'order_pay_money', 'order_arrears_money', 'datetimesingle']);
+        $query = SupplyOrder::field(['id', 'order_money', 'order_pay_money', 'order_arrears_money', 'datetimesingle'])
+            ->where('tenant_id', (int)(request()->tenantId ?? 0));
         self::applyTimeRange($query, $params);
 
         return [
@@ -268,8 +291,14 @@ class SupplyOrderLogic extends BaseLogic
         $supplierIds = array_values(array_unique(array_filter(array_map(fn($item) => (int)($item['supplier_id'] ?? 0), $items))));
         $warehouseIds = array_values(array_unique(array_filter(array_map(fn($item) => (int)($item['warehouse_id'] ?? 0), $items))));
 
-        $supplierRows = empty($supplierIds) ? [] : Vendor::whereIn('id', $supplierIds)->select()->toArray();
-        $warehouseRows = empty($warehouseIds) ? [] : Warehouse::whereIn('id', $warehouseIds)->select()->toArray();
+        $supplierRows = empty($supplierIds) ? [] : Vendor::whereIn('id', $supplierIds)
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->select()
+            ->toArray();
+        $warehouseRows = empty($warehouseIds) ? [] : Warehouse::whereIn('id', $warehouseIds)
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->select()
+            ->toArray();
 
         $supplierMap = [];
         foreach ($supplierRows as $supplier) {
@@ -290,13 +319,17 @@ class SupplyOrderLogic extends BaseLogic
         $warehouseId = (int)($item['warehouse_id'] ?? 0);
         $supplier = $supplierMap[$supplierId] ?? null;
         if ($includeSupplier && !$supplier && $supplierId > 0) {
-            $supplierModel = Vendor::findOrEmpty($supplierId);
+            $supplierModel = Vendor::where('id', $supplierId)
+                ->where('tenant_id', (int)(request()->tenantId ?? 0))
+                ->findOrEmpty();
             $supplier = $supplierModel->isEmpty() ? null : SupplierLogic::formatItem($supplierModel->toArray());
         }
 
         $warehouse = $warehouseMap[$warehouseId] ?? null;
         if ($includeSupplier && !$warehouse && $warehouseId > 0) {
-            $warehouseModel = Warehouse::findOrEmpty($warehouseId);
+            $warehouseModel = Warehouse::where('id', $warehouseId)
+                ->where('tenant_id', (int)(request()->tenantId ?? 0))
+                ->findOrEmpty();
             $warehouse = $warehouseModel->isEmpty() ? null : WarehouseLogic::formatItem($warehouseModel->toArray());
         }
 
@@ -335,7 +368,9 @@ class SupplyOrderLogic extends BaseLogic
 
     protected static function buildOrderData(array $params, array $current = []): array|false
     {
-        $vendor = Vendor::findOrEmpty((int)$params['supplier_id']);
+        $vendor = Vendor::where('id', (int)$params['supplier_id'])
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->findOrEmpty();
         if ($vendor->isEmpty()) {
             self::setError('供应商不存在');
             return false;
@@ -345,22 +380,24 @@ class SupplyOrderLogic extends BaseLogic
             return false;
         }
 
+        $tenantId = (int)(request()->tenantId ?? 0);
+        $adminId = (int)(request()->adminId ?? 0);
+        $orderSn = trim((string)($params['order_sn'] ?? ($current['order_sn'] ?? '')));
+        $idempotentKey = trim((string)($params['idempotent_key'] ?? ''));
+        $datetimesingle = (int)($params['datetimesingle'] ?? ($current['datetimesingle'] ?? time()));
+
         $warehouse = self::resolveWarehouse($params['warehouse_id'] ?? 0);
         if (!$warehouse) {
             return false;
         }
 
-        $goodsRows = self::buildGoodsRows($params['goods'] ?? []);
+        $goodsRows = self::buildGoodsRows($params['goods'] ?? [], (int)$vendor->id, $datetimesingle);
         if ($goodsRows === false) {
             return false;
         }
 
         $orderMoney = array_reduce($goodsRows, fn($sum, $row) => $sum + (float)$row['amount'], 0.0);
         $orderPayMoney = min($orderMoney, max(0, (float)($params['order_pay_money'] ?? ($current['order_pay_money'] ?? 0))));
-        $tenantId = (int)(request()->tenantId ?? 0);
-        $adminId = (int)(request()->adminId ?? 0);
-        $orderSn = trim((string)($params['order_sn'] ?? ($current['order_sn'] ?? '')));
-        $idempotentKey = trim((string)($params['idempotent_key'] ?? ''));
 
         if ($orderSn === '') {
             $orderSn = self::generateOrderSn();
@@ -378,7 +415,7 @@ class SupplyOrderLogic extends BaseLogic
                 'order_money' => self::money($orderMoney),
                 'order_pay_money' => self::money($orderPayMoney),
                 'order_arrears_money' => self::money($orderMoney - $orderPayMoney),
-                'datetimesingle' => (int)($params['datetimesingle'] ?? ($current['datetimesingle'] ?? time())),
+                'datetimesingle' => $datetimesingle,
                 'status' => (int)($current['status'] ?? 1),
                 'purpose_type' => trim((string)($params['purpose_type'] ?? $params['purpose'] ?? ($current['purpose_type'] ?? self::DEFAULT_PURPOSE_TYPE))),
                 'remarks' => trim((string)($params['remarks'] ?? $params['remark'] ?? ($current['remarks'] ?? ''))),
@@ -389,7 +426,7 @@ class SupplyOrderLogic extends BaseLogic
         ];
     }
 
-    protected static function buildGoodsRows(array $goods): array|false
+    protected static function buildGoodsRows(array $goods, int $supplierId, int $datetimesingle): array|false
     {
         if (empty($goods)) {
             self::setError('请选择商品');
@@ -404,7 +441,9 @@ class SupplyOrderLogic extends BaseLogic
                 return false;
             }
 
-            $goodsModel = Goods::findOrEmpty($goodsId);
+            $goodsModel = Goods::where('id', $goodsId)
+                ->where('tenant_id', (int)(request()->tenantId ?? 0))
+                ->findOrEmpty();
             if ($goodsModel->isEmpty()) {
                 self::setError('商品不存在');
                 return false;
@@ -414,21 +453,110 @@ class SupplyOrderLogic extends BaseLogic
                 return false;
             }
 
-            $number = round(max(0, (float)($item['number'] ?? 0)), 4);
-            if ($number <= 0) {
+            $skuId = (int)($item['sku_id'] ?? 0);
+            $skuName = '';
+            $supplierRelationId = 0;
+            $orderQty = round(max(0, (float)($item['order_qty'] ?? $item['number'] ?? 0)), 4);
+            if ($orderQty <= 0) {
                 self::setError('商品数量必须大于0');
                 return false;
             }
 
-            $price = self::money($item['price'] ?? $item['units_money'] ?? $goodsModel->price);
-            $amount = self::money($number * (float)$price);
+            $baseUnitId = (int)($goodsModel->unit_id ?? 0);
+            $baseUnitName = (string)($goodsModel->units ?? '');
+            $orderUnitId = (int)($item['order_unit_id'] ?? $item['unit_id'] ?? $item['units_id'] ?? 0);
+            $orderUnitName = trim((string)($item['order_unit_name'] ?? $item['purchase_unit_name'] ?? $item['units'] ?? $item['unit'] ?? ''));
+            $conversionRate = '1.000000';
+            $conversionSourceType = 'identity';
+            $conversionEffectiveDate = null;
+            $defaultPrice = $goodsModel->cost ?: $goodsModel->price;
+
+            if ($skuId > 0) {
+                $sku = GoodsSku::where('id', $skuId)
+                    ->where('goods_id', $goodsId)
+                    ->where('tenant_id', (int)(request()->tenantId ?? 0))
+                    ->findOrEmpty();
+                if ($sku->isEmpty()) {
+                    self::setError('SKU不存在');
+                    return false;
+                }
+                if ((int)$sku->status !== 1 || (int)$sku->purchase_status !== 1) {
+                    self::setError('该SKU不可采购');
+                    return false;
+                }
+
+                $relation = GoodsSupplierMatrixLogic::assertCanSupply($supplierId, $goodsId, $skuId);
+                if ($relation === false) {
+                    self::setError(GoodsSupplierMatrixLogic::getError());
+                    return false;
+                }
+
+                $skuName = (string)$sku->sku_name;
+                $supplierRelationId = (int)$relation->id;
+                $baseUnitId = (int)($sku->base_unit_id ?? $baseUnitId);
+                $baseUnitName = (string)($sku->base_unit_name ?: $baseUnitName);
+                $orderUnitId = $orderUnitId ?: (int)($relation->purchase_unit_id ?? 0);
+                $orderUnitName = $orderUnitName !== '' ? $orderUnitName : (string)($relation->purchase_unit_name ?? '');
+                $defaultPrice = $relation->purchase_price ?: $defaultPrice;
+
+                $sameUnit = ($orderUnitId > 0 && $baseUnitId > 0 && $orderUnitId === $baseUnitId)
+                    || ($orderUnitName !== '' && $baseUnitName !== '' && $orderUnitName === $baseUnitName);
+                if (!$sameUnit) {
+                    if ($orderUnitId <= 0 || $baseUnitId <= 0) {
+                        self::setError('SKU采购缺少单位ID，无法解析换算');
+                        return false;
+                    }
+                    $conversion = UnitConversionLogic::resolveData(
+                        $goodsId,
+                        $skuId,
+                        $supplierId,
+                        $orderUnitId,
+                        $baseUnitId,
+                        date('Y-m-d', $datetimesingle)
+                    );
+                    if ($conversion === false) {
+                        self::setError(UnitConversionLogic::getError());
+                        return false;
+                    }
+                    $conversionRate = (string)$conversion['ratio'];
+                    $conversionSourceType = (string)$conversion['source_type'];
+                    $conversionEffectiveDate = $conversion['effective_date'] ?? null;
+                }
+            } elseif ($orderUnitName === '') {
+                $orderUnitName = (string)($goodsModel->units ?? '');
+            }
+
+            $expectedBaseQty = self::decimal4($orderQty * (float)$conversionRate);
+            $actualBaseQty = self::decimal4($item['actual_base_qty'] ?? $item['actual_qty'] ?? $expectedBaseQty);
+            $lossBaseQty = self::decimal4(max(0, (float)$expectedBaseQty - (float)$actualBaseQty));
+            $lossRate = (float)$expectedBaseQty > 0 ? number_format((float)$lossBaseQty / (float)$expectedBaseQty, 6, '.', '') : '0.000000';
+            $stockNumber = $skuId > 0 ? $actualBaseQty : self::decimal4($orderQty);
+
+            $price = self::money($item['price'] ?? $item['units_money'] ?? $defaultPrice);
+            $amount = self::money((float)$stockNumber * (float)$price);
             $rows[] = [
                 'tenant_id' => (int)(request()->tenantId ?? 0),
                 'order_type' => self::ORDER_TYPE,
                 'goods_id' => $goodsId,
+                'sku_id' => $skuId,
+                'sku_name' => $skuName,
+                'supplier_relation_id' => $supplierRelationId,
                 'name' => trim((string)($item['name'] ?? $item['product_name'] ?? $goodsModel->name)),
-                'units' => trim((string)($item['units'] ?? $item['unit'] ?? $goodsModel->units)),
-                'number' => number_format($number, 4, '.', ''),
+                'units' => $baseUnitName !== '' ? $baseUnitName : trim((string)($item['units'] ?? $item['unit'] ?? $goodsModel->units)),
+                'order_unit_id' => $orderUnitId,
+                'order_unit_name' => $orderUnitName,
+                'order_qty' => number_format($orderQty, 4, '.', ''),
+                'base_unit_id' => $baseUnitId,
+                'base_unit_name' => $baseUnitName,
+                'conversion_rate' => $conversionRate,
+                'conversion_source_type' => $conversionSourceType,
+                'conversion_effective_date' => $conversionEffectiveDate,
+                'expected_base_qty' => $expectedBaseQty,
+                'actual_base_qty' => $actualBaseQty,
+                'loss_base_qty' => $lossBaseQty,
+                'loss_rate' => $lossRate,
+                'batch_id' => 0,
+                'number' => $stockNumber,
                 'price' => $price,
                 'amount' => $amount,
                 'remark' => trim((string)($item['remark'] ?? '')),
@@ -439,24 +567,34 @@ class SupplyOrderLogic extends BaseLogic
         return $rows;
     }
 
-    protected static function replaceGoods(int $orderId, array $rows): void
+    protected static function replaceGoods(int $orderId, array $rows): array
     {
         OrderGoods::where('order_id', $orderId)
             ->where('order_type', self::ORDER_TYPE)
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
             ->delete();
 
+        $created = [];
         foreach ($rows as $row) {
             $row['order_id'] = $orderId;
-            OrderGoods::create($row);
+            $model = OrderGoods::create($row);
+            $row['id'] = (int)$model->id;
+            $created[] = $row;
         }
+
+        return $created;
     }
 
     protected static function resolveWarehouse(mixed $warehouseId): ?Warehouse
     {
         if ($warehouseId === 'default') {
-            $warehouse = Warehouse::where('name', '默认仓库')->findOrEmpty();
+            $warehouse = Warehouse::where('name', '默认仓库')
+                ->where('tenant_id', (int)(request()->tenantId ?? 0))
+                ->findOrEmpty();
         } else {
-            $warehouse = Warehouse::findOrEmpty((int)$warehouseId);
+            $warehouse = Warehouse::where('id', (int)$warehouseId)
+                ->where('tenant_id', (int)(request()->tenantId ?? 0))
+                ->findOrEmpty();
         }
 
         if ($warehouse->isEmpty()) {
@@ -491,7 +629,8 @@ class SupplyOrderLogic extends BaseLogic
 
     protected static function assertOrderSnUnique(string $orderSn, int $ignoreId = 0): bool
     {
-        $query = SupplyOrder::where('order_sn', $orderSn);
+        $query = SupplyOrder::where('order_sn', $orderSn)
+            ->where('tenant_id', (int)(request()->tenantId ?? 0));
         if ($ignoreId > 0) {
             $query->where('id', '<>', $ignoreId);
         }
@@ -510,10 +649,28 @@ class SupplyOrderLogic extends BaseLogic
                 'id' => (int)($row['id'] ?? 0),
                 'order_goods_id' => (int)($row['id'] ?? 0),
                 'goods_id' => (int)($row['goods_id'] ?? 0),
+                'sku_id' => (int)($row['sku_id'] ?? 0),
+                'sku_name' => (string)($row['sku_name'] ?? ''),
+                'supplier_relation_id' => (int)($row['supplier_relation_id'] ?? 0),
                 'name' => (string)($row['name'] ?? ''),
                 'product_name' => (string)($row['name'] ?? ''),
                 'units' => (string)($row['units'] ?? ''),
                 'unit' => (string)($row['units'] ?? ''),
+                'order_unit_id' => (int)($row['order_unit_id'] ?? 0),
+                'order_unit_name' => (string)($row['order_unit_name'] ?? ''),
+                'order_unit' => (string)($row['order_unit_name'] ?? ''),
+                'order_qty' => (string)($row['order_qty'] ?? $number),
+                'base_unit_id' => (int)($row['base_unit_id'] ?? 0),
+                'base_unit_name' => (string)($row['base_unit_name'] ?? ''),
+                'base_unit' => (string)($row['base_unit_name'] ?? ''),
+                'conversion_rate' => (string)($row['conversion_rate'] ?? '1.000000'),
+                'conversion_source_type' => (string)($row['conversion_source_type'] ?? ''),
+                'conversion_effective_date' => $row['conversion_effective_date'] ?? null,
+                'expected_base_qty' => (string)($row['expected_base_qty'] ?? '0.0000'),
+                'actual_base_qty' => (string)($row['actual_base_qty'] ?? $number),
+                'loss_base_qty' => (string)($row['loss_base_qty'] ?? '0.0000'),
+                'loss_rate' => (string)($row['loss_rate'] ?? '0.000000'),
+                'batch_id' => (int)($row['batch_id'] ?? 0),
                 'number' => $number === '' ? '0' : $number,
                 'price' => self::money($row['price'] ?? 0),
                 'units_money' => self::money($row['price'] ?? 0),
@@ -550,5 +707,10 @@ class SupplyOrderLogic extends BaseLogic
     protected static function money(mixed $value): string
     {
         return number_format(max(0, (float)$value), 2, '.', '');
+    }
+
+    protected static function decimal4(mixed $value): string
+    {
+        return number_format(max(0, (float)$value), 4, '.', '');
     }
 }

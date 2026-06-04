@@ -5,6 +5,8 @@ namespace app\api\jxc\controller;
 use app\api\jxc\lists\GoodsCategoryLists;
 use app\api\jxc\lists\GoodsLists;
 use app\api\jxc\logic\GoodsLogic;
+use app\api\jxc\logic\GoodsSkuLogic;
+use app\api\jxc\logic\GoodsSupplierMatrixLogic;
 use app\api\jxc\validate\GoodsValidate;
 
 class GoodsController extends BaseJxcController
@@ -67,6 +69,48 @@ class GoodsController extends BaseJxcController
         $result = GoodsLogic::saveSuppliers($params);
         if ($result === false) {
             return $this->fail(GoodsLogic::getError());
+        }
+        return $this->success('保存成功', $result, 1, 1);
+    }
+
+    public function skus()
+    {
+        $params = (new GoodsValidate())->goCheck('skus');
+        return $this->data(GoodsSkuLogic::lists($params));
+    }
+
+    public function saveSkus()
+    {
+        $params = (new GoodsValidate())->post()->goCheck('saveSkus');
+        $result = GoodsSkuLogic::save($params);
+        if ($result === false) {
+            return $this->fail(GoodsSkuLogic::getError());
+        }
+        return $this->success('保存成功', $result, 1, 1);
+    }
+
+    public function skuStatus()
+    {
+        $params = (new GoodsValidate())->post()->goCheck('skuStatus');
+        $result = GoodsSkuLogic::status($params);
+        if ($result === false) {
+            return $this->fail(GoodsSkuLogic::getError());
+        }
+        return $this->success('保存成功', [], 1, 1);
+    }
+
+    public function supplierMatrix()
+    {
+        $params = (new GoodsValidate())->goCheck('supplierMatrix');
+        return $this->data(GoodsSupplierMatrixLogic::lists($params));
+    }
+
+    public function saveSupplierMatrix()
+    {
+        $params = (new GoodsValidate())->post()->goCheck('saveSupplierMatrix');
+        $result = GoodsSupplierMatrixLogic::save($params);
+        if ($result === false) {
+            return $this->fail(GoodsSupplierMatrixLogic::getError());
         }
         return $this->success('保存成功', $result, 1, 1);
     }
