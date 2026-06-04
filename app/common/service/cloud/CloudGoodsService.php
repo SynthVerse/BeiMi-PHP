@@ -20,7 +20,16 @@ class CloudGoodsService extends BaseLogic
 
     public static function publicQuery()
     {
-        return CloudGoods::where('scope', CloudGoods::SCOPE_PUBLIC)->where('tenant_id', 0);
+        return CloudGoods::where('scope', CloudGoods::SCOPE_PUBLIC)
+            ->where('tenant_id', 0)
+            ->where('status', '<>', CloudGoods::STATUS_ARCHIVED);
+    }
+
+    public static function publicArchivedQuery()
+    {
+        return CloudGoods::where('scope', CloudGoods::SCOPE_PUBLIC)
+            ->where('tenant_id', 0)
+            ->where('status', CloudGoods::STATUS_ARCHIVED);
     }
 
     public static function listVisible(array $params, int $tenantId, int $offset, int $limit): array
@@ -51,7 +60,7 @@ class CloudGoodsService extends BaseLogic
     {
         $cacheParams = self::cacheParams('public', $params, 0, $offset, $limit);
         $cache = new CloudGoodsCache();
-        return $cache->rememberValue($cache->listKey($cacheParams), function () use ($params, $offset, $limit) {
+        $rows = $cache->rememberValue($cache->listKey($cacheParams), function () use ($params, $offset, $limit) {
             return self::applyFilters(self::publicQuery(), $params)
                 ->field(self::publicListFields())
                 ->limit($offset, $limit)
@@ -59,6 +68,7 @@ class CloudGoodsService extends BaseLogic
                 ->select()
                 ->toArray();
         });
+        return self::attachPublicMeta($rows);
     }
 
     public static function countPublic(array $params): int
@@ -67,6 +77,30 @@ class CloudGoodsService extends BaseLogic
         $cache = new CloudGoodsCache();
         return (int)$cache->rememberValue($cache->listKey($cacheParams), function () use ($params) {
             return self::applyFilters(self::publicQuery(), $params)->count();
+        });
+    }
+
+    public static function listArchivedPublic(array $params, int $offset, int $limit): array
+    {
+        $cacheParams = self::cacheParams('public_archive', $params, 0, $offset, $limit);
+        $cache = new CloudGoodsCache();
+        $rows = $cache->rememberValue($cache->listKey($cacheParams), function () use ($params, $offset, $limit) {
+            return self::applyFilters(self::publicArchivedQuery(), $params)
+                ->field(self::publicListFields())
+                ->limit($offset, $limit)
+                ->order(['update_time' => 'desc', 'id' => 'desc'])
+                ->select()
+                ->toArray();
+        });
+        return self::attachPublicMeta($rows);
+    }
+
+    public static function countArchivedPublic(array $params): int
+    {
+        $cacheParams = self::cacheParams('public_archive_count', $params, 0, 0, 0);
+        $cache = new CloudGoodsCache();
+        return (int)$cache->rememberValue($cache->listKey($cacheParams), function () use ($params) {
+            return self::applyFilters(self::publicArchivedQuery(), $params)->count();
         });
     }
 
@@ -85,7 +119,10 @@ class CloudGoodsService extends BaseLogic
 
     public static function detailPublic(int $id): array
     {
-        $model = self::publicQuery()->where('id', $id)->findOrEmpty();
+        $model = CloudGoods::where('scope', CloudGoods::SCOPE_PUBLIC)
+            ->where('tenant_id', 0)
+            ->where('id', $id)
+            ->findOrEmpty();
         return $model->isEmpty() ? [] : $model->append(['scope_desc', 'status_desc'])->toArray();
     }
 
@@ -101,7 +138,7 @@ class CloudGoodsService extends BaseLogic
 
     public static function deletePublic(array $params): bool
     {
-        return self::deleteCloudGoods((array)($params['id'] ?? []), CloudGoods::SCOPE_PUBLIC, 0);
+        return self::archiveCloudGoods((array)($params['id'] ?? []), CloudGoods::SCOPE_PUBLIC, 0);
     }
 
     public static function loadToTenant(array $params, int $tenantId, int $userId = 0, int $adminId = 0): array|false
@@ -244,16 +281,23 @@ class CloudGoodsService extends BaseLogic
         }
     }
 
-    protected static function deleteCloudGoods(array $ids, int $scope, int $tenantId): bool
+    protected static function archiveCloudGoods(array $ids, int $scope, int $tenantId): bool
     {
         $ids = array_values(array_filter(array_map('intval', $ids)));
         if ($ids === []) {
-            self::setError('请选择要删除的云端商品');
+            self::setError('请选择要归档的云端商品');
             return false;
         }
 
         try {
-            CloudGoods::whereIn('id', $ids)->where('scope', $scope)->where('tenant_id', $tenantId)->delete();
+            CloudGoods::whereIn('id', $ids)
+                ->where('scope', $scope)
+                ->where('tenant_id', $tenantId)
+                ->where('status', '<>', CloudGoods::STATUS_ARCHIVED)
+                ->update([
+                    'status' => CloudGoods::STATUS_ARCHIVED,
+                    'update_time' => time(),
+                ]);
             self::clearCache();
             return true;
         } catch (\Throwable $e) {
@@ -267,7 +311,10 @@ class CloudGoodsService extends BaseLogic
         $status = (int)($params['status'] ?? ($current['status'] ?? CloudGoods::STATUS_ENABLED));
         $isDisabled = (int)($params['is_disabled'] ?? ($current['is_disabled'] ?? 0));
         $name = trim((string)($params['name'] ?? $params['product_name'] ?? ($current['name'] ?? '')));
-        $units = trim((string)($params['units'] ?? $params['unit'] ?? ($current['units'] ?? '')));
+        $isPlatformPublic = $scope === CloudGoods::SCOPE_PUBLIC && $tenantId === 0;
+        $units = $isPlatformPublic
+            ? ''
+            : trim((string)($params['units'] ?? $params['unit'] ?? ($current['units'] ?? '')));
         $category = self::resolvePublicCategory($params, $current);
         if ($category === false) {
             return false;
@@ -281,13 +328,19 @@ class CloudGoodsService extends BaseLogic
             'name' => $name,
             'product_code' => trim((string)($params['product_code'] ?? ($current['product_code'] ?? ''))),
             'units' => $units,
-            'price' => self::normalizeDecimal($params['price'] ?? $params['units_money'] ?? ($current['price'] ?? 0)),
-            'cost' => self::normalizeDecimal($params['cost'] ?? $params['purchase_price'] ?? ($current['cost'] ?? 0)),
-            'stock' => self::normalizeDecimal($params['stock'] ?? ($current['stock'] ?? 0)),
+            'price' => self::normalizeDecimal(
+                $isPlatformPublic ? 0 : ($params['price'] ?? $params['units_money'] ?? ($current['price'] ?? 0))
+            ),
+            'cost' => self::normalizeDecimal(
+                $isPlatformPublic ? 0 : ($params['cost'] ?? $params['purchase_price'] ?? ($current['cost'] ?? 0))
+            ),
+            'stock' => self::normalizeDecimal(
+                $isPlatformPublic ? 0 : ($params['stock'] ?? ($current['stock'] ?? 0))
+            ),
             'category_id' => $category['id'],
             'category_name' => $category['name'],
             'is_disabled' => $isDisabled === 1 ? 1 : 0,
-            'status' => $status === CloudGoods::STATUS_DISABLED ? CloudGoods::STATUS_DISABLED : CloudGoods::STATUS_ENABLED,
+            'status' => self::normalizeManageStatus($status),
             'sort' => (int)($params['sort'] ?? ($current['sort'] ?? 0)),
             'remark' => trim((string)($params['remark'] ?? ($current['remark'] ?? ''))),
         ];
@@ -295,10 +348,9 @@ class CloudGoodsService extends BaseLogic
 
     protected static function resolvePublicCategory(array $params, array $current = []): array|false
     {
-        $categoryId = array_key_exists('category_id', $params)
-            ? (int)$params['category_id']
-            : (int)($current['category_id'] ?? 0);
-        $categoryName = trim((string)($params['category_name'] ?? ($current['category_name'] ?? '')));
+        $hasCategoryId = array_key_exists('category_id', $params);
+        $categoryId = $hasCategoryId ? (int)$params['category_id'] : (int)($current['category_id'] ?? 0);
+        $categoryName = $hasCategoryId ? '' : trim((string)($current['category_name'] ?? ''));
 
         if ($categoryId <= 0) {
             return ['id' => 0, 'name' => $categoryName];
@@ -342,6 +394,7 @@ class CloudGoodsService extends BaseLogic
     {
         $ids = array_values(array_filter(array_map(static fn($row) => (int)($row['id'] ?? 0), $rows)));
         $loaded = [];
+        $loadedCounts = [];
         if ($tenantId > 0 && $ids !== []) {
             $imports = CloudGoodsImport::where('tenant_id', $tenantId)
                 ->whereIn('cloud_goods_id', $ids)
@@ -349,16 +402,45 @@ class CloudGoodsService extends BaseLogic
                 ->select()
                 ->toArray();
             foreach ($imports as $import) {
-                $loaded[(int)$import['cloud_goods_id']] = (int)$import['goods_id'];
+                $cloudGoodsId = (int)$import['cloud_goods_id'];
+                $loaded[$cloudGoodsId] = (int)$import['goods_id'];
+                $loadedCounts[$cloudGoodsId] = ($loadedCounts[$cloudGoodsId] ?? 0) + 1;
             }
         }
 
         foreach ($rows as &$row) {
             $row['scope'] = (int)($row['scope'] ?? 0);
             $row['tenant_id'] = (int)($row['tenant_id'] ?? 0);
-            $row['status_desc'] = (int)($row['status'] ?? 0) === CloudGoods::STATUS_ENABLED ? '启用' : '停用';
+            $row['status_desc'] = self::statusDesc((int)($row['status'] ?? 0));
             $row['loaded'] = isset($loaded[(int)$row['id']]);
             $row['loaded_goods_id'] = $loaded[(int)$row['id']] ?? 0;
+            $row['loaded_count'] = $loadedCounts[(int)$row['id']] ?? 0;
+        }
+        unset($row);
+        return $rows;
+    }
+
+    protected static function attachPublicMeta(array $rows): array
+    {
+        $ids = array_values(array_filter(array_map(static fn($row) => (int)($row['id'] ?? 0), $rows)));
+        $loadedCounts = [];
+        if ($ids !== []) {
+            $imports = CloudGoodsImport::whereIn('cloud_goods_id', $ids)
+                ->field('cloud_goods_id,COUNT(*) as loaded_count')
+                ->group('cloud_goods_id')
+                ->select()
+                ->toArray();
+            foreach ($imports as $import) {
+                $loadedCounts[(int)$import['cloud_goods_id']] = (int)$import['loaded_count'];
+            }
+        }
+
+        foreach ($rows as &$row) {
+            $row['scope'] = (int)($row['scope'] ?? 0);
+            $row['tenant_id'] = (int)($row['tenant_id'] ?? 0);
+            $row['status'] = (int)($row['status'] ?? 0);
+            $row['status_desc'] = self::statusDesc($row['status']);
+            $row['loaded_count'] = $loadedCounts[(int)$row['id']] ?? 0;
         }
         unset($row);
         return $rows;
@@ -389,19 +471,20 @@ class CloudGoodsService extends BaseLogic
         $query = CloudGoods::where('scope', (int)$data['scope'])
             ->where('tenant_id', (int)$data['tenant_id'])
             ->where('name', $data['name'])
-            ->where('units', $data['units']);
+            ->where('status', '<>', CloudGoods::STATUS_ARCHIVED);
         if ($ignoreId > 0) {
             $query->where('id', '<>', $ignoreId);
         }
         if ($query->count() > 0) {
-            self::setError('相同名称和单位的云端商品已存在');
+            self::setError('云端商品名称已存在');
             return false;
         }
 
         if ($data['product_code'] !== '') {
             $codeQuery = CloudGoods::where('scope', (int)$data['scope'])
                 ->where('tenant_id', (int)$data['tenant_id'])
-                ->where('product_code', $data['product_code']);
+                ->where('product_code', $data['product_code'])
+                ->where('status', '<>', CloudGoods::STATUS_ARCHIVED);
             if ($ignoreId > 0) {
                 $codeQuery->where('id', '<>', $ignoreId);
             }
@@ -462,7 +545,6 @@ class CloudGoodsService extends BaseLogic
             'owner_user_id',
             'name',
             'product_code',
-            'units',
             'category_id',
             'category_name',
             'is_disabled',
@@ -472,6 +554,23 @@ class CloudGoodsService extends BaseLogic
             'create_time',
             'update_time',
         ];
+    }
+
+    protected static function normalizeManageStatus(int $status): int
+    {
+        if ($status === CloudGoods::STATUS_ARCHIVED) {
+            return CloudGoods::STATUS_ARCHIVED;
+        }
+        return $status === CloudGoods::STATUS_DISABLED ? CloudGoods::STATUS_DISABLED : CloudGoods::STATUS_ENABLED;
+    }
+
+    protected static function statusDesc(int $status): string
+    {
+        return match ($status) {
+            CloudGoods::STATUS_ENABLED => '启用',
+            CloudGoods::STATUS_ARCHIVED => '已归档',
+            default => '停用',
+        };
     }
 
     protected static function normalizeDecimal(mixed $value): string

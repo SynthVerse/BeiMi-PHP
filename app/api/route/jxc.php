@@ -19,6 +19,12 @@ Route::group('', function () {
     Route::post('units/add', 'jxc.GoodsUnit/add');
     Route::post('units/edit', 'jxc.GoodsUnit/edit');
     Route::delete('units/del', 'jxc.GoodsUnit/delete');
+    Route::post('units/del', 'jxc.GoodsUnit/delete');
+    Route::get('units/conversion/rules', 'jxc.GoodsUnit/conversionRules');
+    Route::post('units/conversion/rules/save', 'jxc.GoodsUnit/saveConversionRules');
+    Route::delete('units/conversion/rules/del', 'jxc.GoodsUnit/deleteConversionRule');
+    Route::post('units/conversion/rules/del', 'jxc.GoodsUnit/deleteConversionRule');
+    Route::get('units/conversion/resolve', 'jxc.GoodsUnit/resolveConversion');
 
     Route::get('warehouse/index', 'jxc.Warehouse/lists');
     Route::get('warehouse/detail', 'jxc.Warehouse/detail');
@@ -42,6 +48,11 @@ Route::group('', function () {
     Route::get('goods/cloud/index', 'jxc.CloudGoods/lists');
     Route::get('goods/cloud/detail', 'jxc.CloudGoods/detail');
     Route::post('goods/cloud/load', 'jxc.CloudGoods/load');
+    Route::get('goods/skus', 'jxc.Goods/skus');
+    Route::post('goods/skus/save', 'jxc.Goods/saveSkus');
+    Route::post('goods/skus/status', 'jxc.Goods/skuStatus');
+    Route::get('goods/supplier-matrix', 'jxc.Goods/supplierMatrix');
+    Route::post('goods/supplier-matrix/save', 'jxc.Goods/saveSupplierMatrix');
     Route::get('goods/detail', 'jxc.Goods/detail');
     Route::get('goods/suppliers', 'jxc.Goods/suppliers');
     Route::post('goods/suppliers/save', 'jxc.Goods/saveSuppliers');

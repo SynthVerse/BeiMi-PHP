@@ -19,6 +19,7 @@ class SupplyOrderValidate extends BaseValidate
         'remark' => 'max:500',
         'purpose' => 'max:50',
         'purpose_type' => 'max:50',
+        'idempotent_key' => 'max:64',
         'start_time' => 'integer|egt:0',
         'end_time' => 'integer|egt:0',
     ];
@@ -36,6 +37,7 @@ class SupplyOrderValidate extends BaseValidate
         'remark' => '备注',
         'purpose' => '入库目的',
         'purpose_type' => '入库目的类型',
+        'idempotent_key' => '幂等键',
         'start_time' => '开始时间',
         'end_time' => '结束时间',
     ];
@@ -54,6 +56,7 @@ class SupplyOrderValidate extends BaseValidate
             'remark',
             'purpose',
             'purpose_type',
+            'idempotent_key',
         ]);
     }
 
@@ -72,6 +75,7 @@ class SupplyOrderValidate extends BaseValidate
             'remark',
             'purpose',
             'purpose_type',
+            'idempotent_key',
         ]);
     }
 

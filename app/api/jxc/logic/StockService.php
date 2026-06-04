@@ -25,9 +25,14 @@ class StockService
         int $orderId,
         string $orderType,
         string $orderSn,
-        string $remark = ''
+        string $remark = '',
+        int $skuId = 0,
+        int $batchId = 0
     ): bool {
-        $goods = Goods::where('id', $goodsId)->lock(true)->find();
+        $goods = Goods::where('id', $goodsId)
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->lock(true)
+            ->find();
         if (!$goods) {
             return false;
         }
@@ -36,7 +41,9 @@ class StockService
         $afterStock = bcadd($beforeStock, $quantity, 2);
 
         // 更新商品库存
-        Goods::where('id', $goodsId)->update([
+        Goods::where('id', $goodsId)
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->update([
             'stock' => $afterStock,
             'update_time' => time(),
         ]);
@@ -46,6 +53,8 @@ class StockService
             'tenant_id'    => (int)(request()->tenantId ?? 0),
             'warehouse_id' => $warehouseId,
             'goods_id'     => $goodsId,
+            'sku_id'       => $skuId,
+            'batch_id'     => $batchId,
             'order_id'     => $orderId,
             'order_type'   => $orderType,
             'order_sn'     => $orderSn,
@@ -79,9 +88,14 @@ class StockService
         int $orderId,
         string $orderType,
         string $orderSn,
-        string $remark = ''
+        string $remark = '',
+        int $skuId = 0,
+        int $batchId = 0
     ): bool {
-        $goods = Goods::where('id', $goodsId)->lock(true)->find();
+        $goods = Goods::where('id', $goodsId)
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->lock(true)
+            ->find();
         if (!$goods) {
             return false;
         }
@@ -91,7 +105,9 @@ class StockService
         // 允许负库存（初期不阻断，只记录）
 
         // 更新商品库存
-        Goods::where('id', $goodsId)->update([
+        Goods::where('id', $goodsId)
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->update([
             'stock' => $afterStock,
             'update_time' => time(),
         ]);
@@ -101,6 +117,8 @@ class StockService
             'tenant_id'    => (int)(request()->tenantId ?? 0),
             'warehouse_id' => $warehouseId,
             'goods_id'     => $goodsId,
+            'sku_id'       => $skuId,
+            'batch_id'     => $batchId,
             'order_id'     => $orderId,
             'order_type'   => $orderType,
             'order_sn'     => $orderSn,
@@ -126,16 +144,22 @@ class StockService
     {
         $flows = StockFlow::where('order_id', $orderId)
             ->where('order_type', $orderType)
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
             ->select();
 
         foreach ($flows as $flow) {
             if ($flow->flow_type == StockFlow::FLOW_OUT) {
                 // 出库流水 → 回补库存（入库）
-                $goods = Goods::where('id', $flow->goods_id)->lock(true)->find();
+                $goods = Goods::where('id', $flow->goods_id)
+                    ->where('tenant_id', (int)$flow->tenant_id)
+                    ->lock(true)
+                    ->find();
                 if ($goods) {
                     $beforeStock = (string)$goods->stock;
                     $afterStock = bcadd($beforeStock, (string)$flow->quantity, 2);
-                    Goods::where('id', $flow->goods_id)->update([
+                    Goods::where('id', $flow->goods_id)
+                        ->where('tenant_id', (int)$flow->tenant_id)
+                        ->update([
                         'stock' => $afterStock,
                         'update_time' => time(),
                     ]);
@@ -144,6 +168,8 @@ class StockService
                         'tenant_id'    => $flow->tenant_id,
                         'warehouse_id' => $flow->warehouse_id,
                         'goods_id'     => $flow->goods_id,
+                        'sku_id'       => (int)($flow->sku_id ?? 0),
+                        'batch_id'     => (int)($flow->batch_id ?? 0),
                         'order_id'     => $orderId,
                         'order_type'   => $orderType,
                         'order_sn'     => $flow->order_sn,
@@ -158,11 +184,16 @@ class StockService
                 }
             } elseif ($flow->flow_type == StockFlow::FLOW_IN) {
                 // 入库流水 → 扣减库存（出库）
-                $goods = Goods::where('id', $flow->goods_id)->lock(true)->find();
+                $goods = Goods::where('id', $flow->goods_id)
+                    ->where('tenant_id', (int)$flow->tenant_id)
+                    ->lock(true)
+                    ->find();
                 if ($goods) {
                     $beforeStock = (string)$goods->stock;
                     $afterStock = bcsub($beforeStock, (string)$flow->quantity, 2);
-                    Goods::where('id', $flow->goods_id)->update([
+                    Goods::where('id', $flow->goods_id)
+                        ->where('tenant_id', (int)$flow->tenant_id)
+                        ->update([
                         'stock' => $afterStock,
                         'update_time' => time(),
                     ]);
@@ -171,6 +202,8 @@ class StockService
                         'tenant_id'    => $flow->tenant_id,
                         'warehouse_id' => $flow->warehouse_id,
                         'goods_id'     => $flow->goods_id,
+                        'sku_id'       => (int)($flow->sku_id ?? 0),
+                        'batch_id'     => (int)($flow->batch_id ?? 0),
                         'order_id'     => $orderId,
                         'order_type'   => $orderType,
                         'order_sn'     => $flow->order_sn,

@@ -11,6 +11,7 @@ class GoodsUnitLists extends BaseDataLists
     protected function baseQuery()
     {
         $query = GoodsUnit::field(['id', 'name', 'sort', 'status', 'create_time', 'update_time']);
+        $query->where('tenant_id', (int)(request()->tenantId ?? 0));
         $keyword = trim((string)($this->params['keyword'] ?? $this->params['name'] ?? ''));
         if ($keyword !== '') {
             $query->whereLike('name', '%' . $keyword . '%');

@@ -215,7 +215,7 @@ CREATE TABLE `la_cloud_goods`
     `category_name`  varchar(100) NOT NULL DEFAULT '' COMMENT '云端分类名称快照',
     `supplier_name`  varchar(100) NOT NULL DEFAULT '' COMMENT '云端供应商名称快照',
     `is_disabled`   tinyint(1) NOT NULL DEFAULT 0 COMMENT '加载后是否停用',
-    `status`         tinyint(1) NOT NULL DEFAULT 1 COMMENT '云端状态：0=停用，1=启用',
+    `status`         tinyint(1) NOT NULL DEFAULT 1 COMMENT '云端状态：0=停用，1=启用，2=已归档',
     `sort`           int(11) NOT NULL DEFAULT 0 COMMENT '排序',
     `remark`         varchar(500) NOT NULL DEFAULT '' COMMENT '备注',
     `create_time`    int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建时间',
@@ -1239,6 +1239,9 @@ VALUES (176, 174, 'A', '编辑', '', 0, 'goods.cloud_goods/edit', '', '', '', ''
 INSERT INTO `la_system_menu`
 VALUES (177, 174, 'A', '删除', '', 0, 'goods.cloud_goods/delete', '', '', '', '', 1, 1, 0, 1780156800,
         1780156800);
+INSERT INTO `la_system_menu`
+VALUES (184, 173, 'C', '商品归档列表', 'local-icon-goods', 80, 'goods.cloud_goods/archive', 'cloud_goods_archive',
+        'goods/cloud_goods/archive', '', '', 0, 1, 0, 1780156800, 1780156800);
 INSERT INTO `la_system_menu`
 VALUES (178, 173, 'C', '分类管理', 'local-icon-goods', 60, 'goods.tenant_goodscat/lists', 'cate',
         'goods/cate/index', '', '', 0, 1, 0, 1780156800, 1780156800);

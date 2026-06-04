@@ -11,7 +11,10 @@ class GoodsUnitLogic extends BaseLogic
 {
     public static function add(array $params): bool
     {
-        if (GoodsUnit::where('name', trim($params['name']))->count() > 0) {
+        if (GoodsUnit::where('tenant_id', self::tenantId())
+            ->where('name', trim($params['name']))
+            ->count() > 0
+        ) {
             self::setError('单位名称已存在');
             return false;
         }
@@ -19,6 +22,7 @@ class GoodsUnitLogic extends BaseLogic
         Db::startTrans();
         try {
             GoodsUnit::create([
+                'tenant_id' => self::tenantId(),
                 'name' => trim($params['name']),
                 'sort' => (int)($params['sort'] ?? 0),
                 'status' => (int)($params['status'] ?? 1),
@@ -45,6 +49,7 @@ class GoodsUnitLogic extends BaseLogic
         $saveData = [];
         if (array_key_exists('name', $params) && trim((string)$params['name']) !== '') {
             $duplicate = GoodsUnit::where('name', trim($params['name']))
+                ->where('tenant_id', self::tenantId())
                 ->where('id', '<>', (int)$params['id'])
                 ->count();
             if ($duplicate > 0) {
@@ -81,13 +86,17 @@ class GoodsUnitLogic extends BaseLogic
 
     public static function delete(array $params): bool
     {
-        $model = GoodsUnit::findOrEmpty((int)$params['id']);
+        $model = GoodsUnit::where('id', (int)$params['id'])
+            ->where('tenant_id', self::tenantId())
+            ->findOrEmpty();
         if ($model->isEmpty()) {
             self::setError('单位不存在');
             return false;
         }
 
-        $goodsCount = Goods::where('unit_id', (int)$model->id)->count();
+        $goodsCount = Goods::where('unit_id', (int)$model->id)
+            ->where('tenant_id', self::tenantId())
+            ->count();
         if ($goodsCount > 0) {
             self::setError('该单位已被商品使用，请先更换商品单位后再删除');
             return false;
@@ -98,7 +107,9 @@ class GoodsUnitLogic extends BaseLogic
 
     public static function detail(array $params): array
     {
-        $model = GoodsUnit::findOrEmpty((int)$params['id']);
+        $model = GoodsUnit::where('id', (int)$params['id'])
+            ->where('tenant_id', self::tenantId())
+            ->findOrEmpty();
         if ($model->isEmpty()) {
             return [];
         }
@@ -111,5 +122,10 @@ class GoodsUnitLogic extends BaseLogic
         $item['status'] = (int)($item['status'] ?? 1);
         $item['sort'] = (int)($item['sort'] ?? 0);
         return $item;
+    }
+
+    protected static function tenantId(): int
+    {
+        return (int)(request()->tenantId ?? 0);
     }
 }
