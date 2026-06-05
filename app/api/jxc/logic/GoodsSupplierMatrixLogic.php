@@ -8,6 +8,7 @@ use app\common\model\jxc\GoodsSku;
 use app\common\model\jxc\GoodsSupplier;
 use app\common\model\jxc\GoodsSupplierPriceHistory;
 use app\common\model\jxc\GoodsUnit;
+use app\common\model\jxc\OrderGoods;
 use app\common\model\jxc\Vendor;
 use think\facade\Db;
 
@@ -138,7 +139,23 @@ class GoodsSupplierMatrixLogic extends BaseLogic
         if ($keptIds !== []) {
             $query->whereNotIn('id', $keptIds);
         }
-        $query->delete();
+        $deleteIds = $query->column('id');
+        if ($deleteIds === []) {
+            return;
+        }
+
+        $usedRelationIds = OrderGoods::where('tenant_id', self::tenantId())
+            ->where('goods_id', $goodsId)
+            ->whereIn('supplier_relation_id', $deleteIds)
+            ->column('supplier_relation_id');
+        if ($usedRelationIds !== []) {
+            throw new \RuntimeException('供应商SKU关系已被订单明细使用，请停用后保留');
+        }
+
+        GoodsSupplier::where('tenant_id', self::tenantId())
+            ->where('goods_id', $goodsId)
+            ->whereIn('id', $deleteIds)
+            ->delete();
     }
 
     public static function assertCanSupply(int $supplierId, int $goodsId, int $skuId): GoodsSupplier|false

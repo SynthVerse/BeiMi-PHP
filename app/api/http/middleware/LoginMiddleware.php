@@ -9,6 +9,7 @@ use app\common\cache\UserTokenCache;
 use app\common\service\JsonService;
 use app\api\service\UserTokenService;
 use think\facade\Config;
+use think\facade\Log;
 
 class LoginMiddleware
 {
@@ -65,6 +66,12 @@ class LoginMiddleware
         $userInfo = (new UserTokenCache())->getUserInfo($token);
 
         if (empty($userInfo) && !$isNotNeedLogin) {
+            Log::warning('[LoginMiddleware] token验证失败', [
+                'token_prefix' => $token ? substr($token, 0, 8) : 'empty',
+                'action' => $request->action(),
+                'controller' => $request->controller(),
+                'source' => $request->source ?? 'unknown',
+            ]);
             //token过期无效并且该地址需要登录才能访问
             return JsonService::fail('登录超时，请重新登录', [], -1, 0);
         }

@@ -17,9 +17,34 @@ class BaseJxcController extends BaseApiController
     public function initialize(): void
     {
         $this->request->source = AdminTerminalEnum::TENANT;
-        $this->adminInfo = $this->request->adminInfo ?? [];
+        $this->refreshIdentityContext();
+    }
+
+    protected function refreshIdentityContext(): void
+    {
+        $this->userInfo = $this->request->userInfo ?? $this->userInfo;
+        $this->userId = (int)($this->request->userId ?? ($this->userInfo['user_id'] ?? $this->userId));
+
+        $adminInfo = $this->request->adminInfo ?? $this->adminInfo;
+        if (empty($adminInfo) && !empty($this->userInfo)) {
+            $adminInfo = [
+                'admin_id'    => $this->userInfo['user_id'] ?? 0,
+                'user_id'     => $this->userInfo['user_id'] ?? 0,
+                'tenant_id'   => $this->userInfo['tenant_id'] ?? 0,
+                'root'        => 0,
+                'name'        => $this->userInfo['nickname'] ?? '',
+                'account'     => $this->userInfo['mobile'] ?? '',
+                'role_name'   => '',
+                'role_id'     => [],
+                'token'       => $this->userInfo['token'] ?? $this->request->header('token'),
+                'terminal'    => $this->userInfo['terminal'] ?? '',
+                'expire_time' => $this->userInfo['expire_time'] ?? 0,
+            ];
+        }
+
+        $this->adminInfo = $adminInfo ?: [];
         $this->tenantId = (int)($this->request->tenantId ?? ($this->adminInfo['tenant_id'] ?? 0));
-        $this->adminId = (int)($this->request->adminId ?? ($this->adminInfo['admin_id'] ?? 0));
+        $this->adminId = (int)($this->request->adminId ?? ($this->adminInfo['admin_id'] ?? ($this->adminInfo['user_id'] ?? 0)));
     }
 
     protected function normalizeListQueryParams(): void

@@ -5,10 +5,22 @@ use think\facade\Route;
 Route::post('user/login', 'jxc.Auth/login');
 Route::post('user/mnpLogin', 'login/mnpLogin');
 
-// 用户信息接口 —— 使用 LoginMiddleware（UserTokenCache 查询，兼容微信登录用户）
+// 用户信息与店铺入口接口 —— 使用 LoginMiddleware（UserTokenCache 查询，兼容微信登录用户）
 Route::group('', function () {
     Route::get('user/info', 'jxc.Auth/info');
     Route::post('user/logout', 'jxc.Auth/logout');
+    Route::get('user/store/status', 'jxc.Store/status');
+    Route::get('user/store',     'jxc.Store/detail');
+    Route::get('user/store/current', 'jxc.Store/detail');
+    Route::get('user/stores',    'jxc.Store/lists');
+    Route::post('user/storeset', 'jxc.Store/setStore');
+    Route::post('user/open',     'jxc.Store/createStore');
+    Route::post('user/store/create', 'jxc.Store/createStore');
+    Route::post('user/store/switch', 'jxc.Store/switchStore');
+    Route::post('user/store/join',   'jxc.Store/join');
+    Route::post('store/invite/accept', 'jxc.Store/join');
+    Route::get('user/store/member-invite', 'jxc.Store/memberInvite');
+    Route::post('user/store/member-invite/accept', 'jxc.Store/acceptMemberInvite');
 })->middleware(\app\api\http\middleware\LoginMiddleware::class, 'enforce');
 
 // JXC 业务接口 —— 使用 JxcLoginMiddleware（双 Token 查询）
@@ -122,19 +134,7 @@ Route::group('', function () {
     Route::get('audit/lists', 'jxc.Audit/lists');
 
     // === 店铺管理 ===
-    Route::get('user/store/status', 'jxc.Store/status');
-    Route::get('user/store',     'jxc.Store/detail');
-    Route::get('user/store/current', 'jxc.Store/detail');
-    Route::get('user/stores',    'jxc.Store/lists');
-    Route::post('user/storeset', 'jxc.Store/setStore');
-    Route::post('user/open',     'jxc.Store/createStore');
-    Route::post('user/store/create', 'jxc.Store/createStore');
-    Route::post('user/store/switch', 'jxc.Store/switchStore');
-    Route::post('user/store/join',   'jxc.Store/join');
-    Route::post('store/invite/accept', 'jxc.Store/join');
     Route::get('user/store/invite',  'jxc.Store/invite');
-    Route::get('user/store/member-invite', 'jxc.Store/memberInvite');
-    Route::post('user/store/member-invite/accept', 'jxc.Store/acceptMemberInvite');
     Route::get('user/store/hierarchy', 'jxc.Store/hierarchy');
     Route::get('user/store/hierarchy/children', 'jxc.Store/hierarchyChildren');
     Route::get('user/store/hierarchy/tree', 'jxc.Store/hierarchyTree');

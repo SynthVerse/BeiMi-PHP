@@ -15,6 +15,10 @@ class SupplierValidate extends BaseValidate
         'remark' => 'max:500',
         'is_disabled' => 'integer|in:0,1',
         'supplier_id' => 'integer|gt:0',
+        'goods_id' => 'integer|egt:0',
+        'sku_id' => 'integer|egt:0',
+        'status' => 'integer|in:0,1',
+        'relation_status' => 'integer|in:0,1',
         'page' => 'integer|gt:0',
         'pagesize' => 'integer|gt:0',
         'page_no' => 'integer|gt:0',
@@ -32,6 +36,10 @@ class SupplierValidate extends BaseValidate
         'remark' => '备注',
         'is_disabled' => '禁用状态',
         'supplier_id' => '供应商ID',
+        'goods_id' => '商品ID',
+        'sku_id' => 'SKU ID',
+        'status' => '关联状态',
+        'relation_status' => '关联状态',
         'page' => '页码',
         'pagesize' => '每页数量',
         'page_no' => '页码',
@@ -62,7 +70,7 @@ class SupplierValidate extends BaseValidate
 
     public function sceneGoods()
     {
-        return $this->only(['id', 'supplier_id', 'page', 'pagesize', 'page_no', 'page_size'])
+        return $this->only(['id', 'supplier_id', 'goods_id', 'sku_id', 'status', 'relation_status', 'page', 'pagesize', 'page_no', 'page_size'])
             ->remove('id', 'require');
     }
 

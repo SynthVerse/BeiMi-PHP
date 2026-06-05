@@ -16,8 +16,8 @@
 namespace app\api\service;
 
 use app\common\cache\UserTokenCache;
-use app\common\model\user\UserSession;
 use think\facade\Config;
+use think\facade\Db;
 
 class UserTokenService
 {
@@ -36,34 +36,41 @@ class UserTokenService
     public static function setToken($user, $terminal)
     {
         $time = time();
-        $userSession = UserSession::where([['user_id', '=', $user->id], ['terminal', '=', $terminal]])->find();
+        $userSession = Db::table('la_user_session')
+            ->where('user_id', $user->id)
+            ->where('terminal', $terminal)
+            ->find();
 
-        //获取token延长过期的时间
         $expireTime = $time + Config::get('project.user_token.expire_duration');
         $userTokenCache = new UserTokenCache();
 
-        //token处理
         if ($userSession) {
-            //清空缓存
-            $userTokenCache->deleteUserInfo($userSession->token);
-            //重新获取token
-            $userSession->token = create_token($user->id);
-            $userSession->expire_time = $expireTime;
-            $userSession->update_time = $time;
-            $userSession->save();
+            $userTokenCache->deleteUserInfo($userSession['token']);
+            $token = ((int)$userSession['expire_time'] <= $time)
+                ? create_token($user->id)
+                : $userSession['token'];
+
+            Db::table('la_user_session')
+                ->where('id', $userSession['id'])
+                ->update([
+                    'token' => $token,
+                    'expire_time' => $expireTime,
+                    'update_time' => $time,
+                ]);
         } else {
-            //找不到在该终端的token记录，创建token记录
-            // tenant_id 字段由 la_user_session 表 DEFAULT 0 提供，无需显式传入
-            // （la_user 跨租户公用用户池，不强制归属租户）
-            $userSession = UserSession::create([
+            $token = create_token($user->id);
+            Db::table('la_user_session')->insert([
                 'user_id' => $user->id,
                 'terminal' => $terminal,
-                'token' => create_token($user->id),
-                'expire_time' => $expireTime
+                'token' => $token,
+                'expire_time' => $expireTime,
+                'update_time' => $time,
+                'create_time' => $time,
+                'tenant_id' => 0,
             ]);
         }
 
-        return $userTokenCache->setUserInfo($userSession->token);
+        return $userTokenCache->setUserInfo($token);
     }
 
 
@@ -80,16 +87,20 @@ class UserTokenService
     public static function overtimeToken($token)
     {
         $time = time();
-        $userSession = UserSession::where('token', '=', $token)->find();
-        if ($userSession->isEmpty()) {
+        $userSession = Db::table('la_user_session')->where('token', $token)->find();
+        if (empty($userSession)) {
             return false;
         }
-        //延长token过期时间
-        $userSession->expire_time = $time + Config::get('project.user_token.expire_duration');
-        $userSession->update_time = $time;
-        $userSession->save();
 
-        return (new UserTokenCache())->setUserInfo($userSession->token);
+        $expireTime = $time + Config::get('project.user_token.expire_duration');
+        Db::table('la_user_session')
+            ->where('id', $userSession['id'])
+            ->update([
+                'expire_time' => $expireTime,
+                'update_time' => $time,
+            ]);
+
+        return (new UserTokenCache())->setUserInfo($token);
     }
 
 
@@ -105,18 +116,20 @@ class UserTokenService
      */
     public static function expireToken($token)
     {
-        $userSession = UserSession::where('token', '=', $token)
-            ->find();
+        $userSession = Db::table('la_user_session')->where('token', $token)->find();
         if (empty($userSession)) {
             return false;
         }
 
         $time = time();
-        $userSession->expire_time = $time;
-        $userSession->update_time = $time;
-        $userSession->save();
+        Db::table('la_user_session')
+            ->where('id', $userSession['id'])
+            ->update([
+                'expire_time' => $time,
+                'update_time' => $time,
+            ]);
 
-        return (new  UserTokenCache())->deleteUserInfo($token);
+        return (new UserTokenCache())->deleteUserInfo($token);
     }
 
 }
