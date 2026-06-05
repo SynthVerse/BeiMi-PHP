@@ -11,6 +11,7 @@ use app\common\model\jxc\GoodsSpecTemplate;
 use app\common\model\jxc\GoodsSpecValue;
 use app\common\model\jxc\GoodsSupplier;
 use app\common\model\jxc\GoodsUnit;
+use app\common\model\jxc\OrderGoods;
 use think\facade\Db;
 
 class GoodsSkuLogic extends BaseLogic
@@ -197,6 +198,28 @@ class GoodsSkuLogic extends BaseLogic
         $deleteIds = $query->column('id');
         if ($deleteIds === []) {
             return;
+        }
+
+        $usedSkuIds = OrderGoods::where('tenant_id', self::tenantId())
+            ->where('goods_id', $goodsId)
+            ->whereIn('sku_id', $deleteIds)
+            ->column('sku_id');
+        if ($usedSkuIds !== []) {
+            throw new \RuntimeException('SKU已被采购/销售明细使用，请停用后保留');
+        }
+
+        $deleteRelationIds = GoodsSupplier::where('tenant_id', self::tenantId())
+            ->where('goods_id', $goodsId)
+            ->whereIn('sku_id', $deleteIds)
+            ->column('id');
+        if ($deleteRelationIds !== []) {
+            $usedRelationIds = OrderGoods::where('tenant_id', self::tenantId())
+                ->where('goods_id', $goodsId)
+                ->whereIn('supplier_relation_id', $deleteRelationIds)
+                ->column('supplier_relation_id');
+            if ($usedRelationIds !== []) {
+                throw new \RuntimeException('SKU供应商关系已被订单明细使用，请停用后保留');
+            }
         }
 
         GoodsSkuSpecValue::where('tenant_id', self::tenantId())

@@ -16,8 +16,9 @@
 namespace app\common\cache;
 
 use app\common\cache\BaseCache;
-use app\common\model\user\User;
-use app\common\model\user\UserSession;
+use app\common\service\FileService;
+use think\facade\Db;
+use think\facade\Log;
 
 class UserTokenCache extends BaseCache
 {
@@ -65,29 +66,52 @@ class UserTokenCache extends BaseCache
      */
     public function setUserInfo($token)
     {
-        $userSession = UserSession::where([['token', '=', $token], ['expire_time', '>', time()]])->find();
-        if (empty($userSession)) {
+        try {
+            // 使用 Db::table 直接查询，完全绕过 Model 层（scopes/events/SoftDelete）
+            $userSession = Db::table('la_user_session')
+                ->where('token', $token)
+                ->where('expire_time', '>', time())
+                ->find();
+
+            if (empty($userSession)) {
+                Log::info('[UserTokenCache] session not found', ['token_prefix' => substr($token, 0, 8)]);
+                return [];
+            }
+
+            $user = Db::table('la_user')
+                ->where('id', $userSession['user_id'])
+                ->whereNull('delete_time')
+                ->find();
+
+            if (empty($user)) {
+                Log::info('[UserTokenCache] user not found', ['user_id' => $userSession['user_id']]);
+                return [];
+            }
+
+            $userInfo = [
+                'user_id'     => (int)$user['id'],
+                'tenant_id'   => (int)($user['tenant_id'] ?? 0),
+                'nickname'    => $user['nickname'] ?? '',
+                'token'       => $token,
+                'sn'          => $user['sn'] ?? '',
+                'mobile'      => $user['mobile'] ?? '',
+                'avatar'      => trim($user['avatar'] ?? '') ? FileService::getFileUrl($user['avatar']) : '',
+                'terminal'    => (int)$userSession['terminal'],
+                'expire_time' => (int)$userSession['expire_time'],
+            ];
+
+            $ttl = max((int)$userSession['expire_time'] - time(), 60);
+            $this->set($this->prefix . $token, $userInfo, $ttl);
+
+            return $userInfo;
+        } catch (\Throwable $e) {
+            Log::error('[UserTokenCache] setUserInfo exception', [
+                'token_prefix' => substr($token, 0, 8),
+                'error' => $e->getMessage(),
+                'file' => $e->getFile() . ':' . $e->getLine(),
+            ]);
             return [];
         }
-
-        $user = User::where('id', '=', $userSession->user_id)
-            ->find();
-
-        $userInfo = [
-            'user_id' => $user->id,
-            'tenant_id' => $user->tenant_id,
-            'nickname' => $user->nickname,
-            'token' => $token,
-            'sn' => $user->sn,
-            'mobile' => $user->mobile,
-            'avatar' => $user->avatar,
-            'terminal' => $userSession->terminal,
-            'expire_time' => $userSession->expire_time,
-        ];
-
-        $ttl = new \DateTime(Date('Y-m-d H:i:s', $userSession->expire_time));
-        $this->set($this->prefix . $token, $userInfo, $ttl);
-        return $this->getUserInfo($token);
     }
 
 

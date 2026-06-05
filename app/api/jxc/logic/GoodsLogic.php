@@ -150,6 +150,7 @@ class GoodsLogic extends BaseLogic
 
         $rows = GoodsSupplier::where('goods_id', $goodsId)
             ->where('tenant_id', self::tenantId())
+            ->where('sku_id', 0)
             ->order(['is_primary' => 'desc', 'id' => 'desc'])
             ->select()
             ->toArray();
@@ -224,11 +225,13 @@ class GoodsLogic extends BaseLogic
         try {
             GoodsSupplier::where('goods_id', $goodsId)
                 ->where('tenant_id', self::tenantId())
+                ->where('sku_id', 0)
                 ->delete();
 
             foreach ($supplierRows as $row) {
                 $row['tenant_id'] = self::tenantId();
                 $row['goods_id'] = $goodsId;
+                $row['sku_id'] = 0;
                 $row['is_primary'] = (int)$row['supplier_id'] === $primarySupplierId ? 1 : 0;
                 GoodsSupplier::create($row);
             }
@@ -253,6 +256,7 @@ class GoodsLogic extends BaseLogic
 
         $relationRows = GoodsSupplier::whereIn('goods_id', $goodsIds)
             ->where('tenant_id', self::tenantId())
+            ->where('sku_id', 0)
             ->order(['is_primary' => 'desc', 'id' => 'desc'])
             ->select()
             ->toArray();
@@ -469,16 +473,19 @@ class GoodsLogic extends BaseLogic
     {
         GoodsSupplier::where('goods_id', $goodsId)
             ->where('tenant_id', self::tenantId())
+            ->where('sku_id', 0)
             ->update(['is_primary' => 0]);
 
         $relation = GoodsSupplier::where('goods_id', $goodsId)
             ->where('supplier_id', $supplierId)
             ->where('tenant_id', self::tenantId())
+            ->where('sku_id', 0)
             ->findOrEmpty();
         if ($relation->isEmpty()) {
             GoodsSupplier::create([
                 'tenant_id' => self::tenantId(),
                 'goods_id' => $goodsId,
+                'sku_id' => 0,
                 'supplier_id' => $supplierId,
                 'is_primary' => 1,
                 'status' => 1,
@@ -494,6 +501,7 @@ class GoodsLogic extends BaseLogic
         if ($primarySupplierId <= 0) {
             GoodsSupplier::where('goods_id', $goodsId)
                 ->where('tenant_id', self::tenantId())
+                ->where('sku_id', 0)
                 ->update(['is_primary' => 0]);
             return;
         }
