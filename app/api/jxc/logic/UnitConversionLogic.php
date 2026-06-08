@@ -12,6 +12,9 @@ use think\facade\Db;
 
 class UnitConversionLogic extends BaseLogic
 {
+    protected const SCOPE_GOODS_DAILY = 'goods_daily';
+    protected const SCOPE_SUPPLIER_SKU_DAILY = 'supplier_sku_daily';
+
     public static function lists(array $params): array
     {
         $query = GoodsUnitConversionRule::where('tenant_id', self::tenantId());
@@ -37,40 +40,57 @@ class UnitConversionLogic extends BaseLogic
             return false;
         }
 
+        $scope = self::normalizeSaveScope($params['scope'] ?? '');
+        if ($scope === false) {
+            return false;
+        }
+
+        $goodsId = (int)($params['goods_id'] ?? 0);
+        $items = [];
+        foreach ($rules as $rule) {
+            if (!is_array($rule)) {
+                continue;
+            }
+            if (!isset($rule['goods_id']) && $goodsId > 0) {
+                $rule['goods_id'] = $goodsId;
+            }
+            $data = self::buildRuleData($rule);
+            if ($data === false) {
+                return false;
+            }
+            $items[] = [
+                'id' => (int)($rule['id'] ?? 0),
+                'data' => $data,
+            ];
+        }
+
+        if ($scope === '') {
+            $scope = self::inferSaveScope($items);
+        }
+
+        $deleteGoodsId = self::resolveDeleteGoodsId($goodsId, $items, $scope);
+        if ($deleteGoodsId === false) {
+            return false;
+        }
+
+        if ($scope !== '' && !self::validateScopeItems($scope, $items, $deleteGoodsId)) {
+            return false;
+        }
+
         Db::startTrans();
         try {
             $keptIds = [];
-            foreach ($rules as $rule) {
-                if (!is_array($rule)) {
-                    continue;
-                }
-                $data = self::buildRuleData($rule);
-                if ($data === false) {
+            foreach ($items as $item) {
+                $id = self::saveRuleItem($item['id'], $item['data'], $scope, $deleteGoodsId);
+                if ($id === false) {
                     Db::rollback();
                     return false;
                 }
-
-                $id = (int)($rule['id'] ?? 0);
-                if ($id > 0) {
-                    $model = GoodsUnitConversionRule::where('id', $id)
-                        ->where('tenant_id', self::tenantId())
-                        ->findOrEmpty();
-                    if ($model->isEmpty()) {
-                        self::setError('换算规则不存在');
-                        Db::rollback();
-                        return false;
-                    }
-                    $model->save($data);
-                    $keptIds[] = (int)$model->id;
-                } else {
-                    $model = GoodsUnitConversionRule::create($data);
-                    $keptIds[] = (int)$model->id;
-                }
+                $keptIds[] = $id;
             }
 
-            $goodsId = (int)($params['goods_id'] ?? 0);
-            if ($goodsId > 0) {
-                self::deleteMissingRules($goodsId, $keptIds);
+            if ($deleteGoodsId > 0) {
+                self::deleteMissingRules($deleteGoodsId, $keptIds, $scope);
             }
             Db::commit();
             return self::lists($params);
@@ -81,14 +101,173 @@ class UnitConversionLogic extends BaseLogic
         }
     }
 
-    protected static function deleteMissingRules(int $goodsId, array $keptIds): void
+    protected static function saveRuleItem(int $id, array $data, string $scope, int $deleteGoodsId): int|false
+    {
+        $model = null;
+        if ($id > 0) {
+            $model = GoodsUnitConversionRule::where('id', $id)
+                ->where('tenant_id', self::tenantId())
+                ->findOrEmpty();
+            if ($model->isEmpty()) {
+                self::setError('换算规则不存在');
+                return false;
+            }
+            $row = $model->toArray();
+            if ($scope !== '' && ((int)($row['goods_id'] ?? 0) !== $deleteGoodsId || self::scopeFromData($row) !== $scope)) {
+                self::setError('换算规则与保存范围不匹配');
+                return false;
+            }
+        }
+
+        $logicalModel = self::findByLogicalKey($data, $id);
+        if (!$logicalModel->isEmpty()) {
+            $model = $logicalModel;
+        }
+
+        if ($model === null) {
+            $model = GoodsUnitConversionRule::create($data);
+        } else {
+            $model->save($data);
+        }
+
+        return (int)$model->id;
+    }
+
+    protected static function deleteMissingRules(int $goodsId, array $keptIds, string $scope): void
     {
         $query = GoodsUnitConversionRule::where('tenant_id', self::tenantId())
             ->where('goods_id', $goodsId);
+        self::applyScopeQuery($query, $scope);
         if ($keptIds !== []) {
             $query->whereNotIn('id', $keptIds);
         }
         $query->delete();
+    }
+
+    protected static function normalizeSaveScope(mixed $scope): string|false
+    {
+        $scope = trim((string)$scope);
+        if ($scope === '') {
+            return '';
+        }
+        if (in_array($scope, [self::SCOPE_GOODS_DAILY, self::SCOPE_SUPPLIER_SKU_DAILY], true)) {
+            return $scope;
+        }
+        self::setError('保存范围错误');
+        return false;
+    }
+
+    protected static function inferSaveScope(array $items): string
+    {
+        $scope = '';
+        foreach ($items as $item) {
+            $itemScope = self::scopeFromData($item['data']);
+            if (!in_array($itemScope, [self::SCOPE_GOODS_DAILY, self::SCOPE_SUPPLIER_SKU_DAILY], true)) {
+                return '';
+            }
+            if ($scope === '') {
+                $scope = $itemScope;
+                continue;
+            }
+            if ($scope !== $itemScope) {
+                return '';
+            }
+        }
+        return $scope;
+    }
+
+    protected static function resolveDeleteGoodsId(int $goodsId, array $items, string $scope): int|false
+    {
+        if ($scope === '') {
+            return $goodsId;
+        }
+
+        $deleteGoodsId = $goodsId;
+        foreach ($items as $item) {
+            $itemGoodsId = (int)$item['data']['goods_id'];
+            if ($itemGoodsId <= 0) {
+                self::setError('请选择商品');
+                return false;
+            }
+            if ($deleteGoodsId <= 0) {
+                $deleteGoodsId = $itemGoodsId;
+                continue;
+            }
+            if ($deleteGoodsId !== $itemGoodsId) {
+                self::setError('换算规则商品与保存商品不一致');
+                return false;
+            }
+        }
+
+        if ($deleteGoodsId <= 0) {
+            self::setError('请选择商品');
+            return false;
+        }
+        return $deleteGoodsId;
+    }
+
+    protected static function validateScopeItems(string $scope, array $items, int $goodsId): bool
+    {
+        foreach ($items as $item) {
+            $data = $item['data'];
+            if ((int)$data['goods_id'] !== $goodsId || self::scopeFromData($data) !== $scope) {
+                self::setError('换算规则与保存范围不匹配');
+                return false;
+            }
+        }
+        return true;
+    }
+
+    protected static function scopeFromData(array $data): string
+    {
+        $goodsId = (int)($data['goods_id'] ?? 0);
+        $skuId = (int)($data['sku_id'] ?? 0);
+        $supplierId = (int)($data['supplier_id'] ?? 0);
+
+        if ($goodsId > 0 && $skuId === 0 && $supplierId === 0) {
+            return self::SCOPE_GOODS_DAILY;
+        }
+        if ($goodsId > 0 && $skuId > 0 && $supplierId > 0) {
+            return self::SCOPE_SUPPLIER_SKU_DAILY;
+        }
+        return '';
+    }
+
+    protected static function applyScopeQuery($query, string $scope): void
+    {
+        if ($scope === self::SCOPE_GOODS_DAILY) {
+            $query->where('sku_id', 0)
+                ->where('supplier_id', 0);
+            return;
+        }
+        if ($scope === self::SCOPE_SUPPLIER_SKU_DAILY) {
+            $query->where('sku_id', '>', 0)
+                ->where('supplier_id', '>', 0);
+        }
+    }
+
+    protected static function findByLogicalKey(array $data, int $excludeId = 0)
+    {
+        $query = GoodsUnitConversionRule::where('tenant_id', self::tenantId())
+            ->where('goods_id', (int)$data['goods_id'])
+            ->where('sku_id', (int)$data['sku_id'])
+            ->where('supplier_id', (int)$data['supplier_id'])
+            ->where('from_unit_id', (int)$data['from_unit_id'])
+            ->where('to_unit_id', (int)$data['to_unit_id']);
+        self::whereNullable($query, 'effective_date', $data['effective_date'] ?? null);
+        if ($excludeId > 0) {
+            $query->where('id', '<>', $excludeId);
+        }
+        return $query->order(['id' => 'desc'])->findOrEmpty();
+    }
+
+    protected static function whereNullable($query, string $field, mixed $value): void
+    {
+        if ($value === null || $value === '') {
+            $query->whereNull($field);
+            return;
+        }
+        $query->where($field, $value);
     }
 
     public static function delete(array $params): bool
@@ -248,11 +427,33 @@ class UnitConversionLogic extends BaseLogic
             'ratio' => (string)($item['ratio'] ?? '0.000000'),
             'conversion_rate' => (string)($item['ratio'] ?? '0.000000'),
             'source_type' => (string)($item['source_type'] ?? ''),
+            'scope' => self::formatScope($item),
             'effective_date' => $item['effective_date'] ?? null,
             'expire_date' => $item['expire_date'] ?? null,
             'status' => (int)($item['status'] ?? 1),
             'remark' => (string)($item['remark'] ?? ''),
         ];
+    }
+
+    protected static function formatScope(array $item): string
+    {
+        $goodsId = (int)($item['goods_id'] ?? 0);
+        $skuId = (int)($item['sku_id'] ?? 0);
+        $supplierId = (int)($item['supplier_id'] ?? 0);
+
+        if ($goodsId === 0 && $skuId === 0 && $supplierId === 0) {
+            return 'tenant_default';
+        }
+        if ($goodsId > 0 && $skuId === 0 && $supplierId === 0) {
+            return self::SCOPE_GOODS_DAILY;
+        }
+        if ($goodsId > 0 && $skuId > 0 && $supplierId === 0) {
+            return 'sku_daily';
+        }
+        if ($goodsId > 0 && $skuId > 0 && $supplierId > 0) {
+            return self::SCOPE_SUPPLIER_SKU_DAILY;
+        }
+        return '';
     }
 
     protected static function existsInTenant(string $modelClass, int $id, int $goodsId = 0): bool
