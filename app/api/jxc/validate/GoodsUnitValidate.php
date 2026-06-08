@@ -19,6 +19,7 @@ class GoodsUnitValidate extends BaseValidate
         'date' => 'max:20',
         'rules' => 'array',
         'conversions' => 'array',
+        'scope' => 'in:goods_daily,supplier_sku_daily',
     ];
 
     protected $field = [
@@ -34,6 +35,7 @@ class GoodsUnitValidate extends BaseValidate
         'date' => '换算日期',
         'rules' => '换算规则',
         'conversions' => '换算规则',
+        'scope' => '保存范围',
     ];
 
     public function sceneAdd()
@@ -64,7 +66,7 @@ class GoodsUnitValidate extends BaseValidate
 
     public function sceneSaveConversionRules()
     {
-        return $this->only(['goods_id', 'rules', 'conversions']);
+        return $this->only(['goods_id', 'rules', 'conversions', 'scope']);
     }
 
     public function sceneDeleteConversionRule()
