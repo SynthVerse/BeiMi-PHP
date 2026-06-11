@@ -7,6 +7,7 @@ use app\common\model\jxc\Goods;
 use app\common\model\jxc\GoodsSupplier;
 use app\common\model\jxc\GoodsSku;
 use app\common\model\jxc\GoodsUnit;
+use app\common\model\jxc\GoodsUnitsBinding;
 use app\common\model\jxc\OrderGoods;
 use app\common\model\jxc\Vendor;
 use think\facade\Db;
@@ -16,6 +17,11 @@ class GoodsLogic extends BaseLogic
     public static function add(array $params): array|false
     {
         $saveData = self::buildSaveData($params);
+        $boundUnits = self::resolveBoundUnitsForSave($params, $saveData);
+        if ($boundUnits === false) {
+            return false;
+        }
+        self::applyBaseUnitToSaveData($saveData, $boundUnits);
         if ((int)$saveData['tenant_id'] <= 0) {
             self::setError('商品租户上下文缺失，请重新登录');
             return false;
@@ -30,6 +36,7 @@ class GoodsLogic extends BaseLogic
         Db::startTrans();
         try {
             $goods = Goods::create($saveData);
+            self::syncBoundUnits((int)$goods->id, $boundUnits);
             if ((int)$saveData['primary_supplier_id'] > 0) {
                 self::ensurePrimarySupplierRelation((int)$goods->id, (int)$saveData['primary_supplier_id']);
             }
@@ -55,6 +62,13 @@ class GoodsLogic extends BaseLogic
         }
 
         $saveData = self::buildSaveData($params, $model->toArray());
+        $oldBaseUnitId = (int)($model->unit_id ?? 0);
+        $oldBaseUnitName = (string)($model->units ?? '');
+        $boundUnits = self::resolveBoundUnitsForSave($params, $saveData, (int)$model->id);
+        if ($boundUnits === false) {
+            return false;
+        }
+        self::applyBaseUnitToSaveData($saveData, $boundUnits);
         if ((int)$saveData['tenant_id'] <= 0) {
             self::setError('商品租户上下文缺失，请重新登录');
             return false;
@@ -69,6 +83,16 @@ class GoodsLogic extends BaseLogic
         Db::startTrans();
         try {
             $model->save($saveData);
+            if ($boundUnits !== null) {
+                self::syncBoundUnits((int)$model->id, $boundUnits);
+            }
+            self::syncInheritedSkuBaseUnit(
+                (int)$model->id,
+                $oldBaseUnitId,
+                $oldBaseUnitName,
+                (int)$saveData['unit_id'],
+                (string)$saveData['units']
+            );
             self::syncPrimarySupplierFlag((int)$model->id, (int)$saveData['primary_supplier_id']);
             Db::commit();
             return true;
@@ -102,6 +126,9 @@ class GoodsLogic extends BaseLogic
             GoodsSupplier::where('goods_id', (int)$model->id)
                 ->where('tenant_id', self::tenantId())
                 ->delete();
+            GoodsUnitsBinding::where('goods_id', (int)$model->id)
+                ->where('tenant_id', self::tenantId())
+                ->delete();
             $model->delete();
             Db::commit();
             return true;
@@ -129,9 +156,23 @@ class GoodsLogic extends BaseLogic
         $item['skus'] = GoodsSkuLogic::lists(['goods_id' => (int)$item['id']]);
         $item['sku_count'] = count($item['skus']);
         $item['supplier_matrix'] = GoodsSupplierMatrixLogic::lists(['goods_id' => (int)$item['id']]);
+        $item['bound_units'] = self::boundUnitsForGoods((int)$item['id'], $item);
         $item['recent_supply_orders'] = self::recentSupplyOrders((int)$item['id']);
         $item['stats'] = self::purchaseStats((int)$item['id'], (int)$item['supplier_count']);
         return $item;
+    }
+
+    public static function unitsBinding(array $params): array
+    {
+        $goodsId = (int)($params['id'] ?? $params['goods_id'] ?? 0);
+        $goods = Goods::where('id', $goodsId)
+            ->where('tenant_id', self::tenantId())
+            ->findOrEmpty();
+        if ($goods->isEmpty()) {
+            return [];
+        }
+
+        return self::boundUnitsForGoods($goodsId, self::formatItem($goods->toArray()));
     }
 
     public static function supplierList(array $params): array
@@ -385,6 +426,227 @@ class GoodsLogic extends BaseLogic
         }
 
         return true;
+    }
+
+    protected static function resolveBoundUnitsForSave(array $params, array $saveData, int $goodsId = 0): array|null|false
+    {
+        if (array_key_exists('bound_units', $params)) {
+            return self::normalizeBoundUnits($params['bound_units'], $saveData, true);
+        }
+
+        if ($goodsId > 0 && self::boundUnitRows($goodsId) !== []) {
+            return null;
+        }
+
+        return self::fallbackBoundUnits($saveData);
+    }
+
+    protected static function normalizeBoundUnits(mixed $rows, array $fallback, bool $strict): array|false
+    {
+        if (!is_array($rows)) {
+            self::setError('绑定单位格式错误');
+            return false;
+        }
+
+        if ($rows === []) {
+            return self::fallbackBoundUnits($fallback);
+        }
+
+        $normalized = [];
+        $seen = [];
+        $baseCount = 0;
+        foreach ($rows as $index => $row) {
+            if (!is_array($row)) {
+                if ($strict) {
+                    self::setError('绑定单位格式错误');
+                    return false;
+                }
+                continue;
+            }
+
+            $unitId = (int)($row['unit_id'] ?? $row['units_id'] ?? $row['id'] ?? 0);
+            if ($unitId <= 0) {
+                if ($strict) {
+                    self::setError('请选择绑定单位');
+                    return false;
+                }
+                continue;
+            }
+            if (isset($seen[$unitId])) {
+                self::setError('绑定单位不能重复');
+                return false;
+            }
+
+            $unit = GoodsUnit::where('id', $unitId)
+                ->where('tenant_id', self::tenantId())
+                ->findOrEmpty();
+            if ($unit->isEmpty()) {
+                self::setError('绑定单位不存在');
+                return false;
+            }
+
+            $isBase = (int)($row['is_base_unit'] ?? 0) === 1 ? 1 : 0;
+            if ($isBase === 1) {
+                $baseCount++;
+            }
+            $seen[$unitId] = true;
+            $normalized[] = [
+                'unit_id' => $unitId,
+                'unit_name' => (string)($row['unit_name'] ?? $row['name'] ?? $unit->name ?? ''),
+                'is_base_unit' => $isBase,
+                'sort' => (int)($row['sort'] ?? $index),
+                'status' => (int)($row['status'] ?? 1) === 0 ? 0 : 1,
+            ];
+        }
+
+        if ($normalized === []) {
+            return self::fallbackBoundUnits($fallback);
+        }
+        if ($baseCount > 1) {
+            self::setError('基础单位只能设置一个');
+            return false;
+        }
+        if ($baseCount === 0) {
+            $normalized[0]['is_base_unit'] = 1;
+        }
+
+        return $normalized;
+    }
+
+    protected static function fallbackBoundUnits(array $saveData): array
+    {
+        $unitId = (int)($saveData['unit_id'] ?? 0);
+        if ($unitId <= 0) {
+            return [];
+        }
+
+        $unitName = (string)($saveData['units'] ?? '');
+        if ($unitName === '') {
+            $unit = GoodsUnit::where('id', $unitId)
+                ->where('tenant_id', self::tenantId())
+                ->findOrEmpty();
+            $unitName = $unit->isEmpty() ? '' : (string)$unit->name;
+        }
+
+        return [[
+            'unit_id' => $unitId,
+            'unit_name' => $unitName,
+            'is_base_unit' => 1,
+            'sort' => 0,
+            'status' => 1,
+        ]];
+    }
+
+    protected static function applyBaseUnitToSaveData(array &$saveData, ?array $boundUnits): void
+    {
+        if (!$boundUnits) {
+            return;
+        }
+
+        foreach ($boundUnits as $row) {
+            if ((int)($row['is_base_unit'] ?? 0) === 1) {
+                $saveData['unit_id'] = (int)$row['unit_id'];
+                $saveData['units'] = (string)$row['unit_name'];
+                return;
+            }
+        }
+    }
+
+    protected static function syncBoundUnits(int $goodsId, ?array $boundUnits): void
+    {
+        if ($boundUnits === null) {
+            return;
+        }
+
+        GoodsUnitsBinding::where('goods_id', $goodsId)
+            ->where('tenant_id', self::tenantId())
+            ->delete();
+
+        $now = time();
+        foreach ($boundUnits as $row) {
+            GoodsUnitsBinding::create([
+                'tenant_id' => self::tenantId(),
+                'goods_id' => $goodsId,
+                'unit_id' => (int)$row['unit_id'],
+                'unit_name' => (string)$row['unit_name'],
+                'is_base_unit' => (int)$row['is_base_unit'] === 1 ? 1 : 0,
+                'sort' => (int)$row['sort'],
+                'status' => (int)$row['status'] === 0 ? 0 : 1,
+                'create_time' => $now,
+                'update_time' => $now,
+            ]);
+        }
+    }
+
+    protected static function boundUnitRows(int $goodsId): array
+    {
+        return GoodsUnitsBinding::where('goods_id', $goodsId)
+            ->where('tenant_id', self::tenantId())
+            ->order(['is_base_unit' => 'desc', 'sort' => 'asc', 'id' => 'asc'])
+            ->select()
+            ->toArray();
+    }
+
+    public static function boundUnitsForGoods(int $goodsId, array $fallbackItem = []): array
+    {
+        $rows = self::boundUnitRows($goodsId);
+        if ($rows === [] && (int)($fallbackItem['unit_id'] ?? $fallbackItem['units_id'] ?? 0) > 0) {
+            return [[
+                'id' => 0,
+                'goods_id' => $goodsId,
+                'unit_id' => (int)($fallbackItem['unit_id'] ?? $fallbackItem['units_id'] ?? 0),
+                'units_id' => (int)($fallbackItem['unit_id'] ?? $fallbackItem['units_id'] ?? 0),
+                'unit_name' => (string)($fallbackItem['units'] ?? $fallbackItem['unit'] ?? ''),
+                'name' => (string)($fallbackItem['units'] ?? $fallbackItem['unit'] ?? ''),
+                'is_base_unit' => 1,
+                'sort' => 0,
+                'status' => 1,
+            ]];
+        }
+
+        return array_map(static fn($row) => [
+            'id' => (int)($row['id'] ?? 0),
+            'goods_id' => (int)($row['goods_id'] ?? 0),
+            'unit_id' => (int)($row['unit_id'] ?? 0),
+            'units_id' => (int)($row['unit_id'] ?? 0),
+            'unit_name' => (string)($row['unit_name'] ?? ''),
+            'name' => (string)($row['unit_name'] ?? ''),
+            'is_base_unit' => (int)($row['is_base_unit'] ?? 0),
+            'sort' => (int)($row['sort'] ?? 0),
+            'status' => (int)($row['status'] ?? 1),
+        ], $rows);
+    }
+
+    protected static function syncInheritedSkuBaseUnit(
+        int $goodsId,
+        int $oldBaseUnitId,
+        string $oldBaseUnitName,
+        int $newBaseUnitId,
+        string $newBaseUnitName
+    ): void {
+        if ($newBaseUnitId <= 0 || ($oldBaseUnitId === $newBaseUnitId && $oldBaseUnitName === $newBaseUnitName)) {
+            return;
+        }
+
+        GoodsSku::where('goods_id', $goodsId)
+            ->where('tenant_id', self::tenantId())
+            ->where(function ($query) use ($oldBaseUnitId, $oldBaseUnitName) {
+                $query->where('base_unit_id', 0);
+                if ($oldBaseUnitId > 0) {
+                    $query->whereOr('base_unit_id', $oldBaseUnitId);
+                }
+                if ($oldBaseUnitName !== '') {
+                    $query->whereOr(function ($subQuery) use ($oldBaseUnitName) {
+                        $subQuery->where('base_unit_id', 0)
+                            ->where('base_unit_name', $oldBaseUnitName);
+                    });
+                }
+            })
+            ->update([
+                'base_unit_id' => $newBaseUnitId,
+                'base_unit_name' => $newBaseUnitName,
+                'update_time' => time(),
+            ]);
     }
 
     protected static function normalizeSupplierRows(mixed $rows): array|false

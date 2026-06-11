@@ -7,6 +7,7 @@ use app\common\model\jxc\Goods;
 use app\common\model\jxc\GoodsSku;
 use app\common\model\jxc\GoodsUnit;
 use app\common\model\jxc\GoodsUnitConversionRule;
+use app\common\model\jxc\GoodsUnitsBinding;
 use app\common\model\jxc\Vendor;
 use think\facade\Db;
 
@@ -391,6 +392,9 @@ class UnitConversionLogic extends BaseLogic
 
         $fromUnit = self::unitName($fromUnitId, (string)($rule['from_unit_name'] ?? $rule['source_unit_name'] ?? ''));
         $toUnit = self::unitName($toUnitId, (string)($rule['to_unit_name'] ?? $rule['target_unit_name'] ?? ''));
+        if (!self::assertUnitsBoundToGoods($goodsId, [$fromUnitId, $toUnitId])) {
+            return false;
+        }
 
         return [
             'tenant_id' => self::tenantId(),
@@ -463,6 +467,30 @@ class UnitConversionLogic extends BaseLogic
             $query->where('goods_id', $goodsId);
         }
         return $query->count() > 0;
+    }
+
+    protected static function assertUnitsBoundToGoods(int $goodsId, array $unitIds): bool
+    {
+        if ($goodsId <= 0) {
+            return true;
+        }
+
+        $boundUnitIds = GoodsUnitsBinding::where('goods_id', $goodsId)
+            ->where('tenant_id', self::tenantId())
+            ->where('status', 1)
+            ->column('unit_id');
+        if ($boundUnitIds === []) {
+            return true;
+        }
+
+        $boundMap = array_fill_keys(array_map('intval', $boundUnitIds), true);
+        foreach ($unitIds as $unitId) {
+            if (!isset($boundMap[(int)$unitId])) {
+                self::setError('换算单位必须先绑定到商品');
+                return false;
+            }
+        }
+        return true;
     }
 
     protected static function identityRule(int $fromUnitId, int $toUnitId): array

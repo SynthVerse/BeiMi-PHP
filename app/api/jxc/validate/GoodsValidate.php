@@ -27,6 +27,7 @@ class GoodsValidate extends BaseValidate
         'skus' => 'array',
         'relations' => 'array',
         'suppliers' => 'array',
+        'bound_units' => 'array',
         'supplier_relation' => 'max:20',
         'stock_status' => 'max:20',
         'status' => 'max:20',
@@ -55,6 +56,7 @@ class GoodsValidate extends BaseValidate
         'skus' => 'SKU列表',
         'relations' => '供应商SKU矩阵',
         'suppliers' => '供应商列表',
+        'bound_units' => '绑定单位列表',
         'supplier_relation' => '供应商关联类型',
         'stock_status' => '库存状态',
         'status' => '商品状态',
@@ -78,6 +80,7 @@ class GoodsValidate extends BaseValidate
             'stock',
             'category_id',
             'primary_supplier_id',
+            'bound_units',
             'is_disabled',
             'remark',
         ]);
@@ -100,6 +103,7 @@ class GoodsValidate extends BaseValidate
             'stock',
             'category_id',
             'primary_supplier_id',
+            'bound_units',
             'is_disabled',
             'remark',
         ]);
@@ -116,6 +120,12 @@ class GoodsValidate extends BaseValidate
     }
 
     public function sceneSuppliers()
+    {
+        return $this->only(['id', 'goods_id'])
+            ->remove('id', 'require');
+    }
+
+    public function sceneUnitsBinding()
     {
         return $this->only(['id', 'goods_id'])
             ->remove('id', 'require');
