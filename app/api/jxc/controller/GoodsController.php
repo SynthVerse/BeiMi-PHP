@@ -63,6 +63,12 @@ class GoodsController extends BaseJxcController
         return $this->data(GoodsLogic::supplierList($params));
     }
 
+    public function unitsBinding()
+    {
+        $params = (new GoodsValidate())->goCheck('unitsBinding');
+        return $this->data(GoodsLogic::unitsBinding($params));
+    }
+
     public function saveSuppliers()
     {
         $params = (new GoodsValidate())->post()->goCheck('saveSuppliers');

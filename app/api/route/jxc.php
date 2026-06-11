@@ -67,6 +67,7 @@ Route::group('', function () {
     Route::post('goods/supplier-matrix/save', 'jxc.Goods/saveSupplierMatrix');
     Route::get('goods/detail', 'jxc.Goods/detail');
     Route::get('goods/suppliers', 'jxc.Goods/suppliers');
+    Route::get('goods/units-binding', 'jxc.Goods/unitsBinding');
     Route::post('goods/suppliers/save', 'jxc.Goods/saveSuppliers');
     Route::post('goods/add', 'jxc.Goods/add');
     Route::post('goods/edit', 'jxc.Goods/edit');
