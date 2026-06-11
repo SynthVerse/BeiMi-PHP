@@ -36,7 +36,7 @@ class GoodsUnitController extends BaseJxcController
 
     public function delete()
     {
-        $params = (new GoodsUnitValidate())->goCheck('delete');
+        $params = (new GoodsUnitValidate())->post()->goCheck('delete');
         $result = GoodsUnitLogic::delete($params);
         if ($result === false) {
             return $this->fail(GoodsUnitLogic::getError());
@@ -68,7 +68,7 @@ class GoodsUnitController extends BaseJxcController
 
     public function deleteConversionRule()
     {
-        $params = (new GoodsUnitValidate())->goCheck('deleteConversionRule');
+        $params = (new GoodsUnitValidate())->post()->goCheck('deleteConversionRule');
         $result = UnitConversionLogic::delete($params);
         if ($result === false) {
             return $this->fail(UnitConversionLogic::getError());
