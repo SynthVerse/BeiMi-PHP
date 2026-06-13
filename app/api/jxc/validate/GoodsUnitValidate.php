@@ -78,4 +78,9 @@ class GoodsUnitValidate extends BaseValidate
     {
         return $this->only(['goods_id', 'sku_id', 'supplier_id', 'from_unit_id', 'to_unit_id', 'date']);
     }
+
+    public function sceneGoodsBaseUnit()
+    {
+        return $this->only(['goods_id']);
+    }
 }

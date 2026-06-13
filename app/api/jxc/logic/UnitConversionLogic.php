@@ -33,6 +33,51 @@ class UnitConversionLogic extends BaseLogic
         return array_map([self::class, 'formatRule'], $rows);
     }
 
+    /**
+     * 获取商品的基础单位信息
+     */
+    public static function getBaseUnit(array $params): ?array
+    {
+        $goodsId = (int)($params['goods_id'] ?? 0);
+        if ($goodsId <= 0) {
+            return null;
+        }
+
+        // 优先从 GoodsUnitsBinding 查找 is_base_unit=1 的记录
+        $baseBinding = GoodsUnitsBinding::where('goods_id', $goodsId)
+            ->where('tenant_id', self::tenantId())
+            ->where('is_base_unit', 1)
+            ->where('status', 1)
+            ->findOrEmpty();
+
+        if (!$baseBinding->isEmpty()) {
+            return [
+                'unit_id' => (int)$baseBinding->unit_id,
+                'unit_name' => (string)($baseBinding->unit_name ?: self::unitName((int)$baseBinding->unit_id, '')),
+                'is_base_unit' => 1,
+            ];
+        }
+
+        // Fallback: 从 la_goods 表取旧版 unit_id + units
+        $goods = Goods::where('id', $goodsId)
+            ->where('tenant_id', self::tenantId())
+            ->findOrEmpty();
+
+        if (!$goods->isEmpty()) {
+            $unitId = (int)($goods->unit_id ?? 0);
+            $unitName = (string)($goods->units ?? '');
+            if ($unitId > 0 || $unitName !== '') {
+                return [
+                    'unit_id' => $unitId,
+                    'unit_name' => $unitName ?: self::unitName($unitId, ''),
+                    'is_base_unit' => 1,
+                ];
+            }
+        }
+
+        return null;
+    }
+
     public static function saveRules(array $params): array|false
     {
         $rules = $params['rules'] ?? $params['conversions'] ?? [];
@@ -395,6 +440,18 @@ class UnitConversionLogic extends BaseLogic
         if (!self::assertUnitsBoundToGoods($goodsId, [$fromUnitId, $toUnitId])) {
             return false;
         }
+        if ($fromUnitId === $toUnitId) {
+            self::setError('源单位和目标单位不能相同');
+            return false;
+        }
+        if ($goodsId > 0) {
+            if (!self::assertToUnitIsBaseUnit($goodsId, $toUnitId)) {
+                return false;
+            }
+            if (!self::assertFromUnitNotBase($goodsId, $fromUnitId)) {
+                return false;
+            }
+        }
 
         return [
             'tenant_id' => self::tenantId(),
@@ -490,6 +547,59 @@ class UnitConversionLogic extends BaseLogic
                 return false;
             }
         }
+        return true;
+    }
+
+    /**
+     * 校验 to_unit_id 必须是商品的基础单位
+     */
+    protected static function assertToUnitIsBaseUnit(int $goodsId, int $toUnitId): bool
+    {
+        if ($goodsId <= 0) {
+            return true;
+        }
+
+        $baseBinding = GoodsUnitsBinding::where('goods_id', $goodsId)
+            ->where('tenant_id', self::tenantId())
+            ->where('is_base_unit', 1)
+            ->where('status', 1)
+            ->findOrEmpty();
+
+        if ($baseBinding->isEmpty()) {
+            self::setError('商品未设置基础单位');
+            return false;
+        }
+
+        if ((int)$baseBinding->unit_id !== $toUnitId) {
+            $baseUnitName = (string)($baseBinding->unit_name ?: self::unitName((int)$baseBinding->unit_id, ''));
+            self::setError("换算目标单位必须为基础单位'{$baseUnitName}'");
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * 校验 from_unit_id 不能是商品的基础单位
+     */
+    protected static function assertFromUnitNotBase(int $goodsId, int $fromUnitId): bool
+    {
+        if ($goodsId <= 0) {
+            return true;
+        }
+
+        $count = GoodsUnitsBinding::where('goods_id', $goodsId)
+            ->where('tenant_id', self::tenantId())
+            ->where('unit_id', $fromUnitId)
+            ->where('is_base_unit', 1)
+            ->where('status', 1)
+            ->count();
+
+        if ($count > 0) {
+            self::setError('基础单位不能作为换算源单位');
+            return false;
+        }
+
         return true;
     }
 

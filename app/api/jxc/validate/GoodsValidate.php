@@ -33,6 +33,10 @@ class GoodsValidate extends BaseValidate
         'status' => 'max:20',
         'is_disabled' => 'integer|in:0,1',
         'remark' => 'max:500',
+        'qualities' => 'array',
+        'specifications' => 'array',
+        'quality_ids' => 'array',
+        'specification_ids' => 'array',
     ];
 
     protected $field = [
@@ -62,6 +66,10 @@ class GoodsValidate extends BaseValidate
         'status' => '商品状态',
         'is_disabled' => '禁用状态',
         'remark' => '备注',
+        'qualities' => '品质列表',
+        'specifications' => '规格列表',
+        'quality_ids' => '品质ID列表',
+        'specification_ids' => '规格ID列表',
     ];
 
     public function sceneAdd()
@@ -110,6 +118,16 @@ class GoodsValidate extends BaseValidate
     }
 
     public function sceneDelete()
+    {
+        return $this->only(['id']);
+    }
+
+    public function sceneArchive()
+    {
+        return $this->only(['id']);
+    }
+
+    public function sceneUnarchive()
     {
         return $this->only(['id']);
     }
@@ -163,6 +181,36 @@ class GoodsValidate extends BaseValidate
     public function sceneSaveSupplierMatrix()
     {
         return $this->only(['id', 'goods_id', 'relations', 'suppliers'])
+            ->remove('id', 'require');
+    }
+
+    public function sceneQualities()
+    {
+        return $this->only(['id', 'goods_id'])
+            ->remove('id', 'require');
+    }
+
+    public function sceneSaveQualities()
+    {
+        return $this->only(['id', 'goods_id', 'qualities'])
+            ->remove('id', 'require');
+    }
+
+    public function sceneSpecifications()
+    {
+        return $this->only(['id', 'goods_id'])
+            ->remove('id', 'require');
+    }
+
+    public function sceneSaveSpecifications()
+    {
+        return $this->only(['id', 'goods_id', 'specifications'])
+            ->remove('id', 'require');
+    }
+
+    public function sceneGenerateSkus()
+    {
+        return $this->only(['id', 'goods_id', 'quality_ids', 'specification_ids'])
             ->remove('id', 'require');
     }
 }

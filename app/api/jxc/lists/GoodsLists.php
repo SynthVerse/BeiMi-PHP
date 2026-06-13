@@ -82,6 +82,14 @@ class GoodsLists extends BaseDataLists
             }
         }
 
+        // 默认排除已归档商品
+        $isArchived = $this->params['is_archived'] ?? '';
+        if ($isArchived !== '') {
+            $query->where('is_archived', (int)$isArchived);
+        } else {
+            $query->where('is_archived', 0);
+        }
+
         return $query->order(['id' => 'desc']);
     }
 

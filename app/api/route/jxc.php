@@ -37,6 +37,7 @@ Route::group('', function () {
     Route::delete('units/conversion/rules/del', 'jxc.GoodsUnit/deleteConversionRule');
     Route::post('units/conversion/rules/del', 'jxc.GoodsUnit/deleteConversionRule');
     Route::get('units/conversion/resolve', 'jxc.GoodsUnit/resolveConversion');
+    Route::get('goods/base-unit', 'jxc.GoodsUnit/goodsBaseUnit');
 
     Route::get('warehouse/index', 'jxc.Warehouse/lists');
     Route::get('warehouse/detail', 'jxc.Warehouse/detail');
@@ -73,6 +74,16 @@ Route::group('', function () {
     Route::post('goods/edit', 'jxc.Goods/edit');
     Route::delete('goods/del', 'jxc.Goods/delete');
     Route::post('goods/del', 'jxc.Goods/delete');
+    Route::post('goods/archive', 'jxc.Goods/archive');
+    Route::post('goods/unarchive', 'jxc.Goods/unarchive');
+    Route::get('goods/archived', 'jxc.Goods/archivedLists');
+
+    // === 品质与规格管理 ===
+    Route::get('goods/qualities', 'jxc.Goods/qualities');
+    Route::post('goods/qualities/save', 'jxc.Goods/saveQualities');
+    Route::get('goods/specifications', 'jxc.Goods/specifications');
+    Route::post('goods/specifications/save', 'jxc.Goods/saveSpecifications');
+    Route::post('goods/skus/generate', 'jxc.Goods/generateSkus');
 
     Route::get('customer/detail', 'jxc.Customer/detail');
     Route::get('customer/children', 'jxc.Customer/children');

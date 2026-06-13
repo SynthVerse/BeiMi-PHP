@@ -129,6 +129,8 @@ class GoodsSkuLogic extends BaseLogic
             'sku_code' => (string)($item['sku_code'] ?? ''),
             'quality_status' => (string)($item['quality_status'] ?? ''),
             'quality_label' => (string)($item['quality_label'] ?? ''),
+            'specification_status' => (string)($item['specification_status'] ?? ''),
+            'specification_label' => (string)($item['specification_label'] ?? ''),
             'base_unit_id' => (int)($item['base_unit_id'] ?? 0),
             'base_unit_name' => (string)($item['base_unit_name'] ?? ''),
             'base_unit' => (string)($item['base_unit_name'] ?? ''),
@@ -137,6 +139,7 @@ class GoodsSkuLogic extends BaseLogic
             'status' => (int)($item['status'] ?? 1),
             'sort' => (int)($item['sort'] ?? 0),
             'remark' => (string)($item['remark'] ?? ''),
+            'is_auto_generated' => (int)($item['is_auto_generated'] ?? 0),
         ];
     }
 
@@ -151,14 +154,26 @@ class GoodsSkuLogic extends BaseLogic
             $qualityLabel = $qualityStatus !== '' ? $qualityStatus : 'default';
         }
 
+        $specificationLabel = trim((string)($sku['specification_label'] ?? ''));
+        $specificationStatus = trim((string)($sku['specification_status'] ?? ''));
+        if ($specificationStatus === '' && $specificationLabel !== '') {
+            $specificationStatus = strtolower((string)preg_replace('/[^a-zA-Z0-9_]+/', '_', $specificationLabel));
+        }
+
         $skuName = trim((string)($sku['sku_name'] ?? ''));
         if ($skuName === '') {
             $skuName = (string)$goods['name'] . '-' . $qualityLabel;
+            if ($specificationLabel !== '') {
+                $skuName .= '-' . $specificationLabel;
+            }
         }
 
         $skuCode = trim((string)($sku['sku_code'] ?? ''));
         if ($skuCode === '') {
             $skuCode = 'SKU-' . (int)$goods['id'] . '-' . ($qualityStatus !== '' ? $qualityStatus : ($index + 1));
+            if ($specificationStatus !== '') {
+                $skuCode .= '-' . $specificationStatus;
+            }
         }
 
         $baseUnitId = (int)($sku['base_unit_id'] ?? $goods['unit_id'] ?? 0);
@@ -177,6 +192,8 @@ class GoodsSkuLogic extends BaseLogic
             'sku_code' => $skuCode,
             'quality_status' => $qualityStatus,
             'quality_label' => $qualityLabel,
+            'specification_status' => $specificationStatus,
+            'specification_label' => $specificationLabel,
             'base_unit_id' => $baseUnitId,
             'base_unit_name' => $baseUnitName,
             'purchase_status' => (int)($sku['purchase_status'] ?? 1) === 0 ? 0 : 1,
@@ -184,6 +201,7 @@ class GoodsSkuLogic extends BaseLogic
             'status' => (int)($sku['status'] ?? 1) === 0 ? 0 : 1,
             'sort' => (int)($sku['sort'] ?? $index),
             'remark' => trim((string)($sku['remark'] ?? '')),
+            'is_auto_generated' => (int)($sku['is_auto_generated'] ?? 0),
         ];
     }
 
@@ -252,6 +270,7 @@ class GoodsSkuLogic extends BaseLogic
             ]);
         }
 
+        // 同步品质维度
         $spec = GoodsSpec::where('tenant_id', self::tenantId())
             ->where('template_id', (int)$template->id)
             ->where('code', 'quality_status')
@@ -306,6 +325,64 @@ class GoodsSkuLogic extends BaseLogic
         } else {
             $relation->save($relationData);
         }
+
+        // 同步规格维度（weight_grade）
+        $specificationStatus = $data['specification_status'] ?? '';
+        if ($specificationStatus !== '') {
+            $weightSpec = GoodsSpec::where('tenant_id', self::tenantId())
+                ->where('template_id', (int)$template->id)
+                ->where('code', 'weight_grade')
+                ->findOrEmpty();
+            if ($weightSpec->isEmpty()) {
+                $weightSpec = GoodsSpec::create([
+                    'tenant_id' => self::tenantId(),
+                    'template_id' => (int)$template->id,
+                    'name' => '重量规格',
+                    'code' => 'weight_grade',
+                    'status' => 1,
+                    'sort' => 1,
+                    'create_time' => time(),
+                    'update_time' => time(),
+                ]);
+            }
+
+            $specValue = GoodsSpecValue::where('tenant_id', self::tenantId())
+                ->where('spec_id', (int)$weightSpec->id)
+                ->where('code', $specificationStatus)
+                ->findOrEmpty();
+            if ($specValue->isEmpty()) {
+                $specValue = GoodsSpecValue::create([
+                    'tenant_id' => self::tenantId(),
+                    'spec_id' => (int)$weightSpec->id,
+                    'name' => $data['specification_label'] ?? $specificationStatus,
+                    'code' => $specificationStatus,
+                    'status' => 1,
+                    'sort' => (int)$data['sort'],
+                    'create_time' => time(),
+                    'update_time' => time(),
+                ]);
+            }
+
+            $specRelation = GoodsSkuSpecValue::where('tenant_id', self::tenantId())
+                ->where('sku_id', $skuId)
+                ->where('spec_id', (int)$weightSpec->id)
+                ->findOrEmpty();
+            $specRelationData = [
+                'tenant_id' => self::tenantId(),
+                'goods_id' => $goodsId,
+                'sku_id' => $skuId,
+                'spec_id' => (int)$weightSpec->id,
+                'spec_value_id' => (int)$specValue->id,
+                'spec_name' => '重量规格',
+                'spec_value_name' => $data['specification_label'] ?? $specificationStatus,
+                'create_time' => time(),
+            ];
+            if ($specRelation->isEmpty()) {
+                GoodsSkuSpecValue::create($specRelationData);
+            } else {
+                $specRelation->save($specRelationData);
+            }
+        }
     }
 
     protected static function assertUniqueCode(int $goodsId, string $skuCode, int $ignoreId = 0): bool
@@ -328,6 +405,153 @@ class GoodsSkuLogic extends BaseLogic
         return Goods::where('id', $goodsId)
             ->where('tenant_id', self::tenantId())
             ->count() > 0;
+    }
+
+    /**
+     * 笛卡尔积生成SKU
+     * @param array $params [goods_id, quality_ids[], specification_ids[]]
+     */
+    public static function generateFromCartesian(array $params): array|false
+    {
+        $goodsId = (int)($params['goods_id'] ?? $params['id'] ?? 0);
+        $goods = Goods::where('id', $goodsId)
+            ->where('tenant_id', self::tenantId())
+            ->findOrEmpty();
+        if ($goods->isEmpty()) {
+            self::setError('商品不存在');
+            return false;
+        }
+
+        $qualityIds = $params['quality_ids'] ?? [];
+        $specificationIds = $params['specification_ids'] ?? [];
+
+        if (!is_array($qualityIds) || empty($qualityIds)) {
+            self::setError('请选择至少一个品质');
+            return false;
+        }
+        if (!is_array($specificationIds) || empty($specificationIds)) {
+            self::setError('请选择至少一个规格');
+            return false;
+        }
+
+        // 获取品质值列表
+        $qualityValues = GoodsSpecValue::where('tenant_id', self::tenantId())
+            ->whereIn('id', $qualityIds)
+            ->select()
+            ->toArray();
+        if (empty($qualityValues)) {
+            self::setError('品质值不存在');
+            return false;
+        }
+
+        // 获取规格值列表
+        $specValues = GoodsSpecValue::where('tenant_id', self::tenantId())
+            ->whereIn('id', $specificationIds)
+            ->select()
+            ->toArray();
+        if (empty($specValues)) {
+            self::setError('规格值不存在');
+            return false;
+        }
+
+        Db::startTrans();
+        try {
+            $goodsData = $goods->toArray();
+            // 计算笛卡尔积
+            $combinations = [];
+            foreach ($qualityValues as $quality) {
+                foreach ($specValues as $spec) {
+                    $combinations[] = [
+                        'quality_code' => $quality['code'],
+                        'quality_name' => $quality['name'],
+                        'spec_code' => $spec['code'],
+                        'spec_name' => $spec['name'],
+                    ];
+                }
+            }
+
+            // 获取现有自动生成的SKU
+            $existingAutoSkus = GoodsSku::where('tenant_id', self::tenantId())
+                ->where('goods_id', $goodsId)
+                ->where('is_auto_generated', 1)
+                ->select()
+                ->toArray();
+
+            // 建立现有SKU索引 (quality_status + specification_status)
+            $existingMap = [];
+            foreach ($existingAutoSkus as $sku) {
+                $key = $sku['quality_status'] . '|' . $sku['specification_status'];
+                $existingMap[$key] = $sku;
+            }
+
+            // 新组合集合
+            $newCombinationKeys = [];
+            $keptIds = [];
+
+            foreach ($combinations as $index => $combo) {
+                $key = $combo['quality_code'] . '|' . $combo['spec_code'];
+                $newCombinationKeys[] = $key;
+
+                if (isset($existingMap[$key])) {
+                    // 已存在，保留
+                    $keptIds[] = (int)$existingMap[$key]['id'];
+                } else {
+                    // 新建SKU
+                    $skuName = $goodsData['name'] . '-' . $combo['quality_name'] . '-' . $combo['spec_name'];
+                    $skuCode = 'SKU-' . $goodsId . '-' . $combo['quality_code'] . '-' . $combo['spec_code'];
+
+                    $skuData = [
+                        'tenant_id' => self::tenantId(),
+                        'goods_id' => $goodsId,
+                        'sku_name' => $skuName,
+                        'sku_code' => $skuCode,
+                        'quality_status' => $combo['quality_code'],
+                        'quality_label' => $combo['quality_name'],
+                        'specification_status' => $combo['spec_code'],
+                        'specification_label' => $combo['spec_name'],
+                        'base_unit_id' => (int)($goodsData['unit_id'] ?? 0),
+                        'base_unit_name' => (string)($goodsData['units'] ?? ''),
+                        'purchase_status' => 1,
+                        'sale_status' => 1,
+                        'status' => 1,
+                        'sort' => $index,
+                        'remark' => '',
+                        'is_auto_generated' => 1,
+                        'create_time' => time(),
+                        'update_time' => time(),
+                    ];
+
+                    $model = GoodsSku::create($skuData);
+                    $keptIds[] = (int)$model->id;
+                    self::syncQualitySpecValue($goodsId, (int)$model->id, $skuData);
+                }
+            }
+
+            // 删除不再存在的自动生成SKU
+            $deleteIds = [];
+            foreach ($existingAutoSkus as $sku) {
+                $key = $sku['quality_status'] . '|' . $sku['specification_status'];
+                if (!in_array($key, $newCombinationKeys)) {
+                    $deleteIds[] = (int)$sku['id'];
+                }
+            }
+            if (!empty($deleteIds)) {
+                GoodsSkuSpecValue::where('tenant_id', self::tenantId())
+                    ->whereIn('sku_id', $deleteIds)
+                    ->delete();
+                GoodsSku::where('tenant_id', self::tenantId())
+                    ->where('goods_id', $goodsId)
+                    ->whereIn('id', $deleteIds)
+                    ->delete();
+            }
+
+            Db::commit();
+            return self::lists(['goods_id' => $goodsId]);
+        } catch (\Throwable $e) {
+            Db::rollback();
+            self::setError($e->getMessage());
+            return false;
+        }
     }
 
     protected static function tenantId(): int

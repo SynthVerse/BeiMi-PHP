@@ -8,6 +8,9 @@ use app\common\model\jxc\GoodsSupplier;
 use app\common\model\jxc\GoodsSku;
 use app\common\model\jxc\GoodsUnit;
 use app\common\model\jxc\GoodsUnitsBinding;
+use app\common\model\cloud\CloudGoodsImport;
+use app\common\model\jxc\GoodsSkuSpecValue;
+use app\common\model\jxc\GoodsSpecValue;
 use app\common\model\jxc\OrderGoods;
 use app\common\model\jxc\Vendor;
 use think\facade\Db;
@@ -117,7 +120,7 @@ class GoodsLogic extends BaseLogic
             ->where('tenant_id', self::tenantId())
             ->count();
         if ($orderGoodsCount > 0) {
-            self::setError('该商品已被订单明细使用，请先删除相关订单后再删除');
+            self::setError('该商品已被订单明细使用，无法直接删除，请使用归档功能');
             return false;
         }
 
@@ -129,11 +132,70 @@ class GoodsLogic extends BaseLogic
             GoodsUnitsBinding::where('goods_id', (int)$model->id)
                 ->where('tenant_id', self::tenantId())
                 ->delete();
+            GoodsSku::where('goods_id', (int)$model->id)
+                ->where('tenant_id', self::tenantId())
+                ->delete();
+            // 清除云端商品导入记录，允许重新从云端加载
+            CloudGoodsImport::where('goods_id', (int)$model->id)
+                ->where('tenant_id', self::tenantId())
+                ->delete();
+            // 清理SKU规格值映射
+            GoodsSkuSpecValue::where('goods_id', (int)$model->id)
+                ->where('tenant_id', self::tenantId())
+                ->delete();
+            // 清理品质/规格值
+            GoodsSpecValue::where('goods_id', (int)$model->id)
+                ->where('tenant_id', self::tenantId())
+                ->delete();
             $model->delete();
             Db::commit();
             return true;
         } catch (\Throwable $e) {
             Db::rollback();
+            self::setError($e->getMessage());
+            return false;
+        }
+    }
+
+    public static function archive(array $params): bool
+    {
+        $model = Goods::where('id', (int)$params['id'])
+            ->where('tenant_id', self::tenantId())
+            ->findOrEmpty();
+        if ($model->isEmpty()) {
+            self::setError('商品不存在');
+            return false;
+        }
+        if ((int)$model->is_archived === 1) {
+            self::setError('该商品已处于归档状态');
+            return false;
+        }
+        try {
+            $model->save(['is_archived' => 1]);
+            return true;
+        } catch (\Throwable $e) {
+            self::setError($e->getMessage());
+            return false;
+        }
+    }
+
+    public static function unarchive(array $params): bool
+    {
+        $model = Goods::where('id', (int)$params['id'])
+            ->where('tenant_id', self::tenantId())
+            ->findOrEmpty();
+        if ($model->isEmpty()) {
+            self::setError('商品不存在');
+            return false;
+        }
+        if ((int)$model->is_archived === 0) {
+            self::setError('该商品未处于归档状态');
+            return false;
+        }
+        try {
+            $model->save(['is_archived' => 0]);
+            return true;
+        } catch (\Throwable $e) {
             self::setError($e->getMessage());
             return false;
         }
@@ -322,6 +384,18 @@ class GoodsLogic extends BaseLogic
             $item['supplier_name'] = $item['primary_supplier']['supplier_name'] ?? '';
         }
         unset($item);
+
+        $goodsIds = array_column($formatted, 'id');
+        if (!empty($goodsIds)) {
+            $usedIds = OrderGoods::where('tenant_id', self::tenantId())
+                ->whereIn('goods_id', $goodsIds)
+                ->group('goods_id')
+                ->column('goods_id');
+            foreach ($formatted as &$item) {
+                $item['has_orders'] = in_array((int)$item['id'], $usedIds);
+            }
+            unset($item);
+        }
 
         return $formatted;
     }
