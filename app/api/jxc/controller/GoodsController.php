@@ -2,10 +2,12 @@
 
 namespace app\api\jxc\controller;
 
+use app\api\jxc\lists\GoodsArchivedLists;
 use app\api\jxc\lists\GoodsCategoryLists;
 use app\api\jxc\lists\GoodsLists;
 use app\api\jxc\logic\GoodsLogic;
 use app\api\jxc\logic\GoodsSkuLogic;
+use app\api\jxc\logic\GoodsSpecificationLogic;
 use app\api\jxc\logic\GoodsSupplierMatrixLogic;
 use app\api\jxc\validate\GoodsValidate;
 
@@ -36,9 +38,14 @@ class GoodsController extends BaseJxcController
         return $this->success('编辑成功', [], 1, 1);
     }
 
+    public function del()
+    {
+        return $this->delete();
+    }
+
     public function delete()
     {
-        $params = (new GoodsValidate())->goCheck('delete');
+        $params = (new GoodsValidate())->post()->goCheck('delete');
         $result = GoodsLogic::delete($params);
         if ($result === false) {
             return $this->fail(GoodsLogic::getError());
@@ -119,5 +126,72 @@ class GoodsController extends BaseJxcController
             return $this->fail(GoodsSupplierMatrixLogic::getError());
         }
         return $this->success('保存成功', $result, 1, 1);
+    }
+
+    public function archive()
+    {
+        $params = (new GoodsValidate())->post()->goCheck('archive');
+        $result = GoodsLogic::archive($params);
+        if ($result === false) {
+            return $this->fail(GoodsLogic::getError());
+        }
+        return $this->success('归档成功', [], 1, 1);
+    }
+
+    public function unarchive()
+    {
+        $params = (new GoodsValidate())->post()->goCheck('unarchive');
+        $result = GoodsLogic::unarchive($params);
+        if ($result === false) {
+            return $this->fail(GoodsLogic::getError());
+        }
+        return $this->success('取消归档成功', [], 1, 1);
+    }
+
+    public function archivedLists()
+    {
+        return $this->dataLists(GoodsArchivedLists::class);
+    }
+
+    public function qualities()
+    {
+        $params = (new GoodsValidate())->goCheck('qualities');
+        return $this->data(GoodsSpecificationLogic::qualityList($params));
+    }
+
+    public function saveQualities()
+    {
+        $params = (new GoodsValidate())->post()->goCheck('saveQualities');
+        $result = GoodsSpecificationLogic::saveQualities($params);
+        if ($result === false) {
+            return $this->fail(GoodsSpecificationLogic::getError());
+        }
+        return $this->success('保存成功', $result, 1, 1);
+    }
+
+    public function specifications()
+    {
+        $params = (new GoodsValidate())->goCheck('specifications');
+        return $this->data(GoodsSpecificationLogic::specificationList($params));
+    }
+
+    public function saveSpecifications()
+    {
+        $params = (new GoodsValidate())->post()->goCheck('saveSpecifications');
+        $result = GoodsSpecificationLogic::saveSpecifications($params);
+        if ($result === false) {
+            return $this->fail(GoodsSpecificationLogic::getError());
+        }
+        return $this->success('保存成功', $result, 1, 1);
+    }
+
+    public function generateSkus()
+    {
+        $params = (new GoodsValidate())->post()->goCheck('generateSkus');
+        $result = GoodsSkuLogic::generateFromCartesian($params);
+        if ($result === false) {
+            return $this->fail(GoodsSkuLogic::getError());
+        }
+        return $this->success('生成成功', $result, 1, 1);
     }
 }

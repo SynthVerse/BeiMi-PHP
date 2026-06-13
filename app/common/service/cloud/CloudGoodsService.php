@@ -448,20 +448,12 @@ class CloudGoodsService extends BaseLogic
 
     protected static function findDuplicateGoods(array $source, int $tenantId, int $unitId): ?array
     {
-        $productCode = trim((string)($source['product_code'] ?? ''));
-        if ($productCode !== '') {
-            $existing = Goods::where('tenant_id', $tenantId)->where('product_code', $productCode)->findOrEmpty();
-            if (!$existing->isEmpty()) {
-                return ['id' => (int)$existing->id, 'reason' => '商品编码已存在'];
-            }
-        }
-
+        // 仅基于商品名称检测重复
         $existing = Goods::where('tenant_id', $tenantId)
             ->where('name', (string)$source['name'])
-            ->where('unit_id', $unitId)
             ->findOrEmpty();
         if (!$existing->isEmpty()) {
-            return ['id' => (int)$existing->id, 'reason' => '相同名称和单位的商品已存在'];
+            return ['id' => (int)$existing->id, 'reason' => '该商品名称在当前店铺已存在，无需重复加载'];
         }
         return null;
     }

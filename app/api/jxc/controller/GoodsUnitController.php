@@ -85,4 +85,11 @@ class GoodsUnitController extends BaseJxcController
         }
         return $this->data($result);
     }
+
+    public function goodsBaseUnit()
+    {
+        $params = (new GoodsUnitValidate())->goCheck('goodsBaseUnit');
+        $result = UnitConversionLogic::getBaseUnit($params);
+        return $this->data($result);
+    }
 }
