@@ -4,6 +4,7 @@ namespace app\api\jxc\lists;
 
 use app\api\jxc\logic\SupplyOrderLogic;
 use app\common\lists\BaseDataLists;
+use app\common\model\jxc\OrderGoods;
 use app\common\model\jxc\SupplyOrder;
 
 class SupplyOrderLists extends BaseDataLists
@@ -34,6 +35,21 @@ class SupplyOrderLists extends BaseDataLists
                 $builder->whereLike('order_sn', '%' . $keyword . '%')
                     ->whereOr('supplier_name', 'like', '%' . $keyword . '%');
             });
+        }
+
+        $goodsId = (int)($this->params['goods_id'] ?? 0);
+        if ($goodsId > 0) {
+            $orderIds = OrderGoods::where('goods_id', $goodsId)
+                ->where('tenant_id', (int)(request()->tenantId ?? 0))
+                ->where('order_type', 'supply')
+                ->group('order_id')
+                ->column('order_id');
+
+            if (!empty($orderIds)) {
+                $query->whereIn('id', $orderIds);
+            } else {
+                $query->where('id', 0);
+            }
         }
 
         $supplierId = (int)($this->params['supplier_id'] ?? 0);
