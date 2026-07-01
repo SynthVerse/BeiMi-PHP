@@ -3,6 +3,7 @@
 namespace app\api\jxc\logic;
 
 use app\common\logic\BaseLogic;
+use app\common\model\jxc\Customer;
 use app\common\model\jxc\Goods;
 use app\common\model\jxc\GoodsSupplier;
 use app\common\model\jxc\GoodsSku;
@@ -222,6 +223,20 @@ class GoodsLogic extends BaseLogic
         $item['recent_supply_orders'] = self::recentSupplyOrders((int)$item['id']);
         $item['stats'] = self::purchaseStats((int)$item['id'], (int)$item['supplier_count']);
         return $item;
+    }
+
+    public static function recommendations(array $params): array
+    {
+        $limit = self::clampInt($params['limit'] ?? 20, 1, 50);
+        $hotDays = self::clampInt($params['hot_days'] ?? 90, 1, 365);
+        $customerId = (int)($params['customer_id'] ?? 0);
+
+        return [
+            'customer_recent' => $customerId > 0
+                ? self::customerRecentRecommendations($customerId, $limit)
+                : [],
+            'hot' => $customerId > 0 ? [] : self::hotSalesRecommendations($limit, $hotDays),
+        ];
     }
 
     public static function unitsBinding(array $params): array
@@ -872,6 +887,100 @@ class GoodsLogic extends BaseLogic
             ->toArray();
     }
 
+    protected static function customerRecentRecommendations(int $customerId, int $limit): array
+    {
+        $customerIds = self::recommendationCustomerIds($customerId);
+        if ($customerIds === []) {
+            return [];
+        }
+
+        $orderIds = Db::name('sales_order')
+            ->where('tenant_id', self::tenantId())
+            ->whereIn('customer_id', $customerIds)
+            ->order(['datetimesingle' => 'desc', 'id' => 'desc'])
+            ->limit(20)
+            ->column('id');
+
+        if ($orderIds === []) {
+            return [];
+        }
+
+        return self::salesGoodsRecommendations([
+            'order_ids' => array_values(array_map('intval', $orderIds)),
+        ], $limit, 'customer_recent');
+    }
+
+    protected static function hotSalesRecommendations(int $limit, int $hotDays): array
+    {
+        return self::salesGoodsRecommendations([
+            'start_time' => time() - ($hotDays * 86400),
+        ], $limit, 'hot');
+    }
+
+    protected static function salesGoodsRecommendations(array $scope, int $limit, string $reason): array
+    {
+        $query = Db::name('order_goods')
+            ->alias('og')
+            ->join('sales_order so', 'so.id = og.order_id')
+            ->join('goods g', 'g.id = og.goods_id')
+            ->where('og.tenant_id', self::tenantId())
+            ->where('so.tenant_id', self::tenantId())
+            ->where('g.tenant_id', self::tenantId())
+            ->where('og.order_type', 'sales')
+            ->where('g.is_disabled', 0)
+            ->where('g.is_archived', 0);
+
+        if (!empty($scope['order_ids'])) {
+            $query->whereIn('og.order_id', $scope['order_ids']);
+        }
+        if (!empty($scope['start_time'])) {
+            $query->where('so.datetimesingle', '>=', (int)$scope['start_time']);
+        }
+
+        $rows = $query
+            ->fieldRaw('g.id AS id,g.id AS goods_id,g.name,g.name AS product_name,g.product_code,g.units,g.unit_id,g.price,g.cost,g.stock,g.category_id,g.primary_supplier_id,g.is_disabled,COALESCE(SUM(og.number), 0) AS total_quantity,MAX(so.datetimesingle) AS last_sale_time')
+            ->group('g.id,g.name,g.product_code,g.units,g.unit_id,g.price,g.cost,g.stock,g.category_id,g.primary_supplier_id,g.is_disabled')
+            ->order('total_quantity desc,last_sale_time desc,g.id desc')
+            ->limit($limit)
+            ->select()
+            ->toArray();
+
+        return self::formatRecommendationRows($rows, $reason);
+    }
+
+    protected static function recommendationCustomerIds(int $customerId): array
+    {
+        $customer = Customer::where('id', $customerId)
+            ->where('tenant_id', self::tenantId())
+            ->findOrEmpty();
+        if ($customer->isEmpty()) {
+            return [];
+        }
+
+        $ids = [$customerId];
+        if ((int)$customer->parent_id === 0) {
+            $childIds = Customer::where('parent_id', $customerId)
+                ->where('tenant_id', self::tenantId())
+                ->column('id');
+            $ids = array_merge($ids, array_map('intval', $childIds));
+        }
+
+        return array_values(array_unique(array_filter($ids)));
+    }
+
+    protected static function formatRecommendationRows(array $rows, string $reason): array
+    {
+        return array_map(static function (array $row) use ($reason) {
+            $item = self::formatItem($row);
+            $item['id'] = (int)($row['id'] ?? 0);
+            $item['goods_id'] = (int)($row['goods_id'] ?? $row['id'] ?? 0);
+            $item['total_quantity'] = number_format(max(0, (float)($row['total_quantity'] ?? 0)), 4, '.', '');
+            $item['last_sale_time'] = (int)($row['last_sale_time'] ?? 0);
+            $item['recommend_reason'] = $reason;
+            return $item;
+        }, $rows);
+    }
+
     protected static function purchaseStats(int $goodsId, int $supplierCount): array
     {
         $stats = Db::name('order_goods')
@@ -895,6 +1004,11 @@ class GoodsLogic extends BaseLogic
     protected static function tenantId(): int
     {
         return (int)(request()->tenantId ?? 0);
+    }
+
+    protected static function clampInt(mixed $value, int $min, int $max): int
+    {
+        return min($max, max($min, (int)$value));
     }
 
     protected static function normalizeDecimal(mixed $value): string

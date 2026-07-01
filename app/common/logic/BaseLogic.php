@@ -65,6 +65,20 @@ class BaseLogic
     }
 
 
+    public static function setReturnData($data) : void
+    {
+        self::$returnData = $data;
+    }
+
+
+    public static function clearError() : void
+    {
+        self::$error = null;
+        self::$returnData = null;
+        self::$returnCode = 0;
+    }
+
+
     /**
      * @notes 是否存在错误
      * @return bool

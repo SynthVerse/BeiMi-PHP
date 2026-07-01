@@ -58,6 +58,7 @@ Route::group('', function () {
 
     Route::get('goods/index', 'jxc.Goods/lists');
     Route::get('goods/categories', 'jxc.Goods/categories');
+    Route::get('goods/recommendations', 'jxc.Goods/recommendations');
     Route::get('goods/cloud/index', 'jxc.CloudGoods/lists');
     Route::get('goods/cloud/detail', 'jxc.CloudGoods/detail');
     Route::post('goods/cloud/load', 'jxc.CloudGoods/load');
@@ -129,6 +130,13 @@ Route::group('', function () {
     Route::post('return/edit',      'jxc.SalesReturnOrder/edit');
     Route::delete('return/remove',  'jxc.SalesReturnOrder/remove');
     Route::get('return/details',    'jxc.SalesReturnOrder/detail');
+
+    // === 采购退货单 ===
+    Route::get('purchase-return/lists',      'jxc.PurchaseReturnOrder/lists');
+    Route::get('purchase-return/details',    'jxc.PurchaseReturnOrder/detail');
+    Route::post('purchase-return/publish',   'jxc.PurchaseReturnOrder/publish');
+    Route::post('purchase-return/edit',      'jxc.PurchaseReturnOrder/edit');
+    Route::delete('purchase-return/remove',  'jxc.PurchaseReturnOrder/remove');
 
     // === 订货单 ===
     Route::get('purchase/lists',              'jxc.PurchaseOrder/lists');

@@ -21,6 +21,9 @@ class GoodsValidate extends BaseValidate
         'cost' => 'float|egt:0',
         'stock' => 'float|egt:0',
         'category_id' => 'integer|egt:0',
+        'customer_id' => 'integer|egt:0',
+        'limit' => 'integer|between:1,50',
+        'hot_days' => 'integer|between:1,365',
         'primary_supplier_id' => 'integer|egt:0',
         'supplier_id' => 'integer|gt:0',
         'sku_id' => 'integer|gt:0',
@@ -54,6 +57,9 @@ class GoodsValidate extends BaseValidate
         'cost' => '成本价',
         'stock' => '库存',
         'category_id' => '分类ID',
+        'customer_id' => '客户ID',
+        'limit' => '推荐数量',
+        'hot_days' => '热销统计天数',
         'primary_supplier_id' => '默认供应商ID',
         'supplier_id' => '供应商ID',
         'sku_id' => 'SKU ID',
@@ -135,6 +141,11 @@ class GoodsValidate extends BaseValidate
     public function sceneDetail()
     {
         return $this->only(['id']);
+    }
+
+    public function sceneRecommendations()
+    {
+        return $this->only(['customer_id', 'limit', 'hot_days']);
     }
 
     public function sceneSuppliers()

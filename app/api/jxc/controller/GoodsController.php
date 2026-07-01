@@ -64,6 +64,12 @@ class GoodsController extends BaseJxcController
         return $this->dataLists(GoodsCategoryLists::class);
     }
 
+    public function recommendations()
+    {
+        $params = (new GoodsValidate())->goCheck('recommendations');
+        return $this->data(GoodsLogic::recommendations($params));
+    }
+
     public function suppliers()
     {
         $params = (new GoodsValidate())->goCheck('suppliers');

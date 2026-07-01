@@ -25,6 +25,7 @@ class SalesReturnOrderLogic extends BaseLogic
 
     public static function publish(array $params): array|false
     {
+        self::clearError();
         // 幂等键检查（事务开始前）
         $idempotentKey = trim((string)($params['idempotent_key'] ?? ''));
         if ($idempotentKey !== '') {
@@ -36,6 +37,7 @@ class SalesReturnOrderLogic extends BaseLogic
                 return [
                     'id'       => (int)$existing->id,
                     'order_sn' => (string)$existing->order_sn,
+                    'sn'       => (string)$existing->order_sn,
                 ];
             }
         }
@@ -52,7 +54,7 @@ class SalesReturnOrderLogic extends BaseLogic
 
             // === 库存入库（退货收回商品）===
             foreach ($built['goods'] as $row) {
-                StockService::inbound(
+                $stockOk = StockService::inbound(
                     (int)$built['order']['warehouse_id'],
                     (int)$row['goods_id'],
                     (string)$row['number'],
@@ -60,12 +62,15 @@ class SalesReturnOrderLogic extends BaseLogic
                     'sales-return',
                     $built['order']['order_sn']
                 );
+                if (!$stockOk) {
+                    self::throwFailure('库存入库失败', 'RETURN_STOCK_FAILED');
+                }
             }
 
             // === 应收减少（退货导致应收降低）===
             $orderMoney = (string)$built['order']['order_money'];
             if (bccomp($orderMoney, '0', 2) > 0) {
-                FinanceService::reduceReceivable(
+                $financeOk = FinanceService::reduceReceivable(
                     (int)$built['order']['customer_id'],
                     $orderMoney,
                     (int)$order->id,
@@ -74,7 +79,12 @@ class SalesReturnOrderLogic extends BaseLogic
                     ReceivableFlow::TYPE_RETURN_REDUCE,
                     '销售退货应收减少-' . $built['order']['order_sn']
                 );
+                if (!$financeOk) {
+                    self::throwFailure('应收冲减失败', 'RETURN_FINANCE_FAILED');
+                }
             }
+
+            self::refreshSalesOrderReturnStatus((int)$built['order']['original_sales_order_id']);
 
             Db::commit();
 
@@ -90,10 +100,12 @@ class SalesReturnOrderLogic extends BaseLogic
             return [
                 'id' => (int)$order->id,
                 'order_sn' => (string)$order->order_sn,
+                'sn' => (string)$order->order_sn,
             ];
         } catch (BusinessException $e) {
             Db::rollback();
             self::setError($e->getMessage());
+            self::ensureFailureCode('RETURN_FINANCE_FAILED');
             return false;
         } catch (\Throwable $e) {
             Db::rollback();
@@ -102,24 +114,26 @@ class SalesReturnOrderLogic extends BaseLogic
                 'line'  => $e->getLine(),
                 'trace' => $e->getTraceAsString(),
             ]);
-            self::setError('操作失败，请稍后重试');
+            self::failWithCode('操作失败，请稍后重试', 'RETURN_FINANCE_FAILED');
             return false;
         }
     }
 
     public static function edit(array $params): array|false
     {
+        self::clearError();
         $order = SalesReturnOrder::where('id', (int)$params['id'])
             ->where('tenant_id', (int)(request()->tenantId ?? 0))
             ->findOrEmpty();
         if ($order->isEmpty()) {
-            self::setError('退货单不存在');
+            self::failWithCode('退货单不存在', 'RETURN_ORDER_NOT_FOUND');
             return false;
         }
 
         $oldOrderMoney = (string)$order->order_money;
         $oldCustomerId = (int)$order->customer_id;
         $oldOrderSn = (string)$order->order_sn;
+        $oldOriginalOrderId = (int)$order->original_sales_order_id;
 
         $built = self::buildOrderData($params, $order->toArray());
         if ($built === false) {
@@ -129,18 +143,22 @@ class SalesReturnOrderLogic extends BaseLogic
         Db::startTrans();
         try {
             // === 回滚旧库存 ===
-            StockService::rollback((int)$order->id, 'sales-return');
+            if (!StockService::rollback((int)$order->id, 'sales-return')) {
+                self::throwFailure('旧库存回滚失败', 'RETURN_STOCK_FAILED');
+            }
 
             // === 恢复旧应收（退货单之前减少了应收，回滚时需要加回去）===
             if (bccomp($oldOrderMoney, '0', 2) > 0) {
-                FinanceService::addReceivable(
+                if (!FinanceService::addReceivable(
                     $oldCustomerId,
                     $oldOrderMoney,
                     (int)$order->id,
                     'sales-return',
                     $oldOrderSn,
                     '退货单编辑回滚应收-' . $oldOrderSn
-                );
+                )) {
+                    self::throwFailure('旧应收回滚失败', 'RETURN_FINANCE_FAILED');
+                }
             }
 
             $order->save($built['order']);
@@ -148,7 +166,7 @@ class SalesReturnOrderLogic extends BaseLogic
 
             // === 重新入库 ===
             foreach ($built['goods'] as $row) {
-                StockService::inbound(
+                $stockOk = StockService::inbound(
                     (int)$built['order']['warehouse_id'],
                     (int)$row['goods_id'],
                     (string)$row['number'],
@@ -156,12 +174,15 @@ class SalesReturnOrderLogic extends BaseLogic
                     'sales-return',
                     $order->order_sn
                 );
+                if (!$stockOk) {
+                    self::throwFailure('库存入库失败', 'RETURN_STOCK_FAILED');
+                }
             }
 
             // === 重新减少应收 ===
             $newOrderMoney = (string)$built['order']['order_money'];
             if (bccomp($newOrderMoney, '0', 2) > 0) {
-                FinanceService::reduceReceivable(
+                $financeOk = FinanceService::reduceReceivable(
                     (int)$built['order']['customer_id'],
                     $newOrderMoney,
                     (int)$order->id,
@@ -170,6 +191,14 @@ class SalesReturnOrderLogic extends BaseLogic
                     ReceivableFlow::TYPE_RETURN_REDUCE,
                     '销售退货应收减少-' . $order->order_sn
                 );
+                if (!$financeOk) {
+                    self::throwFailure('应收冲减失败', 'RETURN_FINANCE_FAILED');
+                }
+            }
+
+            self::refreshSalesOrderReturnStatus($oldOriginalOrderId);
+            if ((int)$built['order']['original_sales_order_id'] !== $oldOriginalOrderId) {
+                self::refreshSalesOrderReturnStatus((int)$built['order']['original_sales_order_id']);
             }
 
             Db::commit();
@@ -188,6 +217,7 @@ class SalesReturnOrderLogic extends BaseLogic
         } catch (BusinessException $e) {
             Db::rollback();
             self::setError($e->getMessage());
+            self::ensureFailureCode('RETURN_FINANCE_FAILED');
             return false;
         } catch (\Throwable $e) {
             Db::rollback();
@@ -196,44 +226,53 @@ class SalesReturnOrderLogic extends BaseLogic
                 'line'  => $e->getLine(),
                 'trace' => $e->getTraceAsString(),
             ]);
-            self::setError('操作失败，请稍后重试');
+            self::failWithCode('操作失败，请稍后重试', 'RETURN_FINANCE_FAILED');
             return false;
         }
     }
 
     public static function remove(array $params): array|false
     {
-        $order = SalesReturnOrder::findOrEmpty((int)$params['id']);
+        self::clearError();
+        $order = SalesReturnOrder::where('id', (int)$params['id'])
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->findOrEmpty();
         if ($order->isEmpty()) {
-            self::setError('退货单不存在');
+            self::failWithCode('退货单不存在', 'RETURN_ORDER_NOT_FOUND');
             return false;
         }
 
         $oldOrderMoney = (string)$order->order_money;
         $customerId = (int)$order->customer_id;
         $orderSn = (string)$order->order_sn;
+        $originalOrderId = (int)$order->original_sales_order_id;
 
         Db::startTrans();
         try {
             // === 回滚库存 ===
-            StockService::rollback((int)$order->id, 'sales-return');
+            if (!StockService::rollback((int)$order->id, 'sales-return')) {
+                self::throwFailure('旧库存回滚失败', 'RETURN_STOCK_FAILED');
+            }
 
             // === 恢复应收（退货作废，应收加回）===
             if (bccomp($oldOrderMoney, '0', 2) > 0) {
-                FinanceService::addReceivable(
+                if (!FinanceService::addReceivable(
                     $customerId,
                     $oldOrderMoney,
                     (int)$order->id,
                     'sales-return',
                     $orderSn,
                     '退货作废恢复应收-' . $orderSn
-                );
+                )) {
+                    self::throwFailure('旧应收回滚失败', 'RETURN_FINANCE_FAILED');
+                }
             }
 
             OrderGoods::where('order_id', (int)$order->id)
                 ->where('order_type', self::ORDER_TYPE)
                 ->delete();
             $order->delete();
+            self::refreshSalesOrderReturnStatus($originalOrderId);
             Db::commit();
 
             AuditService::log(
@@ -251,6 +290,7 @@ class SalesReturnOrderLogic extends BaseLogic
         } catch (BusinessException $e) {
             Db::rollback();
             self::setError($e->getMessage());
+            self::ensureFailureCode('RETURN_FINANCE_FAILED');
             return false;
         } catch (\Throwable $e) {
             Db::rollback();
@@ -259,7 +299,7 @@ class SalesReturnOrderLogic extends BaseLogic
                 'line'  => $e->getLine(),
                 'trace' => $e->getTraceAsString(),
             ]);
-            self::setError('操作失败，请稍后重试');
+            self::failWithCode('操作失败，请稍后重试', 'RETURN_FINANCE_FAILED');
             return false;
         }
     }
@@ -286,6 +326,8 @@ class SalesReturnOrderLogic extends BaseLogic
                 'id' => (int)$originalOrder->id,
                 'order_sn' => (string)$originalOrder->order_sn,
                 'order_money' => self::money($originalOrder->order_money),
+                'status' => (int)$originalOrder->status,
+                'status_label' => SalesOrder::statusLabel((int)$originalOrder->status),
             ];
         } else {
             $item['original_sales_order'] = null;
@@ -384,11 +426,11 @@ class SalesReturnOrderLogic extends BaseLogic
     {
         $customer = Customer::findOrEmpty((int)$params['customer_id']);
         if ($customer->isEmpty()) {
-            self::setError('客户不存在');
+            self::failWithCode('客户不存在', 'RETURN_ORIGINAL_NOT_FOUND');
             return false;
         }
         if ((int)$customer->is_disabled === 1) {
-            self::setError('停用客户不可开退货单');
+            self::failWithCode('停用客户不可开退货单', 'RETURN_ORIGINAL_NOT_FOUND');
             return false;
         }
 
@@ -400,20 +442,20 @@ class SalesReturnOrderLogic extends BaseLogic
         // 验证原销售单存在且 customer_id 匹配
         $originalOrderId = (int)($params['original_order_id'] ?? ($current['original_sales_order_id'] ?? 0));
         if ($originalOrderId <= 0) {
-            self::setError('原销售单ID不能为空');
+            self::failWithCode('原销售单ID不能为空', 'RETURN_ORIGINAL_REQUIRED');
             return false;
         }
         $originalOrder = SalesOrder::findOrEmpty($originalOrderId);
         if ($originalOrder->isEmpty()) {
-            self::setError('原销售单不存在');
+            self::failWithCode('原销售单不存在', 'RETURN_ORIGINAL_NOT_FOUND');
             return false;
         }
         if ((int)$originalOrder->customer_id !== (int)$customer->id) {
-            self::setError('原销售单客户与退货客户不匹配');
+            self::failWithCode('原销售单客户与退货客户不匹配', 'RETURN_ORIGINAL_NOT_FOUND');
             return false;
         }
 
-        $goodsRows = self::buildGoodsRows($params['goods'] ?? []);
+        $goodsRows = self::buildGoodsRows($params['goods'] ?? [], $originalOrderId, (int)($current['id'] ?? 0));
         if ($goodsRows === false) {
             return false;
         }
@@ -453,34 +495,68 @@ class SalesReturnOrderLogic extends BaseLogic
         ];
     }
 
-    protected static function buildGoodsRows(array $goods): array|false
+    protected static function buildGoodsRows(array $goods, int $originalOrderId, int $ignoreReturnOrderId = 0): array|false
     {
         if (empty($goods)) {
-            self::setError('请选择商品');
+            self::failWithCode('请选择商品', 'RETURN_ITEMS_EMPTY');
             return false;
         }
 
+        $originalRows = OrderGoods::where('order_id', $originalOrderId)
+            ->where('order_type', 'sales')
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->select()
+            ->toArray();
+        $originalById = [];
+        $originalByGoodsSku = [];
+        foreach ($originalRows as $row) {
+            $originalById[(int)$row['id']] = $row;
+            $originalByGoodsSku[self::goodsSkuSalesReturnKey($row)] = $row;
+        }
+
+        $returnedMap = self::returnedSalesQtyMap($originalOrderId, $ignoreReturnOrderId);
         $rows = [];
         foreach (array_values($goods) as $index => $item) {
+            $originLineId = (int)($item['original_sales_order_list_id'] ?? $item['original_order_goods_id'] ?? $item['order_goods_id'] ?? 0);
             $goodsId = (int)($item['goods_id'] ?? $item['id'] ?? 0);
+            $skuId = (int)($item['sku_id'] ?? 0);
             if ($goodsId <= 0) {
-                self::setError('商品明细缺少商品ID');
+                self::failWithCode('商品明细缺少商品ID', 'RETURN_ITEMS_EMPTY');
                 return false;
             }
+            $origin = $originLineId > 0
+                ? ($originalById[$originLineId] ?? null)
+                : ($originalByGoodsSku[self::goodsSkuSalesReturnKey(['goods_id' => $goodsId, 'sku_id' => $skuId])] ?? null);
+            if (!$origin) {
+                self::failWithCode('退货商品不属于原销售单', 'RETURN_ORIGINAL_NOT_FOUND');
+                return false;
+            }
+            $originLineId = (int)$origin['id'];
+            $goodsId = (int)$origin['goods_id'];
+            $skuId = (int)($origin['sku_id'] ?? 0);
 
             $goodsModel = Goods::findOrEmpty($goodsId);
             if ($goodsModel->isEmpty()) {
-                self::setError('商品不存在');
+                self::failWithCode('商品不存在', 'RETURN_ORIGINAL_NOT_FOUND');
                 return false;
             }
             if ((int)$goodsModel->is_disabled === 1) {
-                self::setError('停用商品不可开退货单');
+                self::failWithCode('停用商品不可开退货单', 'RETURN_ORIGINAL_NOT_FOUND');
                 return false;
             }
 
-            $number = round(max(0, (float)($item['number'] ?? 0)), 4);
+            $number = round((float)($item['return_num'] ?? $item['number'] ?? 0), 4);
             if ($number <= 0) {
-                self::setError('商品数量必须大于0');
+                self::failWithCode('商品数量必须大于0', 'RETURN_QTY_INVALID');
+                return false;
+            }
+            $lineKey = self::salesReturnDimensionKey(['original_sales_order_list_id' => $originLineId, 'goods_id' => $goodsId, 'sku_id' => $skuId]);
+            $goodsSkuKey = self::goodsSkuSalesReturnKey(['goods_id' => $goodsId, 'sku_id' => $skuId]);
+            $originalQty = (string)$origin['number'];
+            $returnedQty = (string)($returnedMap[$lineKey] ?? $returnedMap[$goodsSkuKey] ?? '0.0000');
+            $availableQty = bcsub($originalQty, $returnedQty, 4);
+            if (bccomp((string)$number, $availableQty, 4) > 0) {
+                self::failWithCode('退货数量超过可退数量', 'RETURN_QTY_EXCEEDS_AVAILABLE');
                 return false;
             }
 
@@ -489,7 +565,9 @@ class SalesReturnOrderLogic extends BaseLogic
             $rows[] = [
                 'tenant_id' => (int)(request()->tenantId ?? 0),
                 'order_type' => self::ORDER_TYPE,
+                'original_sales_order_list_id' => $originLineId,
                 'goods_id' => $goodsId,
+                'sku_id' => $skuId,
                 'name' => trim((string)($item['name'] ?? $item['product_name'] ?? $goodsModel->name)),
                 'units' => trim((string)($item['units'] ?? $item['unit'] ?? $goodsModel->units)),
                 'number' => number_format($number, 4, '.', ''),
@@ -501,6 +579,130 @@ class SalesReturnOrderLogic extends BaseLogic
         }
 
         return $rows;
+    }
+
+    protected static function returnedSalesQtyMap(int $originalOrderId, int $ignoreReturnOrderId = 0): array
+    {
+        $returnIdsQuery = SalesReturnOrder::where('original_sales_order_id', $originalOrderId)
+            ->where('tenant_id', (int)(request()->tenantId ?? 0));
+        if ($ignoreReturnOrderId > 0) {
+            $returnIdsQuery->where('id', '<>', $ignoreReturnOrderId);
+        }
+        $returnIds = $returnIdsQuery->column('id');
+        if (empty($returnIds)) {
+            return [];
+        }
+
+        $rows = OrderGoods::whereIn('order_id', $returnIds)
+            ->where('order_type', self::ORDER_TYPE)
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->select()
+            ->toArray();
+
+        return self::salesReturnReturnedQtyMapFromRows($rows);
+    }
+
+    protected static function salesReturnReturnedQtyMapFromRows(array $rows): array
+    {
+        $map = [];
+        foreach ($rows as $row) {
+            $key = self::salesReturnDimensionKey($row);
+            $map[$key] = bcadd((string)($map[$key] ?? '0.0000'), (string)($row['number'] ?? '0.0000'), 4);
+        }
+        return $map;
+    }
+
+    protected static function refreshSalesOrderReturnStatus(int $salesOrderId): void
+    {
+        if ($salesOrderId <= 0) {
+            return;
+        }
+
+        $originalRows = OrderGoods::where('order_id', $salesOrderId)
+            ->where('order_type', 'sales')
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->select()
+            ->toArray();
+        if (empty($originalRows)) {
+            SalesOrder::where('id', $salesOrderId)
+                ->where('tenant_id', (int)(request()->tenantId ?? 0))
+                ->update(['status' => SalesOrder::STATUS_SOLD]);
+            return;
+        }
+
+        $returnedMap = self::returnedSalesQtyMap($salesOrderId);
+        $status = self::salesReturnStatusFromRows($originalRows, $returnedMap);
+        SalesOrder::where('id', $salesOrderId)
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->update(['status' => $status]);
+    }
+
+    protected static function failWithCode(string $message, string $errorCode): void
+    {
+        self::setError($message);
+        self::setReturnData(['error_code' => $errorCode]);
+    }
+
+    protected static function ensureFailureCode(string $fallbackErrorCode): void
+    {
+        $data = self::getReturnData();
+        if (!is_array($data) || empty($data['error_code'])) {
+            self::setReturnData(['error_code' => $fallbackErrorCode]);
+        }
+    }
+
+    protected static function salesReturnDimensionKey(array $row): string
+    {
+        $originLineId = (int)($row['original_sales_order_list_id'] ?? $row['original_order_goods_id'] ?? 0);
+        if ($originLineId > 0) {
+            return 'line:' . $originLineId;
+        }
+
+        return self::goodsSkuSalesReturnKey($row);
+    }
+
+    protected static function goodsSkuSalesReturnKey(array $row): string
+    {
+        return 'goods:' . (int)($row['goods_id'] ?? 0) . ':' . (int)($row['sku_id'] ?? 0);
+    }
+
+    protected static function salesReturnReturnedQtyForOrigin(array $originRow, array $returnedMap): string
+    {
+        $lineKey = self::salesReturnDimensionKey([
+            'original_sales_order_list_id' => (int)($originRow['id'] ?? 0),
+            'goods_id' => (int)($originRow['goods_id'] ?? 0),
+            'sku_id' => (int)($originRow['sku_id'] ?? 0),
+        ]);
+        $goodsSkuKey = self::goodsSkuSalesReturnKey($originRow);
+
+        return (string)($returnedMap[$lineKey] ?? $returnedMap[$goodsSkuKey] ?? '0.0000');
+    }
+
+    protected static function salesReturnStatusFromRows(array $originalRows, array $returnedMap): int
+    {
+        $hasReturned = false;
+        $allReturned = true;
+        foreach ($originalRows as $row) {
+            $returnedQty = self::salesReturnReturnedQtyForOrigin($row, $returnedMap);
+            if (bccomp($returnedQty, '0', 4) > 0) {
+                $hasReturned = true;
+            }
+            if (bccomp($returnedQty, (string)($row['number'] ?? '0.0000'), 4) < 0) {
+                $allReturned = false;
+            }
+        }
+
+        if (!$hasReturned) {
+            return SalesOrder::STATUS_SOLD;
+        }
+
+        return $allReturned ? SalesOrder::STATUS_RETURNED : SalesOrder::STATUS_PART_RETURNED;
+    }
+
+    protected static function throwFailure(string $message, string $errorCode): void
+    {
+        self::failWithCode($message, $errorCode);
+        throw new BusinessException($message);
     }
 
     protected static function replaceGoods(int $orderId, array $rows): void
@@ -524,11 +726,11 @@ class SalesReturnOrderLogic extends BaseLogic
         }
 
         if ($warehouse->isEmpty()) {
-            self::setError('仓库不存在');
+            self::failWithCode('仓库不存在', 'RETURN_ORIGINAL_NOT_FOUND');
             return null;
         }
         if ((int)$warehouse->is_enabled !== 1) {
-            self::setError('停用仓库不可开退货单');
+            self::failWithCode('停用仓库不可开退货单', 'RETURN_ORIGINAL_NOT_FOUND');
             return null;
         }
 
@@ -560,7 +762,7 @@ class SalesReturnOrderLogic extends BaseLogic
             $query->where('id', '<>', $ignoreId);
         }
         if ($query->count() > 0) {
-            self::setError('退货单号已存在');
+            self::failWithCode('退货单号已存在', 'RETURN_ORIGINAL_NOT_FOUND');
             return false;
         }
         return true;
@@ -573,6 +775,7 @@ class SalesReturnOrderLogic extends BaseLogic
             return [
                 'id' => (int)($row['id'] ?? 0),
                 'order_goods_id' => (int)($row['id'] ?? 0),
+                'original_sales_order_list_id' => (int)($row['original_sales_order_list_id'] ?? 0),
                 'goods_id' => (int)($row['goods_id'] ?? 0),
                 'name' => (string)($row['name'] ?? ''),
                 'product_name' => (string)($row['name'] ?? ''),
