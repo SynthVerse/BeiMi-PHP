@@ -11,6 +11,7 @@ class AuditService
     const MODULE_SALES_ORDER    = 'sales_order';
     const MODULE_SUPPLY_ORDER   = 'supply_order';
     const MODULE_RETURN_ORDER   = 'return_order';
+    const MODULE_PURCHASE_RETURN_ORDER = 'purchase_return_order';
     const MODULE_PURCHASE_ORDER = 'purchase_order';
 
     // 操作常量

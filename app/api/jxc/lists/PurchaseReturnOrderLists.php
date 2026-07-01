@@ -2,28 +2,26 @@
 
 namespace app\api\jxc\lists;
 
-use app\api\jxc\logic\SupplyOrderLogic;
+use app\api\jxc\logic\PurchaseReturnOrderLogic;
 use app\common\lists\BaseDataLists;
-use app\common\model\jxc\OrderGoods;
-use app\common\model\jxc\SupplyOrder;
+use app\common\model\jxc\PurchaseReturnOrder;
 
-class SupplyOrderLists extends BaseDataLists
+class PurchaseReturnOrderLists extends BaseDataLists
 {
     protected function baseQuery()
     {
-        $query = SupplyOrder::field([
+        $query = PurchaseReturnOrder::field([
             'id',
             'order_sn',
+            'original_supply_order_id',
+            'original_order_sn',
             'supplier_id',
             'supplier_name',
             'warehouse_id',
             'order_money',
-            'order_pay_money',
-            'order_arrears_money',
+            'return_reason',
             'datetimesingle',
             'status',
-            'return_status',
-            'purpose_type',
             'remarks',
             'admin_id',
             'create_time',
@@ -34,23 +32,9 @@ class SupplyOrderLists extends BaseDataLists
         if ($keyword !== '') {
             $query->where(function ($builder) use ($keyword) {
                 $builder->whereLike('order_sn', '%' . $keyword . '%')
-                    ->whereOr('supplier_name', 'like', '%' . $keyword . '%');
+                    ->whereOr('supplier_name', 'like', '%' . $keyword . '%')
+                    ->whereOr('original_order_sn', 'like', '%' . $keyword . '%');
             });
-        }
-
-        $goodsId = (int)($this->params['goods_id'] ?? 0);
-        if ($goodsId > 0) {
-            $orderIds = OrderGoods::where('goods_id', $goodsId)
-                ->where('tenant_id', (int)(request()->tenantId ?? 0))
-                ->where('order_type', 'supply')
-                ->group('order_id')
-                ->column('order_id');
-
-            if (!empty($orderIds)) {
-                $query->whereIn('id', $orderIds);
-            } else {
-                $query->where('id', 0);
-            }
         }
 
         $supplierId = (int)($this->params['supplier_id'] ?? 0);
@@ -83,7 +67,7 @@ class SupplyOrderLists extends BaseDataLists
             ->select()
             ->toArray();
 
-        return SupplyOrderLogic::formatList($lists);
+        return PurchaseReturnOrderLogic::formatList($lists);
     }
 
     public function count(): int

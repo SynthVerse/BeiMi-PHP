@@ -154,68 +154,78 @@ class StockService
                     ->where('tenant_id', (int)$flow->tenant_id)
                     ->lock(true)
                     ->find();
-                if ($goods) {
-                    $beforeStock = (string)$goods->stock;
-                    $afterStock = bcadd($beforeStock, (string)$flow->quantity, 2);
-                    Goods::where('id', $flow->goods_id)
-                        ->where('tenant_id', (int)$flow->tenant_id)
-                        ->update([
+                if (!$goods) {
+                    return false;
+                }
+
+                $beforeStock = (string)$goods->stock;
+                $afterStock = bcadd($beforeStock, (string)$flow->quantity, 2);
+                $updated = Goods::where('id', $flow->goods_id)
+                    ->where('tenant_id', (int)$flow->tenant_id)
+                    ->update([
                         'stock' => $afterStock,
                         'update_time' => time(),
                     ]);
-
-                    StockFlow::create([
-                        'tenant_id'    => $flow->tenant_id,
-                        'warehouse_id' => $flow->warehouse_id,
-                        'goods_id'     => $flow->goods_id,
-                        'sku_id'       => (int)($flow->sku_id ?? 0),
-                        'batch_id'     => (int)($flow->batch_id ?? 0),
-                        'order_id'     => $orderId,
-                        'order_type'   => $orderType,
-                        'order_sn'     => $flow->order_sn,
-                        'flow_type'    => StockFlow::FLOW_IN,
-                        'quantity'     => $flow->quantity,
-                        'before_stock' => $beforeStock,
-                        'after_stock'  => $afterStock,
-                        'admin_id'     => (int)(request()->adminId ?? 0),
-                        'remark'       => '回滚-' . $orderType,
-                        'create_time'  => time(),
-                    ]);
+                if ($updated === false) {
+                    return false;
                 }
+
+                StockFlow::create([
+                    'tenant_id'    => $flow->tenant_id,
+                    'warehouse_id' => $flow->warehouse_id,
+                    'goods_id'     => $flow->goods_id,
+                    'sku_id'       => (int)($flow->sku_id ?? 0),
+                    'batch_id'     => (int)($flow->batch_id ?? 0),
+                    'order_id'     => $orderId,
+                    'order_type'   => $orderType,
+                    'order_sn'     => $flow->order_sn,
+                    'flow_type'    => StockFlow::FLOW_IN,
+                    'quantity'     => $flow->quantity,
+                    'before_stock' => $beforeStock,
+                    'after_stock'  => $afterStock,
+                    'admin_id'     => (int)(request()->adminId ?? 0),
+                    'remark'       => '回滚-' . $orderType,
+                    'create_time'  => time(),
+                ]);
             } elseif ($flow->flow_type == StockFlow::FLOW_IN) {
                 // 入库流水 → 扣减库存（出库）
                 $goods = Goods::where('id', $flow->goods_id)
                     ->where('tenant_id', (int)$flow->tenant_id)
                     ->lock(true)
                     ->find();
-                if ($goods) {
-                    $beforeStock = (string)$goods->stock;
-                    $afterStock = bcsub($beforeStock, (string)$flow->quantity, 2);
-                    Goods::where('id', $flow->goods_id)
-                        ->where('tenant_id', (int)$flow->tenant_id)
-                        ->update([
+                if (!$goods) {
+                    return false;
+                }
+
+                $beforeStock = (string)$goods->stock;
+                $afterStock = bcsub($beforeStock, (string)$flow->quantity, 2);
+                $updated = Goods::where('id', $flow->goods_id)
+                    ->where('tenant_id', (int)$flow->tenant_id)
+                    ->update([
                         'stock' => $afterStock,
                         'update_time' => time(),
                     ]);
-
-                    StockFlow::create([
-                        'tenant_id'    => $flow->tenant_id,
-                        'warehouse_id' => $flow->warehouse_id,
-                        'goods_id'     => $flow->goods_id,
-                        'sku_id'       => (int)($flow->sku_id ?? 0),
-                        'batch_id'     => (int)($flow->batch_id ?? 0),
-                        'order_id'     => $orderId,
-                        'order_type'   => $orderType,
-                        'order_sn'     => $flow->order_sn,
-                        'flow_type'    => StockFlow::FLOW_OUT,
-                        'quantity'     => $flow->quantity,
-                        'before_stock' => $beforeStock,
-                        'after_stock'  => $afterStock,
-                        'admin_id'     => (int)(request()->adminId ?? 0),
-                        'remark'       => '回滚-' . $orderType,
-                        'create_time'  => time(),
-                    ]);
+                if ($updated === false) {
+                    return false;
                 }
+
+                StockFlow::create([
+                    'tenant_id'    => $flow->tenant_id,
+                    'warehouse_id' => $flow->warehouse_id,
+                    'goods_id'     => $flow->goods_id,
+                    'sku_id'       => (int)($flow->sku_id ?? 0),
+                    'batch_id'     => (int)($flow->batch_id ?? 0),
+                    'order_id'     => $orderId,
+                    'order_type'   => $orderType,
+                    'order_sn'     => $flow->order_sn,
+                    'flow_type'    => StockFlow::FLOW_OUT,
+                    'quantity'     => $flow->quantity,
+                    'before_stock' => $beforeStock,
+                    'after_stock'  => $afterStock,
+                    'admin_id'     => (int)(request()->adminId ?? 0),
+                    'remark'       => '回滚-' . $orderType,
+                    'create_time'  => time(),
+                ]);
             }
         }
 

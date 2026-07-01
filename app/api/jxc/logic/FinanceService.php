@@ -190,7 +190,8 @@ class FinanceService
         int $orderId,
         string $orderType,
         string $orderSn,
-        string $remark = ''
+        string $remark = '',
+        int $flowType = PayableFlow::TYPE_PAYMENT
     ): bool {
         if (bccomp($amount, '0', 2) <= 0) {
             return true;
@@ -204,11 +205,16 @@ class FinanceService
         $beforeAmount = (string)($vendor->order_payable ?? '0.00');
         $afterAmount = bcsub($beforeAmount, $amount, 2);
 
-        Vendor::where('id', $supplierId)->update([
+        $update = [
             'order_payable' => $afterAmount,
-            'order_paid_money' => bcadd((string)($vendor->order_paid_money ?? '0.00'), $amount, 2),
             'update_time' => time(),
-        ]);
+        ];
+        if ($flowType === PayableFlow::TYPE_RETURN_REDUCE) {
+            $update['order_money'] = bcsub((string)($vendor->order_money ?? '0.00'), $amount, 2);
+        } else {
+            $update['order_paid_money'] = bcadd((string)($vendor->order_paid_money ?? '0.00'), $amount, 2);
+        }
+        Vendor::where('id', $supplierId)->update($update);
 
         PayableFlow::create([
             'tenant_id'     => (int)(request()->tenantId ?? 0),
@@ -216,7 +222,7 @@ class FinanceService
             'order_id'      => $orderId,
             'order_type'    => $orderType,
             'order_sn'      => $orderSn,
-            'flow_type'     => PayableFlow::TYPE_PAYMENT,
+            'flow_type'     => $flowType,
             'amount'        => $amount,
             'before_amount' => $beforeAmount,
             'after_amount'  => $afterAmount,
@@ -237,54 +243,78 @@ class FinanceService
             ->where('order_type', $orderType)
             ->select();
 
-        $netAmounts = [];
-        $orderSns = [];
         foreach ($flows as $flow) {
             $supplierId = (int)$flow->supplier_id;
-            $netAmounts[$supplierId] ??= '0.00';
-            $orderSns[$supplierId] ??= (string)$flow->order_sn;
-
-            if ($flow->flow_type == PayableFlow::TYPE_SUPPLY_ADD) {
-                $netAmounts[$supplierId] = bcadd($netAmounts[$supplierId], (string)$flow->amount, 2);
-            } elseif ($flow->flow_type == PayableFlow::TYPE_PAYMENT) {
-                $netAmounts[$supplierId] = bcsub($netAmounts[$supplierId], (string)$flow->amount, 2);
-            }
-        }
-
-        foreach ($netAmounts as $supplierId => $amount) {
-            if (bccomp((string)$amount, '0', 2) <= 0) {
-                continue;
-            }
-
             $vendor = Vendor::where('id', $supplierId)->lock(true)->find();
             if (!$vendor) {
-                continue;
+                return false;
             }
 
-            $beforeAmount = (string)($vendor->order_payable ?? '0.00');
-            $afterAmount = bcsub($beforeAmount, (string)$amount, 2);
-            Vendor::where('id', $supplierId)->update([
-                'order_payable' => $afterAmount,
-                'order_money' => bcsub((string)$vendor->order_money, (string)$amount, 2),
-                'update_time' => time(),
-            ]);
-
-            PayableFlow::create([
-                'tenant_id'     => (int)(request()->tenantId ?? 0),
-                'supplier_id'   => $supplierId,
-                'order_id'      => $orderId,
-                'order_type'    => $orderType,
-                'order_sn'      => $orderSns[$supplierId] ?? '',
-                'flow_type'     => PayableFlow::TYPE_PAYMENT,
-                'amount'        => (string)$amount,
-                'before_amount' => $beforeAmount,
-                'after_amount'  => $afterAmount,
-                'admin_id'      => (int)(request()->adminId ?? 0),
-                'remark'        => '回滚应付-' . $orderType,
-                'create_time'   => time(),
-            ]);
+            if ($flow->flow_type == PayableFlow::TYPE_SUPPLY_ADD) {
+                $beforeAmount = (string)($vendor->order_payable ?? '0.00');
+                $afterAmount = bcsub($beforeAmount, (string)$flow->amount, 2);
+                $updated = Vendor::where('id', $supplierId)->update([
+                    'order_payable' => $afterAmount,
+                    'order_money' => bcsub((string)($vendor->order_money ?? '0.00'), (string)$flow->amount, 2),
+                    'update_time' => time(),
+                ]);
+                if ($updated === false) {
+                    return false;
+                }
+                self::createPayableRollbackFlow($supplierId, $orderId, $orderType, (string)$flow->order_sn, PayableFlow::TYPE_PAYMENT, (string)$flow->amount, $beforeAmount, $afterAmount);
+            } elseif ($flow->flow_type == PayableFlow::TYPE_PAYMENT) {
+                $beforeAmount = (string)($vendor->order_payable ?? '0.00');
+                $afterAmount = bcadd($beforeAmount, (string)$flow->amount, 2);
+                $updated = Vendor::where('id', $supplierId)->update([
+                    'order_payable' => $afterAmount,
+                    'order_paid_money' => bcsub((string)($vendor->order_paid_money ?? '0.00'), (string)$flow->amount, 2),
+                    'update_time' => time(),
+                ]);
+                if ($updated === false) {
+                    return false;
+                }
+                self::createPayableRollbackFlow($supplierId, $orderId, $orderType, (string)$flow->order_sn, PayableFlow::TYPE_SUPPLY_ADD, (string)$flow->amount, $beforeAmount, $afterAmount);
+            } elseif ($flow->flow_type == PayableFlow::TYPE_RETURN_REDUCE) {
+                $beforeAmount = (string)($vendor->order_payable ?? '0.00');
+                $afterAmount = bcadd($beforeAmount, (string)$flow->amount, 2);
+                $updated = Vendor::where('id', $supplierId)->update([
+                    'order_payable' => $afterAmount,
+                    'order_money' => bcadd((string)($vendor->order_money ?? '0.00'), (string)$flow->amount, 2),
+                    'update_time' => time(),
+                ]);
+                if ($updated === false) {
+                    return false;
+                }
+                self::createPayableRollbackFlow($supplierId, $orderId, $orderType, (string)$flow->order_sn, PayableFlow::TYPE_SUPPLY_ADD, (string)$flow->amount, $beforeAmount, $afterAmount);
+            }
         }
 
         return true;
+    }
+
+    protected static function createPayableRollbackFlow(
+        int $supplierId,
+        int $orderId,
+        string $orderType,
+        string $orderSn,
+        int $flowType,
+        string $amount,
+        string $beforeAmount,
+        string $afterAmount
+    ): void {
+        PayableFlow::create([
+            'tenant_id'     => (int)(request()->tenantId ?? 0),
+            'supplier_id'   => $supplierId,
+            'order_id'      => $orderId,
+            'order_type'    => $orderType,
+            'order_sn'      => $orderSn,
+            'flow_type'     => $flowType,
+            'amount'        => $amount,
+            'before_amount' => $beforeAmount,
+            'after_amount'  => $afterAmount,
+            'admin_id'      => (int)(request()->adminId ?? 0),
+            'remark'        => '回滚应付-' . $orderType,
+            'create_time'   => time(),
+        ]);
     }
 }

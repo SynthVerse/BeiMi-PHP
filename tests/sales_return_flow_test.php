@@ -128,6 +128,23 @@ function assert_true(bool $condition, string $testName): bool
     return false;
 }
 
+function assert_error_code(array $response, string $expectedErrorCode, string $testName): bool
+{
+    global $totalTests, $passTests, $failTests;
+    $totalTests++;
+
+    $actual = (string)($response['data']['error_code'] ?? '');
+    if ($actual === $expectedErrorCode) {
+        echo "[PASS] {$testName}\n";
+        $passTests++;
+        return true;
+    }
+
+    echo "[FAIL] {$testName}: 期望 error_code={$expectedErrorCode}, 实际 error_code={$actual}\n";
+    $failTests++;
+    return false;
+}
+
 function extractId(array $response, string $key = 'id'): ?int
 {
     return isset($response['data'][$key]) ? (int)$response['data'][$key] : null;
@@ -208,6 +225,7 @@ $supplyId = null;
 $salesId = null;
 $salesSn = '';
 $returnId = null;
+$overReturnId = null;
 
 echo "\n--- 场景1: 销售退货库存与应收闭环 ---\n";
 
@@ -325,10 +343,46 @@ $receivableAfterReturn = extractReceivable(httpRequest('GET', "{$BASE_URL}/api/c
 assert_eq((float)$stockAfterReturn - (float)$initialStock, 44, '退货后库存=初始+44');
 assert_eq((float)$receivableAfterReturn - (float)$initialReceivable, 120, '退货后客户应收=初始+120');
 
+$overReturnRes = httpRequest('POST', "{$BASE_URL}/api/return/publish", [
+    'original_order_id' => $salesId,
+    'original_order_sn' => $salesSn,
+    'customer_id' => $customerId,
+    'warehouse_id' => $warehouseId,
+    'goods' => [goodsRow($goodsId, $goodsName, 7, 20, '件')],
+    'return_reason' => '专项回归超退',
+], $token);
+assert_code($overReturnRes, 0, '累计退货超过原销售数量必须失败');
+assert_error_code($overReturnRes, 'RETURN_QTY_EXCEEDS_AVAILABLE', '超退失败返回稳定 error_code');
+$overReturnId = extractId($overReturnRes);
+if ($overReturnId) {
+    httpRequest('DELETE', "{$BASE_URL}/api/return/remove", ['id' => $overReturnId], $token);
+    $overReturnId = null;
+}
+
+$salesDetailAfterPartialReturn = httpRequest('GET', "{$BASE_URL}/api/order/details", ['id' => $salesId], $token);
+assert_code($salesDetailAfterPartialReturn, 1, '原销售单详情-部分退货后');
+assert_true((int)($salesDetailAfterPartialReturn['data']['status'] ?? 0) === 2, '部分退货后原销售单状态=2');
+assert_true((string)($salesDetailAfterPartialReturn['data']['status_label'] ?? '') === '部分退货', '部分退货后原销售单返回 status_label');
+
 $returnDetail = httpRequest('GET', "{$BASE_URL}/api/return/details", ['id' => $returnId], $token);
 assert_code($returnDetail, 1, '退货单详情');
 assert_true((int)($returnDetail['data']['original_sales_order_id'] ?? 0) === $salesId, '退货详情保留原销售单ID');
 assert_eq($returnDetail['data']['order_money'] ?? 0, 80, '退货详情金额=80');
+
+$returnFullEditRes = httpRequest('POST', "{$BASE_URL}/api/return/edit", [
+    'id' => $returnId,
+    'original_order_id' => $salesId,
+    'original_order_sn' => $salesSn,
+    'customer_id' => $customerId,
+    'warehouse_id' => $warehouseId,
+    'goods' => [goodsRow($goodsId, $goodsName, 10, 20, '件')],
+    'return_reason' => '专项回归全量退货',
+], $token);
+assert_code($returnFullEditRes, 1, '编辑退货单为全量10件×20');
+$salesDetailAfterFullReturn = httpRequest('GET', "{$BASE_URL}/api/order/details", ['id' => $salesId], $token);
+assert_code($salesDetailAfterFullReturn, 1, '原销售单详情-全量退货后');
+assert_true((int)($salesDetailAfterFullReturn['data']['status'] ?? 0) === 3, '全量退货后原销售单状态=3');
+assert_true((string)($salesDetailAfterFullReturn['data']['status_label'] ?? '') === '已退货', '全量退货后原销售单返回 status_label');
 
 $returnEditRes = httpRequest('POST', "{$BASE_URL}/api/return/edit", [
     'id' => $returnId,
@@ -354,6 +408,9 @@ assert_eq((float)$stockAfterReturnDelete - (float)$initialStock, 40, '删除退�
 assert_eq((float)$receivableAfterReturnDelete - (float)$initialReceivable, 200, '删除退货后应收恢复销售后状态');
 
 echo "\n--- 清理测试数据 ---\n";
+if ($overReturnId) {
+    assert_code(httpRequest('DELETE', "{$BASE_URL}/api/return/remove", ['id' => $overReturnId], $token), 1, '清理-删除误创建超退单');
+}
 if ($returnId) {
     assert_code(httpRequest('DELETE', "{$BASE_URL}/api/return/remove", ['id' => $returnId], $token), 1, '清理-删除退货单');
 }

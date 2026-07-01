@@ -356,6 +356,8 @@ class SupplyOrderLogic extends BaseLogic
             'datetimesingle' => $datetimesingle,
             'createdate' => self::dateText($datetimesingle ?: ($item['create_time'] ?? 0)),
             'status' => (int)($item['status'] ?? 1),
+            'return_status' => (int)($item['return_status'] ?? 0),
+            'return_status_label' => SupplyOrder::returnStatusLabel((int)($item['return_status'] ?? 0)),
             'purpose' => self::DEFAULT_PURPOSE,
             'purpose_type' => (string)($item['purpose_type'] ?? self::DEFAULT_PURPOSE_TYPE),
             'remarks' => (string)($item['remarks'] ?? ''),

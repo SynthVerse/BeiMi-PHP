@@ -24,7 +24,7 @@ class SalesReturnOrderController extends BaseJxcController
         $params = (new SalesReturnOrderValidate())->post()->goCheck('publish');
         $result = SalesReturnOrderLogic::publish($params);
         if ($result === false) {
-            return $this->fail(SalesReturnOrderLogic::getError());
+            return $this->fail(SalesReturnOrderLogic::getError(), SalesReturnOrderLogic::getReturnData() ?: []);
         }
         return $this->success('添加成功', $result, 1, 1);
     }
@@ -34,7 +34,7 @@ class SalesReturnOrderController extends BaseJxcController
         $params = (new SalesReturnOrderValidate())->post()->goCheck('edit');
         $result = SalesReturnOrderLogic::edit($params);
         if ($result === false) {
-            return $this->fail(SalesReturnOrderLogic::getError());
+            return $this->fail(SalesReturnOrderLogic::getError(), SalesReturnOrderLogic::getReturnData() ?: []);
         }
         return $this->success('编辑成功', $result, 1, 1);
     }
@@ -44,7 +44,7 @@ class SalesReturnOrderController extends BaseJxcController
         $params = (new SalesReturnOrderValidate())->goCheck('remove');
         $result = SalesReturnOrderLogic::remove($params);
         if ($result === false) {
-            return $this->fail(SalesReturnOrderLogic::getError());
+            return $this->fail(SalesReturnOrderLogic::getError(), SalesReturnOrderLogic::getReturnData() ?: []);
         }
         return $this->success('删除成功', $result, 1, 1);
     }
