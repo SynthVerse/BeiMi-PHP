@@ -7,6 +7,7 @@ use app\common\model\jxc\Customer;
 use app\common\model\jxc\Goods;
 use app\common\model\jxc\OrderGoods;
 use app\common\model\jxc\SalesOrder;
+use app\common\model\jxc\SalesReturnOrder;
 use app\common\model\jxc\Warehouse;
 use think\facade\Db;
 use think\facade\Log;
@@ -237,11 +238,12 @@ class SalesOrderLogic extends BaseLogic
         }
 
         $item = self::formatItem($order->toArray(), true);
-        $item['goods'] = self::formatGoodsRows(OrderGoods::where('order_id', (int)$order->id)
+        $goodsRows = OrderGoods::where('order_id', (int)$order->id)
             ->where('order_type', self::ORDER_TYPE)
             ->order(['sort' => 'asc', 'id' => 'asc'])
             ->select()
-            ->toArray());
+            ->toArray();
+        $item['goods'] = self::formatGoodsRows($goodsRows, self::returnedSalesQtyMap((int)$order->id));
 
         return $item;
     }
@@ -505,19 +507,30 @@ class SalesOrderLogic extends BaseLogic
         return true;
     }
 
-    protected static function formatGoodsRows(array $rows): array
+    protected static function formatGoodsRows(array $rows, array $returnedMap = []): array
     {
-        return array_map(function ($row) {
+        $uniqueGoodsSkuKeys = self::uniqueGoodsSkuKeys($rows);
+
+        return array_map(function ($row) use ($returnedMap, $uniqueGoodsSkuKeys) {
             $number = rtrim(rtrim(number_format((float)($row['number'] ?? 0), 4, '.', ''), '0'), '.');
+            $returnedNumber = self::salesReturnReturnedQtyForOrigin($row, $returnedMap, $uniqueGoodsSkuKeys);
+            $returnableNumber = bcsub((string)($row['number'] ?? '0.0000'), $returnedNumber, 4);
+            if (bccomp($returnableNumber, '0', 4) < 0) {
+                $returnableNumber = '0.0000';
+            }
             return [
                 'id' => (int)($row['id'] ?? 0),
                 'order_goods_id' => (int)($row['id'] ?? 0),
                 'goods_id' => (int)($row['goods_id'] ?? 0),
+                'sku_id' => (int)($row['sku_id'] ?? 0),
                 'name' => (string)($row['name'] ?? ''),
                 'product_name' => (string)($row['name'] ?? ''),
                 'units' => (string)($row['units'] ?? ''),
                 'unit' => (string)($row['units'] ?? ''),
                 'number' => $number === '' ? '0' : $number,
+                'returned_number' => self::quantityText($returnedNumber),
+                'returnable_number' => self::quantityText($returnableNumber),
+                'max_return_number' => self::quantityText($returnableNumber),
                 'price' => self::money($row['price'] ?? 0),
                 'units_money' => self::money($row['price'] ?? 0),
                 'amount' => self::money($row['amount'] ?? 0),
@@ -525,6 +538,75 @@ class SalesOrderLogic extends BaseLogic
                 'sort' => (int)($row['sort'] ?? 0),
             ];
         }, $rows);
+    }
+
+    protected static function uniqueGoodsSkuKeys(array $rows): array
+    {
+        $counts = [];
+        foreach ($rows as $row) {
+            $key = 'goods:' . (int)($row['goods_id'] ?? 0) . ':' . (int)($row['sku_id'] ?? 0);
+            $counts[$key] = (int)($counts[$key] ?? 0) + 1;
+        }
+
+        return array_keys(array_filter($counts, fn($count) => $count === 1));
+    }
+
+    protected static function returnedSalesQtyMap(int $originalOrderId): array
+    {
+        $returnIds = SalesReturnOrder::where('original_sales_order_id', $originalOrderId)
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->column('id');
+        if (empty($returnIds)) {
+            return [];
+        }
+
+        $rows = OrderGoods::whereIn('order_id', $returnIds)
+            ->where('order_type', 'sales-return')
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->select()
+            ->toArray();
+
+        $map = [];
+        foreach ($rows as $row) {
+            $key = self::salesReturnDimensionKey($row);
+            $map[$key] = bcadd((string)($map[$key] ?? '0.0000'), (string)($row['number'] ?? '0.0000'), 4);
+        }
+
+        return $map;
+    }
+
+    protected static function salesReturnDimensionKey(array $row): string
+    {
+        $originLineId = (int)($row['original_sales_order_list_id'] ?? $row['original_order_goods_id'] ?? 0);
+        if ($originLineId > 0) {
+            return 'line:' . $originLineId;
+        }
+
+        return 'goods:' . (int)($row['goods_id'] ?? 0) . ':' . (int)($row['sku_id'] ?? 0);
+    }
+
+    protected static function salesReturnReturnedQtyForOrigin(array $originRow, array $returnedMap, array $uniqueGoodsSkuKeys = []): string
+    {
+        $lineKey = self::salesReturnDimensionKey([
+            'original_sales_order_list_id' => (int)($originRow['id'] ?? 0),
+            'goods_id' => (int)($originRow['goods_id'] ?? 0),
+            'sku_id' => (int)($originRow['sku_id'] ?? 0),
+        ]);
+        $goodsSkuKey = 'goods:' . (int)($originRow['goods_id'] ?? 0) . ':' . (int)($originRow['sku_id'] ?? 0);
+
+        if (isset($returnedMap[$lineKey])) {
+            return (string)$returnedMap[$lineKey];
+        }
+
+        return in_array($goodsSkuKey, $uniqueGoodsSkuKeys, true)
+            ? (string)($returnedMap[$goodsSkuKey] ?? '0.0000')
+            : '0.0000';
+    }
+
+    protected static function quantityText(mixed $value): string
+    {
+        $text = rtrim(rtrim(number_format((float)$value, 4, '.', ''), '0'), '.');
+        return $text === '' ? '0' : $text;
     }
 
     protected static function applyTimeRange($query, array $params): void

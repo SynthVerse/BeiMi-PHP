@@ -150,6 +150,21 @@ Route::group('', function () {
     Route::post('purchase/parse-text',        'jxc.PurchaseOrder/parsePastedText');
     Route::get('purchase/statistics',         'jxc.PurchaseOrder/statistics');
 
+    // === 销售预定 ===
+    Route::get('jxc/sales_reservation/detail', 'jxc.SalesReservation/detail');
+    Route::post('jxc/sales_reservation/submit', 'jxc.SalesReservation/submit');
+    Route::post('jxc/sales_reservation/cancel', 'jxc.SalesReservation/cancel');
+    Route::post('jxc/sales_reservation/convert_sales', 'jxc.SalesReservation/convertSales');
+    Route::get('jxc/sales_reservation/lists', 'jxc.SalesReservation/lists');
+
+    // === 采购任务 ===
+    Route::get('jxc/procurement_task/detail', 'jxc.ProcurementTask/detail');
+    Route::post('jxc/procurement_task/manual_create', 'jxc.ProcurementTask/manualCreate');
+    Route::post('jxc/procurement_task/start', 'jxc.ProcurementTask/start');
+    Route::post('jxc/procurement_task/close', 'jxc.ProcurementTask/close');
+    Route::post('jxc/procurement_task/cancel', 'jxc.ProcurementTask/cancel');
+    Route::get('jxc/procurement_task/lists', 'jxc.ProcurementTask/lists');
+
     // === 审计日志 ===
     Route::get('audit/lists', 'jxc.Audit/lists');
 

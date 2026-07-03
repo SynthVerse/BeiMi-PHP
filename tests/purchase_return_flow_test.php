@@ -80,6 +80,22 @@ function pr_db_value_or_null(string $sql, array $params = [])
     }
 }
 
+function pr_find_goods_row(array $response, int $goodsId): ?array
+{
+    $goods = $response['data']['goods'] ?? [];
+    if (!is_array($goods)) {
+        return null;
+    }
+
+    foreach ($goods as $row) {
+        if ((int)($row['goods_id'] ?? 0) === $goodsId) {
+            return $row;
+        }
+    }
+
+    return null;
+}
+
 echo "=== BeiMi JXC 采购退货 P0 回归测试 ===\n";
 echo "BASE_URL: {$BASE_URL}\n\n";
 
@@ -96,6 +112,7 @@ $warehouseId = null;
 $supplierId = null;
 $goodsId = null;
 $supplyId = null;
+$supplyId2 = null;
 $returnId = null;
 $overReturnId = null;
 
@@ -178,6 +195,14 @@ $runtime->assertTrue($supplyId !== null && $supplySn !== '', '进货单创建返
 $stockAfterSupply = \goods_stock(\http_request('GET', "{$BASE_URL}/api/goods/detail", ['id' => $goodsId], $token));
 $runtime->assertMoney((float)$stockAfterSupply - (float)$initialStock, 10, '进货后库存增加10');
 
+$supplyDetailBeforeReturn = \http_request('GET', "{$BASE_URL}/api/supply/details", ['id' => $supplyId], $token);
+$runtime->assertCode($supplyDetailBeforeReturn, 1, '进货详情-退货前');
+$supplyGoodsBeforeReturn = pr_find_goods_row($supplyDetailBeforeReturn, $goodsId);
+$runtime->assertTrue($supplyGoodsBeforeReturn !== null, '进货详情退货前存在商品行');
+$runtime->assertMoney((float)($supplyGoodsBeforeReturn['returned_number'] ?? -1), 0, '进货详情退货前 returned_number=0');
+$runtime->assertMoney((float)($supplyGoodsBeforeReturn['returnable_number'] ?? -1), 10, '进货详情退货前 returnable_number=10');
+$runtime->assertMoney((float)($supplyGoodsBeforeReturn['max_return_number'] ?? -1), 10, '进货详情退货前 max_return_number=10');
+
 $returnRes = \http_request('POST', "{$BASE_URL}/api/purchase-return/publish", [
     'original_order_id' => $supplyId,
     'original_order_sn' => $supplySn,
@@ -206,14 +231,89 @@ $runtime->assertInt((int)$returnStatus, 1, '部分采购退货后原进货单 re
 
 $detailRes = \http_request('GET', "{$BASE_URL}/api/purchase-return/details", ['id' => $returnId], $token);
 $runtime->assertCode($detailRes, 1, '采购退货详情');
+$runtime->assertTrue((string)($detailRes['data']['warehouse_name'] ?? '') === $warehouseName, '采购退货详情返回 warehouse_name');
+$runtime->assertTrue((string)($detailRes['data']['warehouse'] ?? '') === $warehouseName, '采购退货详情返回 warehouse');
 $runtime->assertTrue(isset($detailRes['data']['goods']) && is_array($detailRes['data']['goods']), '采购退货详情返回 data.goods');
+$detailGoods = pr_find_goods_row($detailRes, $goodsId);
+$runtime->assertTrue($detailGoods !== null, '采购退货详情返回目标商品行');
+$runtime->assertMoney((float)($detailGoods['returned_number'] ?? -1), 4, '采购退货详情 returned_number=4');
+$runtime->assertMoney((float)($detailGoods['returnable_number'] ?? -1), 6, '采购退货详情 returnable_number=6');
+$runtime->assertMoney((float)($detailGoods['max_return_number'] ?? -1), 10, '采购退货详情 max_return_number=10');
+
+$supplyDetailAfterReturn = \http_request('GET', "{$BASE_URL}/api/supply/details", ['id' => $supplyId], $token);
+$runtime->assertCode($supplyDetailAfterReturn, 1, '进货详情-退货后');
+$supplyGoodsAfterReturn = pr_find_goods_row($supplyDetailAfterReturn, $goodsId);
+$runtime->assertTrue($supplyGoodsAfterReturn !== null, '进货详情退货后存在商品行');
+$runtime->assertMoney((float)($supplyGoodsAfterReturn['returned_number'] ?? -1), 4, '进货详情退货后 returned_number=4');
+$runtime->assertMoney((float)($supplyGoodsAfterReturn['returnable_number'] ?? -1), 6, '进货详情退货后 returnable_number=6');
+$runtime->assertMoney((float)($supplyGoodsAfterReturn['max_return_number'] ?? -1), 6, '进货详情退货后 max_return_number=6');
+
+$editRes = \http_request('POST', "{$BASE_URL}/api/purchase-return/edit", [
+    'id' => $returnId,
+    'original_order_id' => $supplyId,
+    'original_supply_order_id' => $supplyId,
+    'supplier_id' => $supplierId,
+    'warehouse_id' => $warehouseId,
+    'goods' => [pr_goods_row($goodsId, $goodsName, 2, 10, '件')],
+    'return_reason' => '专项回归采购退货-编辑减量',
+], $token);
+$runtime->assertCode($editRes, 1, '编辑采购退货4件改2件');
+$editGoods = pr_find_goods_row($editRes, $goodsId);
+$runtime->assertTrue($editGoods !== null, '编辑采购退货返回详情商品行');
+$runtime->assertMoney((float)($editGoods['returned_number'] ?? -1), 2, '编辑采购退货返回详情 returned_number=2');
+$runtime->assertMoney((float)($editGoods['returnable_number'] ?? -1), 8, '编辑采购退货返回详情 returnable_number=8');
+$runtime->assertMoney((float)($editGoods['max_return_number'] ?? -1), 10, '编辑采购退货返回详情 max_return_number=10');
+$runtime->assertTrue(
+    (float)($editGoods['max_return_number'] ?? 0) >= (float)($editGoods['return_num'] ?? $editGoods['number'] ?? 0),
+    '编辑采购退货返回详情 max_return_number 不小于当前退货数量'
+);
+$stockAfterEdit = \goods_stock(\http_request('GET', "{$BASE_URL}/api/goods/detail", ['id' => $goodsId], $token));
+$runtime->assertMoney((float)$stockAfterEdit - (float)$initialStock, 8, '编辑采购退货后库存=初始+8');
+$payableAfterEdit = number_format((float)pr_db_value_or_null('SELECT order_payable FROM ' . \db_table('vendor') . ' WHERE id = ?', [$supplierId]), 2, '.', '');
+$runtime->assertMoney((float)$payableAfterEdit - (float)$initialPayable, 80, '编辑采购退货后应付=初始+80');
+$returnStatusAfterEdit = pr_db_value_or_null('SELECT return_status FROM ' . \db_table('supply_order') . ' WHERE id = ?', [$supplyId]);
+$runtime->assertInt((int)$returnStatusAfterEdit, 1, '编辑采购退货后原进货单 return_status 仍为1');
+
+$supplyDetailAfterEdit = \http_request('GET', "{$BASE_URL}/api/supply/details", ['id' => $supplyId], $token);
+$runtime->assertCode($supplyDetailAfterEdit, 1, '进货详情-编辑采购退货后');
+$supplyGoodsAfterEdit = pr_find_goods_row($supplyDetailAfterEdit, $goodsId);
+$runtime->assertTrue($supplyGoodsAfterEdit !== null, '进货详情编辑后存在商品行');
+$runtime->assertMoney((float)($supplyGoodsAfterEdit['returned_number'] ?? -1), 2, '进货详情编辑后 returned_number=2');
+$runtime->assertMoney((float)($supplyGoodsAfterEdit['returnable_number'] ?? -1), 8, '进货详情编辑后 returnable_number=8');
+$runtime->assertMoney((float)($supplyGoodsAfterEdit['max_return_number'] ?? -1), 8, '进货详情编辑后 max_return_number=8');
+
+$supplyRes2 = \http_request('POST', "{$BASE_URL}/api/supply/publish", [
+    'supplier_id' => $supplierId,
+    'warehouse_id' => $warehouseId,
+    'order_pay_money' => 0,
+    'goods' => [pr_goods_row($goodsId, $goodsName, 3, 10, '件')],
+], $token);
+$runtime->assertCode($supplyRes2, 1, '发布第二张原进货单3件×10');
+$supplyId2 = \extract_id($supplyRes2);
+$runtime->assertTrue($supplyId2 !== null, '第二张原进货单返回 data.id');
+
+$switchOriginalRes = \http_request('POST', "{$BASE_URL}/api/purchase-return/edit", [
+    'id' => $returnId,
+    'original_order_id' => $supplyId2,
+    'original_supply_order_id' => $supplyId2,
+    'supplier_id' => $supplierId,
+    'warehouse_id' => $warehouseId,
+    'goods' => [pr_goods_row($goodsId, $goodsName, 2, 10, '件')],
+    'return_reason' => '专项回归采购退货-尝试切换原单',
+], $token);
+$runtime->assertCode($switchOriginalRes, 0, '编辑采购退货时切换原进货单必须失败');
+pr_assert_error_code($runtime, $switchOriginalRes, 'RETURN_ORIGINAL_LOCKED', '切换原进货单失败返回稳定 error_code');
+
+$detailAfterSwitchFail = \http_request('GET', "{$BASE_URL}/api/purchase-return/details", ['id' => $returnId], $token);
+$runtime->assertCode($detailAfterSwitchFail, 1, '切换原单失败后采购退货详情仍可读取');
+$runtime->assertInt((int)($detailAfterSwitchFail['data']['original_supply_order_id'] ?? 0), $supplyId, '切换原单失败后 original_supply_order_id 保持不变');
 
 $overReturnRes = \http_request('POST', "{$BASE_URL}/api/purchase-return/publish", [
     'original_order_id' => $supplyId,
     'original_order_sn' => $supplySn,
     'supplier_id' => $supplierId,
     'warehouse_id' => $warehouseId,
-    'goods' => [pr_goods_row($goodsId, $goodsName, 7, 10, '件')],
+    'goods' => [pr_goods_row($goodsId, $goodsName, 9, 10, '件')],
     'return_reason' => '专项回归采购超退',
 ], $token);
 $runtime->assertCode($overReturnRes, 0, '累计采购退货超过原进货数量必须失败');
@@ -238,6 +338,9 @@ if ($overReturnId) {
 }
 if ($returnId) {
     $runtime->assertCode(\http_request('DELETE', "{$BASE_URL}/api/purchase-return/remove", ['id' => $returnId], $token), 1, '清理-删除采购退货单');
+}
+if ($supplyId2) {
+    $runtime->assertCode(\http_request('DELETE', "{$BASE_URL}/api/supply/remove", ['id' => $supplyId2], $token), 1, '清理-删除第二张进货单');
 }
 if ($supplyId) {
     $runtime->assertCode(\http_request('DELETE', "{$BASE_URL}/api/supply/remove", ['id' => $supplyId], $token), 1, '清理-删除进货单');
