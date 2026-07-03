@@ -1,7 +1,7 @@
 -- P0 sales reservation, logical inventory reservation, and procurement task schema.
--- Replace {{prefix}} with the configured database prefix before applying.
+-- Database prefix applied: la_.
 
-CREATE TABLE IF NOT EXISTS `{{prefix}}sales_reservation` (
+CREATE TABLE IF NOT EXISTS `la_sales_reservation` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '销售预定ID',
   `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
   `sn` varchar(64) NOT NULL DEFAULT '' COMMENT '销售预定单号',
@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS `{{prefix}}sales_reservation` (
   KEY `idx_tenant_customer` (`tenant_id`, `customer_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='JXC销售预定表';
 
-CREATE TABLE IF NOT EXISTS `{{prefix}}sales_reservation_item` (
+CREATE TABLE IF NOT EXISTS `la_sales_reservation_item` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '销售预定明细ID',
   `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
   `reservation_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '销售预定ID',
@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS `{{prefix}}sales_reservation_item` (
   KEY `idx_task` (`procurement_task_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='JXC销售预定明细表';
 
-CREATE TABLE IF NOT EXISTS `{{prefix}}inventory_reservation` (
+CREATE TABLE IF NOT EXISTS `la_inventory_reservation` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '库存逻辑预留ID',
   `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
   `reservation_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '销售预定ID',
@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS `{{prefix}}inventory_reservation` (
   KEY `idx_tenant_item` (`tenant_id`, `reservation_item_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='JXC库存逻辑预留表';
 
-CREATE TABLE IF NOT EXISTS `{{prefix}}procurement_task` (
+CREATE TABLE IF NOT EXISTS `la_procurement_task` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '采购任务ID',
   `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
   `sn` varchar(64) NOT NULL DEFAULT '' COMMENT '采购任务编号',
@@ -105,7 +105,7 @@ CREATE TABLE IF NOT EXISTS `{{prefix}}procurement_task` (
   KEY `idx_tenant_source_reservation` (`tenant_id`, `source_reservation_id`, `source_reservation_item_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='JXC采购任务表';
 
-CREATE TABLE IF NOT EXISTS `{{prefix}}procurement_task_inbound` (
+CREATE TABLE IF NOT EXISTS `la_procurement_task_inbound` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '采购任务到货回填ID',
   `task_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '采购任务ID',
   `goods_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '商品ID',
