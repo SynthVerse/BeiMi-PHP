@@ -46,6 +46,10 @@ class SalesOrderLists extends BaseDataLists
             $query->where('warehouse_id', $warehouseId);
         }
 
+        if ((int)($this->params['returnable_only'] ?? 0) === 1) {
+            $query->where('status', '<>', SalesOrder::STATUS_RETURNED);
+        }
+
         $startTime = (int)($this->params['start_time'] ?? 0);
         $endTime = (int)($this->params['end_time'] ?? 0);
         if ($startTime > 0 && $endTime > 0) {

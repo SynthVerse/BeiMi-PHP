@@ -7,6 +7,7 @@ use app\common\model\jxc\Vendor;
 use app\common\model\jxc\Goods;
 use app\common\model\jxc\GoodsSku;
 use app\common\model\jxc\OrderGoods;
+use app\common\model\jxc\PurchaseReturnOrderDetail;
 use app\common\model\jxc\SupplyOrder;
 use app\common\model\jxc\Warehouse;
 use think\facade\Db;
@@ -66,6 +67,7 @@ class SupplyOrderLogic extends BaseLogic
                     (int)($row['batch_id'] ?? 0)
                 );
             }
+            ProcurementTaskService::backfillSupplyInbound((int)$order->id, $createdGoods);
 
             // === 应付增加 ===
             $arrearsMoney = (string)$built['order']['order_arrears_money'];
@@ -258,12 +260,13 @@ class SupplyOrderLogic extends BaseLogic
         }
 
         $item = self::formatItem($order->toArray(), true);
-        $item['goods'] = self::formatGoodsRows(OrderGoods::where('order_id', (int)$order->id)
+        $goodsRows = OrderGoods::where('order_id', (int)$order->id)
             ->where('order_type', self::ORDER_TYPE)
             ->where('tenant_id', (int)(request()->tenantId ?? 0))
             ->order(['sort' => 'asc', 'id' => 'asc'])
             ->select()
-            ->toArray());
+            ->toArray();
+        $item['goods'] = self::formatGoodsRows($goodsRows, self::purchaseReturnedQtyMap((int)$order->id));
 
         return $item;
     }
@@ -587,6 +590,23 @@ class SupplyOrderLogic extends BaseLogic
         return $created;
     }
 
+    protected static function purchaseReturnedQtyMap(int $supplyOrderId): array
+    {
+        $rows = PurchaseReturnOrderDetail::where('original_supply_order_id', $supplyOrderId)
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->field('original_supply_order_list_id,SUM(return_num) as returned_num')
+            ->group('original_supply_order_list_id')
+            ->select()
+            ->toArray();
+
+        $map = [];
+        foreach ($rows as $row) {
+            $map[(int)$row['original_supply_order_list_id']] = (string)($row['returned_num'] ?? '0.0000');
+        }
+
+        return $map;
+    }
+
     protected static function resolveWarehouse(mixed $warehouseId): ?Warehouse
     {
         if ($warehouseId === 'default') {
@@ -643,10 +663,18 @@ class SupplyOrderLogic extends BaseLogic
         return true;
     }
 
-    protected static function formatGoodsRows(array $rows): array
+    protected static function formatGoodsRows(array $rows, array $returnedMap = []): array
     {
-        return array_map(function ($row) {
-            $number = rtrim(rtrim(number_format((float)($row['number'] ?? 0), 4, '.', ''), '0'), '.');
+        return array_map(function ($row) use ($returnedMap) {
+            $orderGoodsId = (int)($row['id'] ?? 0);
+            $numberValue = (string)($row['number'] ?? 0);
+            $number = self::quantityText($numberValue);
+            $returnedNumber = (string)($returnedMap[$orderGoodsId] ?? '0.0000');
+            $returnableNumber = bcsub($numberValue, $returnedNumber, 4);
+            if (bccomp($returnableNumber, '0', 4) < 0) {
+                $returnableNumber = '0.0000';
+            }
+
             return [
                 'id' => (int)($row['id'] ?? 0),
                 'order_goods_id' => (int)($row['id'] ?? 0),
@@ -674,6 +702,9 @@ class SupplyOrderLogic extends BaseLogic
                 'loss_rate' => (string)($row['loss_rate'] ?? '0.000000'),
                 'batch_id' => (int)($row['batch_id'] ?? 0),
                 'number' => $number === '' ? '0' : $number,
+                'returned_number' => self::quantityText($returnedNumber),
+                'returnable_number' => self::quantityText($returnableNumber),
+                'max_return_number' => self::quantityText($returnableNumber),
                 'price' => self::money($row['price'] ?? 0),
                 'units_money' => self::money($row['price'] ?? 0),
                 'amount' => self::money($row['amount'] ?? 0),
@@ -714,5 +745,11 @@ class SupplyOrderLogic extends BaseLogic
     protected static function decimal4(mixed $value): string
     {
         return number_format(max(0, (float)$value), 4, '.', '');
+    }
+
+    protected static function quantityText(mixed $value): string
+    {
+        $text = rtrim(rtrim(number_format((float)$value, 4, '.', ''), '0'), '.');
+        return $text === '' ? '0' : $text;
     }
 }

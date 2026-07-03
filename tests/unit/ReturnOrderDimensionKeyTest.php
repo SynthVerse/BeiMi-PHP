@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace tests\unit;
 
 use app\api\jxc\logic\SalesReturnOrderLogic;
+use app\api\jxc\logic\SalesOrderLogic;
 use app\common\model\jxc\SalesOrder;
 use PHPUnit\Framework\TestCase;
 use ReflectionClass;
@@ -115,5 +116,46 @@ final class ReturnOrderDimensionKeyTest extends TestCase
             'line:101' => '5.0000',
         ], $returnedMap);
         self::assertSame(SalesOrder::STATUS_PART_RETURNED, $statusMethod->invoke(null, $originalRows, $returnedMap));
+    }
+
+    public function testSalesOrderGoodsRowsExposeReturnedAndReturnableQuantities(): void
+    {
+        $method = (new ReflectionClass(SalesOrderLogic::class))->getMethod('formatGoodsRows');
+        $method->setAccessible(true);
+
+        $rows = [[
+            'id' => 101,
+            'goods_id' => 10,
+            'sku_id' => 1,
+            'name' => '测试商品',
+            'units' => '件',
+            'number' => '10.0000',
+            'price' => '3.00',
+            'amount' => '30.00',
+        ]];
+
+        $formatted = $method->invoke(null, $rows, ['line:101' => '4.0000']);
+
+        self::assertSame('4', $formatted[0]['returned_number']);
+        self::assertSame('6', $formatted[0]['returnable_number']);
+        self::assertSame('6', $formatted[0]['max_return_number']);
+    }
+
+    public function testSalesOrderGoodsRowsDoNotApplyAmbiguousGoodsSkuFallbackToDuplicateOriginalLines(): void
+    {
+        $method = (new ReflectionClass(SalesOrderLogic::class))->getMethod('formatGoodsRows');
+        $method->setAccessible(true);
+
+        $rows = [
+            ['id' => 101, 'goods_id' => 10, 'sku_id' => 1, 'name' => '测试商品A', 'units' => '件', 'number' => '5.0000', 'price' => '3.00', 'amount' => '15.00'],
+            ['id' => 102, 'goods_id' => 10, 'sku_id' => 1, 'name' => '测试商品A', 'units' => '件', 'number' => '5.0000', 'price' => '3.00', 'amount' => '15.00'],
+        ];
+
+        $formatted = $method->invoke(null, $rows, ['goods:10:1' => '5.0000']);
+
+        self::assertSame('0', $formatted[0]['returned_number']);
+        self::assertSame('5', $formatted[0]['returnable_number']);
+        self::assertSame('0', $formatted[1]['returned_number']);
+        self::assertSame('5', $formatted[1]['returnable_number']);
     }
 }

@@ -127,6 +127,16 @@ class PurchaseReturnOrderLogic extends BaseLogic
         }
 
         $oldOriginalOrderId = (int)$order->original_supply_order_id;
+        $requestedOriginalOrderId = array_key_exists('original_order_id', $params) || array_key_exists('original_supply_order_id', $params)
+            ? (int)($params['original_order_id'] ?? $params['original_supply_order_id'] ?? 0)
+            : $oldOriginalOrderId;
+        if ($requestedOriginalOrderId > 0 && $requestedOriginalOrderId !== $oldOriginalOrderId) {
+            self::failWithCode('原进货单已锁定，不可修改', 'RETURN_ORIGINAL_LOCKED');
+            return false;
+        }
+
+        $params['original_order_id'] = $oldOriginalOrderId;
+        $params['original_supply_order_id'] = $oldOriginalOrderId;
         $built = self::buildOrderData($params, $order->toArray());
         if ($built === false) {
             return false;
@@ -277,11 +287,17 @@ class PurchaseReturnOrderLogic extends BaseLogic
         }
 
         $item = self::formatItem($order->toArray(), true);
-        $item['goods'] = self::formatDetailRows(PurchaseReturnOrderDetail::where('purchase_return_order_id', (int)$order->id)
+        $detailRows = PurchaseReturnOrderDetail::where('purchase_return_order_id', (int)$order->id)
             ->where('tenant_id', (int)(request()->tenantId ?? 0))
             ->order(['sort' => 'asc', 'id' => 'asc'])
             ->select()
-            ->toArray());
+            ->toArray();
+        $returnedExcludingCurrent = [];
+        $originalSupplyOrderId = (int)($item['original_supply_order_id'] ?? 0);
+        if ($originalSupplyOrderId > 0) {
+            $returnedExcludingCurrent = self::returnedSupplyQtyMap($originalSupplyOrderId, (int)$order->id);
+        }
+        $item['goods'] = self::formatDetailRows($detailRows, $returnedExcludingCurrent);
 
         return $item;
     }
@@ -294,6 +310,15 @@ class PurchaseReturnOrderLogic extends BaseLogic
     public static function formatItem(array $item, bool $includeOriginal = false): array
     {
         $datetimesingle = (int)($item['datetimesingle'] ?? 0);
+        $warehouseId = (int)($item['warehouse_id'] ?? 0);
+        $warehouseName = '';
+        if ($warehouseId > 0) {
+            $warehouse = Warehouse::where('id', $warehouseId)
+                ->where('tenant_id', (int)(request()->tenantId ?? 0))
+                ->findOrEmpty();
+            $warehouseName = $warehouse->isEmpty() ? '' : (string)($warehouse->name ?? '');
+        }
+
         $result = [
             'id' => (int)($item['id'] ?? 0),
             'order_sn' => (string)($item['order_sn'] ?? ''),
@@ -303,7 +328,9 @@ class PurchaseReturnOrderLogic extends BaseLogic
             'original_order_sn' => (string)($item['original_order_sn'] ?? ''),
             'supplier_id' => (int)($item['supplier_id'] ?? 0),
             'supplier_name' => (string)($item['supplier_name'] ?? ''),
-            'warehouse_id' => (int)($item['warehouse_id'] ?? 0),
+            'warehouse_id' => $warehouseId,
+            'warehouse_name' => $warehouseName,
+            'warehouse' => $warehouseName,
             'order_money' => self::money($item['order_money'] ?? 0),
             'return_reason' => (string)($item['return_reason'] ?? ''),
             'datetimesingle' => $datetimesingle,
@@ -326,6 +353,9 @@ class PurchaseReturnOrderLogic extends BaseLogic
             $result['original_supply_order'] = $original->isEmpty() ? null : [
                 'id' => (int)$original->id,
                 'order_sn' => (string)$original->order_sn,
+                'warehouse_id' => (int)($original->warehouse_id ?? 0),
+                'warehouse_name' => $warehouseName,
+                'warehouse' => $warehouseName,
                 'return_status' => (int)($original->return_status ?? 0),
                 'return_status_label' => SupplyOrder::returnStatusLabel((int)($original->return_status ?? 0)),
             ];
@@ -557,10 +587,24 @@ class PurchaseReturnOrderLogic extends BaseLogic
             ->update(['return_status' => $status]);
     }
 
-    protected static function formatDetailRows(array $rows): array
+    protected static function formatDetailRows(array $rows, array $returnedExcludingCurrentMap = []): array
     {
-        return array_map(function ($row) {
-            $returnNum = rtrim(rtrim(number_format((float)($row['return_num'] ?? 0), 4, '.', ''), '0'), '.');
+        return array_map(function ($row) use ($returnedExcludingCurrentMap) {
+            $originLineId = (int)($row['original_supply_order_list_id'] ?? 0);
+            $originalNum = (string)($row['original_num'] ?? '0.0000');
+            $currentReturnNum = number_format((float)($row['return_num'] ?? 0), 4, '.', '');
+            $otherReturnedNum = (string)($returnedExcludingCurrentMap[$originLineId] ?? '0.0000');
+            $maxReturnNum = bcsub($originalNum, $otherReturnedNum, 4);
+            if (bccomp($maxReturnNum, $currentReturnNum, 4) < 0) {
+                $maxReturnNum = $currentReturnNum;
+            }
+            $returnedNum = bcadd($otherReturnedNum, $currentReturnNum, 4);
+            $returnableNum = bcsub($maxReturnNum, $currentReturnNum, 4);
+            if (bccomp($returnableNum, '0', 4) < 0) {
+                $returnableNum = '0.0000';
+            }
+
+            $returnNum = self::quantityText($currentReturnNum);
             return [
                 'id' => (int)($row['id'] ?? 0),
                 'original_supply_order_id' => (int)($row['original_supply_order_id'] ?? 0),
@@ -574,9 +618,12 @@ class PurchaseReturnOrderLogic extends BaseLogic
                 'unit_name' => (string)($row['unit_name'] ?? ''),
                 'units' => (string)($row['unit_name'] ?? ''),
                 'unit' => (string)($row['unit_name'] ?? ''),
-                'original_num' => (string)($row['original_num'] ?? '0.0000'),
+                'original_num' => $originalNum,
                 'return_num' => $returnNum === '' ? '0' : $returnNum,
                 'number' => $returnNum === '' ? '0' : $returnNum,
+                'returned_number' => self::quantityText($returnedNum),
+                'returnable_number' => self::quantityText($returnableNum),
+                'max_return_number' => self::quantityText($maxReturnNum),
                 'price' => self::money($row['price'] ?? 0),
                 'units_money' => self::money($row['price'] ?? 0),
                 'amount' => self::money($row['amount'] ?? 0),
@@ -649,5 +696,11 @@ class PurchaseReturnOrderLogic extends BaseLogic
     protected static function money(mixed $value): string
     {
         return number_format(max(0, (float)$value), 2, '.', '');
+    }
+
+    protected static function quantityText(mixed $value): string
+    {
+        $formatted = rtrim(rtrim(number_format((float)$value, 4, '.', ''), '0'), '.');
+        return $formatted === '' ? '0' : $formatted;
     }
 }
