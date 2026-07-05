@@ -6,6 +6,7 @@ use app\common\logic\BaseLogic;
 use app\common\model\jxc\Vendor;
 use app\common\model\jxc\Goods;
 use app\common\model\jxc\GoodsSku;
+use app\common\model\jxc\GoodsSkuSpecValue;
 use app\common\model\jxc\OrderGoods;
 use app\common\model\jxc\PurchaseReturnOrderDetail;
 use app\common\model\jxc\SupplyOrder;
@@ -67,7 +68,10 @@ class SupplyOrderLogic extends BaseLogic
                     (int)($row['batch_id'] ?? 0)
                 );
             }
-            ProcurementTaskService::backfillSupplyInbound((int)$order->id, $createdGoods);
+            WorkTaskService::backfillProcurementInbound(
+                (int)$order->id,
+                self::procurementInboundRows($createdGoods, (int)$built['order']['warehouse_id'])
+            );
 
             // === 应付增加 ===
             $arrearsMoney = (string)$built['order']['order_arrears_money'];
@@ -459,6 +463,7 @@ class SupplyOrderLogic extends BaseLogic
             }
 
             $skuId = (int)($item['sku_id'] ?? 0);
+            $specId = (int)($item['spec_id'] ?? 0);
             $skuName = '';
             $supplierRelationId = 0;
             $orderQty = round(max(0, (float)($item['order_qty'] ?? $item['number'] ?? 0)), 4);
@@ -497,6 +502,7 @@ class SupplyOrderLogic extends BaseLogic
                 }
 
                 $skuName = (string)$sku->sku_name;
+                $specId = $specId > 0 ? $specId : self::resolveSingleSpecIdForSku($skuId);
                 $supplierRelationId = (int)$relation->id;
                 $baseUnitId = (int)($sku->base_unit_id ?? $baseUnitId);
                 $baseUnitName = (string)($sku->base_unit_name ?: $baseUnitName);
@@ -544,6 +550,7 @@ class SupplyOrderLogic extends BaseLogic
                 'order_type' => self::ORDER_TYPE,
                 'goods_id' => $goodsId,
                 'sku_id' => $skuId,
+                'spec_id' => $specId,
                 'sku_name' => $skuName,
                 'supplier_relation_id' => $supplierRelationId,
                 'name' => trim((string)($item['name'] ?? $item['product_name'] ?? $goodsModel->name)),
@@ -582,12 +589,41 @@ class SupplyOrderLogic extends BaseLogic
         $created = [];
         foreach ($rows as $row) {
             $row['order_id'] = $orderId;
-            $model = OrderGoods::create($row);
+            $model = OrderGoods::create(self::orderGoodsPersistRow($row));
             $row['id'] = (int)$model->id;
             $created[] = $row;
         }
 
         return $created;
+    }
+
+    protected static function orderGoodsPersistRow(array $row): array
+    {
+        unset($row['spec_id'], $row['warehouse_id']);
+        return $row;
+    }
+
+    protected static function procurementInboundRows(array $rows, int $warehouseId): array
+    {
+        return array_map(function (array $row) use ($warehouseId) {
+            $row['warehouse_id'] = $warehouseId;
+            $row['spec_id'] = (int)($row['spec_id'] ?? 0);
+            return $row;
+        }, $rows);
+    }
+
+    protected static function resolveSingleSpecIdForSku(int $skuId): int
+    {
+        if ($skuId <= 0) {
+            return 0;
+        }
+
+        $specIds = GoodsSkuSpecValue::where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->where('sku_id', $skuId)
+            ->column('spec_id');
+        $specIds = array_values(array_unique(array_map('intval', $specIds)));
+
+        return count($specIds) === 1 ? $specIds[0] : 0;
     }
 
     protected static function purchaseReturnedQtyMap(int $supplyOrderId): array

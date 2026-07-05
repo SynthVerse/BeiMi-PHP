@@ -83,7 +83,6 @@ class SalesReservationLogic extends BaseLogic
                     'reserved_num' => $reserved,
                     'shortage_num' => InventoryReservationService::qty($shortage),
                     'status' => bccomp($shortage, '0', 4) > 0 ? SalesReservationItem::STATUS_SHORTAGE : SalesReservationItem::STATUS_RESERVED,
-                    'procurement_task_id' => 0,
                     'create_time' => time(),
                     'update_time' => time(),
                 ]);
@@ -96,7 +95,7 @@ class SalesReservationLogic extends BaseLogic
 
                 $task = false;
                 if (bccomp($shortage, '0', 4) > 0) {
-                    $task = ProcurementTaskService::createForReservationItem((int)$row->id);
+                    $task = WorkTaskService::createProcurementWorkTaskForReservationItem((int)$row->id);
                 }
 
                 $total = bcadd($total, $num, 4);
@@ -104,7 +103,7 @@ class SalesReservationLogic extends BaseLogic
                 $shortageTotal = bcadd($shortageTotal, $shortage, 4);
                 $fresh = SalesReservationItem::find((int)$row->id)->toArray();
                 if ($task !== false) {
-                    $fresh['procurement_task'] = $task;
+                    $fresh['work_task'] = $task;
                 }
                 $resultItems[] = self::formatItem($fresh);
             }
@@ -119,6 +118,13 @@ class SalesReservationLogic extends BaseLogic
             ]);
 
             $freshReservation = SalesReservation::find((int)$reservation->id)->toArray();
+            if ($status === SalesReservation::STATUS_READY) {
+                WorkTaskService::createSalesConvertTask([
+                    'reservation_id' => (int)$freshReservation['id'],
+                    'reservation_sn' => (string)$freshReservation['sn'],
+                    'title' => '预定转销售',
+                ]);
+            }
             Db::commit();
             return self::format($freshReservation, $resultItems);
         } catch (\RuntimeException $e) {
@@ -146,7 +152,7 @@ class SalesReservationLogic extends BaseLogic
         Db::startTrans();
         try {
             InventoryReservationService::releaseReservation((int)$reservation->id);
-            ProcurementTaskService::cancelOpenTasksForReservation((int)$reservation->id);
+            WorkTaskService::cancelOpenProcurementWorkTasksForReservation((int)$reservation->id);
             SalesReservationItem::where('reservation_id', (int)$reservation->id)
                 ->where('tenant_id', self::tenantId())
                 ->update([
@@ -284,8 +290,7 @@ class SalesReservationLogic extends BaseLogic
             'reserved_num' => InventoryReservationService::qty($item['reserved_num'] ?? 0),
             'shortage_num' => InventoryReservationService::qty($item['shortage_num'] ?? 0),
             'status' => (string)($item['status'] ?? ''),
-            'procurement_task_id' => (int)($item['procurement_task_id'] ?? 0),
-            'procurement_task' => $item['procurement_task'] ?? null,
+            'work_task' => $item['work_task'] ?? null,
         ];
     }
 
