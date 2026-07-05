@@ -1,4 +1,4 @@
--- P0 sales reservation, logical inventory reservation, and procurement task schema.
+-- P0 sales reservation and logical inventory reservation schema.
 -- Database prefix applied: la_.
 
 CREATE TABLE IF NOT EXISTS `la_sales_reservation` (
@@ -40,14 +40,12 @@ CREATE TABLE IF NOT EXISTS `la_sales_reservation_item` (
   `reserved_num` decimal(12,4) NOT NULL DEFAULT 0.0000 COMMENT '预留数量',
   `shortage_num` decimal(12,4) NOT NULL DEFAULT 0.0000 COMMENT '缺口数量',
   `status` varchar(32) NOT NULL DEFAULT 'reserved' COMMENT '状态：reserved/shortage/gap_closed/converted/released',
-  `procurement_task_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '采购任务ID',
   `create_time` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建时间',
   `update_time` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新时间',
   `delete_time` int(11) UNSIGNED NULL DEFAULT NULL COMMENT '删除时间',
   PRIMARY KEY (`id`),
   KEY `idx_tenant_reservation` (`tenant_id`, `reservation_id`),
-  KEY `idx_tenant_goods` (`tenant_id`, `goods_id`),
-  KEY `idx_task` (`procurement_task_id`)
+  KEY `idx_tenant_goods` (`tenant_id`, `goods_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='JXC销售预定明细表';
 
 CREATE TABLE IF NOT EXISTS `la_inventory_reservation` (
@@ -71,50 +69,3 @@ CREATE TABLE IF NOT EXISTS `la_inventory_reservation` (
   KEY `idx_tenant_reservation` (`tenant_id`, `reservation_id`),
   KEY `idx_tenant_item` (`tenant_id`, `reservation_item_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='JXC库存逻辑预留表';
-
-CREATE TABLE IF NOT EXISTS `la_procurement_task` (
-  `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '采购任务ID',
-  `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
-  `sn` varchar(64) NOT NULL DEFAULT '' COMMENT '采购任务编号',
-  `source_type` varchar(32) NOT NULL DEFAULT '' COMMENT '来源类型',
-  `source_key` varchar(128) NOT NULL DEFAULT '' COMMENT '来源唯一键',
-  `source_reservation_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '来源销售预定ID',
-  `source_reservation_item_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '来源销售预定明细ID',
-  `goods_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '商品ID',
-  `goods_name` varchar(200) NOT NULL DEFAULT '' COMMENT '商品名称快照',
-  `goods_code` varchar(100) NOT NULL DEFAULT '' COMMENT '商品编码快照',
-  `warehouse_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '仓库ID，仅展示/未来扩展',
-  `sku_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT 'SKU ID，仅展示/未来扩展',
-  `spec_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '规格ID，仅展示/未来扩展',
-  `required_num` decimal(12,4) NOT NULL DEFAULT 0.0000 COMMENT '需求数量',
-  `arrived_num` decimal(12,4) NOT NULL DEFAULT 0.0000 COMMENT '已到货数量',
-  `status` varchar(32) NOT NULL DEFAULT 'pending' COMMENT '状态：pending/purchasing/partial_arrived/fulfilled/closed/cancelled',
-  `close_reason` varchar(500) NOT NULL DEFAULT '' COMMENT '关闭原因',
-  `start_time` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '开始时间',
-  `finish_time` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '完成时间',
-  `close_time` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '关闭时间',
-  `create_by` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建人',
-  `update_by` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新人',
-  `create_time` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建时间',
-  `update_time` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新时间',
-  `delete_time` int(11) UNSIGNED NULL DEFAULT NULL COMMENT '删除时间',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_tenant_source` (`tenant_id`, `source_type`, `source_key`),
-  KEY `idx_tenant_sn` (`tenant_id`, `sn`),
-  KEY `idx_tenant_goods_status` (`tenant_id`, `goods_id`, `status`),
-  KEY `idx_tenant_source_reservation` (`tenant_id`, `source_reservation_id`, `source_reservation_item_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='JXC采购任务表';
-
-CREATE TABLE IF NOT EXISTS `la_procurement_task_inbound` (
-  `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '采购任务到货回填ID',
-  `task_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '采购任务ID',
-  `goods_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '商品ID',
-  `supply_order_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '进货单ID',
-  `supply_order_item_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '进货单明细ID',
-  `inbound_num` decimal(12,4) NOT NULL DEFAULT 0.0000 COMMENT '回填数量',
-  `create_time` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建时间',
-  PRIMARY KEY (`id`),
-  KEY `idx_task` (`task_id`),
-  KEY `idx_goods` (`goods_id`),
-  KEY `idx_supply_item` (`supply_order_id`, `supply_order_item_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='JXC采购任务到货回填表';
