@@ -68,7 +68,7 @@ class SupplyOrderLogic extends BaseLogic
                     (int)($row['batch_id'] ?? 0)
                 );
             }
-            WorkTaskService::backfillProcurementInbound(
+            TaskCenterService::applyProcurementInbound(
                 (int)$order->id,
                 self::procurementInboundRows($createdGoods, (int)$built['order']['warehouse_id'])
             );

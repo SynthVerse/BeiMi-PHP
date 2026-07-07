@@ -150,30 +150,16 @@ Route::group('', function () {
     Route::post('purchase/parse-text',        'jxc.PurchaseOrder/parsePastedText');
     Route::get('purchase/statistics',         'jxc.PurchaseOrder/statistics');
 
-    // === 任务管理 ===
-    Route::get('jxc/task_role/lists', 'jxc.TaskRole/lists');
-    Route::get('jxc/task_role/detail', 'jxc.TaskRole/detail');
-    Route::post('jxc/task_role/create', 'jxc.TaskRole/create');
-    Route::post('jxc/task_role/edit', 'jxc.TaskRole/edit');
-    Route::post('jxc/task_role/status', 'jxc.TaskRole/status');
-    Route::get('jxc/task/type/lists', 'jxc.TaskType/lists');
-    Route::get('jxc/task/type/detail', 'jxc.TaskType/detail');
-    Route::post('jxc/task/type/create', 'jxc.TaskType/create');
-    Route::post('jxc/task/type/edit', 'jxc.TaskType/edit');
-    Route::post('jxc/task/type/status', 'jxc.TaskType/status');
-    Route::get('jxc/task/employee/lists', 'jxc.TaskEmployee/lists');
-    Route::get('jxc/task/employee/detail', 'jxc.TaskEmployee/detail');
-    Route::post('jxc/task/employee/create', 'jxc.TaskEmployee/create');
-    Route::post('jxc/task/employee/edit', 'jxc.TaskEmployee/edit');
-    Route::post('jxc/task/employee/status', 'jxc.TaskEmployee/status');
-    Route::get('jxc/task/lists', 'jxc.Task/lists');
-    Route::get('jxc/task/detail', 'jxc.Task/detail');
-    Route::post('jxc/task/create', 'jxc.Task/create');
-    Route::post('jxc/task/edit', 'jxc.Task/edit');
-    Route::post('jxc/task/assign', 'jxc.Task/assign');
-    Route::post('jxc/task/start', 'jxc.Task/start');
-    Route::post('jxc/task/complete', 'jxc.Task/complete');
-    Route::post('jxc/task/cancel', 'jxc.Task/cancel');
+    // === 任务中心 ===
+    Route::get('jxc/task/dashboard', 'jxc.Task/dashboard');
+    Route::get('jxc/task/reservations/select', 'jxc.Task/reservationsSelect');
+    Route::post('jxc/task/reservations/preview', 'jxc.Task/reservationsPreview');
+    Route::get('jxc/task/items', 'jxc.Task/items');
+    Route::post('jxc/task/assignment/save', 'jxc.Task/assignmentSave');
+    Route::get('jxc/task/employee-board', 'jxc.Task/employeeBoard');
+    Route::get('jxc/task/procurement/shortage', 'jxc.Task/procurementShortage');
+    Route::post('jxc/task/print-data', 'jxc.Task/printData');
+    Route::post('jxc/task/status', 'jxc.Task/status');
 
     // === 销售预定 ===
     Route::get('jxc/sales_reservation/detail', 'jxc.SalesReservation/detail');

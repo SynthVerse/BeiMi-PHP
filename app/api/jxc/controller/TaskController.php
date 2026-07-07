@@ -2,68 +2,61 @@
 
 namespace app\api\jxc\controller;
 
-use app\api\jxc\lists\WorkTaskLists;
-use app\api\jxc\logic\WorkTaskLogic;
-use app\api\jxc\validate\WorkTaskValidate;
+use app\api\jxc\logic\TaskCenterService;
+use app\api\jxc\validate\TaskCenterValidate;
 
 class TaskController extends BaseJxcController
 {
-    public function lists()
+    public function dashboard()
     {
-        return $this->dataLists(WorkTaskLists::class);
+        return $this->data(TaskCenterService::dashboard($this->request->get()));
     }
 
-    public function detail()
+    public function reservationsSelect()
     {
-        $params = (new WorkTaskValidate())->get()->goCheck('detail');
-        return $this->data(WorkTaskLogic::detail($params));
+        return $this->data(TaskCenterService::reservationsSelect($this->request->get()));
     }
 
-    public function create()
+    public function reservationsPreview()
     {
-        $params = (new WorkTaskValidate())->post()->goCheck('create');
-        $result = WorkTaskLogic::create($params);
+        $params = (new TaskCenterValidate())->post()->goCheck('preview');
+        return $this->data(TaskCenterService::preview($params));
+    }
+
+    public function items()
+    {
+        return $this->data(TaskCenterService::items($this->request->get()));
+    }
+
+    public function assignmentSave()
+    {
+        $params = (new TaskCenterValidate())->post()->goCheck('assignmentSave');
+        return $this->success('保存成功', TaskCenterService::saveAssignment($params), 1, 1);
+    }
+
+    public function employeeBoard()
+    {
+        return $this->data(TaskCenterService::employeeBoard($this->request->get()));
+    }
+
+    public function procurementShortage()
+    {
+        return $this->data(TaskCenterService::procurementShortage($this->request->get()));
+    }
+
+    public function printData()
+    {
+        $params = (new TaskCenterValidate())->post()->goCheck('printData');
+        return $this->data(TaskCenterService::printData($params));
+    }
+
+    public function status()
+    {
+        $params = (new TaskCenterValidate())->post()->goCheck('status');
+        $result = TaskCenterService::status($params);
         if ($result === false) {
-            return $this->fail(WorkTaskLogic::getError(), WorkTaskLogic::getReturnData() ?: []);
+            return $this->fail('任务状态不允许操作', ['error_code' => 'TASK_STATUS_INVALID']);
         }
-        return $this->success('创建成功', $result, 1, 1);
-    }
-
-    public function edit()
-    {
-        $params = (new WorkTaskValidate())->post()->goCheck('edit');
-        return $this->writeResult(WorkTaskLogic::edit($params), '编辑成功');
-    }
-
-    public function assign()
-    {
-        $params = (new WorkTaskValidate())->post()->goCheck('assign');
-        return $this->writeResult(WorkTaskLogic::assign($params), '分配成功');
-    }
-
-    public function start()
-    {
-        $params = (new WorkTaskValidate())->post()->goCheck('action');
-        return $this->writeResult(WorkTaskLogic::start($params), '开始成功');
-    }
-
-    public function complete()
-    {
-        $params = (new WorkTaskValidate())->post()->goCheck('action');
-        return $this->writeResult(WorkTaskLogic::complete($params), '完成成功');
-    }
-
-    public function cancel()
-    {
-        $params = (new WorkTaskValidate())->post()->goCheck('action');
-        return $this->writeResult(WorkTaskLogic::cancel($params), '取消成功');
-    }
-
-    private function writeResult(array|false $result, string $message)
-    {
-        if ($result === false) {
-            return $this->fail(WorkTaskLogic::getError(), WorkTaskLogic::getReturnData() ?: []);
-        }
-        return $this->success($message, $result, 1, 1);
+        return $this->success('更新成功', $result, 1, 1);
     }
 }
