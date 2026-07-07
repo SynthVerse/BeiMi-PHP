@@ -4,7 +4,7 @@ namespace app\common\model\jxc;
 
 use app\common\model\BaseModel;
 
-class TaskTypeRole extends BaseModel
+class TaskPrintLog extends BaseModel
 {
-    protected $name = 'task_type_role';
+    protected $name = 'task_print_log';
 }

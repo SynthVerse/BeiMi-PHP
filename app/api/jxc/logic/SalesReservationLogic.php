@@ -93,18 +93,10 @@ class SalesReservationLogic extends BaseLogic
                     ]), $reserved);
                 }
 
-                $task = false;
-                if (bccomp($shortage, '0', 4) > 0) {
-                    $task = WorkTaskService::createProcurementWorkTaskForReservationItem((int)$row->id);
-                }
-
                 $total = bcadd($total, $num, 4);
                 $reservedTotal = bcadd($reservedTotal, $reserved, 4);
                 $shortageTotal = bcadd($shortageTotal, $shortage, 4);
                 $fresh = SalesReservationItem::find((int)$row->id)->toArray();
-                if ($task !== false) {
-                    $fresh['work_task'] = $task;
-                }
                 $resultItems[] = self::formatItem($fresh);
             }
 
@@ -118,13 +110,6 @@ class SalesReservationLogic extends BaseLogic
             ]);
 
             $freshReservation = SalesReservation::find((int)$reservation->id)->toArray();
-            if ($status === SalesReservation::STATUS_READY) {
-                WorkTaskService::createSalesConvertTask([
-                    'reservation_id' => (int)$freshReservation['id'],
-                    'reservation_sn' => (string)$freshReservation['sn'],
-                    'title' => '预定转销售',
-                ]);
-            }
             Db::commit();
             return self::format($freshReservation, $resultItems);
         } catch (\RuntimeException $e) {
@@ -152,7 +137,7 @@ class SalesReservationLogic extends BaseLogic
         Db::startTrans();
         try {
             InventoryReservationService::releaseReservation((int)$reservation->id);
-            WorkTaskService::cancelOpenProcurementWorkTasksForReservation((int)$reservation->id);
+            TaskCenterService::cancelByReservation((int)$reservation->id);
             SalesReservationItem::where('reservation_id', (int)$reservation->id)
                 ->where('tenant_id', self::tenantId())
                 ->update([
