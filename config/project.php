@@ -31,7 +31,7 @@ return [
     // 平台端
     'platform' => [
         'admin_avatar' => 'resource/image/common/avatar.png',
-        'name' => env('project.web_name', 'SaaS平台端'), // 网站名称
+        'name' => env('project.web_name', 'BeiMi项目总后台'), // 网站名称
         'url' => env('project.web_url', 'www.likeadmin.cn/'), // 网站地址
         'login_image' => 'resource/image/platformapi/default/login_image.png',
         'web_logo_light' => 'resource/image/platformapi/default/web_logo_light.png', // 网站logo
