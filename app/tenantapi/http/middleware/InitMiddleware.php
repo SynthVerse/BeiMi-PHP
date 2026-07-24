@@ -37,6 +37,62 @@ class InitMiddleware
      */
     public function handle($request, \Closure $next)
     {
+        $retiredActions = [
+            'user.user_order/lists',
+            'user.user_order/add',
+            'user.user_order/pay',
+            'user.user_order/delete',
+            'user.user_order/detail',
+            'user.user_order_goods/lists',
+            'user.user_order_goods/add',
+            'user.user_order_goods/edit',
+            'user.user_order_goods/delete',
+            'user.user_order_goods/detail',
+            'user.user_money/lists',
+            'user.user_money/delete',
+            'user.user_money/detail',
+            'user.user/pay',
+        ];
+        if (in_array(strtolower($request->controller() . '/' . $request->action()), $retiredActions, true)) {
+            return json([
+                'code' => 0,
+                'show' => 1,
+                'msg' => '客户赊销订单与客户收款功能已下线',
+                'data' => [
+                    'retirement_marker' => 'LEGACY_CUSTOMER_ORDER_RETIRED',
+                ],
+            ], 410);
+        }
+
+        $retiredSupplierActions = [
+            'user.user_supplier/lists',
+            'user.user_supplier/add',
+            'user.user_supplier/edit',
+            'user.user_supplier/delete',
+            'user.user_supplier/detail',
+            'user.user_supplier/pay',
+            'user.user_supplier/search',
+            'user.user_supplier_order/lists',
+            'user.user_supplier_order/add',
+            'user.user_supplier_order/edit',
+            'user.user_supplier_order/delete',
+            'user.user_supplier_order/detail',
+            'user.user_supplier_order/pay',
+            'user.user_supplier_money/lists',
+            'user.user_supplier_money/delete',
+            'user.user_supplier_money/detail',
+        ];
+        if (in_array(strtolower($request->controller() . '/' . $request->action()), $retiredSupplierActions, true)) {
+            return json([
+                'code' => 0,
+                'show' => 1,
+                'msg' => '历史供应商采购与付款功能已下线',
+                'data' => [
+                    'retirement_marker' => 'LEGACY_SUPPLIER_ORDER_RETIRED',
+                ],
+            ], 410);
+        }
+
         //获取控制器
         try {
             $controller = str_replace('.', '\\', $request->controller());

@@ -60,7 +60,7 @@ class StoreMembershipService
                 throw new \RuntimeException('创建店铺失败');
             }
 
-            self::createOrActivateMember($tenantId, $userId, self::ROLE_OWNER, 0, self::generateInviteCode());
+            self::createMember($tenantId, $userId, self::ROLE_OWNER, 0, self::generateInviteCode());
             self::ensureTenantInvite($tenantId, $userId);
             DefaultDataInitService::initForTenant($tenantId);
             self::setCurrentTenant($userId, $tenantId, $token);
@@ -116,7 +116,7 @@ class StoreMembershipService
                 throw new \RuntimeException('店铺不可用');
             }
 
-            self::createOrActivateMember($tenantId, $userId, $role, $inviterId);
+            self::createMember($tenantId, $userId, $role, $inviterId);
             self::setCurrentTenant($userId, $tenantId, $token);
 
             return self::formatTenant((array)$tenant, $userId);
@@ -129,9 +129,7 @@ class StoreMembershipService
             throw new \RuntimeException('请先登录');
         }
         if (!self::hasActiveMembership($userId, $tenantId)) {
-            self::ensureLegacyMembership($userId, $tenantId);
-        }
-        if (!self::hasActiveMembership($userId, $tenantId)) {
+            self::rejectMembership($userId);
             throw new \RuntimeException('无权访问该店铺');
         }
 
@@ -150,8 +148,6 @@ class StoreMembershipService
             return [];
         }
 
-        self::ensureLegacyDefaultMembership($userId);
-
         $rows = Db::name('tenant_member')
             ->alias('m')
             ->join('tenant t', 't.id = m.tenant_id')
@@ -159,6 +155,7 @@ class StoreMembershipService
             ->where('m.status', self::STATUS_ACTIVE)
             ->whereNull('m.delete_time')
             ->whereNull('t.delete_time')
+            ->where('t.disable', 0)
             ->field('t.id,t.sn,t.name,t.avatar,t.tel,t.disable,t.notes,t.create_time,m.role,m.invite_code,m.joined_at')
             ->order('m.id desc')
             ->select()
@@ -190,10 +187,9 @@ class StoreMembershipService
         if ($tenantId <= 0 || $userId <= 0) {
             return [];
         }
-        self::ensureLegacyMembership($userId, $tenantId);
-
         $tenant = Db::name('tenant')->where('id', $tenantId)->whereNull('delete_time')->find();
-        if (!$tenant || !self::hasActiveMembership($userId, $tenantId)) {
+        if (!$tenant || (int)($tenant['disable'] ?? 0) !== 0 || !self::hasActiveMembership($userId, $tenantId)) {
+            self::rejectMembership($userId);
             return [];
         }
         return self::formatTenant((array)$tenant, $userId);
@@ -204,11 +200,11 @@ class StoreMembershipService
         if ($userId <= 0 || $tenantId <= 0) {
             return false;
         }
-        if (self::hasActiveMembership($userId, $tenantId)) {
-            return true;
+        $allowed = self::hasActiveMembership($userId, $tenantId);
+        if (!$allowed) {
+            self::rejectMembership($userId);
         }
-        self::ensureLegacyMembership($userId, $tenantId);
-        return self::hasActiveMembership($userId, $tenantId);
+        return $allowed;
     }
 
     public static function getInviteCode(int $userId, int $tenantId): string
@@ -254,14 +250,17 @@ class StoreMembershipService
         if ($userId <= 0 || $tenantId <= 0) {
             return '';
         }
-        self::ensureLegacyMembership($userId, $tenantId);
-
-        return (string)Db::name('tenant_member')
+        $role = (string)Db::name('tenant_member')
             ->where('tenant_id', $tenantId)
             ->where('user_id', $userId)
             ->where('status', self::STATUS_ACTIVE)
             ->whereNull('delete_time')
             ->value('role');
+        if ($role === '' || !self::isTenantAvailable($tenantId)) {
+            self::rejectMembership($userId);
+            return '';
+        }
+        return $role;
     }
 
     private static function ensureTenantInvite(int $tenantId, int $userId): string
@@ -321,7 +320,7 @@ class StoreMembershipService
         return $inviteCode;
     }
 
-    private static function createOrActivateMember(
+    private static function createMember(
         int $tenantId,
         int $userId,
         string $role,
@@ -335,12 +334,9 @@ class StoreMembershipService
             ->find();
 
         if ($existing) {
-            Db::name('tenant_member')->where('id', (int)$existing['id'])->update([
-                'role' => $existing['role'] ?: self::normalizeMemberRole($role),
-                'status' => self::STATUS_ACTIVE,
-                'delete_time' => null,
-                'update_time' => $time,
-            ]);
+            if ((int)$existing['status'] !== self::STATUS_ACTIVE || $existing['delete_time'] !== null) {
+                throw new \RuntimeException('成员资格已失效');
+            }
             return;
         }
 
@@ -365,38 +361,29 @@ class StoreMembershipService
         }
 
         return Db::name('tenant_member')
-            ->where('tenant_id', $tenantId)
-            ->where('user_id', $userId)
-            ->where('status', self::STATUS_ACTIVE)
+            ->alias('m')
+            ->join('tenant t', 't.id = m.tenant_id')
+            ->where('m.tenant_id', $tenantId)
+            ->where('m.user_id', $userId)
+            ->where('m.status', self::STATUS_ACTIVE)
+            ->whereNull('m.delete_time')
+            ->where('t.disable', 0)
+            ->whereNull('t.delete_time')
+            ->count() > 0;
+    }
+
+    private static function isTenantAvailable(int $tenantId): bool
+    {
+        return $tenantId > 0 && Db::name('tenant')
+            ->where('id', $tenantId)
+            ->where('disable', 0)
             ->whereNull('delete_time')
             ->count() > 0;
     }
 
-    private static function ensureLegacyDefaultMembership(int $userId): void
+    public static function rejectMembership(int $userId): void
     {
-        $tenantId = (int)Db::name('user')->where('id', $userId)->value('tenant_id');
-        if ($tenantId > 0) {
-            self::ensureLegacyMembership($userId, $tenantId);
-        }
-    }
-
-    private static function ensureLegacyMembership(int $userId, int $tenantId): void
-    {
-        if ($tenantId <= 0 || $userId <= 0 || self::hasActiveMembership($userId, $tenantId)) {
-            return;
-        }
-
-        $currentTenantId = (int)Db::name('user')->where('id', $userId)->value('tenant_id');
-        if ($currentTenantId !== $tenantId) {
-            return;
-        }
-
-        $tenantExists = Db::name('tenant')->where('id', $tenantId)->whereNull('delete_time')->count() > 0;
-        if (!$tenantExists) {
-            return;
-        }
-
-        self::createOrActivateMember($tenantId, $userId, self::ROLE_OWNER, 0, TenantInviteService::generateCode());
+        UserTokenCache::revokeUserSessions($userId);
     }
 
     private static function setCurrentTenant(int $userId, int $tenantId, ?string $token = null): void
@@ -431,6 +418,7 @@ class StoreMembershipService
         $member = $tenantId > 0 ? Db::name('tenant_member')
             ->where('tenant_id', $tenantId)
             ->where('user_id', $userId)
+            ->where('status', self::STATUS_ACTIVE)
             ->whereNull('delete_time')
             ->find() : null;
 

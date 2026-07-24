@@ -223,8 +223,9 @@ class PurchaseReturnOrderLogic extends BaseLogic
     public static function remove(array $params): array|false
     {
         self::clearError();
+        $tenantId = (int)(request()->tenantId ?? 0);
         $order = PurchaseReturnOrder::where('id', (int)$params['id'])
-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->where('tenant_id', $tenantId)
             ->findOrEmpty();
         if ($order->isEmpty()) {
             self::failWithCode('采购退货单不存在', 'RETURN_ORDER_NOT_FOUND');
@@ -233,6 +234,17 @@ class PurchaseReturnOrderLogic extends BaseLogic
 
         $orderData = $order->toArray();
         $originalOrderId = (int)$order->original_supply_order_id;
+        if ($originalOrderId > 0) {
+            $original = SupplyOrder::where('id', $originalOrderId)
+                ->where('tenant_id', $tenantId)
+                ->findOrEmpty();
+            if ($original->isEmpty()) {
+                self::failWithCode('原进货单不存在', 'RETURN_ORIGINAL_NOT_FOUND');
+                return false;
+            }
+
+        }
+
         Db::startTrans();
         try {
             if (!StockService::rollback((int)$order->id, self::ORDER_TYPE)) {
@@ -372,8 +384,9 @@ class PurchaseReturnOrderLogic extends BaseLogic
             return false;
         }
 
+        $tenantId = (int)(request()->tenantId ?? 0);
         $original = SupplyOrder::where('id', $originalOrderId)
-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->where('tenant_id', $tenantId)
             ->findOrEmpty();
         if ($original->isEmpty()) {
             self::failWithCode('原进货单不存在', 'RETURN_ORIGINAL_NOT_FOUND');

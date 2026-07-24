@@ -122,8 +122,9 @@ class SalesReturnOrderLogic extends BaseLogic
     public static function edit(array $params): array|false
     {
         self::clearError();
+        $tenantId = (int)(request()->tenantId ?? 0);
         $order = SalesReturnOrder::where('id', (int)$params['id'])
-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->where('tenant_id', $tenantId)
             ->findOrEmpty();
         if ($order->isEmpty()) {
             self::failWithCode('退货单不存在', 'RETURN_ORDER_NOT_FOUND');
@@ -138,6 +139,17 @@ class SalesReturnOrderLogic extends BaseLogic
         $built = self::buildOrderData($params, $order->toArray());
         if ($built === false) {
             return false;
+        }
+
+        if ($oldOriginalOrderId > 0 && (int)$built['order']['original_sales_order_id'] !== $oldOriginalOrderId) {
+            $oldOriginalOrder = SalesOrder::where('id', $oldOriginalOrderId)
+                ->where('tenant_id', $tenantId)
+                ->findOrEmpty();
+            if ($oldOriginalOrder->isEmpty()) {
+                self::failWithCode('原销售单不存在', 'RETURN_ORIGINAL_NOT_FOUND');
+                return false;
+            }
+
         }
 
         Db::startTrans();
@@ -234,8 +246,9 @@ class SalesReturnOrderLogic extends BaseLogic
     public static function remove(array $params): array|false
     {
         self::clearError();
+        $tenantId = (int)(request()->tenantId ?? 0);
         $order = SalesReturnOrder::where('id', (int)$params['id'])
-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->where('tenant_id', $tenantId)
             ->findOrEmpty();
         if ($order->isEmpty()) {
             self::failWithCode('退货单不存在', 'RETURN_ORDER_NOT_FOUND');
@@ -246,6 +259,17 @@ class SalesReturnOrderLogic extends BaseLogic
         $customerId = (int)$order->customer_id;
         $orderSn = (string)$order->order_sn;
         $originalOrderId = (int)$order->original_sales_order_id;
+
+        if ($originalOrderId > 0) {
+            $originalOrder = SalesOrder::where('id', $originalOrderId)
+                ->where('tenant_id', $tenantId)
+                ->findOrEmpty();
+            if ($originalOrder->isEmpty()) {
+                self::failWithCode('原销售单不存在', 'RETURN_ORIGINAL_NOT_FOUND');
+                return false;
+            }
+
+        }
 
         Db::startTrans();
         try {
@@ -445,11 +469,16 @@ class SalesReturnOrderLogic extends BaseLogic
             self::failWithCode('原销售单ID不能为空', 'RETURN_ORIGINAL_REQUIRED');
             return false;
         }
-        $originalOrder = SalesOrder::findOrEmpty($originalOrderId);
+        $tenantId = (int)(request()->tenantId ?? 0);
+        $originalOrder = SalesOrder::where('id', $originalOrderId)
+            ->where('tenant_id', $tenantId)
+            ->findOrEmpty();
         if ($originalOrder->isEmpty()) {
             self::failWithCode('原销售单不存在', 'RETURN_ORIGINAL_NOT_FOUND');
             return false;
         }
+
+
         if ((int)$originalOrder->customer_id !== (int)$customer->id) {
             self::failWithCode('原销售单客户与退货客户不匹配', 'RETURN_ORIGINAL_NOT_FOUND');
             return false;
@@ -461,7 +490,6 @@ class SalesReturnOrderLogic extends BaseLogic
         }
 
         $orderMoney = array_reduce($goodsRows, fn($sum, $row) => $sum + (float)$row['amount'], 0.0);
-        $tenantId = (int)(request()->tenantId ?? 0);
         $adminId = (int)(request()->adminId ?? 0);
         $orderSn = trim((string)($params['order_sn'] ?? ($current['order_sn'] ?? '')));
         $idempotentKey = trim((string)($params['idempotent_key'] ?? ''));

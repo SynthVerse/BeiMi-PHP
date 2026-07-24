@@ -118,13 +118,15 @@ class SupplyOrderLogic extends BaseLogic
 
     public static function edit(array $params): array|false
     {
+        $tenantId = (int)(request()->tenantId ?? 0);
         $order = SupplyOrder::where('id', (int)$params['id'])
-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->where('tenant_id', $tenantId)
             ->findOrEmpty();
         if ($order->isEmpty()) {
             self::setError('进货单不存在');
             return false;
         }
+
 
         $built = self::buildOrderData($params, $order->toArray());
         if ($built === false) {
@@ -203,13 +205,15 @@ class SupplyOrderLogic extends BaseLogic
 
     public static function remove(array $params): array|false
     {
+        $tenantId = (int)(request()->tenantId ?? 0);
         $order = SupplyOrder::where('id', (int)$params['id'])
-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->where('tenant_id', $tenantId)
             ->findOrEmpty();
         if ($order->isEmpty()) {
             self::setError('进货单不存在');
             return false;
         }
+
 
         Db::startTrans();
         try {
@@ -256,8 +260,13 @@ class SupplyOrderLogic extends BaseLogic
 
     public static function detail(array $params): array
     {
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) {
+            return [];
+        }
+
         $order = SupplyOrder::where('id', (int)$params['id'])
-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->where('tenant_id', $tenantId)
             ->findOrEmpty();
         if ($order->isEmpty()) {
             return [];
@@ -266,12 +275,11 @@ class SupplyOrderLogic extends BaseLogic
         $item = self::formatItem($order->toArray(), true);
         $goodsRows = OrderGoods::where('order_id', (int)$order->id)
             ->where('order_type', self::ORDER_TYPE)
-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->where('tenant_id', $tenantId)
             ->order(['sort' => 'asc', 'id' => 'asc'])
             ->select()
             ->toArray();
         $item['goods'] = self::formatGoodsRows($goodsRows, self::purchaseReturnedQtyMap((int)$order->id));
-
         return $item;
     }
 

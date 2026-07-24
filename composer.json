@@ -36,6 +36,7 @@
         "w7corp/easywechat": "^6.19.1",
         "tencentcloud/sms": "^3.0",
         "alipaysdk/easysdk": "^2.2",
+        "ext-bcmath": "*",
         "ext-curl": "*",
         "ext-zip": "*"
     },

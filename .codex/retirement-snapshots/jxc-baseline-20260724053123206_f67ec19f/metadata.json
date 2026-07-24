@@ -1,0 +1,45 @@
+{
+  "format_version": 1,
+  "created_at": "2026-07-24T05:31:23.209Z",
+  "git_head": "ffb12d6cf55b0a396413804bdcbc49002b65b6cf",
+  "path_count": 13,
+  "paths": [
+    "app/api/jxc/controller/AuthController.php",
+    "app/api/jxc/controller/BaseJxcController.php",
+    "app/api/jxc/controller/SupplyOrderController.php",
+    "app/api/jxc/logic/CustomerLogic.php",
+    "app/api/jxc/logic/PurchaseReturnOrderLogic.php",
+    "app/api/jxc/logic/SalesOrderLogic.php",
+    "app/api/jxc/logic/SalesReturnOrderLogic.php",
+    "app/api/jxc/logic/StoreLogic.php",
+    "app/api/jxc/logic/SupplierLogic.php",
+    "app/api/jxc/logic/SupplyOrderLogic.php",
+    "app/api/jxc/middleware/JxcLoginMiddleware.php",
+    "app/api/jxc/validate/SalesOrderValidate.php",
+    "app/api/jxc/validate/SupplyOrderValidate.php"
+  ],
+  "patch_path_count": 12,
+  "patch_paths": [
+    "app/api/jxc/controller/AuthController.php",
+    "app/api/jxc/controller/BaseJxcController.php",
+    "app/api/jxc/logic/CustomerLogic.php",
+    "app/api/jxc/logic/PurchaseReturnOrderLogic.php",
+    "app/api/jxc/logic/SalesOrderLogic.php",
+    "app/api/jxc/logic/SalesReturnOrderLogic.php",
+    "app/api/jxc/logic/StoreLogic.php",
+    "app/api/jxc/logic/SupplierLogic.php",
+    "app/api/jxc/logic/SupplyOrderLogic.php",
+    "app/api/jxc/middleware/JxcLoginMiddleware.php",
+    "app/api/jxc/validate/SalesOrderValidate.php",
+    "app/api/jxc/validate/SupplyOrderValidate.php"
+  ],
+  "artifact_sha256": {
+    "README.md": "9ea5285b0bbb04beda123f59c3fc974c113289d37e2e5d05d4b6fa15317c31fa",
+    "jxc-status--porcelain-v1.txt": "e2633bedcdc6d1f481c91423af09bc860cd9a7da85f3c31e2e75f6c451a41da3",
+    "jxc-diff--binary.patch": "f57d3c9a62cf6d30a6e440e027e2d726df00f7603845682361bcd35a54ad6dd0",
+    "jxc-files-sha256.tsv": "9726a54c8b5059fbe9be7f8d1e3c300cd857ab4ecdb4da378b040277e315130a"
+  },
+  "provenance": "current-20260724T105744+0800-067338f6",
+  "provenance_claim": "byte_equal_only_not_restore_source",
+  "scope_statement": "JXC files are user-confirmed existing worktree changes outside supplier retirement."
+}

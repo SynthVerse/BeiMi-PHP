@@ -18,8 +18,6 @@ class UserValidate extends BaseValidate
         'field' => 'require|checkField',
         'value' => 'require',
         'tenant_id' => 'require',
-        'order_money' => 'require',
-        'pay_type' => 'require|in:1,2',
     ];
 
     protected $message = [
@@ -27,8 +25,6 @@ class UserValidate extends BaseValidate
         'field.require' => '请选择操作',
         'value.require' => '请输入内容',
         'tenant_id.require' => '请选择租户标识',
-        'order_money' => '订单金额',
-        'pay_type' => '支付方式',
     ];
 
 
@@ -147,15 +143,5 @@ class UserValidate extends BaseValidate
         return true;
     }
 
-
-    /**
-     * @notes 付款场景
-     * @author 金毛失望
-     * @date 2025/12/22 16:53
-     */
-    public function scenePays()
-    {
-        return $this->only(['id','order_money','pay_type']);
-    }
 
 }

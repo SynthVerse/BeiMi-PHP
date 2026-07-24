@@ -62,7 +62,11 @@ class RoleLists extends BaseAdminDataLists
      */
     public function lists(): array
     {
-        $lists = TenantSystemRole::with(['role_menu_index'])
+        $tenantId = (int)($this->adminInfo['tenant_id'] ?? 0);
+        if ($tenantId <= 0) {
+            return [];
+        }
+        $lists = TenantSystemRole::where('tenant_id', $tenantId)->with(['role_menu_index'])
             ->field('id,name,desc,sort,create_time')
             ->limit($this->limitOffset, $this->limitLength)
             ->order(['sort' => 'desc', 'id' => 'desc'])
@@ -88,6 +92,6 @@ class RoleLists extends BaseAdminDataLists
      */
     public function count(): int
     {
-        return TenantSystemRole::count();
+        return TenantSystemRole::where('tenant_id', (int)($this->adminInfo['tenant_id'] ?? 0))->count();
     }
 }

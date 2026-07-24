@@ -1,0 +1,13 @@
+ M app/api/jxc/controller/AuthController.php
+ M app/api/jxc/controller/BaseJxcController.php
+ M app/api/jxc/controller/SupplyOrderController.php
+ M app/api/jxc/logic/CustomerLogic.php
+ M app/api/jxc/logic/PurchaseReturnOrderLogic.php
+ M app/api/jxc/logic/SalesOrderLogic.php
+ M app/api/jxc/logic/SalesReturnOrderLogic.php
+ M app/api/jxc/logic/StoreLogic.php
+ M app/api/jxc/logic/SupplierLogic.php
+ M app/api/jxc/logic/SupplyOrderLogic.php
+ M app/api/jxc/middleware/JxcLoginMiddleware.php
+ M app/api/jxc/validate/SalesOrderValidate.php
+ M app/api/jxc/validate/SupplyOrderValidate.php

@@ -448,6 +448,15 @@ class CustomerLogic extends BaseLogic
     public static function paymoney(array $params): array|false
     {
         $customerId = (int)$params['customer_id'];
+        $tenantId = (int)(request()->tenantId ?? 0);
+        $customer = Customer::where('id', $customerId)
+            ->where('tenant_id', $tenantId)
+            ->findOrEmpty();
+        if ($customer->isEmpty()) {
+            self::setError('客户不存在');
+            return false;
+        }
+
         $amount = max(0, (float)($params['money'] ?? $params['amount'] ?? 0));
         if ($amount <= 0) {
             self::setError('请输入付款金额');
@@ -457,6 +466,7 @@ class CustomerLogic extends BaseLogic
         Db::startTrans();
         try {
             $model = Customer::where('id', $customerId)
+                ->where('tenant_id', $tenantId)
                 ->lock(true)
                 ->findOrEmpty();
             if ($model->isEmpty()) {

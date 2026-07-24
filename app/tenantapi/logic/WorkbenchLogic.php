@@ -16,10 +16,7 @@ namespace app\tenantapi\logic;
 
 
 use app\common\logic\BaseLogic;
-use app\common\model\supplier\UserSupplier;
-use app\common\model\supplier\UserSupplierOrder;
 use app\common\model\user\User;
-use app\common\model\user\UserOrder;
 use app\common\service\ConfigService;
 use app\common\service\FileService;
 
@@ -80,16 +77,6 @@ class WorkbenchLogic extends BaseLogic
                 'name' => '销售订单',
                 'image' => FileService::getFileUrl(config('project.default_image.menu_goods_order')),
                 'url' => '/consumer/order'
-            ],
-            [
-                'name' => '供应商管理',
-                'image' => FileService::getFileUrl(config('project.default_image.menu_supplier')),
-                'url' => '/supplier/lists'
-            ],
-            [
-                'name' => '供应商订单',
-                'image' => FileService::getFileUrl(config('project.default_image.menu_supplier_order')),
-                'url' => '/supplier/order'
             ],
             [
                 'name' => '管理员管理',
@@ -157,37 +144,6 @@ class WorkbenchLogic extends BaseLogic
             'today_new_user' => User::where('create_time', '>=', strtotime('today'))->count(),
             // 总用户量
             'total_new_user' => User::count(),
-
-            // 今日新增客户订单
-            'today_new_user_order' => UserOrder::where('create_time', '>=', strtotime('today'))->sum("order_money"),
-            // 总供客户订单
-            'total_new_user_order' => UserOrder::sum("order_money"),
-
-            // 客户订单数量
-            'total_new_user_num' => UserOrder::count(),
-            'today_new_user_num' => UserOrder::where('create_time', '>=', strtotime('today'))->count(),
-
-            // 客户订单欠款
-            'total_new_user_debt' => UserOrder::sum("order_arrears_money"),
-            'today_new_user_debt' => UserOrder::where('create_time', '>=', strtotime('today'))->sum("order_arrears_money"),
-
-            // 今日新增供应商
-            'today_new_supplier' => UserSupplier::where('create_time', '>=', strtotime('today'))->count(),
-            // 总供应商
-            'total_new_supplier' => UserSupplier::count(),
-
-            // 今日新增供应商订单
-            'today_new_supplier_order' => UserSupplierOrder::where('create_time', '>=', strtotime('today'))->sum("order_money"),
-            // 总供应商订单
-            'total_new_supplier_order' => UserSupplierOrder::sum("order_money"),
-
-            // 供应商订单数量
-            'total_new_supplier_num' => UserSupplierOrder::count(),
-            'today_new_supplier_num' => UserSupplierOrder::where('create_time', '>=', strtotime('today'))->count(),
-
-            // 供应商订单欠款
-            'total_new_supplier_debt' => UserSupplierOrder::sum("order_arrears_money"),
-            'today_new_supplier_debt' => UserSupplierOrder::where('create_time', '>=', strtotime('today'))->sum("order_arrears_money"),
 
         ];
     }

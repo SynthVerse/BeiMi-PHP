@@ -78,9 +78,14 @@ class StoreLogic extends BaseLogic
             return $tenant ? self::formatTenantStore((array)$tenant) : [];
         }
 
-        if ($userId > 0 && $tenantId > 0) {
+        if ($fromUserToken) {
             if (!StoreMembershipService::requireCurrentMembership($userId, $tenantId)) {
+                StoreMembershipService::rejectMembership($userId);
                 self::setError('无权访问该店铺');
+                return false;
+            }
+            if (!StoreMembershipService::isTenantAdmin($userId, $tenantId)) {
+                self::setError('需要店铺管理员权限');
                 return false;
             }
 

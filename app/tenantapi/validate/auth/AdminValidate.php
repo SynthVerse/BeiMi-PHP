@@ -16,6 +16,7 @@ namespace app\tenantapi\validate\auth;
 
 use app\common\validate\BaseValidate;
 use app\common\model\auth\TenantAdmin;
+use app\common\model\auth\TenantSystemRole;
 
 /**
  * 管理员验证
@@ -30,7 +31,7 @@ class AdminValidate extends BaseValidate
         'name' => 'require|length:1,16|unique:'.TenantAdmin::class,
         'password' => 'require|length:6,32|edit',
         'password_confirm' => 'requireWith:password|confirm',
-        'role_id' => 'require',
+        'role_id' => 'require|checkRole',
         'disable' => 'require|in:0,1|checkAbleDisable',
         'multipoint_login' => 'require|in:0,1',
     ];
@@ -88,8 +89,7 @@ class AdminValidate extends BaseValidate
     {
         return $this->remove('password', 'require|length')
             ->append('id', 'require|checkAdmin')
-            ->remove('role_id', 'require')
-            ->append('role_id', 'checkRole');
+            ->remove('role_id', 'require');
     }
 
 
@@ -137,7 +137,9 @@ class AdminValidate extends BaseValidate
      */
     public function checkAdmin($value)
     {
-        $admin = TenantAdmin::findOrEmpty($value);
+        $admin = TenantAdmin::where('id', $value)
+            ->where('tenant_id', $this->currentTenantId())
+            ->findOrEmpty();
         if ($admin->isEmpty()) {
             return '管理员不存在';
         }
@@ -156,7 +158,9 @@ class AdminValidate extends BaseValidate
      */
     public function checkAbleDisable($value, $rule, $data)
     {
-        $admin = TenantAdmin::findOrEmpty($data['id']);
+        $admin = TenantAdmin::where('id', $data['id'])
+            ->where('tenant_id', $this->currentTenantId())
+            ->findOrEmpty();
         if ($admin->isEmpty()) {
             return '管理员不存在';
         }
@@ -178,20 +182,37 @@ class AdminValidate extends BaseValidate
      */
     public function checkRole($value, $rule, $data)
     {
-        $admin = TenantAdmin::findOrEmpty($data['id']);
-        if ($admin->isEmpty()) {
-            return '管理员不存在';
+        $tenantId = $this->currentTenantId();
+        if ($tenantId <= 0 || !is_array($value) || $value === []) {
+            return '角色参数错误';
         }
 
-        if ($admin['root']) {
-            return true;
+        $roleIds = [];
+        foreach ($value as $roleId) {
+            if (!is_int($roleId) || $roleId <= 0 || isset($roleIds[$roleId])) {
+                return '角色参数错误';
+            }
+            $roleIds[$roleId] = $roleId;
+        }
+        $roleIds = array_values($roleIds);
+        $foundIds = TenantSystemRole::where('tenant_id', $tenantId)
+            ->whereIn('id', $roleIds)
+            ->column('id');
+        $foundIds = array_map('intval', $foundIds);
+        sort($roleIds, SORT_NUMERIC);
+        sort($foundIds, SORT_NUMERIC);
+        return $roleIds === $foundIds ? true : '角色参数错误';
+    }
+
+    private function currentTenantId(): int
+    {
+        $adminInfo = request()->adminInfo ?? null;
+        if (!is_array($adminInfo)) {
+            return 0;
         }
 
-        if (empty($data['role_id'])) {
-            return '请选择角色';
-        }
-
-        return true;
+        $tenantId = (int)($adminInfo['tenant_id'] ?? 0);
+        return $tenantId > 0 ? $tenantId : 0;
     }
 
 }

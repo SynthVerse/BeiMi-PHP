@@ -20,6 +20,12 @@ class SupplyOrderValidate extends BaseValidate
         'purpose' => 'max:50',
         'purpose_type' => 'max:50',
         'idempotent_key' => 'max:64',
+        'amount' => [
+            'require',
+            'string',
+            'regex' => '/^(?:(?:0\\.(?:0[1-9]|[1-9][0-9]))|(?:[1-9][0-9]{0,9}\\.[0-9]{2}))$/D',
+        ],
+        'idempotency_key' => 'require|string|regex:/^[A-Za-z0-9._:-]{1,64}$/D',
         'start_time' => 'integer|egt:0',
         'end_time' => 'integer|egt:0',
     ];
@@ -38,6 +44,8 @@ class SupplyOrderValidate extends BaseValidate
         'purpose' => '入库目的',
         'purpose_type' => '入库目的类型',
         'idempotent_key' => '幂等键',
+        'amount' => '付款金额',
+        'idempotency_key' => '幂等键',
         'start_time' => '开始时间',
         'end_time' => '结束时间',
     ];

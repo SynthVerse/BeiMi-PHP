@@ -38,13 +38,24 @@ class UserTokenCache extends BaseCache
      */
     public function getUserInfo($token)
     {
-        //直接从缓存获取
+        // Sessions are revocable. Never authorize a cache hit without first
+        // confirming that the session is still live in the source of truth.
+        $session = Db::table('la_user_session')
+            ->where('token', $token)
+            ->where('expire_time', '>', time())
+            ->find();
+        if (empty($session)) {
+            $this->deleteUserInfo($token);
+            return false;
+        }
+
         $userInfo = $this->get($this->prefix . $token);
-        if ($userInfo) {
+        if ($userInfo
+            && (int)($userInfo['user_id'] ?? 0) === (int)$session['user_id']
+            && (int)($userInfo['expire_time'] ?? 0) === (int)$session['expire_time']) {
             return $userInfo;
         }
 
-        //从数据获取信息被设置缓存(可能后台清除缓存）
         $userInfo = $this->setUserInfo($token);
         if ($userInfo) {
             return $userInfo;
@@ -125,5 +136,28 @@ class UserTokenCache extends BaseCache
     public function deleteUserInfo($token)
     {
         return $this->delete($this->prefix . $token);
+    }
+
+    /**
+     * Revoke every user-terminal session after membership authority is removed.
+     * Database revocation is authoritative; cache deletion is only cleanup.
+     */
+    public static function revokeUserSessions(int $userId): void
+    {
+        if ($userId <= 0) {
+            return;
+        }
+
+        $time = time();
+        $tokens = Db::table('la_user_session')->where('user_id', $userId)->column('token');
+        Db::table('la_user_session')->where('user_id', $userId)->update([
+            'expire_time' => $time,
+            'update_time' => $time,
+        ]);
+
+        $cache = new self();
+        foreach ($tokens as $token) {
+            $cache->deleteUserInfo((string)$token);
+        }
     }
 }

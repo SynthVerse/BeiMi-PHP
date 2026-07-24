@@ -10,6 +10,7 @@ class SalesOrderLists extends BaseDataLists
 {
     protected function baseQuery()
     {
+        $tenantId = (int)(request()->tenantId ?? 0);
         $query = SalesOrder::field([
             'id',
             'order_sn',
@@ -26,7 +27,7 @@ class SalesOrderLists extends BaseDataLists
             'admin_id',
             'create_time',
             'update_time',
-        ]);
+        ])->where('tenant_id', $tenantId > 0 ? $tenantId : -1);
 
         $keyword = trim((string)($this->params['keyword'] ?? $this->params['order_sn'] ?? $this->params['customer_name'] ?? ''));
         if ($keyword !== '') {

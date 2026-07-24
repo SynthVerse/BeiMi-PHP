@@ -6,6 +6,7 @@ use app\common\cache\TenantAdminTokenCache;
 use app\common\enum\user\UserTerminalEnum;
 use app\common\logic\BaseLogic;
 use app\common\model\tenant\Tenant;
+use app\common\service\auth\TenantSessionAuthorityService;
 use Exception;
 use think\facade\Db;
 
@@ -90,13 +91,23 @@ class TenantLogic extends BaseLogic
      */
     public static function edit(array $params)
     {
+        $transactionStarted = false;
         try {
+            $expiredTokens = [];
             $domain_alias = self::formatDomainAlias((string)($params['domain_alias'] ?? ''));
             $expiredTime = empty($params['expired_time']) ? time() : strtotime((string)$params['expired_time']);
             if (false === $expiredTime) {
                 throw new Exception('有效期格式错误');
             }
             $params["expired_time"] = $expiredTime;
+            Db::startTrans();
+            $transactionStarted = true;
+            $tenant = Tenant::where('id', (int)$params['id'])->lock(true)->findOrEmpty();
+            if ($tenant->isEmpty()) {
+                throw new Exception('店铺不存在');
+            }
+            $authorizationChanged = (int)$tenant['disable'] !== (int)($params['disable'] ?? 0)
+                || (int)$tenant['expired_time'] !== (int)$params['expired_time'];
             Tenant::update([
                 'name'                => $params['name'],
                 'avatar'              => $params['avatar'] ?? '',
@@ -107,9 +118,25 @@ class TenantLogic extends BaseLogic
                 'domain_alias_enable' => (int)($params['domain_alias_enable'] ?? 1),
                 'notes'               => $params['notes'] ?? '',
             ], ['id' => $params['id']]);
+            if ($authorizationChanged) {
+                $adminIds = Db::name('tenant_admin')
+                    ->where('tenant_id', (int)$params['id'])
+                    ->whereNull('delete_time')
+                    ->column('id');
+                $expiredTokens = TenantSessionAuthorityService::expireAdminSessionsByIds($adminIds);
+            }
+            Db::commit();
+            $transactionStarted = false;
+            TenantSessionAuthorityService::clearTokenCaches($expiredTokens);
+            if ($authorizationChanged) {
+                TenantSessionAuthorityService::clearTenantAuthorizationCache((int)$params['id']);
+            }
             return true;
         } catch (\Exception $e) {
             self::setError($e->getMessage());
+            if ($transactionStarted) {
+                Db::rollback();
+            }
             return false;
         }
     }
@@ -124,7 +151,9 @@ class TenantLogic extends BaseLogic
     public static function delete(array $params)
     {
         try {
-            Db::transaction(function () use ($params) {
+            $tokens = [];
+            $adminIds = [];
+            Db::transaction(function () use ($params, &$tokens, &$adminIds) {
                 $tenantId = (int)$params['id'];
                 Tenant::destroy($tenantId);
 
@@ -155,14 +184,11 @@ class TenantLogic extends BaseLogic
                         'update_time' => $time,
                     ]);
 
-                $tokenCache = new TenantAdminTokenCache();
-                foreach ($tokens as $token) {
-                    $tokenCache->deleteAdminInfo($token);
-                }
-                foreach ($adminIds as $adminId) {
-                    (new TenantAdminAuthCache($adminId))->clearAuthCache();
-                }
             });
+            TenantSessionAuthorityService::clearTokenCaches($tokens);
+            foreach ($adminIds as $adminId) {
+                TenantSessionAuthorityService::clearAuthorizationCache((int)$adminId, (int)$params['id']);
+            }
             return true;
         } catch (\Exception $e) {
             self::setError($e->getMessage());
@@ -178,7 +204,9 @@ class TenantLogic extends BaseLogic
     public static function restore(array $params)
     {
         try {
-            Db::transaction(function () use ($params) {
+            $tokens = [];
+            $adminIds = [];
+            Db::transaction(function () use ($params, &$tokens, &$adminIds) {
                 $tenantId = (int)$params['id'];
                 $tenant = Tenant::onlyTrashed()->where('id', $tenantId)->findOrEmpty();
                 if ($tenant->isEmpty()) {
@@ -222,10 +250,12 @@ class TenantLogic extends BaseLogic
                         'update_time' => time(),
                     ]);
 
-                foreach ($adminIds as $adminId) {
-                    (new TenantAdminAuthCache($adminId))->clearAuthCache();
-                }
+                $tokens = TenantSessionAuthorityService::expireAdminSessionsByIds($adminIds);
             });
+            TenantSessionAuthorityService::clearTokenCaches($tokens);
+            foreach ($adminIds as $adminId) {
+                TenantSessionAuthorityService::clearAuthorizationCache((int)$adminId, (int)$params['id']);
+            }
             return true;
         } catch (\Exception $e) {
             self::setError($e->getMessage());

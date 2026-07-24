@@ -1,0 +1,77 @@
+ M AGENTS.md
+ M app/api/http/middleware/LoginMiddleware.php
+ M app/api/jxc/controller/AuthController.php
+ M app/api/jxc/controller/BaseJxcController.php
+ M app/api/jxc/controller/SupplyOrderController.php
+ M app/api/jxc/logic/CustomerLogic.php
+ M app/api/jxc/logic/PurchaseReturnOrderLogic.php
+ M app/api/jxc/logic/SalesOrderLogic.php
+ M app/api/jxc/logic/SalesReturnOrderLogic.php
+ M app/api/jxc/logic/StoreLogic.php
+ M app/api/jxc/logic/SupplierLogic.php
+ M app/api/jxc/logic/SupplyOrderLogic.php
+ M app/api/jxc/middleware/JxcLoginMiddleware.php
+ M app/api/jxc/validate/SalesOrderValidate.php
+ M app/api/jxc/validate/SupplyOrderValidate.php
+ M app/api/route/jxc.php
+ M app/api/service/UserTokenService.php
+ M app/common/cache/TenantAdminAuthCache.php
+ M app/common/cache/UserTokenCache.php
+ D app/common/model/user/UserMoney.php
+ D app/common/model/user/UserOrder.php
+ D app/common/model/user/UserOrderGoods.php
+ M app/common/service/jxc/StoreMembershipService.php
+ M app/common/service/jxc/TenantProvisionService.php
+ M app/platformapi/logic/tenant/TenantAdminLogic.php
+ M app/platformapi/logic/tenant/TenantLogic.php
+ M app/tenantapi/controller/auth/MenuController.php
+ M app/tenantapi/controller/auth/RoleController.php
+ M app/tenantapi/controller/user/UserController.php
+ D app/tenantapi/controller/user/UserMoneyController.php
+ D app/tenantapi/controller/user/UserOrderController.php
+ D app/tenantapi/controller/user/UserOrderGoodsController.php
+ M app/tenantapi/http/middleware/AuthMiddleware.php
+ M app/tenantapi/http/middleware/InitMiddleware.php
+ M app/tenantapi/http/middleware/LoginMiddleware.php
+ M app/tenantapi/lists/auth/RoleLists.php
+ D app/tenantapi/lists/user/UserMoneyLists.php
+ D app/tenantapi/lists/user/UserOrderGoodsLists.php
+ D app/tenantapi/lists/user/UserOrderLists.php
+ M app/tenantapi/logic/WorkbenchLogic.php
+ M app/tenantapi/logic/auth/AdminLogic.php
+ M app/tenantapi/logic/auth/AuthLogic.php
+ M app/tenantapi/logic/auth/MenuLogic.php
+ M app/tenantapi/logic/auth/RoleLogic.php
+ M app/tenantapi/logic/user/UserLogic.php
+ D app/tenantapi/logic/user/UserMoneyLogic.php
+ D app/tenantapi/logic/user/UserOrderGoodsLogic.php
+ D app/tenantapi/logic/user/UserOrderLogic.php
+ M app/tenantapi/validate/auth/AdminValidate.php
+ M app/tenantapi/validate/auth/RoleValidate.php
+ D app/tenantapi/validate/user/UserMoneyValidate.php
+ D app/tenantapi/validate/user/UserOrderGoodsValidate.php
+ D app/tenantapi/validate/user/UserOrderValidate.php
+ M app/tenantapi/validate/user/UserValidate.php
+ M composer.json
+ M composer.lock
+ M config/console.php
+ M database/migrations/20260521_000001_create_tenant_membership.sql
+ M tests/unit/TenantProvisionServiceTest.php
+?? .codex/retirement-snapshots/20260722T154639+0800-sanitized/BeiMi-PHP-20260722T154639+0800-sanitized.zip
+?? .codex/retirement-snapshots/20260722T154639+0800-sanitized/snapshot-metadata.txt
+?? app/common/command/TenantMembershipBackfill.php
+?? app/common/service/auth/TenantSessionAuthorityService.php
+?? tests/unit/AdminRoleAssignmentTenantContractTest.php
+?? tests/unit/JxcLoginMiddlewareAuthorityContractTest.php
+?? tests/unit/JxcUserTokenStoreSetAuthorityContractTest.php
+?? tests/unit/LegacyCustomerOrderRetirementContractTest.php
+?? tests/unit/PlatformTenantAuthCacheInvalidationContractTest.php
+?? tests/unit/RoleLogicRevocationContractTest.php
+?? tests/unit/RoleTenantIsolationContractTest.php
+?? tests/unit/RoleValidateMenuIdTest.php
+?? tests/unit/StrictTenantMembershipContractTest.php
+?? tests/unit/TenantAuthTenantScopeContractTest.php
+?? tests/unit/TenantAuthorizationRemediationContractTest.php
+?? tests/unit/TenantMenuTenantIsolationContractTest.php
+?? tests/unit/TenantSessionAuthorityContractTest.php
+?? tests/unit/UserTokenTenantContextContractTest.php

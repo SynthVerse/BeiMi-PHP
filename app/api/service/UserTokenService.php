@@ -87,14 +87,19 @@ class UserTokenService
     public static function overtimeToken($token)
     {
         $time = time();
-        $userSession = Db::table('la_user_session')->where('token', $token)->find();
+        $userSession = Db::table('la_user_session')
+            ->where('token', $token)
+            ->where('expire_time', '>', $time)
+            ->find();
         if (empty($userSession)) {
+            (new UserTokenCache())->deleteUserInfo($token);
             return false;
         }
 
         $expireTime = $time + Config::get('project.user_token.expire_duration');
         Db::table('la_user_session')
             ->where('id', $userSession['id'])
+            ->where('expire_time', '>', $time)
             ->update([
                 'expire_time' => $expireTime,
                 'update_time' => $time,

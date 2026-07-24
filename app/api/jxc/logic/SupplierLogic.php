@@ -2,6 +2,7 @@
 
 namespace app\api\jxc\logic;
 
+use app\api\jxc\exception\BusinessException;
 use app\common\logic\BaseLogic;
 use app\common\model\jxc\GoodsSupplier;
 use app\common\model\jxc\SupplyOrder;
@@ -222,6 +223,7 @@ class SupplierLogic extends BaseLogic
     {
         $supplierId = (int)($params['supplier_id'] ?? $params['id'] ?? 0);
         $amount = self::money(max(0, (float)($params['money'] ?? $params['amount'] ?? 0)));
+        $tenantId = self::tenantId();
         if ($supplierId <= 0) {
             self::setError('供应商不存在');
             return false;
@@ -230,11 +232,16 @@ class SupplierLogic extends BaseLogic
             self::setError('请输入付款金额');
             return false;
         }
+        if ($tenantId <= 0) {
+            self::setError('供应商租户上下文缺失，请重新登录');
+            return false;
+        }
+
 
         Db::startTrans();
         try {
             $model = Vendor::where('id', $supplierId)
-                ->where('tenant_id', self::tenantId())
+                ->where('tenant_id', $tenantId)
                 ->lock(true)
                 ->findOrEmpty();
             if ($model->isEmpty()) {
@@ -278,9 +285,13 @@ class SupplierLogic extends BaseLogic
 
             Db::commit();
             return self::detail(['id' => $supplierId]);
-        } catch (\Throwable $e) {
+        } catch (BusinessException $e) {
             Db::rollback();
             self::setError($e->getMessage());
+            return false;
+        } catch (\Throwable $e) {
+            Db::rollback();
+            self::setError('付款失败，请稍后重试');
             return false;
         }
     }

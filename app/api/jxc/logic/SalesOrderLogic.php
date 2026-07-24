@@ -6,6 +6,7 @@ use app\common\logic\BaseLogic;
 use app\common\model\jxc\Customer;
 use app\common\model\jxc\Goods;
 use app\common\model\jxc\OrderGoods;
+use app\common\model\jxc\ReceivableFlow;
 use app\common\model\jxc\SalesOrder;
 use app\common\model\jxc\SalesReturnOrder;
 use app\common\model\jxc\Warehouse;
@@ -24,10 +25,11 @@ class SalesOrderLogic extends BaseLogic
 
     public static function publish(array $params): array|false
     {
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) { self::setError('租户无效'); return false; }
         // 幂等键检查（事务开始前）
         $idempotentKey = trim((string)($params['idempotent_key'] ?? ''));
         if ($idempotentKey !== '') {
-            $tenantId = (int)(request()->tenantId ?? 0);
             $existing = SalesOrder::where('tenant_id', $tenantId)
                 ->where('idempotent_key', $idempotentKey)
                 ->find();
@@ -51,26 +53,26 @@ class SalesOrderLogic extends BaseLogic
 
             // === 库存出库 ===
             foreach ($built['goods'] as $row) {
-                StockService::outbound(
+                if (!StockService::outbound(
                     (int)$built['order']['warehouse_id'],
                     (int)$row['goods_id'],
                     (string)$row['number'],
                     (int)$order->id,
                     'sales',
                     $built['order']['order_sn']
-                );
+                )) { throw new BusinessException('库存处理失败'); }
             }
 
             // === 应收增加 ===
             $arrearsMoney = (string)$built['order']['order_arrears_money'];
             if (bccomp($arrearsMoney, '0', 2) > 0) {
-                FinanceService::addReceivable(
+                if (!FinanceService::addReceivable(
                     (int)$built['order']['customer_id'],
                     $arrearsMoney,
                     (int)$order->id,
                     'sales',
                     $built['order']['order_sn']
-                );
+                )) { throw new BusinessException('应收处理失败'); }
             }
 
             Db::commit();
@@ -106,8 +108,10 @@ class SalesOrderLogic extends BaseLogic
 
     public static function edit(array $params): array|false
     {
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) { self::setError('租户无效'); return false; }
         $order = SalesOrder::where('id', (int)$params['id'])
-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->where('tenant_id', $tenantId)
             ->findOrEmpty();
         if ($order->isEmpty()) {
             self::setError('销售单不存在');
@@ -122,34 +126,34 @@ class SalesOrderLogic extends BaseLogic
         Db::startTrans();
         try {
             // === 回滚旧库存和旧应收 ===
-            StockService::rollback((int)$order->id, 'sales');
-            FinanceService::rollbackReceivable((int)$order->id, 'sales');
+            if (!StockService::rollback((int)$order->id, 'sales')) { throw new BusinessException('库存回滚失败'); }
+            if (!FinanceService::rollbackReceivable((int)$order->id, 'sales')) { throw new BusinessException('应收回滚失败'); }
 
             $order->save($built['order']);
             self::replaceGoods((int)$order->id, $built['goods']);
 
             // === 重新出库 ===
             foreach ($built['goods'] as $row) {
-                StockService::outbound(
+                if (!StockService::outbound(
                     (int)$built['order']['warehouse_id'],
                     (int)$row['goods_id'],
                     (string)$row['number'],
                     (int)$order->id,
                     'sales',
                     $order->order_sn
-                );
+                )) { throw new BusinessException('库存处理失败'); }
             }
 
             // === 重新计算应收 ===
             $arrearsMoney = (string)$built['order']['order_arrears_money'];
             if (bccomp($arrearsMoney, '0', 2) > 0) {
-                FinanceService::addReceivable(
+                if (!FinanceService::addReceivable(
                     (int)$built['order']['customer_id'],
                     $arrearsMoney,
                     (int)$order->id,
                     'sales',
                     $order->order_sn
-                );
+                )) { throw new BusinessException('应收处理失败'); }
             }
 
             Db::commit();
@@ -183,7 +187,11 @@ class SalesOrderLogic extends BaseLogic
 
     public static function remove(array $params): array|false
     {
-        $order = SalesOrder::findOrEmpty((int)$params['id']);
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) { self::setError('租户无效'); return false; }
+        $order = SalesOrder::where('id', (int)$params['id'])
+            ->where('tenant_id', $tenantId)
+            ->findOrEmpty();
         if ($order->isEmpty()) {
             self::setError('销售单不存在');
             return false;
@@ -192,12 +200,13 @@ class SalesOrderLogic extends BaseLogic
         Db::startTrans();
         try {
             // === 回滚库存和应收 ===
-            StockService::rollback((int)$order->id, 'sales');
-            FinanceService::rollbackReceivable((int)$order->id, 'sales');
+            if (!StockService::rollback((int)$order->id, 'sales')) { throw new BusinessException('库存回滚失败'); }
+            if (!FinanceService::rollbackReceivable((int)$order->id, 'sales')) { throw new BusinessException('应收回滚失败'); }
 
             $orderData = $order->toArray();
             OrderGoods::where('order_id', (int)$order->id)
                 ->where('order_type', self::ORDER_TYPE)
+                ->where('tenant_id', $tenantId)
                 ->delete();
             $order->delete();
             Db::commit();
@@ -232,7 +241,14 @@ class SalesOrderLogic extends BaseLogic
 
     public static function detail(array $params): array
     {
-        $order = SalesOrder::findOrEmpty((int)$params['id']);
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) {
+            return [];
+        }
+
+        $order = SalesOrder::where('id', (int)$params['id'])
+            ->where('tenant_id', $tenantId)
+            ->findOrEmpty();
         if ($order->isEmpty()) {
             return [];
         }
@@ -240,17 +256,19 @@ class SalesOrderLogic extends BaseLogic
         $item = self::formatItem($order->toArray(), true);
         $goodsRows = OrderGoods::where('order_id', (int)$order->id)
             ->where('order_type', self::ORDER_TYPE)
+            ->where('tenant_id', $tenantId)
             ->order(['sort' => 'asc', 'id' => 'asc'])
             ->select()
             ->toArray();
         $item['goods'] = self::formatGoodsRows($goodsRows, self::returnedSalesQtyMap((int)$order->id));
-
         return $item;
     }
 
     public static function statistics(array $params): array
     {
-        $query = SalesOrder::field(['id', 'order_money', 'order_pay_money', 'order_arrears_money', 'datetimesingle']);
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) return ['number'=>0,'order_money'=>'0.00','order_pay_money'=>'0.00','order_arrears_money'=>'0.00'];
+        $query = SalesOrder::where('tenant_id', $tenantId)->field(['id', 'order_money', 'order_pay_money', 'order_arrears_money', 'datetimesingle']);
         self::applyTimeRange($query, $params);
 
         return [
@@ -270,8 +288,10 @@ class SalesOrderLogic extends BaseLogic
         $customerIds = array_values(array_unique(array_filter(array_map(fn($item) => (int)($item['customer_id'] ?? 0), $items))));
         $warehouseIds = array_values(array_unique(array_filter(array_map(fn($item) => (int)($item['warehouse_id'] ?? 0), $items))));
 
-        $customerRows = empty($customerIds) ? [] : Customer::whereIn('id', $customerIds)->select()->toArray();
-        $warehouseRows = empty($warehouseIds) ? [] : Warehouse::whereIn('id', $warehouseIds)->select()->toArray();
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) return [];
+        $customerRows = empty($customerIds) ? [] : Customer::whereIn('id', $customerIds)->where('tenant_id', $tenantId)->select()->toArray();
+        $warehouseRows = empty($warehouseIds) ? [] : Warehouse::whereIn('id', $warehouseIds)->where('tenant_id', $tenantId)->select()->toArray();
 
         $customerMap = [];
         foreach ($customerRows as $customer) {
@@ -288,17 +308,21 @@ class SalesOrderLogic extends BaseLogic
 
     public static function formatItem(array $item, bool $includeCustomer = false, array $customerMap = [], array $warehouseMap = []): array
     {
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) {
+            return [];
+        }
         $customerId = (int)($item['customer_id'] ?? 0);
         $warehouseId = (int)($item['warehouse_id'] ?? 0);
         $customer = $customerMap[$customerId] ?? null;
         if ($includeCustomer && !$customer && $customerId > 0) {
-            $customerModel = Customer::findOrEmpty($customerId);
+            $customerModel = Customer::where('id', $customerId)->where('tenant_id', $tenantId)->findOrEmpty();
             $customer = $customerModel->isEmpty() ? null : CustomerLogic::formatItem($customerModel->toArray());
         }
 
         $warehouse = $warehouseMap[$warehouseId] ?? null;
         if ($includeCustomer && !$warehouse && $warehouseId > 0) {
-            $warehouseModel = Warehouse::findOrEmpty($warehouseId);
+            $warehouseModel = Warehouse::where('id', $warehouseId)->where('tenant_id', $tenantId)->findOrEmpty();
             $warehouse = $warehouseModel->isEmpty() ? null : WarehouseLogic::formatItem($warehouseModel->toArray());
         }
 
@@ -338,7 +362,9 @@ class SalesOrderLogic extends BaseLogic
 
     protected static function buildOrderData(array $params, array $current = []): array|false
     {
-        $customer = Customer::findOrEmpty((int)$params['customer_id']);
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) { self::setError('租户无效'); return false; }
+        $customer = Customer::where('id', (int)$params['customer_id'])->where('tenant_id', $tenantId)->findOrEmpty();
         if ($customer->isEmpty()) {
             self::setError('客户不存在');
             return false;
@@ -409,7 +435,7 @@ class SalesOrderLogic extends BaseLogic
                 return false;
             }
 
-            $goodsModel = Goods::findOrEmpty($goodsId);
+            $goodsModel = Goods::where('id', $goodsId)->where('tenant_id', (int)(request()->tenantId ?? 0))->findOrEmpty();
             if ($goodsModel->isEmpty()) {
                 self::setError('商品不存在');
                 return false;
@@ -448,6 +474,7 @@ class SalesOrderLogic extends BaseLogic
     {
         OrderGoods::where('order_id', $orderId)
             ->where('order_type', self::ORDER_TYPE)
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
             ->delete();
 
         foreach ($rows as $row) {
@@ -459,9 +486,9 @@ class SalesOrderLogic extends BaseLogic
     protected static function resolveWarehouse(mixed $warehouseId): ?Warehouse
     {
         if ($warehouseId === 'default') {
-            $warehouse = Warehouse::where('name', '默认仓库')->findOrEmpty();
+            $warehouse = Warehouse::where('name', '默认仓库')->where('tenant_id', (int)(request()->tenantId ?? 0))->findOrEmpty();
         } else {
-            $warehouse = Warehouse::findOrEmpty((int)$warehouseId);
+            $warehouse = Warehouse::where('id', (int)$warehouseId)->where('tenant_id', (int)(request()->tenantId ?? 0))->findOrEmpty();
         }
 
         if ($warehouse->isEmpty()) {
@@ -496,7 +523,7 @@ class SalesOrderLogic extends BaseLogic
 
     protected static function assertOrderSnUnique(string $orderSn, int $ignoreId = 0): bool
     {
-        $query = SalesOrder::where('order_sn', $orderSn);
+        $query = SalesOrder::where('order_sn', $orderSn)->where('tenant_id', (int)(request()->tenantId ?? 0));
         if ($ignoreId > 0) {
             $query->where('id', '<>', $ignoreId);
         }
@@ -632,6 +659,9 @@ class SalesOrderLogic extends BaseLogic
         return strlen($text) >= 10 ? substr($text, 0, 10) : $text;
     }
 
+    /**
+     * @throws BusinessException
+     */
     protected static function money(mixed $value): string
     {
         return number_format(max(0, (float)$value), 2, '.', '');

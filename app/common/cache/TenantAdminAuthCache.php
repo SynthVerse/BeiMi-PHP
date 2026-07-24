@@ -32,21 +32,29 @@ class TenantAdminAuthCache extends BaseCache
     private string $cacheUrlKey    = '';          //管理员的url缓存key
     private string $authMd5        = '';          //权限文件MD5的值
     private mixed $adminId         = '';
+    private int $tenantId          = 0;
 
 
-    public function __construct($adminId = '')
+    public function __construct($adminId = '', ?int $tenantId = null)
     {
         parent::__construct();
 
         $this->adminId = $adminId;
+        $this->tenantId = $tenantId ?? self::currentTenantId();
+        if ($this->tenantId <= 0) {
+            return;
+        }
+
+        // Both the tag and every cache key must remain tenant-local.
+        $this->tagName = static::class . ':' . $this->tenantId;
         // 全部权限
-        $this->authConfigList = AuthLogic::getAllAuth();
+        $this->authConfigList = AuthLogic::getAllAuth($this->tenantId);
         // 当前权限配置文件的md5
         $this->authMd5 = md5(json_encode($this->authConfigList));
 
-        $this->cacheMd5Key = $this->prefix . 'md5';
-        $this->cacheAllKey = $this->prefix . 'all';
-        $this->cacheUrlKey = $this->prefix . 'url_' . $this->adminId;
+        $this->cacheMd5Key = $this->prefix . $this->tenantId . '_md5';
+        $this->cacheAllKey = $this->prefix . $this->tenantId . '_all';
+        $this->cacheUrlKey = $this->prefix . $this->tenantId . '_url_' . $this->adminId;
 
         $cacheAuthMd5 = $this->get($this->cacheMd5Key);
         $cacheAuth = $this->get($this->cacheAllKey);
@@ -66,6 +74,10 @@ class TenantAdminAuthCache extends BaseCache
      */
     public function getAdminUri()
     {
+        if ($this->tenantId <= 0 || empty($this->adminId)) {
+            return [];
+        }
+
         //从缓存获取，直接返回
         $urisAuth = $this->get($this->cacheUrlKey);
         if ($urisAuth) {
@@ -93,12 +105,16 @@ class TenantAdminAuthCache extends BaseCache
      */
     public function getAllUri()
     {
+        if ($this->tenantId <= 0) {
+            return [];
+        }
+
         $cacheAuth = $this->get($this->cacheAllKey);
         if ($cacheAuth) {
             return $cacheAuth;
         }
         // 获取全部权限
-        $authList = AuthLogic::getAllAuth();
+        $authList = AuthLogic::getAllAuth($this->tenantId);
         //保存到缓存并读取返回
         $this->set($this->cacheMd5Key, $this->authMd5);
         $this->set($this->cacheAllKey, $authList);
@@ -112,10 +128,36 @@ class TenantAdminAuthCache extends BaseCache
      * @author cjhao
      * @date 2021/10/13 18:47
      */
-    public function clearAuthCache()
+    public function clearAuthCache(): bool
     {
-        $this->clear($this->cacheUrlKey);
-        return true;
+        if ($this->tenantId <= 0 || $this->cacheUrlKey === '') {
+            return false;
+        }
+
+        return $this->clear($this->cacheUrlKey);
+    }
+
+    /**
+     * A missing tenant context must never clear the legacy global cache tag.
+     */
+    public function deleteTag(): bool
+    {
+        if ($this->tenantId <= 0) {
+            return false;
+        }
+
+        return parent::deleteTag();
+    }
+
+    private static function currentTenantId(): int
+    {
+        $adminInfo = request()->adminInfo ?? null;
+        if (!is_array($adminInfo)) {
+            return 0;
+        }
+
+        $tenantId = (int)($adminInfo['tenant_id'] ?? 0);
+        return $tenantId > 0 ? $tenantId : 0;
     }
 
 

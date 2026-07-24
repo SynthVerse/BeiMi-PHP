@@ -6,6 +6,7 @@ namespace app\api\http\middleware;
 
 use app\api\jxc\controller\BaseJxcController;
 use app\common\cache\UserTokenCache;
+use app\common\service\jxc\StoreMembershipService;
 use app\common\service\JsonService;
 use app\api\service\UserTokenService;
 use think\facade\Config;
@@ -24,30 +25,20 @@ class LoginMiddleware
     public function handle($request, \Closure $next, string $mode = '')
     {
         $isJxc = ($request->controllerObject ?? null) instanceof BaseJxcController;
+        $isOnboarding = $mode === 'enforce-onboarding';
 
         // JXC 控制器在模块级（非 enforce 模式）：尝试 UserTokenCache 软验证，不拒绝请求
-        if ($isJxc && $mode !== 'enforce') {
+        if ($isJxc && $mode !== 'enforce' && !$isOnboarding) {
             $token = $request->header('token');
             if (!empty($token)) {
                 $userInfo = (new UserTokenCache())->getUserInfo($token);
                 if (!empty($userInfo)) {
                     $request->userInfo = $userInfo;
                     $request->userId = $userInfo['user_id'] ?? 0;
-                    $request->adminInfo = [
-                        'admin_id'    => $userInfo['user_id'],
-                        'user_id'     => $userInfo['user_id'],
-                        'tenant_id'   => $userInfo['tenant_id'] ?? 0,
-                        'root'        => 0,
-                        'name'        => $userInfo['nickname'] ?? '',
-                        'account'     => $userInfo['mobile'] ?? '',
-                        'role_name'   => '',
-                        'role_id'     => [],
-                        'token'       => $userInfo['token'] ?? $token,
-                        'terminal'    => $userInfo['terminal'] ?? '',
-                        'expire_time' => $userInfo['expire_time'] ?? 0,
-                    ];
-                    $request->adminId = (int)($userInfo['user_id'] ?? 0);
-                    $request->tenantId = (int)($userInfo['tenant_id'] ?? 0);
+                    $candidateTenantId = (int)($userInfo['tenant_id'] ?? 0);
+                    if ($candidateTenantId > 0 && StoreMembershipService::requireCurrentMembership((int)$request->userId, $candidateTenantId)) {
+                        $this->setJxcUserTokenContext($request, $userInfo, $token, $candidateTenantId);
+                    }
                 }
             }
             return $next($request);
@@ -106,24 +97,38 @@ class LoginMiddleware
 
         // JXC 控制器 enforce 模式：额外映射 adminInfo 供 BaseJxcController 使用
         if ($isJxc && $userInfo) {
-            $request->adminInfo = [
-                'admin_id'    => $userInfo['user_id'],
-                'user_id'     => $userInfo['user_id'],
-                'tenant_id'   => $userInfo['tenant_id'] ?? 0,
-                'root'        => 0,
-                'name'        => $userInfo['nickname'] ?? '',
-                'account'     => $userInfo['mobile'] ?? '',
-                'role_name'   => '',
-                'role_id'     => [],
-                'token'       => $userInfo['token'] ?? $token,
-                'terminal'    => $userInfo['terminal'] ?? '',
-                'expire_time' => $userInfo['expire_time'] ?? 0,
-            ];
-            $request->adminId = (int)($userInfo['user_id'] ?? 0);
-            $request->tenantId = (int)($userInfo['tenant_id'] ?? 0);
+            $candidateTenantId = (int)($userInfo['tenant_id'] ?? 0);
+            if ($candidateTenantId <= 0 || !StoreMembershipService::requireCurrentMembership((int)$request->userId, $candidateTenantId)) {
+                if (!$isOnboarding) {
+                    return JsonService::fail('登录超时，请重新登录', [], -1, 0);
+                }
+            } else {
+                $this->setJxcUserTokenContext($request, $userInfo, $token, $candidateTenantId);
+                $request->jxcFromUserToken = true;
+            }
         }
 
         return $next($request);
+    }
+
+    private function setJxcUserTokenContext($request, array $userInfo, string $token, int $tenantId): void
+    {
+        $userId = (int)($userInfo['user_id'] ?? 0);
+        $request->adminInfo = [
+            'admin_id'    => $userId,
+            'user_id'     => $userId,
+            'tenant_id'   => $tenantId,
+            'root'        => 0,
+            'name'        => $userInfo['nickname'] ?? '',
+            'account'     => $userInfo['mobile'] ?? '',
+            'role_name'   => '',
+            'role_id'     => [],
+            'token'       => $userInfo['token'] ?? $token,
+            'terminal'    => $userInfo['terminal'] ?? '',
+            'expire_time' => $userInfo['expire_time'] ?? 0,
+        ];
+        $request->adminId = $userId;
+        $request->tenantId = $tenantId;
     }
 
 }

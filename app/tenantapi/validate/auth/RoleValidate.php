@@ -16,7 +16,7 @@ namespace app\tenantapi\validate\auth;
 
 
 use app\common\validate\BaseValidate;
-use app\common\model\auth\{TenantAdminRole, TenantSystemRole, TenantAdmin};
+use app\common\model\auth\{TenantAdminRole, TenantSystemRole, TenantSystemMenu};
 
 /**
  * 角色验证器
@@ -27,8 +27,8 @@ class RoleValidate extends BaseValidate
 {
     protected $rule = [
         'id' => 'require|checkRole',
-        'name' => 'require|max:64|unique:' . TenantSystemRole::class . ',name',
-        'menu_id' => 'array',
+        'name' => 'require|max:64|checkName',
+        'menu_id' => 'array|checkMenus',
     ];
 
     protected $message = [
@@ -88,7 +88,7 @@ class RoleValidate extends BaseValidate
      */
     public function checkRole($value, $rule, $data)
     {
-        if (!TenantSystemRole::find($value)) {
+        if (!TenantSystemRole::where('id', $value)->where('tenant_id', $this->currentTenantId())->find()) {
             return '角色不存在';
         }
         return true;
@@ -114,6 +114,48 @@ class RoleValidate extends BaseValidate
             return '有管理员在使用该角色，不允许删除';
         }
         return true;
+    }
+
+    public function checkName($value, $rule, $data)
+    {
+        $tenantId = $this->currentTenantId();
+        if ($tenantId <= 0) {
+            return '租户上下文不可用';
+        }
+        $query = TenantSystemRole::where('tenant_id', $tenantId)->where('name', $value);
+        if (!empty($data['id'])) {
+            $query->where('id', '<>', (int)$data['id']);
+        }
+        return $query->find() ? '角色名称已存在' : true;
+    }
+
+    public function checkMenus($value, $rule, $data)
+    {
+        if (!is_array($value)) {
+            return '权限格式错误';
+        }
+        $ids = [];
+        foreach ($value as $menuId) {
+            if (!is_int($menuId) || $menuId <= 0) {
+                return '权限菜单不存在';
+            }
+            $ids[] = $menuId;
+        }
+        $ids = array_values(array_unique($ids));
+        if ($ids === []) {
+            return true;
+        }
+        if (TenantSystemMenu::where('tenant_id', $this->currentTenantId())
+            ->whereIn('id', $ids)->count() !== count($ids)) {
+            return '权限菜单不存在';
+        }
+        return true;
+    }
+
+    private function currentTenantId(): int
+    {
+        $adminInfo = request()->adminInfo ?? null;
+        return is_array($adminInfo) ? max(0, (int)($adminInfo['tenant_id'] ?? 0)) : 0;
     }
 
 }

@@ -32,35 +32,3 @@ CREATE TABLE IF NOT EXISTS `la_tenant_invite` (
   UNIQUE KEY `uk_code` (`code`),
   KEY `idx_tenant_status` (`tenant_id`,`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='租户邀请码';
-
--- 兼容历史 la_user.tenant_id：已有默认租户的用户补为 owner 成员。
-INSERT IGNORE INTO `la_tenant_member`
-(`tenant_id`, `user_id`, `role`, `status`, `invite_code`, `inviter_id`, `joined_at`, `create_time`, `update_time`, `delete_time`)
-SELECT
-  u.`tenant_id`,
-  u.`id`,
-  'owner',
-  1,
-  UPPER(SUBSTRING(MD5(CONCAT('tenant:', u.`tenant_id`, ':user:', u.`id`)), 1, 8)),
-  0,
-  IFNULL(u.`create_time`, UNIX_TIMESTAMP()),
-  UNIX_TIMESTAMP(),
-  UNIX_TIMESTAMP(),
-  NULL
-FROM `la_user` u
-INNER JOIN `la_tenant` t ON t.`id` = u.`tenant_id` AND t.`delete_time` IS NULL
-WHERE u.`tenant_id` > 0 AND u.`delete_time` IS NULL;
-
-INSERT IGNORE INTO `la_tenant_invite`
-(`tenant_id`, `creator_user_id`, `code`, `status`, `expire_time`, `create_time`, `update_time`, `delete_time`)
-SELECT
-  m.`tenant_id`,
-  m.`user_id`,
-  m.`invite_code`,
-  1,
-  0,
-  UNIX_TIMESTAMP(),
-  UNIX_TIMESTAMP(),
-  NULL
-FROM `la_tenant_member` m
-WHERE m.`role` = 'owner' AND m.`invite_code` <> '' AND m.`delete_time` IS NULL;

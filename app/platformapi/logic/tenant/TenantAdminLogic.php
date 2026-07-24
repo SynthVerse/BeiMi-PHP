@@ -23,6 +23,7 @@ use app\common\model\auth\TenantAdminJobs;
 use app\common\model\auth\TenantAdminRole;
 use app\common\model\auth\TenantAdminSession;
 use app\common\service\FileService;
+use app\common\service\auth\TenantSessionAuthorityService;
 use think\facade\Db;
 use think\facade\Config;
 
@@ -105,8 +106,10 @@ class TenantAdminLogic extends BaseLogic
      */
     public static function edit(array $params)
     {
+        $expiredTokens = [];
         Db::startTrans();
         try {
+            $tenantId = (int)TenantAdmin::where('id', $params['id'])->value('tenant_id');
             // 基础信息
             $data = [
                 'name'             => $params['name'],
@@ -131,14 +134,11 @@ class TenantAdminLogic extends BaseLogic
                 $editRole = true;
             }
 
-            if ($params['disable'] == 1 || $editRole) {
-                $tokenArr = TenantAdminSession::where('admin_id', $params['id'])->select()->toArray();
-                foreach ($tokenArr as $token) {
-                    self::expireToken($token['token']);
-                }
+            if ($params['disable'] == 1 || $editRole || !empty($params['password'])
+                || (int)TenantAdmin::where('id', $params['id'])->value('multipoint_login') !== (int)$params['multipoint_login']) {
+                $expiredTokens = TenantSessionAuthorityService::expireAdminSessions((int)$params['id']);
             }
             TenantAdmin::update($data, ['id' => $params['id']]);
-            (new TenantAdminAuthCache($params['id']))->clearAuthCache();
 
             // 删除旧的关联信息
             TenantAdminRole::delByUserId($params['id']);
@@ -152,6 +152,8 @@ class TenantAdminLogic extends BaseLogic
             self::insertJobs($params['id'], $params['jobs_id'] ?? []);
 
             Db::commit();
+            TenantSessionAuthorityService::clearTokenCaches($expiredTokens);
+            TenantSessionAuthorityService::clearAuthorizationCache((int)$params['id'], $tenantId);
 
             return true;
         } catch (\Exception $e) {
@@ -170,6 +172,7 @@ class TenantAdminLogic extends BaseLogic
      */
     public static function delete(array $params)
     {
+        $expiredTokens = [];
         Db::startTrans();
         try {
             $admin = TenantAdmin::findOrEmpty($params['id']);
@@ -179,11 +182,7 @@ class TenantAdminLogic extends BaseLogic
             TenantAdmin::destroy($params['id']);
 
             //设置token过期
-            $tokenArr = TenantAdminSession::where('admin_id', $params['id'])->select()->toArray();
-            foreach ($tokenArr as $token) {
-                self::expireToken($token['token']);
-            }
-            (new TenantAdminAuthCache($params['id']))->clearAuthCache();
+            $expiredTokens = TenantSessionAuthorityService::expireAdminSessions((int)$params['id']);
 
             // 删除旧的关联信息
             TenantAdminRole::delByUserId($params['id']);
@@ -191,6 +190,8 @@ class TenantAdminLogic extends BaseLogic
             TenantAdminJobs::delByUserId($params['id']);
 
             Db::commit();
+            TenantSessionAuthorityService::clearTokenCaches($expiredTokens);
+            TenantSessionAuthorityService::clearAuthorizationCache((int)$params['id'], (int)$admin['tenant_id']);
             return true;
         } catch (\Exception $e) {
             Db::rollback();

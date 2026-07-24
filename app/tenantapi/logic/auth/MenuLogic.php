@@ -18,7 +18,9 @@ namespace app\tenantapi\logic\auth;
 use app\common\enum\YesNoEnum;
 use app\common\logic\BaseLogic;
 use app\common\model\auth\TenantAdmin;
+use app\common\model\auth\TenantAdminRole;
 use app\common\model\auth\TenantSystemMenu;
+use app\common\model\auth\TenantSystemRole;
 use app\common\model\auth\TenantSystemRoleMenu;
 
 
@@ -43,14 +45,37 @@ class MenuLogic extends BaseLogic
      */
     public static function getMenuByAdminId($adminId)
     {
-        $admin = TenantAdmin::findOrEmpty($adminId);
+        $admin = TenantAdmin::field('id,tenant_id,root')->findOrEmpty($adminId);
+        if ($admin->isEmpty()) {
+            return [];
+        }
+
+        $tenantId = (int)$admin['tenant_id'];
+        if ($tenantId <= 0) {
+            return [];
+        }
 
         $where = [];
         $where[] = ['type', 'in', ['M', 'C']];
         $where[] = ['is_disable', '=', 0];
+        $where[] = ['tenant_id', '=', $tenantId];
 
         if ($admin['root'] != 1) {
-            $roleMenu = TenantSystemRoleMenu::whereIn('role_id', $admin['role_id'])->column('menu_id');
+            $roleIds = array_map('intval', TenantAdminRole::where('admin_id', $admin['id'])->column('role_id'));
+            if ($roleIds === []) {
+                return [];
+            }
+
+            $tenantRoleIds = array_map('intval', TenantSystemRole::where('tenant_id', $tenantId)
+                ->whereIn('id', $roleIds)
+                ->column('id'));
+            sort($roleIds, SORT_NUMERIC);
+            sort($tenantRoleIds, SORT_NUMERIC);
+            if ($roleIds !== $tenantRoleIds) {
+                return [];
+            }
+
+            $roleMenu = TenantSystemRoleMenu::whereIn('role_id', $roleIds)->column('menu_id');
             $where[] = ['id', 'in', $roleMenu];
         }
 
@@ -168,9 +193,14 @@ class MenuLogic extends BaseLogic
      * @author 段誉
      * @date 2022/10/13 11:03
      */
-    public static function getAllData()
+    public static function getAllData(int $tenantId): array
     {
+        if ($tenantId <= 0) {
+            return [];
+        }
+
         $data = TenantSystemMenu::where(['is_disable' => YesNoEnum::NO])
+            ->where('tenant_id', $tenantId)
             ->field('id,pid,name')
             ->order(['sort' => 'desc', 'id' => 'desc'])
             ->select()

@@ -1,16 +1,7 @@
-# BeiMi-PHP entrypoint
+# BeiMi-PHP local overlay
 
-This is the BeiMi PHP backend: ThinkPHP 8 and LikeAdmin services.
+This repository is the ThinkPHP 8 and LikeAdmin backend. The user-level workflow in `C:\Users\ASUS\.codex\AGENTS.md` is inherited automatically; this file provides only local technical facts.
 
-Before substantive work, route through the family entrypoint:
-`E:/object/BeiMi/AGENTS.md`.
+Use project-local PHP, ThinkPHP, LikeAdmin, authentication, tenant-isolation, validation, test, risk-memory, and release guidance when it exists. The global `application-security-boundaries` skill provides the cross-project baseline; local PHP-specific guidance may add stricter requirements.
 
-For project-family workflow rules, follow:
-`E:/object/BeiMi/BeiMi-uniapp/.codex/codex-combo-tools-workflow-rules-zh.md`.
-
-For PHP, ThinkPHP 8, LikeAdmin, authentication, tenant isolation, and backend
-security work, use the existing guidance:
-`E:/object/BeiMi/BeiMi-uniapp/.agents/skills/php-thinkphp-likeadmin-security/SKILL.md`.
-
-Protect business files and all existing user changes. Do not overwrite,
-discard, or clean unrelated modifications.
+Protect business files and existing user changes. The legacy BeiMi workflow is compatibility-only for tasks explicitly bound to it before the migration.

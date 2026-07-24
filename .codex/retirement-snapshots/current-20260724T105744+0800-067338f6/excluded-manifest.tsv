@@ -1,0 +1,4 @@
+relative_path_or_redacted_identifier	reason
+runtime	excluded_component
+vendor	excluded_component
+app/common/cache	excluded_component

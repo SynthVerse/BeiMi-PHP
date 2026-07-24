@@ -19,6 +19,12 @@ class SalesOrderValidate extends BaseValidate
         'remark' => 'max:500',
         'purpose' => 'max:50',
         'purpose_type' => 'max:50',
+        'idempotency_key' => 'require|string|regex:/^[A-Za-z0-9._:-]{1,64}$/D',
+        'amount' => [
+            'require',
+            'string',
+            'regex' => '/^(?:(?:0\\.(?:0[1-9]|[1-9][0-9]))|(?:[1-9][0-9]{0,9}\\.[0-9]{2}))$/D',
+        ],
         'start_time' => 'integer|egt:0',
         'end_time' => 'integer|egt:0',
     ];
@@ -36,6 +42,8 @@ class SalesOrderValidate extends BaseValidate
         'remark' => '备注',
         'purpose' => '出库目的',
         'purpose_type' => '出库目的类型',
+        'idempotency_key' => '幂等键',
+        'amount' => '收款金额',
         'start_time' => '开始时间',
         'end_time' => '结束时间',
     ];

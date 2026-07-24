@@ -15,6 +15,7 @@
 namespace app\tenantapi\logic\auth;
 
 use app\common\model\auth\TenantAdminRole;
+use app\common\model\auth\TenantSystemRole;
 use app\common\model\auth\TenantSystemMenu;
 use app\common\model\auth\TenantSystemRoleMenu;
 
@@ -33,9 +34,14 @@ class AuthLogic
      * @author 段誉
      * @date 2022/7/1 11:55
      */
-    public static function getAllAuth()
+    public static function getAllAuth(int $tenantId): array
     {
+        if ($tenantId <= 0) {
+            return [];
+        }
+
         return TenantSystemMenu::distinct(true)
+            ->where('tenant_id', $tenantId)
             ->where([
                 ['is_disable', '=', 0],
                 ['perms', '<>', '']
@@ -57,7 +63,11 @@ class AuthLogic
             return ['*'];
         }
 
-        $menuId = TenantSystemRoleMenu::whereIn('role_id', $admin['role_id'])
+        $tenantId = (int)($admin['tenant_id'] ?? 0);
+        if ($tenantId <= 0) {
+            return [];
+        }
+        $menuId = TenantSystemRoleMenu::whereIn('role_id', self::tenantRoleIdsByAdminId((int)$admin['id'], $tenantId))
             ->column('menu_id');
 
         $where[] = ['is_disable', '=', 0];
@@ -65,10 +75,12 @@ class AuthLogic
 
         $roleAuth = TenantSystemMenu::distinct(true)
             ->where('id', 'in', $menuId)
+            ->where('tenant_id', $tenantId)
             ->where($where)
             ->column('perms');
 
         $allAuth = TenantSystemMenu::distinct(true)
+            ->where('tenant_id', $tenantId)
             ->where($where)
             ->column('perms');
 
@@ -90,7 +102,15 @@ class AuthLogic
      */
     public static function getAuthByAdminId(int $adminId): array
     {
-        $roleIds = TenantAdminRole::where('admin_id', $adminId)->column('role_id');
+        $admin = \app\common\model\auth\TenantAdmin::field('id,tenant_id')->findOrEmpty($adminId);
+        if ($admin->isEmpty()) {
+            return [];
+        }
+        $tenantId = (int)$admin['tenant_id'];
+        if ($tenantId <= 0) {
+            return [];
+        }
+        $roleIds = self::tenantRoleIdsByAdminId($adminId, $tenantId);
         $menuId = TenantSystemRoleMenu::whereIn('role_id', $roleIds)->column('menu_id');
 
         return TenantSystemMenu::distinct(true)
@@ -99,6 +119,26 @@ class AuthLogic
                 ['perms', '<>', ''],
                 ['id', 'in', array_unique($menuId)],
             ])
+            ->where('tenant_id', $tenantId)
             ->column('perms');
+    }
+
+    /** @return list<int> */
+    private static function tenantRoleIdsByAdminId(int $adminId, int $tenantId): array
+    {
+        $roleIds = array_map('intval', TenantAdminRole::where('admin_id', $adminId)->column('role_id'));
+        if ($roleIds === []) {
+            return [];
+        }
+
+        $tenantRoleIds = array_map('intval', TenantSystemRole::where('tenant_id', $tenantId)
+            ->whereIn('id', $roleIds)
+            ->column('id'));
+        sort($roleIds, SORT_NUMERIC);
+        sort($tenantRoleIds, SORT_NUMERIC);
+
+        // Historical association rows can outlive a tenant-bound role change.
+        // Treat any such mismatch as invalid rather than granting partial access.
+        return $roleIds === $tenantRoleIds ? $roleIds : [];
     }
 }

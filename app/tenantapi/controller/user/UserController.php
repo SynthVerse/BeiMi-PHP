@@ -4,7 +4,6 @@ namespace app\tenantapi\controller\user;
 use app\tenantapi\controller\BaseAdminController;
 use app\tenantapi\lists\user\UserLists;
 use app\tenantapi\logic\user\UserLogic;
-use app\tenantapi\logic\user\UserOrderLogic;
 use app\tenantapi\validate\user\AdjustUserMoney;
 use app\tenantapi\validate\user\UserValidate;
 
@@ -110,20 +109,4 @@ class UserController extends BaseAdminController
         return $this->fail($res);
     }
 
-    /**
-     * @notes 订单支付
-     * @return \think\response\Json
-     * @author likeadmin
-     * @date 2025/12/22 16:53
-     */
-    public function pay()
-    {
-        $params = (new UserValidate())->post()->goCheck('pays');
-        $result = UserLogic::pay($params,$this->adminId);
-        if (!$result) {
-            return $this->fail(UserLogic::getError());
-        }
-        UserOrderLogic::userStatic($params["id"], 3);
-        return $this->success('删除成功', [], 1, 1);
-    }
 }

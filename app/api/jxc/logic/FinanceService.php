@@ -9,6 +9,7 @@ use app\common\model\jxc\PayableFlow;
 
 class FinanceService
 {
+    private const TYPE_SALES_ROLLBACK = 4;
     /**
      * 增加客户应收（销售出单时调用）
      */
@@ -20,11 +21,13 @@ class FinanceService
         string $orderSn,
         string $remark = ''
     ): bool {
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) return false;
         if (bccomp($amount, '0', 2) <= 0) {
             return true; // 金额为0时不记录
         }
 
-        $customer = Customer::where('id', $customerId)->lock(true)->find();
+        $customer = Customer::where('id', $customerId)->where('tenant_id', $tenantId)->lock(true)->find();
         if (!$customer) {
             return false;
         }
@@ -33,7 +36,7 @@ class FinanceService
         $afterAmount = bcadd($beforeAmount, $amount, 2);
 
         // 更新客户应收和累计销售
-        Customer::where('id', $customerId)->update([
+        Customer::where('id', $customerId)->where('tenant_id', $tenantId)->update([
             'order_receivable' => $afterAmount,
             'order_money' => bcadd((string)$customer->order_money, $amount, 2),
             'update_time' => time(),
@@ -70,11 +73,13 @@ class FinanceService
         int $flowType = ReceivableFlow::TYPE_PAYMENT,
         string $remark = ''
     ): bool {
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) return false;
         if (bccomp($amount, '0', 2) <= 0) {
             return true;
         }
 
-        $customer = Customer::where('id', $customerId)->lock(true)->find();
+        $customer = Customer::where('id', $customerId)->where('tenant_id', $tenantId)->lock(true)->find();
         if (!$customer) {
             return false;
         }
@@ -82,7 +87,7 @@ class FinanceService
         $beforeAmount = (string)$customer->order_receivable;
         $afterAmount = bcsub($beforeAmount, $amount, 2);
 
-        Customer::where('id', $customerId)->update([
+        Customer::where('id', $customerId)->where('tenant_id', $tenantId)->update([
             'order_receivable' => $afterAmount,
             'order_pay_money' => bcadd((string)$customer->order_pay_money, $amount, 2),
             'update_time' => time(),
@@ -111,24 +116,52 @@ class FinanceService
      */
     public static function rollbackReceivable(int $orderId, string $orderType): bool
     {
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) return false;
         $flows = ReceivableFlow::where('order_id', $orderId)
             ->where('order_type', $orderType)
+            ->where('tenant_id', $tenantId)
+            ->lock(true)
             ->select();
 
+        $netByCustomer = [];
         foreach ($flows as $flow) {
-            $customer = Customer::where('id', $flow->customer_id)->lock(true)->find();
-            if (!$customer) continue;
-
-            if ($flow->flow_type == ReceivableFlow::TYPE_SALES_ADD) {
-                // 销售应收增加的流水 → 回减
-                $beforeAmount = (string)$customer->order_receivable;
-                $afterAmount = bcsub($beforeAmount, (string)$flow->amount, 2);
-                Customer::where('id', $flow->customer_id)->update([
-                    'order_receivable' => $afterAmount,
-                    'order_money' => bcsub((string)$customer->order_money, (string)$flow->amount, 2),
-                    'update_time' => time(),
-                ]);
+            $customerId = (int)$flow->customer_id;
+            $amount = (string)$flow->amount;
+            if (!isset($netByCustomer[$customerId])) $netByCustomer[$customerId] = '0.00';
+            if ((int)$flow->flow_type === ReceivableFlow::TYPE_SALES_ADD) {
+                $netByCustomer[$customerId] = bcadd($netByCustomer[$customerId], $amount, 2);
+            } elseif ((int)$flow->flow_type === self::TYPE_SALES_ROLLBACK) {
+                $netByCustomer[$customerId] = bcsub($netByCustomer[$customerId], $amount, 2);
             }
+        }
+        ksort($netByCustomer, SORT_NUMERIC);
+        foreach ($netByCustomer as $customerId => $net) {
+            if (bccomp($net, '0', 2) <= 0) continue;
+            $customer = Customer::where('id', (int)$customerId)->where('tenant_id', $tenantId)->lock(true)->find();
+            if (!$customer) return false;
+            $beforeAmount = (string)$customer->order_receivable;
+            $afterAmount = bcsub($beforeAmount, $net, 2);
+            Customer::where('id', (int)$customerId)->where('tenant_id', $tenantId)->update([
+                'order_receivable' => $afterAmount,
+                'order_money' => bcsub((string)$customer->order_money, $net, 2),
+                'update_time' => time(),
+            ]);
+            $firstFlow = $flows->first();
+            ReceivableFlow::create([
+                'tenant_id' => $tenantId,
+                'customer_id' => (int)$customerId,
+                'order_id' => $orderId,
+                'order_type' => $orderType,
+                'order_sn' => (string)($firstFlow->order_sn ?? ''),
+                'flow_type' => self::TYPE_SALES_ROLLBACK,
+                'amount' => $net,
+                'before_amount' => $beforeAmount,
+                'after_amount' => $afterAmount,
+                'admin_id' => (int)(request()->adminId ?? 0),
+                'remark' => '回滚应收-' . $orderType,
+                'create_time' => time(),
+            ]);
         }
 
         return true;

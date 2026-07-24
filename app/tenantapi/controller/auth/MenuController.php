@@ -37,7 +37,7 @@ class MenuController extends BaseAdminController
      */
     public function all()
     {
-        $result = MenuLogic::getAllData();
+        $result = MenuLogic::getAllData($this->tenantId);
         return $this->data($result);
     }
 }

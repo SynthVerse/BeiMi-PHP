@@ -1,0 +1,593 @@
+diff --git a/app/api/jxc/controller/AuthController.php b/app/api/jxc/controller/AuthController.php
+index 112a6cdd6601f7fa7acaa594e140b72a7b3bb59e..0501ee51ebc3cc424962cb519ab7b1c2d9767a65 100644
+--- a/app/api/jxc/controller/AuthController.php
++++ b/app/api/jxc/controller/AuthController.php
+@@ -25,30 +25,6 @@ class AuthController extends BaseJxcController
+     {
+         $this->refreshIdentityContext();
+ 
+-        // 如果中间件未能设置身份，尝试直接从 token 重新验证
+-        if ($this->adminId <= 0 && (int)($this->adminInfo['user_id'] ?? 0) <= 0) {
+-            $token = $this->request->header('token');
+-            if (!empty($token)) {
+-                $userInfo = (new \app\common\cache\UserTokenCache())->getUserInfo($token);
+-                if (!empty($userInfo) && !empty($userInfo['user_id'])) {
+-                    $this->adminInfo = [
+-                        'admin_id'    => $userInfo['user_id'],
+-                        'user_id'     => $userInfo['user_id'],
+-                        'tenant_id'   => $userInfo['tenant_id'] ?? 0,
+-                        'root'        => 0,
+-                        'name'        => $userInfo['nickname'] ?? '',
+-                        'account'     => $userInfo['mobile'] ?? '',
+-                        'role_name'   => '',
+-                        'role_id'     => [],
+-                        'token'       => $token,
+-                        'terminal'    => $userInfo['terminal'] ?? '',
+-                        'expire_time' => $userInfo['expire_time'] ?? 0,
+-                    ];
+-                    $this->adminId = (int)$userInfo['user_id'];
+-                }
+-            }
+-        }
+-
+         if ($this->adminId <= 0 && (int)($this->adminInfo['user_id'] ?? 0) <= 0) {
+             return $this->fail('登录超时，请重新登录', [], -1, 0);
+         }
+diff --git a/app/api/jxc/controller/BaseJxcController.php b/app/api/jxc/controller/BaseJxcController.php
+index 32abc1aabe0e8c99a257be1cae8ac12e036f11d0..e1057eeea3268971e128d6a1ebc3620663a18999 100644
+--- a/app/api/jxc/controller/BaseJxcController.php
++++ b/app/api/jxc/controller/BaseJxcController.php
+@@ -25,24 +25,7 @@ class BaseJxcController extends BaseApiController
+         $this->userInfo = $this->request->userInfo ?? $this->userInfo;
+         $this->userId = (int)($this->request->userId ?? ($this->userInfo['user_id'] ?? $this->userId));
+ 
+-        $adminInfo = $this->request->adminInfo ?? $this->adminInfo;
+-        if (empty($adminInfo) && !empty($this->userInfo)) {
+-            $adminInfo = [
+-                'admin_id'    => $this->userInfo['user_id'] ?? 0,
+-                'user_id'     => $this->userInfo['user_id'] ?? 0,
+-                'tenant_id'   => $this->userInfo['tenant_id'] ?? 0,
+-                'root'        => 0,
+-                'name'        => $this->userInfo['nickname'] ?? '',
+-                'account'     => $this->userInfo['mobile'] ?? '',
+-                'role_name'   => '',
+-                'role_id'     => [],
+-                'token'       => $this->userInfo['token'] ?? $this->request->header('token'),
+-                'terminal'    => $this->userInfo['terminal'] ?? '',
+-                'expire_time' => $this->userInfo['expire_time'] ?? 0,
+-            ];
+-        }
+-
+-        $this->adminInfo = $adminInfo ?: [];
++        $this->adminInfo = ($this->request->adminInfo ?? $this->adminInfo) ?: [];
+         $this->tenantId = (int)($this->request->tenantId ?? ($this->adminInfo['tenant_id'] ?? 0));
+         $this->adminId = (int)($this->request->adminId ?? ($this->adminInfo['admin_id'] ?? ($this->adminInfo['user_id'] ?? 0)));
+     }
+diff --git a/app/api/jxc/logic/CustomerLogic.php b/app/api/jxc/logic/CustomerLogic.php
+index da349cca8331977cd6e277f3a509272b8fbfd8d2..3735b939020eb24d938ed3ad07318b58d7db9aeb 100644
+--- a/app/api/jxc/logic/CustomerLogic.php
++++ b/app/api/jxc/logic/CustomerLogic.php
+@@ -448,6 +448,15 @@ class CustomerLogic extends BaseLogic
+     public static function paymoney(array $params): array|false
+     {
+         $customerId = (int)$params['customer_id'];
++        $tenantId = (int)(request()->tenantId ?? 0);
++        $customer = Customer::where('id', $customerId)
++            ->where('tenant_id', $tenantId)
++            ->findOrEmpty();
++        if ($customer->isEmpty()) {
++            self::setError('客户不存在');
++            return false;
++        }
++
+         $amount = max(0, (float)($params['money'] ?? $params['amount'] ?? 0));
+         if ($amount <= 0) {
+             self::setError('请输入付款金额');
+@@ -457,6 +466,7 @@ class CustomerLogic extends BaseLogic
+         Db::startTrans();
+         try {
+             $model = Customer::where('id', $customerId)
++                ->where('tenant_id', $tenantId)
+                 ->lock(true)
+                 ->findOrEmpty();
+             if ($model->isEmpty()) {
+diff --git a/app/api/jxc/logic/PurchaseReturnOrderLogic.php b/app/api/jxc/logic/PurchaseReturnOrderLogic.php
+index 597768901d90a217dc686df3e49f6d665fb324ce..25db40fd399aef6d26a2e7d3e8a78b44c64f306c 100644
+--- a/app/api/jxc/logic/PurchaseReturnOrderLogic.php
++++ b/app/api/jxc/logic/PurchaseReturnOrderLogic.php
+@@ -223,8 +223,9 @@ class PurchaseReturnOrderLogic extends BaseLogic
+     public static function remove(array $params): array|false
+     {
+         self::clearError();
++        $tenantId = (int)(request()->tenantId ?? 0);
+         $order = PurchaseReturnOrder::where('id', (int)$params['id'])
+-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
++            ->where('tenant_id', $tenantId)
+             ->findOrEmpty();
+         if ($order->isEmpty()) {
+             self::failWithCode('采购退货单不存在', 'RETURN_ORDER_NOT_FOUND');
+@@ -233,6 +234,17 @@ class PurchaseReturnOrderLogic extends BaseLogic
+ 
+         $orderData = $order->toArray();
+         $originalOrderId = (int)$order->original_supply_order_id;
++        if ($originalOrderId > 0) {
++            $original = SupplyOrder::where('id', $originalOrderId)
++                ->where('tenant_id', $tenantId)
++                ->findOrEmpty();
++            if ($original->isEmpty()) {
++                self::failWithCode('原进货单不存在', 'RETURN_ORIGINAL_NOT_FOUND');
++                return false;
++            }
++
++        }
++
+         Db::startTrans();
+         try {
+             if (!StockService::rollback((int)$order->id, self::ORDER_TYPE)) {
+@@ -372,8 +384,9 @@ class PurchaseReturnOrderLogic extends BaseLogic
+             return false;
+         }
+ 
++        $tenantId = (int)(request()->tenantId ?? 0);
+         $original = SupplyOrder::where('id', $originalOrderId)
+-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
++            ->where('tenant_id', $tenantId)
+             ->findOrEmpty();
+         if ($original->isEmpty()) {
+             self::failWithCode('原进货单不存在', 'RETURN_ORIGINAL_NOT_FOUND');
+diff --git a/app/api/jxc/logic/SalesOrderLogic.php b/app/api/jxc/logic/SalesOrderLogic.php
+index c1e10f34cf212e9fb8a43279f25d802518126e1d..bc2a381f9180091184a5f52210b007705c9e5031 100644
+--- a/app/api/jxc/logic/SalesOrderLogic.php
++++ b/app/api/jxc/logic/SalesOrderLogic.php
+@@ -6,6 +6,7 @@ use app\common\logic\BaseLogic;
+ use app\common\model\jxc\Customer;
+ use app\common\model\jxc\Goods;
+ use app\common\model\jxc\OrderGoods;
++use app\common\model\jxc\ReceivableFlow;
+ use app\common\model\jxc\SalesOrder;
+ use app\common\model\jxc\SalesReturnOrder;
+ use app\common\model\jxc\Warehouse;
+@@ -106,8 +107,9 @@ class SalesOrderLogic extends BaseLogic
+ 
+     public static function edit(array $params): array|false
+     {
++        $tenantId = (int)(request()->tenantId ?? 0);
+         $order = SalesOrder::where('id', (int)$params['id'])
+-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
++            ->where('tenant_id', $tenantId)
+             ->findOrEmpty();
+         if ($order->isEmpty()) {
+             self::setError('销售单不存在');
+@@ -183,7 +185,10 @@ class SalesOrderLogic extends BaseLogic
+ 
+     public static function remove(array $params): array|false
+     {
+-        $order = SalesOrder::findOrEmpty((int)$params['id']);
++        $tenantId = (int)(request()->tenantId ?? 0);
++        $order = SalesOrder::where('id', (int)$params['id'])
++            ->where('tenant_id', $tenantId)
++            ->findOrEmpty();
+         if ($order->isEmpty()) {
+             self::setError('销售单不存在');
+             return false;
+@@ -232,7 +237,14 @@ class SalesOrderLogic extends BaseLogic
+ 
+     public static function detail(array $params): array
+     {
+-        $order = SalesOrder::findOrEmpty((int)$params['id']);
++        $tenantId = (int)(request()->tenantId ?? 0);
++        if ($tenantId <= 0) {
++            return [];
++        }
++
++        $order = SalesOrder::where('id', (int)$params['id'])
++            ->where('tenant_id', $tenantId)
++            ->findOrEmpty();
+         if ($order->isEmpty()) {
+             return [];
+         }
+@@ -240,11 +252,11 @@ class SalesOrderLogic extends BaseLogic
+         $item = self::formatItem($order->toArray(), true);
+         $goodsRows = OrderGoods::where('order_id', (int)$order->id)
+             ->where('order_type', self::ORDER_TYPE)
++            ->where('tenant_id', $tenantId)
+             ->order(['sort' => 'asc', 'id' => 'asc'])
+             ->select()
+             ->toArray();
+         $item['goods'] = self::formatGoodsRows($goodsRows, self::returnedSalesQtyMap((int)$order->id));
+-
+         return $item;
+     }
+ 
+@@ -632,6 +644,9 @@ class SalesOrderLogic extends BaseLogic
+         return strlen($text) >= 10 ? substr($text, 0, 10) : $text;
+     }
+ 
++    /**
++     * @throws BusinessException
++     */
+     protected static function money(mixed $value): string
+     {
+         return number_format(max(0, (float)$value), 2, '.', '');
+diff --git a/app/api/jxc/logic/SalesReturnOrderLogic.php b/app/api/jxc/logic/SalesReturnOrderLogic.php
+index 7ce420295fd5f3c675ed9e33276f457a6aeb983b..ec569d5da1812a0bc6d7aeeb6cd73174d5c1bc23 100644
+--- a/app/api/jxc/logic/SalesReturnOrderLogic.php
++++ b/app/api/jxc/logic/SalesReturnOrderLogic.php
+@@ -122,8 +122,9 @@ class SalesReturnOrderLogic extends BaseLogic
+     public static function edit(array $params): array|false
+     {
+         self::clearError();
++        $tenantId = (int)(request()->tenantId ?? 0);
+         $order = SalesReturnOrder::where('id', (int)$params['id'])
+-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
++            ->where('tenant_id', $tenantId)
+             ->findOrEmpty();
+         if ($order->isEmpty()) {
+             self::failWithCode('退货单不存在', 'RETURN_ORDER_NOT_FOUND');
+@@ -140,6 +141,17 @@ class SalesReturnOrderLogic extends BaseLogic
+             return false;
+         }
+ 
++        if ($oldOriginalOrderId > 0 && (int)$built['order']['original_sales_order_id'] !== $oldOriginalOrderId) {
++            $oldOriginalOrder = SalesOrder::where('id', $oldOriginalOrderId)
++                ->where('tenant_id', $tenantId)
++                ->findOrEmpty();
++            if ($oldOriginalOrder->isEmpty()) {
++                self::failWithCode('原销售单不存在', 'RETURN_ORIGINAL_NOT_FOUND');
++                return false;
++            }
++
++        }
++
+         Db::startTrans();
+         try {
+             // === 回滚旧库存 ===
+@@ -234,8 +246,9 @@ class SalesReturnOrderLogic extends BaseLogic
+     public static function remove(array $params): array|false
+     {
+         self::clearError();
++        $tenantId = (int)(request()->tenantId ?? 0);
+         $order = SalesReturnOrder::where('id', (int)$params['id'])
+-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
++            ->where('tenant_id', $tenantId)
+             ->findOrEmpty();
+         if ($order->isEmpty()) {
+             self::failWithCode('退货单不存在', 'RETURN_ORDER_NOT_FOUND');
+@@ -247,6 +260,17 @@ class SalesReturnOrderLogic extends BaseLogic
+         $orderSn = (string)$order->order_sn;
+         $originalOrderId = (int)$order->original_sales_order_id;
+ 
++        if ($originalOrderId > 0) {
++            $originalOrder = SalesOrder::where('id', $originalOrderId)
++                ->where('tenant_id', $tenantId)
++                ->findOrEmpty();
++            if ($originalOrder->isEmpty()) {
++                self::failWithCode('原销售单不存在', 'RETURN_ORIGINAL_NOT_FOUND');
++                return false;
++            }
++
++        }
++
+         Db::startTrans();
+         try {
+             // === 回滚库存 ===
+@@ -445,11 +469,16 @@ class SalesReturnOrderLogic extends BaseLogic
+             self::failWithCode('原销售单ID不能为空', 'RETURN_ORIGINAL_REQUIRED');
+             return false;
+         }
+-        $originalOrder = SalesOrder::findOrEmpty($originalOrderId);
++        $tenantId = (int)(request()->tenantId ?? 0);
++        $originalOrder = SalesOrder::where('id', $originalOrderId)
++            ->where('tenant_id', $tenantId)
++            ->findOrEmpty();
+         if ($originalOrder->isEmpty()) {
+             self::failWithCode('原销售单不存在', 'RETURN_ORIGINAL_NOT_FOUND');
+             return false;
+         }
++
++
+         if ((int)$originalOrder->customer_id !== (int)$customer->id) {
+             self::failWithCode('原销售单客户与退货客户不匹配', 'RETURN_ORIGINAL_NOT_FOUND');
+             return false;
+@@ -461,7 +490,6 @@ class SalesReturnOrderLogic extends BaseLogic
+         }
+ 
+         $orderMoney = array_reduce($goodsRows, fn($sum, $row) => $sum + (float)$row['amount'], 0.0);
+-        $tenantId = (int)(request()->tenantId ?? 0);
+         $adminId = (int)(request()->adminId ?? 0);
+         $orderSn = trim((string)($params['order_sn'] ?? ($current['order_sn'] ?? '')));
+         $idempotentKey = trim((string)($params['idempotent_key'] ?? ''));
+diff --git a/app/api/jxc/logic/StoreLogic.php b/app/api/jxc/logic/StoreLogic.php
+index 5bafecffe7cc682a4fa74ee65a50876a4e9274c7..6a25a6374d269b24a8b49d55b3c83211234007a7 100644
+--- a/app/api/jxc/logic/StoreLogic.php
++++ b/app/api/jxc/logic/StoreLogic.php
+@@ -78,11 +78,16 @@ class StoreLogic extends BaseLogic
+             return $tenant ? self::formatTenantStore((array)$tenant) : [];
+         }
+ 
+-        if ($userId > 0 && $tenantId > 0) {
++        if ($fromUserToken) {
+             if (!StoreMembershipService::requireCurrentMembership($userId, $tenantId)) {
++                StoreMembershipService::rejectMembership($userId);
+                 self::setError('无权访问该店铺');
+                 return false;
+             }
++            if (!StoreMembershipService::isTenantAdmin($userId, $tenantId)) {
++                self::setError('需要店铺管理员权限');
++                return false;
++            }
+ 
+             $name = trim((string)($params['store_name'] ?? $params['tenant_name'] ?? $params['name'] ?? ''));
+             $updateData = [];
+diff --git a/app/api/jxc/logic/SupplierLogic.php b/app/api/jxc/logic/SupplierLogic.php
+index 01e776408d77cf5c00fc8672b382749a3f795cc3..924824eedacf71ec229ed6568bfa0582384fb8e2 100644
+--- a/app/api/jxc/logic/SupplierLogic.php
++++ b/app/api/jxc/logic/SupplierLogic.php
+@@ -2,6 +2,7 @@
+ 
+ namespace app\api\jxc\logic;
+ 
++use app\api\jxc\exception\BusinessException;
+ use app\common\logic\BaseLogic;
+ use app\common\model\jxc\GoodsSupplier;
+ use app\common\model\jxc\SupplyOrder;
+@@ -222,6 +223,7 @@ class SupplierLogic extends BaseLogic
+     {
+         $supplierId = (int)($params['supplier_id'] ?? $params['id'] ?? 0);
+         $amount = self::money(max(0, (float)($params['money'] ?? $params['amount'] ?? 0)));
++        $tenantId = self::tenantId();
+         if ($supplierId <= 0) {
+             self::setError('供应商不存在');
+             return false;
+@@ -230,11 +232,16 @@ class SupplierLogic extends BaseLogic
+             self::setError('请输入付款金额');
+             return false;
+         }
++        if ($tenantId <= 0) {
++            self::setError('供应商租户上下文缺失，请重新登录');
++            return false;
++        }
++
+ 
+         Db::startTrans();
+         try {
+             $model = Vendor::where('id', $supplierId)
+-                ->where('tenant_id', self::tenantId())
++                ->where('tenant_id', $tenantId)
+                 ->lock(true)
+                 ->findOrEmpty();
+             if ($model->isEmpty()) {
+@@ -278,10 +285,14 @@ class SupplierLogic extends BaseLogic
+ 
+             Db::commit();
+             return self::detail(['id' => $supplierId]);
+-        } catch (\Throwable $e) {
++        } catch (BusinessException $e) {
+             Db::rollback();
+             self::setError($e->getMessage());
+             return false;
++        } catch (\Throwable $e) {
++            Db::rollback();
++            self::setError('付款失败，请稍后重试');
++            return false;
+         }
+     }
+ 
+diff --git a/app/api/jxc/logic/SupplyOrderLogic.php b/app/api/jxc/logic/SupplyOrderLogic.php
+index c05387b962ff85d28da637b7cfd6c8be1e1d7cfa..14b2b75c64ee95feac00df8f7dcd0a8b08f03266 100644
+--- a/app/api/jxc/logic/SupplyOrderLogic.php
++++ b/app/api/jxc/logic/SupplyOrderLogic.php
+@@ -118,14 +118,16 @@ class SupplyOrderLogic extends BaseLogic
+ 
+     public static function edit(array $params): array|false
+     {
++        $tenantId = (int)(request()->tenantId ?? 0);
+         $order = SupplyOrder::where('id', (int)$params['id'])
+-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
++            ->where('tenant_id', $tenantId)
+             ->findOrEmpty();
+         if ($order->isEmpty()) {
+             self::setError('进货单不存在');
+             return false;
+         }
+ 
++
+         $built = self::buildOrderData($params, $order->toArray());
+         if ($built === false) {
+             return false;
+@@ -203,14 +205,16 @@ class SupplyOrderLogic extends BaseLogic
+ 
+     public static function remove(array $params): array|false
+     {
++        $tenantId = (int)(request()->tenantId ?? 0);
+         $order = SupplyOrder::where('id', (int)$params['id'])
+-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
++            ->where('tenant_id', $tenantId)
+             ->findOrEmpty();
+         if ($order->isEmpty()) {
+             self::setError('进货单不存在');
+             return false;
+         }
+ 
++
+         Db::startTrans();
+         try {
+             // === 回滚库存和应付 ===
+@@ -256,8 +260,13 @@ class SupplyOrderLogic extends BaseLogic
+ 
+     public static function detail(array $params): array
+     {
++        $tenantId = (int)(request()->tenantId ?? 0);
++        if ($tenantId <= 0) {
++            return [];
++        }
++
+         $order = SupplyOrder::where('id', (int)$params['id'])
+-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
++            ->where('tenant_id', $tenantId)
+             ->findOrEmpty();
+         if ($order->isEmpty()) {
+             return [];
+@@ -266,12 +275,11 @@ class SupplyOrderLogic extends BaseLogic
+         $item = self::formatItem($order->toArray(), true);
+         $goodsRows = OrderGoods::where('order_id', (int)$order->id)
+             ->where('order_type', self::ORDER_TYPE)
+-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
++            ->where('tenant_id', $tenantId)
+             ->order(['sort' => 'asc', 'id' => 'asc'])
+             ->select()
+             ->toArray();
+         $item['goods'] = self::formatGoodsRows($goodsRows, self::purchaseReturnedQtyMap((int)$order->id));
+-
+         return $item;
+     }
+ 
+diff --git a/app/api/jxc/middleware/JxcLoginMiddleware.php b/app/api/jxc/middleware/JxcLoginMiddleware.php
+index 6e85ac257c7ddfde50baa13c2d8e8c8345595edf..d734a2db5ec0101d10284ad67242464396939c96 100644
+--- a/app/api/jxc/middleware/JxcLoginMiddleware.php
++++ b/app/api/jxc/middleware/JxcLoginMiddleware.php
+@@ -4,11 +4,8 @@ declare(strict_types=1);
+ 
+ namespace app\api\jxc\middleware;
+ 
+-use app\common\cache\TenantAdminTokenCache;
+-use app\common\cache\UserTokenCache;
+-use app\api\jxc\logic\StoreLogic;
++use app\common\service\auth\TenantSessionAuthorityService;
+ use app\common\service\JsonService;
+-use app\common\service\jxc\StoreMembershipService;
+ use app\tenantapi\service\TenantTokenService;
+ use think\facade\Config;
+ 
+@@ -22,40 +19,26 @@ class JxcLoginMiddleware
+             return JsonService::fail('请求参数缺token', [], 0, 0);
+         }
+ 
+-        $adminInfo = (new TenantAdminTokenCache())->getAdminInfo($token);
+-
+-        // 回退查询：当 TenantAdminTokenCache 无记录时，尝试从 UserTokenCache 获取（微信登录用户）
+-        $fromUserToken = false;
++        // Cache entries are not an authority boundary. Resolve the session,
++        // administrator, and tenant from the database for every request.
++        $adminInfo = TenantSessionAuthorityService::resolve((string)$token);
+         if (empty($adminInfo)) {
+-            $userInfo = (new UserTokenCache())->getUserInfo($token);
+-            if (empty($userInfo)) {
+-                return JsonService::fail('登录超时，请重新登录', [], -1, 0);
+-            }
+-            $adminInfo = [
+-                'admin_id'    => $userInfo['user_id'],
+-                'user_id'     => $userInfo['user_id'],
+-                'tenant_id'   => $userInfo['tenant_id'] ?? 0,
+-                'root'        => 0,
+-                'name'        => $userInfo['nickname'] ?? '',
+-                'account'     => $userInfo['mobile'] ?? '',
+-                'role_name'   => '',
+-                'role_id'     => [],
+-                'token'       => $userInfo['token'],
+-                'terminal'    => $userInfo['terminal'] ?? '',
+-                'expire_time' => $userInfo['expire_time'] ?? 0,
+-            ];
+-            $fromUserToken = true;
++            return JsonService::fail('登录超时，请重新登录', [], -1, 0);
+         }
+ 
+-        // Token 续期逻辑仅对 TenantAdmin 体系生效
+-        if (!$fromUserToken) {
+-            $beExpireDuration = Config::get('project.admin_token.be_expire_duration');
+-            if (time() > (($adminInfo['expire_time'] ?? 0) - $beExpireDuration)) {
+-                $result = TenantTokenService::overtimeToken($token);
+-                if (empty($result)) {
+-                    return JsonService::fail('登录过期', [], -1, 0);
+-                }
+-                $adminInfo = (new TenantAdminTokenCache())->getAdminInfo($token);
++        if (($adminInfo['login_ip'] ?? '') !== (string)$request->ip()) {
++            return JsonService::fail('ip地址发生变化，请重新登录', [], -1, 0);
++        }
++
++        $beExpireDuration = Config::get('project.tenant_token.be_expire_duration');
++        if (time() > (($adminInfo['expire_time'] ?? 0) - $beExpireDuration)) {
++            $result = TenantTokenService::overtimeToken($token);
++            if (empty($result)) {
++                return JsonService::fail('登录过期', [], -1, 0);
++            }
++            $adminInfo = TenantSessionAuthorityService::resolve((string)$token);
++            if (empty($adminInfo) || ($adminInfo['login_ip'] ?? '') !== (string)$request->ip()) {
++                return JsonService::fail('登录状态无效，请重新登录', [], -1, 0);
+             }
+         }
+ 
+@@ -63,20 +46,7 @@ class JxcLoginMiddleware
+         $request->tenantId = $tenantId;
+         $request->adminInfo = $adminInfo;
+         $request->adminId = (int)($adminInfo['admin_id'] ?? 0);
+-        $request->userId = (int)($adminInfo['user_id'] ?? 0);
+-        $request->jxcFromUserToken = $fromUserToken;
+-
+-        if ($fromUserToken) {
+-            $userId = (int)($adminInfo['user_id'] ?? $adminInfo['admin_id'] ?? 0);
+-            $action = strtolower((string)$request->action());
+-            $controller = strtolower((string)$request->controller());
+-            $storeEntryActions = ['status', 'createstore', 'join', 'acceptmemberinvite', 'lists', 'switchstore'];
+-            $isStoreEntryAction = str_ends_with($controller, 'store') && in_array($action, $storeEntryActions, true);
+-
+-            if (!$isStoreEntryAction && !StoreMembershipService::requireCurrentMembership($userId, $tenantId)) {
+-                return JsonService::fail('请先创建或切换到有效店铺', StoreLogic::status(), 0, 0);
+-            }
+-        }
++        $request->userId = (int)$adminInfo['admin_id'];
+ 
+         return $next($request);
+     }
+diff --git a/app/api/jxc/validate/SalesOrderValidate.php b/app/api/jxc/validate/SalesOrderValidate.php
+index 345b5992725614b26341d80d0bfb8eceec688ae0..42489a93b032f3d8acbefd09487fffe5098f14ca 100644
+--- a/app/api/jxc/validate/SalesOrderValidate.php
++++ b/app/api/jxc/validate/SalesOrderValidate.php
+@@ -19,6 +19,12 @@ class SalesOrderValidate extends BaseValidate
+         'remark' => 'max:500',
+         'purpose' => 'max:50',
+         'purpose_type' => 'max:50',
++        'idempotency_key' => 'require|string|regex:/^[A-Za-z0-9._:-]{1,64}$/D',
++        'amount' => [
++            'require',
++            'string',
++            'regex' => '/^(?:(?:0\\.(?:0[1-9]|[1-9][0-9]))|(?:[1-9][0-9]{0,9}\\.[0-9]{2}))$/D',
++        ],
+         'start_time' => 'integer|egt:0',
+         'end_time' => 'integer|egt:0',
+     ];
+@@ -36,6 +42,8 @@ class SalesOrderValidate extends BaseValidate
+         'remark' => '备注',
+         'purpose' => '出库目的',
+         'purpose_type' => '出库目的类型',
++        'idempotency_key' => '幂等键',
++        'amount' => '收款金额',
+         'start_time' => '开始时间',
+         'end_time' => '结束时间',
+     ];
+diff --git a/app/api/jxc/validate/SupplyOrderValidate.php b/app/api/jxc/validate/SupplyOrderValidate.php
+index 80b2974a507ca49fe25d8e2ff77c8a8d7d6f80c9..e59e6087830840aa2d1cff11de1fad8d706d68cf 100644
+--- a/app/api/jxc/validate/SupplyOrderValidate.php
++++ b/app/api/jxc/validate/SupplyOrderValidate.php
+@@ -20,6 +20,12 @@ class SupplyOrderValidate extends BaseValidate
+         'purpose' => 'max:50',
+         'purpose_type' => 'max:50',
+         'idempotent_key' => 'max:64',
++        'amount' => [
++            'require',
++            'string',
++            'regex' => '/^(?:(?:0\\.(?:0[1-9]|[1-9][0-9]))|(?:[1-9][0-9]{0,9}\\.[0-9]{2}))$/D',
++        ],
++        'idempotency_key' => 'require|string|regex:/^[A-Za-z0-9._:-]{1,64}$/D',
+         'start_time' => 'integer|egt:0',
+         'end_time' => 'integer|egt:0',
+     ];
+@@ -38,6 +44,8 @@ class SupplyOrderValidate extends BaseValidate
+         'purpose' => '入库目的',
+         'purpose_type' => '入库目的类型',
+         'idempotent_key' => '幂等键',
++        'amount' => '付款金额',
++        'idempotency_key' => '幂等键',
+         'start_time' => '开始时间',
+         'end_time' => '结束时间',
+     ];

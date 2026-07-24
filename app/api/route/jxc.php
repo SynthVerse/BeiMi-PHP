@@ -5,22 +5,26 @@ use think\facade\Route;
 Route::post('user/login', 'jxc.Auth/login');
 Route::post('user/mnpLogin', 'login/mnpLogin');
 
-// 用户信息与店铺入口接口 —— 使用 LoginMiddleware（UserTokenCache 查询，兼容微信登录用户）
+// 新用户开店/入店入口：精确白名单允许已登录但尚未加入店铺的用户访问。
 Route::group('', function () {
     Route::get('user/info', 'jxc.Auth/info');
     Route::post('user/logout', 'jxc.Auth/logout');
     Route::get('user/store/status', 'jxc.Store/status');
-    Route::get('user/store',     'jxc.Store/detail');
     Route::get('user/store/current', 'jxc.Store/detail');
     Route::get('user/stores',    'jxc.Store/lists');
-    Route::post('user/storeset', 'jxc.Store/setStore');
     Route::post('user/open',     'jxc.Store/createStore');
     Route::post('user/store/create', 'jxc.Store/createStore');
-    Route::post('user/store/switch', 'jxc.Store/switchStore');
     Route::post('user/store/join',   'jxc.Store/join');
     Route::post('store/invite/accept', 'jxc.Store/join');
-    Route::get('user/store/member-invite', 'jxc.Store/memberInvite');
     Route::post('user/store/member-invite/accept', 'jxc.Store/acceptMemberInvite');
+})->middleware(\app\api\http\middleware\LoginMiddleware::class, 'enforce-onboarding');
+
+// 店铺成员操作：继续要求当前店铺成员身份。
+Route::group('', function () {
+    Route::get('user/store',     'jxc.Store/detail');
+    Route::post('user/storeset', 'jxc.Store/setStore');
+    Route::post('user/store/switch', 'jxc.Store/switchStore');
+    Route::get('user/store/member-invite', 'jxc.Store/memberInvite');
 })->middleware(\app\api\http\middleware\LoginMiddleware::class, 'enforce');
 
 // JXC 业务接口 —— 使用 JxcLoginMiddleware（双 Token 查询）
@@ -180,4 +184,6 @@ Route::group('', function () {
     Route::post('user/store/hierarchy/invite', 'jxc.Store/createHierarchyInvite');
     Route::post('user/store/hierarchy/invite/accept', 'jxc.Store/acceptHierarchyInvite');
     Route::post('user/store/hierarchy/unbind', 'jxc.Store/unbindHierarchy');
+
+    Route::get('return/statistics', 'jxc.SalesReturnOrder/statistics');
 })->middleware(\app\api\jxc\middleware\JxcLoginMiddleware::class);

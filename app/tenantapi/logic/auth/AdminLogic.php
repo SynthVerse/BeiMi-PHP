@@ -9,9 +9,11 @@ use app\common\model\auth\TenantAdminDept;
 use app\common\model\auth\TenantAdminJobs;
 use app\common\model\auth\TenantAdminRole;
 use app\common\model\auth\TenantAdminSession;
+use app\common\model\auth\TenantSystemRole;
 use app\common\cache\TenantAdminTokenCache;
 use app\common\model\tenant\Tenant;
 use app\common\service\FileService;
+use app\common\service\auth\TenantSessionAuthorityService;
 use think\facade\Config;
 use think\facade\Db;
 
@@ -31,14 +33,22 @@ class AdminLogic extends BaseLogic
      */
     public static function add(array $params)
     {
+        $tenantId = self::currentTenantId();
+        if ($tenantId <= 0) {
+            self::setError('角色参数错误');
+            return false;
+        }
+
         Db::startTrans();
         try {
+            $roleIds = self::tenantRoleIds($params['role_id'] ?? [], $tenantId);
             $passwordSalt = Config::get('project.unique_identification');
             $password = create_password($params['password'], $passwordSalt);
             $defaultAvatar = config('project.default_image.admin_avatar');
             $avatar = !empty($params['avatar']) ? FileService::setFileUrl($params['avatar']) : $defaultAvatar;
 
             $admin = TenantAdmin::create([
+                'tenant_id' => $tenantId,
                 'name' => $params['name'],
                 'account' => $params['account'],
                 'avatar' => $avatar,
@@ -49,7 +59,7 @@ class AdminLogic extends BaseLogic
             ]);
 
             // 角色
-            self::insertRole($admin['id'], $params['role_id'] ?? []);
+            self::insertRole($admin['id'], $roleIds);
             // 部门
             self::insertDept($admin['id'], $params['dept_id'] ?? []);
             // 岗位
@@ -74,8 +84,23 @@ class AdminLogic extends BaseLogic
      */
     public static function edit(array $params): bool
     {
+        $tenantId = self::currentTenantId();
+        if ($tenantId <= 0) {
+            self::setError('角色参数错误');
+            return false;
+        }
+
+        $expiredTokens = [];
         Db::startTrans();
         try {
+            $admin = TenantAdmin::where('id', $params['id'])
+                ->where('tenant_id', $tenantId)
+                ->lock(true)
+                ->findOrEmpty();
+            if ($admin->isEmpty()) {
+                throw new \Exception('管理员不存在');
+            }
+            $roleIds = self::tenantRoleIds($params['role_id'] ?? [], $tenantId);
             // 基础信息
             $data = [
                 'name' => $params['name'],
@@ -94,36 +119,34 @@ class AdminLogic extends BaseLogic
             }
 
             // 禁用或更换角色后.设置token过期
-            $roleId = TenantAdminRole::where('admin_id', $params['id'])->column('role_id');
+            $roleId = TenantAdminRole::where('admin_id', $admin['id'])->column('role_id');
             $editRole = false;
-            if (!empty(array_diff_assoc($roleId, $params['role_id']))) {
+            if (!empty(array_diff_assoc($roleId, $roleIds))) {
                 $editRole = true;
             }
 
-            if ($params['disable'] == 1 || $editRole) {
-                $tokenArr = TenantAdminSession::where('admin_id', $params['id'])->select()->toArray();
-                foreach ($tokenArr as $token) {
-                    self::expireToken($token['token']);
-                }
+            if ($params['disable'] == 1 || $editRole || !empty($params['password']) || (int)$admin['multipoint_login'] !== (int)$params['multipoint_login']) {
+                $expiredTokens = TenantSessionAuthorityService::expireAdminSessions((int)$admin['id']);
             }
 
-            TenantAdmin::update($data, ['id' => $params['id']]);
-            (new TenantAdminAuthCache($params['id']))->clearAuthCache();
+            $admin->save($data);
 
             // 删除旧的关联信息
-            TenantAdminRole::delByUserId($params['id']);
-            TenantAdminDept::delByUserId($params['id']);
-            TenantAdminJobs::delByUserId($params['id']);
+            TenantAdminRole::delByUserId($admin['id']);
+            TenantAdminDept::delByUserId($admin['id']);
+            TenantAdminJobs::delByUserId($admin['id']);
             // 角色
-            self::insertRole($params['id'], $params['role_id']);
+            self::insertRole($admin['id'], $roleIds);
             // 部门
-            self::insertDept($params['id'], $params['dept_id'] ?? []);
+            self::insertDept($admin['id'], $params['dept_id'] ?? []);
             // 岗位
-            self::insertJobs($params['id'], $params['jobs_id'] ?? []);
+            self::insertJobs($admin['id'], $params['jobs_id'] ?? []);
 
             Db::commit();
+            TenantSessionAuthorityService::clearTokenCaches($expiredTokens);
+            TenantSessionAuthorityService::clearAuthorizationCache((int)$admin['id'], $tenantId);
             return true;
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             Db::rollback();
             self::setError($e->getMessage());
             return false;
@@ -140,29 +163,39 @@ class AdminLogic extends BaseLogic
      */
     public static function delete(array $params): bool
     {
+        $tenantId = self::currentTenantId();
+        if ($tenantId <= 0) {
+            self::setError('管理员不存在');
+            return false;
+        }
+
+        $expiredTokens = [];
         Db::startTrans();
         try {
-            $admin = TenantAdmin::findOrEmpty($params['id']);
+            $admin = TenantAdmin::where('id', $params['id'])
+                ->where('tenant_id', $tenantId)
+                ->lock(true)
+                ->findOrEmpty();
+            if ($admin->isEmpty()) {
+                throw new \Exception('管理员不存在');
+            }
             if ($admin->root == YesNoEnum::YES) {
                 throw new \Exception("超级管理员不允许被删除");
             }
-            TenantAdmin::destroy($params['id']);
+            $admin->delete();
 
             //设置token过期
-            $tokenArr = TenantAdminSession::where('admin_id', $params['id'])->select()->toArray();
-            foreach ($tokenArr as $token) {
-                self::expireToken($token['token']);
-            }
-            (new TenantAdminAuthCache($params['id']))->clearAuthCache();
-
+            $expiredTokens = TenantSessionAuthorityService::expireAdminSessions((int)$admin['id']);
             // 删除旧的关联信息
-            TenantAdminRole::delByUserId($params['id']);
-            TenantAdminDept::delByUserId($params['id']);
-            TenantAdminJobs::delByUserId($params['id']);
+            TenantAdminRole::delByUserId($admin['id']);
+            TenantAdminDept::delByUserId($admin['id']);
+            TenantAdminJobs::delByUserId($admin['id']);
 
             Db::commit();
+            TenantSessionAuthorityService::clearTokenCaches($expiredTokens);
+            TenantSessionAuthorityService::clearAuthorizationCache((int)$admin['id'], $tenantId);
             return true;
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             Db::rollback();
             self::setError($e->getMessage());
             return false;
@@ -208,10 +241,20 @@ class AdminLogic extends BaseLogic
      */
     public static function detail($params, $action = 'detail'): array
     {
-        $admin = TenantAdmin::field([
+        $tenantId = self::currentTenantId();
+        if ($tenantId <= 0) {
+            return [];
+        }
+        $admin = TenantAdmin::where('id', $params['id'])
+            ->where('tenant_id', $tenantId)
+            ->field([
             'id', 'account', 'name', 'disable', 'root','tenant_id',
             'multipoint_login', 'avatar',
-        ])->findOrEmpty($params['id'])->toArray();
+        ])->findOrEmpty()->toArray();
+
+        if ($admin === []) {
+            return [];
+        }
 
         if ($action == 'detail') {
             return $admin;
@@ -262,7 +305,7 @@ class AdminLogic extends BaseLogic
      * @author 段誉
      * @date 2022/11/25 14:23
      */
-    public static function insertRole($adminId, $roleIds)
+    private static function insertRole($adminId, $roleIds)
     {
         if (!empty($roleIds)) {
             // 角色
@@ -275,6 +318,49 @@ class AdminLogic extends BaseLogic
             }
             (new TenantAdminRole())->saveAll($roleData);
         }
+    }
+
+    /** @return list<int> */
+    private static function tenantRoleIds(mixed $roleIds, int $tenantId): array
+    {
+        if ($tenantId <= 0 || !is_array($roleIds)) {
+            throw new \Exception('角色参数错误');
+        }
+
+        $ids = [];
+        foreach ($roleIds as $roleId) {
+            if (!is_int($roleId) || $roleId <= 0 || isset($ids[$roleId])) {
+                throw new \Exception('角色参数错误');
+            }
+            $ids[$roleId] = $roleId;
+        }
+        if ($ids === []) {
+            throw new \Exception('角色参数错误');
+        }
+
+        $roleIds = array_values($ids);
+        $foundIds = TenantSystemRole::where('tenant_id', $tenantId)
+            ->whereIn('id', $roleIds)
+            ->column('id');
+        $foundIds = array_map('intval', $foundIds);
+        sort($roleIds, SORT_NUMERIC);
+        sort($foundIds, SORT_NUMERIC);
+        if ($roleIds !== $foundIds) {
+            throw new \Exception('角色参数错误');
+        }
+
+        return $roleIds;
+    }
+
+    private static function currentTenantId(): int
+    {
+        $adminInfo = request()->adminInfo ?? null;
+        if (!is_array($adminInfo)) {
+            return 0;
+        }
+
+        $tenantId = (int)($adminInfo['tenant_id'] ?? 0);
+        return $tenantId > 0 ? $tenantId : 0;
     }
 
 

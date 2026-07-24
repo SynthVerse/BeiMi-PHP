@@ -16,7 +16,7 @@ declare (strict_types=1);
 
 namespace app\tenantapi\http\middleware;
 
-use app\common\cache\TenantAdminTokenCache;
+use app\common\service\auth\TenantSessionAuthorityService;
 use app\tenantapi\service\TenantTokenService;
 use app\common\service\JsonService;
 use think\facade\Config;
@@ -48,7 +48,9 @@ class LoginMiddleware
             return JsonService::fail('请求参数缺token', [], 0, 0);
         }
 
-        $adminInfo = (new TenantAdminTokenCache())->getAdminInfo($token);
+        // The token cache is not an authority boundary. Every protected request
+        // revalidates the session, administrator, and tenant from the database.
+        $adminInfo = TenantSessionAuthorityService::resolve((string)$token);
 
 
         if (empty($adminInfo) && !$isNotNeedLogin) {

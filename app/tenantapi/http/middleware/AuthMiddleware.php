@@ -44,16 +44,26 @@ class AuthMiddleware
             return $next($request);
         }
 
-        if ($request->adminInfo['login_ip'] != request()->ip()) {
+        $adminInfo = $request->adminInfo ?? null;
+        if (!is_array($adminInfo)) {
+            return JsonService::fail('登录状态无效，请重新登录', [], -1);
+        }
+        $tenantId = (int)($adminInfo['tenant_id'] ?? 0);
+        $adminId = (int)($adminInfo['admin_id'] ?? 0);
+        if ($tenantId <= 0 || $adminId <= 0) {
+            return JsonService::fail('登录状态无效，请重新登录', [], -1);
+        }
+
+        if (($adminInfo['login_ip'] ?? '') != request()->ip()) {
             return JsonService::fail('ip地址发生变化，请重新登录', [], -1);
         }
 
         //系统默认超级管理员，无需权限验证
-        if (1 === $request->adminInfo['root']) {
+        if (1 === ($adminInfo['root'] ?? 0)) {
             return $next($request);
         }
 
-        $adminAuthCache = new TenantAdminAuthCache($request->adminInfo['admin_id']);
+        $adminAuthCache = new TenantAdminAuthCache($adminId, $tenantId);
 
         // 当前访问路径
         $accessUri = strtolower($request->controller() . '/' . $request->action());

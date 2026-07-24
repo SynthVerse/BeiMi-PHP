@@ -1,0 +1,17 @@
+snapshot_created_at=2026-07-22T17:00:14.2842781+08:00
+source_snapshot_created_at=2026-07-22T15:46:39.7986571+08:00
+project_path=E:\object\BeiMi\BeiMi-PHP
+source_branch=master
+source_head=ffb12d6cf55b0a396413804bdcbc49002b65b6cf
+source_archive_file=BeiMi-PHP-20260722T154639+0800.zip
+source_archive_sha256=62c778445a3df7ee35a3f3feca5c1020ace08554f7b6a48e6d2f794357a46d0a
+archive_file=BeiMi-PHP-20260722T154639+0800-sanitized.zip
+archive_sha256=ef8345f23179047286f64802214303649f4d4ecd1c8070c513b5b9b1fb739a0d
+source_status_metadata=git-status--porcelain-v1-uall.txt
+source_status_metadata_present=true
+source_status_metadata_sha256=5832214dadbc7bc8500283c3b24a6048d5a253e4f086aa95fdd307126931dc91
+source_status_metadata_bytes=2515
+source_status_summary=source status metadata retained as provenance by presence, byte count, and SHA-256 only; its contents were not read or copied.
+exclusions=path-components:.git,.codegraph,.uv-cache,vendor,node_modules,runtime,cache,log; filename-patterns:.env,.env.*,secret,credential,key; source-retirement-snapshots-not-included
+entry_copy_method=streamed allowed entries only; forbidden entries were not opened or read.
+restore_instruction=Extract the archive into a separate recovery directory; restore only the required file or code block into the active worktree. Do not overwrite the current worktree with the archive.
