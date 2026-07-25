@@ -10,6 +10,10 @@ class SupplierLists extends BaseDataLists
 {
     protected function baseQuery()
     {
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) {
+            throw new \RuntimeException('租户无效');
+        }
         $query = Vendor::field([
             'id',
             'supplier_name',
@@ -23,7 +27,7 @@ class SupplierLists extends BaseDataLists
             'order_paid_money',
             'create_time',
             'update_time',
-        ]);
+        ])->where('tenant_id', $tenantId);
 
         $keyword = trim((string)($this->params['keyword'] ?? $this->params['name'] ?? $this->params['supplier_name'] ?? ''));
         if ($keyword !== '') {

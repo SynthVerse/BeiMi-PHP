@@ -12,4 +12,6 @@ class PayableFlow extends BaseModel
     const TYPE_SUPPLY_ADD    = 1; // 应付增加-进货
     const TYPE_PAYMENT       = 2; // 应付减少-付款
     const TYPE_RETURN_REDUCE = 3; // 应付减少-采购退货
+    const TYPE_ORDER_ROLLBACK = 4; // 进货单回滚
+    const TYPE_RETURN_ROLLBACK = 5; // 采购退货单回滚
 }

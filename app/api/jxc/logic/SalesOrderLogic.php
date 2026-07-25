@@ -27,20 +27,7 @@ class SalesOrderLogic extends BaseLogic
     {
         $tenantId = (int)(request()->tenantId ?? 0);
         if ($tenantId <= 0) { self::setError('租户无效'); return false; }
-        // 幂等键检查（事务开始前）
         $idempotentKey = trim((string)($params['idempotent_key'] ?? ''));
-        if ($idempotentKey !== '') {
-            $existing = SalesOrder::where('tenant_id', $tenantId)
-                ->where('idempotent_key', $idempotentKey)
-                ->find();
-            if ($existing) {
-                return [
-                    'id'       => (int)$existing->id,
-                    'order_sn' => (string)$existing->order_sn,
-                ];
-            }
-        }
-
         $built = self::buildOrderData($params);
         if ($built === false) {
             return false;
@@ -48,10 +35,31 @@ class SalesOrderLogic extends BaseLogic
 
         Db::startTrans();
         try {
+            $lockedTenantId = (int)Db::name('tenant')
+                ->where('id', $tenantId)
+                ->where('disable', 0)
+                ->lock(true)
+                ->value('id');
+            if ($lockedTenantId !== $tenantId) {
+                throw new BusinessException('租户无效');
+            }
+            if ($idempotentKey !== '') {
+                $existing = SalesOrder::where('tenant_id', $tenantId)
+                    ->where('idempotent_key', $idempotentKey)
+                    ->find();
+                if ($existing) {
+                    Db::commit();
+                    return [
+                        'id' => (int)$existing->id,
+                        'order_sn' => (string)$existing->order_sn,
+                    ];
+                }
+            }
             $order = SalesOrder::create($built['order']);
             self::replaceGoods((int)$order->id, $built['goods']);
 
             // === 库存出库 ===
+            usort($built['goods'], static fn(array $left, array $right): int => (int)$left['goods_id'] <=> (int)$right['goods_id']);
             foreach ($built['goods'] as $row) {
                 if (!StockService::outbound(
                     (int)$built['order']['warehouse_id'],
@@ -125,6 +133,18 @@ class SalesOrderLogic extends BaseLogic
 
         Db::startTrans();
         try {
+            $order = SalesOrder::where('id', (int)$params['id'])
+                ->where('tenant_id', $tenantId)
+                ->lock(true)
+                ->findOrEmpty();
+            if ($order->isEmpty()) {
+                throw new BusinessException('销售单不存在');
+            }
+            $built = self::buildOrderData($params, $order->toArray());
+            if ($built === false) {
+                Db::rollback();
+                return false;
+            }
             // === 回滚旧库存和旧应收 ===
             if (!StockService::rollback((int)$order->id, 'sales')) { throw new BusinessException('库存回滚失败'); }
             if (!FinanceService::rollbackReceivable((int)$order->id, 'sales')) { throw new BusinessException('应收回滚失败'); }
@@ -133,6 +153,7 @@ class SalesOrderLogic extends BaseLogic
             self::replaceGoods((int)$order->id, $built['goods']);
 
             // === 重新出库 ===
+            usort($built['goods'], static fn(array $left, array $right): int => (int)$left['goods_id'] <=> (int)$right['goods_id']);
             foreach ($built['goods'] as $row) {
                 if (!StockService::outbound(
                     (int)$built['order']['warehouse_id'],
@@ -199,6 +220,13 @@ class SalesOrderLogic extends BaseLogic
 
         Db::startTrans();
         try {
+            $order = SalesOrder::where('id', (int)$params['id'])
+                ->where('tenant_id', $tenantId)
+                ->lock(true)
+                ->findOrEmpty();
+            if ($order->isEmpty()) {
+                throw new BusinessException('销售单不存在');
+            }
             // === 回滚库存和应收 ===
             if (!StockService::rollback((int)$order->id, 'sales')) { throw new BusinessException('库存回滚失败'); }
             if (!FinanceService::rollbackReceivable((int)$order->id, 'sales')) { throw new BusinessException('应收回滚失败'); }

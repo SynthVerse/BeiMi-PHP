@@ -18,27 +18,12 @@ final class StrictTenantMembershipContractTest extends TestCase
         self::assertStringContainsString('UserTokenCache::revokeUserSessions($userId);', $service);
     }
 
-    public function test_backfill_is_a_fixed_zero_io_preflight(): void
+    public function test_backfill_command_and_registration_are_removed(): void
     {
-        $command = self::source('app/common/command/TenantMembershipBackfill.php');
-        self::assertStringContainsString("setName('tenant-membership:backfill')", $command);
-        self::assertStringContainsString("setDescription('Run the fixed zero-I/O tenant membership preflight')", $command);
-        self::assertStringContainsString("'preflight source=none mapping_entries=0 proposed_writes=0 writes=0'", $command);
-
-        foreach ([
-            'Db::',
-            'think\\facade\\Db',
-            'addOption',
-            'apply(',
-            'rollback(',
-            'readApprovedMapping',
-            'mapping-file',
-            'batch-id',
-            'tenant_member_backfill_journal',
-            'approval_source',
-        ] as $forbiddenPath) {
-            self::assertStringNotContainsString($forbiddenPath, $command);
-        }
+        self::assertFileDoesNotExist(dirname(__DIR__, 2) . '/app/common/command/TenantMembershipBackfill.php');
+        $console = self::source('config/console.php');
+        self::assertStringNotContainsString('tenant-membership:backfill', $console);
+        self::assertStringNotContainsString('TenantMembershipBackfill', $console);
     }
 
     public function test_jxc_default_initialization_never_provisions_historical_users(): void

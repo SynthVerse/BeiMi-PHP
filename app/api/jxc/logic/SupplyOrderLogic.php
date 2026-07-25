@@ -26,28 +26,41 @@ class SupplyOrderLogic extends BaseLogic
 
     public static function publish(array $params): array|false
     {
-        // 幂等键检查（事务开始前）
-        $idempotentKey = trim((string)($params['idempotent_key'] ?? ''));
-        if ($idempotentKey !== '') {
-            $tenantId = (int)(request()->tenantId ?? 0);
-            $existing = SupplyOrder::where('tenant_id', $tenantId)
-                ->where('idempotent_key', $idempotentKey)
-                ->find();
-            if ($existing) {
-                return [
-                    'id'       => (int)$existing->id,
-                    'order_sn' => (string)$existing->order_sn,
-                ];
-            }
-        }
-
-        $built = self::buildOrderData($params);
-        if ($built === false) {
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) {
+            self::setError('租户无效');
             return false;
         }
+        $idempotentKey = trim((string)($params['idempotent_key'] ?? ''));
 
         Db::startTrans();
         try {
+            $lockedTenantId = (int)Db::name('tenant')
+                ->where('id', $tenantId)
+                ->where('disable', 0)
+                ->lock(true)
+                ->value('id');
+            if ($lockedTenantId !== $tenantId) {
+                throw new BusinessException('租户无效');
+            }
+            if ($idempotentKey !== '') {
+                $existing = SupplyOrder::where('tenant_id', $tenantId)
+                    ->where('idempotent_key', $idempotentKey)
+                    ->find();
+                if ($existing) {
+                    Db::commit();
+                    return [
+                        'id'       => (int)$existing->id,
+                        'order_sn' => (string)$existing->order_sn,
+                    ];
+                }
+            }
+
+            $built = self::buildOrderData($params);
+            if ($built === false) {
+                Db::rollback();
+                return false;
+            }
             $order = SupplyOrder::create($built['order']);
             $createdGoods = self::replaceGoods((int)$order->id, $built['goods']);
             $createdGoods = PurchaseArrivalService::rebuildForSupplyOrder(array_merge($built['order'], [
@@ -55,8 +68,9 @@ class SupplyOrderLogic extends BaseLogic
             ]), $createdGoods);
 
             // === 库存入库 ===
+            usort($createdGoods, static fn(array $left, array $right): int => (int)$left['goods_id'] <=> (int)$right['goods_id']);
             foreach ($createdGoods as $row) {
-                StockService::inbound(
+                if (!StockService::inbound(
                     (int)$built['order']['warehouse_id'],
                     (int)$row['goods_id'],
                     (string)$row['number'],
@@ -66,7 +80,9 @@ class SupplyOrderLogic extends BaseLogic
                     '采购入库-' . (string)($row['sku_name'] ?: $row['name']),
                     (int)($row['sku_id'] ?? 0),
                     (int)($row['batch_id'] ?? 0)
-                );
+                )) {
+                    throw new BusinessException('库存处理失败');
+                }
             }
             TaskCenterService::applyProcurementInbound(
                 (int)$order->id,
@@ -76,13 +92,15 @@ class SupplyOrderLogic extends BaseLogic
             // === 应付增加 ===
             $arrearsMoney = (string)$built['order']['order_arrears_money'];
             if (bccomp($arrearsMoney, '0', 2) > 0) {
-                FinanceService::addPayable(
+                if (!FinanceService::addPayable(
                     (int)$built['order']['supplier_id'],
                     $arrearsMoney,
                     (int)$order->id,
                     'supply',
                     $built['order']['order_sn']
-                );
+                )) {
+                    throw new BusinessException('应付处理失败');
+                }
             }
 
             Db::commit();
@@ -135,9 +153,25 @@ class SupplyOrderLogic extends BaseLogic
 
         Db::startTrans();
         try {
+            $order = SupplyOrder::where('id', (int)$params['id'])
+                ->where('tenant_id', $tenantId)
+                ->lock(true)
+                ->findOrEmpty();
+            if ($order->isEmpty()) {
+                throw new BusinessException('进货单不存在');
+            }
+            $built = self::buildOrderData($params, $order->toArray());
+            if ($built === false) {
+                Db::rollback();
+                return false;
+            }
             // === 回滚旧库存和旧应付 ===
-            StockService::rollback((int)$order->id, 'supply');
-            FinanceService::rollbackPayable((int)$order->id, 'supply');
+            if (!StockService::rollback((int)$order->id, 'supply')) {
+                throw new BusinessException('库存回滚失败');
+            }
+            if (!FinanceService::rollbackPayable((int)$order->id, 'supply')) {
+                throw new BusinessException('应付回滚失败');
+            }
             PurchaseArrivalService::deleteBySupplyOrder((int)$order->id);
 
             $order->save($built['order']);
@@ -148,8 +182,9 @@ class SupplyOrderLogic extends BaseLogic
             ]), $createdGoods);
 
             // === 重新入库 ===
+            usort($createdGoods, static fn(array $left, array $right): int => (int)$left['goods_id'] <=> (int)$right['goods_id']);
             foreach ($createdGoods as $row) {
-                StockService::inbound(
+                if (!StockService::inbound(
                     (int)$built['order']['warehouse_id'],
                     (int)$row['goods_id'],
                     (string)$row['number'],
@@ -159,19 +194,23 @@ class SupplyOrderLogic extends BaseLogic
                     '采购入库-' . (string)($row['sku_name'] ?: $row['name']),
                     (int)($row['sku_id'] ?? 0),
                     (int)($row['batch_id'] ?? 0)
-                );
+                )) {
+                    throw new BusinessException('库存处理失败');
+                }
             }
 
             // === 重新计算应付 ===
             $arrearsMoney = (string)$built['order']['order_arrears_money'];
             if (bccomp($arrearsMoney, '0', 2) > 0) {
-                FinanceService::addPayable(
+                if (!FinanceService::addPayable(
                     (int)$built['order']['supplier_id'],
                     $arrearsMoney,
                     (int)$order->id,
                     'supply',
                     $order->order_sn
-                );
+                )) {
+                    throw new BusinessException('应付处理失败');
+                }
             }
 
             Db::commit();
@@ -217,9 +256,20 @@ class SupplyOrderLogic extends BaseLogic
 
         Db::startTrans();
         try {
+            $order = SupplyOrder::where('id', (int)$params['id'])
+                ->where('tenant_id', $tenantId)
+                ->lock(true)
+                ->findOrEmpty();
+            if ($order->isEmpty()) {
+                throw new BusinessException('进货单不存在');
+            }
             // === 回滚库存和应付 ===
-            StockService::rollback((int)$order->id, 'supply');
-            FinanceService::rollbackPayable((int)$order->id, 'supply');
+            if (!StockService::rollback((int)$order->id, 'supply')) {
+                throw new BusinessException('库存回滚失败');
+            }
+            if (!FinanceService::rollbackPayable((int)$order->id, 'supply')) {
+                throw new BusinessException('应付回滚失败');
+            }
             PurchaseArrivalService::deleteBySupplyOrder((int)$order->id);
 
             $orderData = $order->toArray();
@@ -285,8 +335,17 @@ class SupplyOrderLogic extends BaseLogic
 
     public static function statistics(array $params): array
     {
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) {
+            return [
+                'number' => 0,
+                'order_money' => '0.00',
+                'order_pay_money' => '0.00',
+                'order_arrears_money' => '0.00',
+            ];
+        }
         $query = SupplyOrder::field(['id', 'order_money', 'order_pay_money', 'order_arrears_money', 'datetimesingle'])
-            ->where('tenant_id', (int)(request()->tenantId ?? 0));
+            ->where('tenant_id', $tenantId);
         self::applyTimeRange($query, $params);
 
         return [

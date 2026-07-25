@@ -11,6 +11,8 @@ use app\common\model\auth\TenantAdminRole;
 use app\common\model\auth\TenantAdminSession;
 use app\common\model\auth\TenantSystemRole;
 use app\common\cache\TenantAdminTokenCache;
+use app\common\model\dept\TenantDept;
+use app\common\model\dept\TenantJobs;
 use app\common\model\tenant\Tenant;
 use app\common\service\FileService;
 use app\common\service\auth\TenantSessionAuthorityService;
@@ -42,6 +44,8 @@ class AdminLogic extends BaseLogic
         Db::startTrans();
         try {
             $roleIds = self::tenantRoleIds($params['role_id'] ?? [], $tenantId);
+            $deptIds = self::tenantOwnedIds($params['dept_id'] ?? [], $tenantId, TenantDept::class, '部门参数错误');
+            $jobsIds = self::tenantOwnedIds($params['jobs_id'] ?? [], $tenantId, TenantJobs::class, '岗位参数错误');
             $passwordSalt = Config::get('project.unique_identification');
             $password = create_password($params['password'], $passwordSalt);
             $defaultAvatar = config('project.default_image.admin_avatar');
@@ -61,9 +65,9 @@ class AdminLogic extends BaseLogic
             // 角色
             self::insertRole($admin['id'], $roleIds);
             // 部门
-            self::insertDept($admin['id'], $params['dept_id'] ?? []);
+            self::insertDept($admin['id'], $deptIds);
             // 岗位
-            self::insertJobs($admin['id'], $params['jobs_id'] ?? []);
+            self::insertJobs($admin['id'], $jobsIds);
 
             Db::commit();
             return true;
@@ -101,6 +105,8 @@ class AdminLogic extends BaseLogic
                 throw new \Exception('管理员不存在');
             }
             $roleIds = self::tenantRoleIds($params['role_id'] ?? [], $tenantId);
+            $deptIds = self::tenantOwnedIds($params['dept_id'] ?? [], $tenantId, TenantDept::class, '部门参数错误');
+            $jobsIds = self::tenantOwnedIds($params['jobs_id'] ?? [], $tenantId, TenantJobs::class, '岗位参数错误');
             // 基础信息
             $data = [
                 'name' => $params['name'],
@@ -121,9 +127,11 @@ class AdminLogic extends BaseLogic
             // 禁用或更换角色后.设置token过期
             $roleId = TenantAdminRole::where('admin_id', $admin['id'])->column('role_id');
             $editRole = false;
-            if (!empty(array_diff_assoc($roleId, $roleIds))) {
-                $editRole = true;
-            }
+            $roleId = array_map('intval', $roleId);
+            sort($roleId, SORT_NUMERIC);
+            $newRoleIds = $roleIds;
+            sort($newRoleIds, SORT_NUMERIC);
+            $editRole = $roleId !== $newRoleIds;
 
             if ($params['disable'] == 1 || $editRole || !empty($params['password']) || (int)$admin['multipoint_login'] !== (int)$params['multipoint_login']) {
                 $expiredTokens = TenantSessionAuthorityService::expireAdminSessions((int)$admin['id']);
@@ -138,9 +146,9 @@ class AdminLogic extends BaseLogic
             // 角色
             self::insertRole($admin['id'], $roleIds);
             // 部门
-            self::insertDept($admin['id'], $params['dept_id'] ?? []);
+            self::insertDept($admin['id'], $deptIds);
             // 岗位
-            self::insertJobs($admin['id'], $params['jobs_id'] ?? []);
+            self::insertJobs($admin['id'], $jobsIds);
 
             Db::commit();
             TenantSessionAuthorityService::clearTokenCaches($expiredTokens);
@@ -361,6 +369,41 @@ class AdminLogic extends BaseLogic
 
         $tenantId = (int)($adminInfo['tenant_id'] ?? 0);
         return $tenantId > 0 ? $tenantId : 0;
+    }
+
+    /** @return list<int> */
+    private static function tenantOwnedIds(
+        mixed $values,
+        int $tenantId,
+        string $modelClass,
+        string $error
+    ): array {
+        if ($tenantId <= 0 || !is_array($values)) {
+            throw new \Exception($error);
+        }
+
+        $ids = [];
+        foreach ($values as $value) {
+            if (!is_int($value) || $value <= 0 || isset($ids[$value])) {
+                throw new \Exception($error);
+            }
+            $ids[$value] = $value;
+        }
+        if ($ids === []) {
+            return [];
+        }
+
+        $expected = array_values($ids);
+        $found = array_map('intval', $modelClass::where('tenant_id', $tenantId)
+            ->whereIn('id', $expected)
+            ->column('id'));
+        sort($expected, SORT_NUMERIC);
+        sort($found, SORT_NUMERIC);
+        if ($expected !== $found) {
+            throw new \Exception($error);
+        }
+
+        return $expected;
     }
 
 

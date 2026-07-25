@@ -142,91 +142,113 @@ class StockService
      */
     public static function rollback(int $orderId, string $orderType): bool
     {
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) {
+            return false;
+        }
+
         $flows = StockFlow::where('order_id', $orderId)
             ->where('order_type', $orderType)
-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->where('tenant_id', $tenantId)
+            ->lock(true)
             ->select();
 
+        $netByDimension = [];
         foreach ($flows as $flow) {
-            if ($flow->flow_type == StockFlow::FLOW_OUT) {
-                // 出库流水 → 回补库存（入库）
-                $goods = Goods::where('id', $flow->goods_id)
-                    ->where('tenant_id', (int)$flow->tenant_id)
-                    ->lock(true)
-                    ->find();
-                if (!$goods) {
-                    return false;
-                }
-
-                $beforeStock = (string)$goods->stock;
-                $afterStock = bcadd($beforeStock, (string)$flow->quantity, 2);
-                $updated = Goods::where('id', $flow->goods_id)
-                    ->where('tenant_id', (int)$flow->tenant_id)
-                    ->update([
-                        'stock' => $afterStock,
-                        'update_time' => time(),
-                    ]);
-                if ($updated === false) {
-                    return false;
-                }
-
-                StockFlow::create([
-                    'tenant_id'    => $flow->tenant_id,
-                    'warehouse_id' => $flow->warehouse_id,
-                    'goods_id'     => $flow->goods_id,
-                    'sku_id'       => (int)($flow->sku_id ?? 0),
-                    'batch_id'     => (int)($flow->batch_id ?? 0),
-                    'order_id'     => $orderId,
-                    'order_type'   => $orderType,
-                    'order_sn'     => $flow->order_sn,
-                    'flow_type'    => StockFlow::FLOW_IN,
-                    'quantity'     => $flow->quantity,
-                    'before_stock' => $beforeStock,
-                    'after_stock'  => $afterStock,
-                    'admin_id'     => (int)(request()->adminId ?? 0),
-                    'remark'       => '回滚-' . $orderType,
-                    'create_time'  => time(),
-                ]);
-            } elseif ($flow->flow_type == StockFlow::FLOW_IN) {
-                // 入库流水 → 扣减库存（出库）
-                $goods = Goods::where('id', $flow->goods_id)
-                    ->where('tenant_id', (int)$flow->tenant_id)
-                    ->lock(true)
-                    ->find();
-                if (!$goods) {
-                    return false;
-                }
-
-                $beforeStock = (string)$goods->stock;
-                $afterStock = bcsub($beforeStock, (string)$flow->quantity, 2);
-                $updated = Goods::where('id', $flow->goods_id)
-                    ->where('tenant_id', (int)$flow->tenant_id)
-                    ->update([
-                        'stock' => $afterStock,
-                        'update_time' => time(),
-                    ]);
-                if ($updated === false) {
-                    return false;
-                }
-
-                StockFlow::create([
-                    'tenant_id'    => $flow->tenant_id,
-                    'warehouse_id' => $flow->warehouse_id,
-                    'goods_id'     => $flow->goods_id,
-                    'sku_id'       => (int)($flow->sku_id ?? 0),
-                    'batch_id'     => (int)($flow->batch_id ?? 0),
-                    'order_id'     => $orderId,
-                    'order_type'   => $orderType,
-                    'order_sn'     => $flow->order_sn,
-                    'flow_type'    => StockFlow::FLOW_OUT,
-                    'quantity'     => $flow->quantity,
-                    'before_stock' => $beforeStock,
-                    'after_stock'  => $afterStock,
-                    'admin_id'     => (int)(request()->adminId ?? 0),
-                    'remark'       => '回滚-' . $orderType,
-                    'create_time'  => time(),
-                ]);
+            $dimension = implode(':', [
+                $tenantId,
+                $orderId,
+                $orderType,
+                (int)$flow->warehouse_id,
+                (int)$flow->goods_id,
+                (int)($flow->sku_id ?? 0),
+                (int)($flow->batch_id ?? 0),
+            ]);
+            if (!isset($netByDimension[$dimension])) {
+                $netByDimension[$dimension] = [
+                    'tenant_id' => $tenantId,
+                    'warehouse_id' => (int)$flow->warehouse_id,
+                    'goods_id' => (int)$flow->goods_id,
+                    'sku_id' => (int)($flow->sku_id ?? 0),
+                    'batch_id' => (int)($flow->batch_id ?? 0),
+                    'order_sn' => (string)$flow->order_sn,
+                    'net' => '0.00',
+                ];
             }
+            $quantity = (string)$flow->quantity;
+            $netByDimension[$dimension]['net'] = (int)$flow->flow_type === StockFlow::FLOW_IN
+                ? bcadd($netByDimension[$dimension]['net'], $quantity, 2)
+                : bcsub($netByDimension[$dimension]['net'], $quantity, 2);
+        }
+
+        uasort($netByDimension, static function (array $left, array $right): int {
+            return [
+                $left['goods_id'],
+                $left['warehouse_id'],
+                $left['sku_id'],
+                $left['batch_id'],
+            ] <=> [
+                $right['goods_id'],
+                $right['warehouse_id'],
+                $right['sku_id'],
+                $right['batch_id'],
+            ];
+        });
+
+        $goodsIds = array_values(array_unique(array_map(
+            static fn(array $item): int => $item['goods_id'],
+            $netByDimension
+        )));
+        sort($goodsIds, SORT_NUMERIC);
+        $stocks = [];
+        foreach ($goodsIds as $goodsId) {
+            $goods = Goods::where('id', $goodsId)
+                ->where('tenant_id', $tenantId)
+                ->lock(true)
+                ->find();
+            if (!$goods) {
+                return false;
+            }
+            $stocks[$goodsId] = (string)$goods->stock;
+        }
+
+        foreach ($netByDimension as $item) {
+            $net = (string)$item['net'];
+            if (bccomp($net, '0', 2) === 0) {
+                continue;
+            }
+            $goodsId = (int)$item['goods_id'];
+            $quantity = ltrim($net, '-');
+            $flowType = bccomp($net, '0', 2) > 0 ? StockFlow::FLOW_OUT : StockFlow::FLOW_IN;
+            $beforeStock = $stocks[$goodsId];
+            $afterStock = $flowType === StockFlow::FLOW_IN
+                ? bcadd($beforeStock, $quantity, 2)
+                : bcsub($beforeStock, $quantity, 2);
+            $updated = Goods::where('id', $goodsId)
+                ->where('tenant_id', $tenantId)
+                ->update(['stock' => $afterStock, 'update_time' => time()]);
+            if ($updated === false) {
+                return false;
+            }
+            $stocks[$goodsId] = $afterStock;
+
+            StockFlow::create([
+                'tenant_id' => $tenantId,
+                'warehouse_id' => (int)$item['warehouse_id'],
+                'goods_id' => $goodsId,
+                'sku_id' => (int)$item['sku_id'],
+                'batch_id' => (int)$item['batch_id'],
+                'order_id' => $orderId,
+                'order_type' => $orderType,
+                'order_sn' => (string)$item['order_sn'],
+                'flow_type' => $flowType,
+                'quantity' => $quantity,
+                'before_stock' => $beforeStock,
+                'after_stock' => $afterStock,
+                'admin_id' => (int)(request()->adminId ?? 0),
+                'remark' => '回滚-' . $orderType,
+                'create_time' => time(),
+            ]);
         }
 
         return true;

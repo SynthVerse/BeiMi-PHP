@@ -44,8 +44,12 @@ final class TenantAuthTenantScopeContractTest extends TestCase
             '#function deleteTag\(\): bool\s*\{\s*if \(\$this->tenantId <= 0\) \{\s*return false;\s*\}#',
             $cache
         );
-        self::assertStringContainsString('new TenantAdminAuthCache($adminId, $tenantId)', $middleware);
+        self::assertStringNotContainsString('new TenantAdminAuthCache', $middleware);
         self::assertStringContainsString('if ($tenantId <= 0 || $adminId <= 0)', $middleware);
+        self::assertStringContainsString('TenantSessionAuthorityService::resolve($token)', $middleware);
+        self::assertStringContainsString("TenantSystemMenu::where('tenant_id', \$tenantId)", $middleware);
+        self::assertStringContainsString("TenantSystemRole::where('tenant_id', \$tenantId)", $middleware);
+        self::assertStringContainsString('if ($registeredMenuIds === [])', $middleware);
         self::assertStringContainsString('TenantSessionAuthorityService::resolve((string)$token)', $login);
 
         $reflection = new \ReflectionMethod(TenantAdminAuthCache::class, '__construct');

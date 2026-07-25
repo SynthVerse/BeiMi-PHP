@@ -11,6 +11,10 @@ class CustomerLists extends BaseDataLists
 {
     protected function baseQuery()
     {
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) {
+            throw new \RuntimeException('租户无效');
+        }
         $query = Customer::field([
             'id',
             'customer_name',
@@ -28,7 +32,7 @@ class CustomerLists extends BaseDataLists
             'order_pay_money',
             'create_time',
             'update_time',
-        ]);
+        ])->where('tenant_id', $tenantId);
 
         $keyword = trim((string)($this->params['keyword'] ?? $this->params['name'] ?? $this->params['customer_name'] ?? ''));
         if ($keyword !== '') {
@@ -43,7 +47,9 @@ class CustomerLists extends BaseDataLists
         $groupId = (int)($this->params['group_id'] ?? 0);
         $groupName = trim((string)($this->params['group_name'] ?? ''));
         if ($groupId <= 0 && $groupName !== '') {
-            $groupId = (int)(CustomerGroup::where('group_name', $groupName)->value('id') ?: 0);
+            $groupId = (int)(CustomerGroup::where('group_name', $groupName)
+                ->where('tenant_id', $tenantId)
+                ->value('id') ?: 0);
         }
         if ($groupId > 0) {
             $query->where('group_id', $groupId);

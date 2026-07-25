@@ -11,6 +11,10 @@ class SupplyOrderLists extends BaseDataLists
 {
     protected function baseQuery()
     {
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) {
+            throw new \RuntimeException('租户无效');
+        }
         $query = SupplyOrder::field([
             'id',
             'order_sn',
@@ -28,7 +32,7 @@ class SupplyOrderLists extends BaseDataLists
             'admin_id',
             'create_time',
             'update_time',
-        ]);
+        ])->where('tenant_id', $tenantId);
 
         $keyword = trim((string)($this->params['keyword'] ?? $this->params['order_sn'] ?? $this->params['supplier_name'] ?? ''));
         if ($keyword !== '') {
@@ -41,7 +45,7 @@ class SupplyOrderLists extends BaseDataLists
         $goodsId = (int)($this->params['goods_id'] ?? 0);
         if ($goodsId > 0) {
             $orderIds = OrderGoods::where('goods_id', $goodsId)
-                ->where('tenant_id', (int)(request()->tenantId ?? 0))
+                ->where('tenant_id', $tenantId)
                 ->where('order_type', 'supply')
                 ->group('order_id')
                 ->column('order_id');

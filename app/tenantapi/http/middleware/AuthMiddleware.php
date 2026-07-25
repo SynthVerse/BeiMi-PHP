@@ -16,10 +16,12 @@ declare (strict_types=1);
 
 namespace app\tenantapi\http\middleware;
 
+use app\common\model\auth\TenantAdminRole;
+use app\common\model\auth\TenantSystemMenu;
+use app\common\model\auth\TenantSystemRole;
+use app\common\model\auth\TenantSystemRoleMenu;
+use app\common\service\auth\TenantSessionAuthorityService;
 use app\common\service\JsonService;
-use app\common\{
-    cache\TenantAdminAuthCache
-};
 use think\helper\Str;
 
 /**
@@ -45,9 +47,12 @@ class AuthMiddleware
         }
 
         $adminInfo = $request->adminInfo ?? null;
-        if (!is_array($adminInfo)) {
+        $token = is_array($adminInfo) ? (string)($adminInfo['token'] ?? '') : '';
+        $adminInfo = TenantSessionAuthorityService::resolve($token);
+        if (empty($adminInfo)) {
             return JsonService::fail('登录状态无效，请重新登录', [], -1);
         }
+        $request->adminInfo = $adminInfo;
         $tenantId = (int)($adminInfo['tenant_id'] ?? 0);
         $adminId = (int)($adminInfo['admin_id'] ?? 0);
         if ($tenantId <= 0 || $adminId <= 0) {
@@ -63,23 +68,41 @@ class AuthMiddleware
             return $next($request);
         }
 
-        $adminAuthCache = new TenantAdminAuthCache($adminId, $tenantId);
-
         // 当前访问路径
         $accessUri = strtolower($request->controller() . '/' . $request->action());
-        // 全部路由
-        $allUri = $this->formatUrl($adminAuthCache->getAllUri());
-
-        // 判断该当前访问的uri是否存在，不存在无需验证
-        if (!in_array($accessUri, $allUri)) {
-            return $next($request);
+        $allMenu = TenantSystemMenu::where('tenant_id', $tenantId)
+            ->where('is_disable', 0)
+            ->where('perms', '<>', '')
+            ->field('id,perms')
+            ->select()
+            ->toArray();
+        $registeredMenuIds = [];
+        foreach ($allMenu as $menu) {
+            if ($this->formatUrl([(string)$menu['perms']])[0] === $accessUri) {
+                $registeredMenuIds[] = (int)$menu['id'];
+            }
+        }
+        if ($registeredMenuIds === []) {
+            return JsonService::fail('权限不足，无法访问或操作');
         }
 
-        // 当前管理员拥有的路由权限
-        $AdminUris = $adminAuthCache->getAdminUri() ?? [];
-        $AdminUris = $this->formatUrl($AdminUris);
+        $roleIds = array_map('intval', TenantAdminRole::where('admin_id', $adminId)->column('role_id'));
+        if ($roleIds === []) {
+            return JsonService::fail('权限不足，无法访问或操作');
+        }
+        $tenantRoleIds = array_map('intval', TenantSystemRole::where('tenant_id', $tenantId)
+            ->whereIn('id', $roleIds)
+            ->column('id'));
+        sort($roleIds, SORT_NUMERIC);
+        sort($tenantRoleIds, SORT_NUMERIC);
+        if ($roleIds !== $tenantRoleIds) {
+            return JsonService::fail('权限不足，无法访问或操作');
+        }
 
-        if (in_array($accessUri, $AdminUris)) {
+        $authorized = TenantSystemRoleMenu::whereIn('role_id', $roleIds)
+            ->whereIn('menu_id', $registeredMenuIds)
+            ->count() > 0;
+        if ($authorized) {
             return $next($request);
         }
         return JsonService::fail('权限不足，无法访问或操作');

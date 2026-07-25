@@ -16,7 +16,6 @@ namespace app\tenantapi\logic;
 
 
 use app\common\logic\BaseLogic;
-use app\common\model\user\User;
 use app\common\service\ConfigService;
 use app\common\service\FileService;
 
@@ -40,16 +39,10 @@ class WorkbenchLogic extends BaseLogic
         return [
             // 版本信息
             'version' => self::versionInfo(),
-            // 今日数据
-            'today' => self::today(),
             // 常用功能
             'menu' => self::menu(),
-            // 近15日访客数
-            'visitor' => self::visitor(),
             // 服务支持
             'support' => self::support(),
-            // 销售数据
-            'sale' => self::sale()
         ];
     }
 
@@ -72,11 +65,6 @@ class WorkbenchLogic extends BaseLogic
                 'name' => '商品管理',
                 'image' => FileService::getFileUrl(config('project.default_image.menu_goods')),
                 'url' => '/goods/lists'
-            ],
-            [
-                'name' => '销售订单',
-                'image' => FileService::getFileUrl(config('project.default_image.menu_goods_order')),
-                'url' => '/consumer/order'
             ],
             [
                 'name' => '管理员管理',
@@ -125,75 +113,6 @@ class WorkbenchLogic extends BaseLogic
             'website' => config('project.website.url'),
             'name' => ConfigService::get('tenant', 'name'),
             'based' => 'sass系统',
-        ];
-    }
-
-
-    /**
-     * @notes 今日数据
-     * @return int[]
-     * @author 段誉
-     * @date 2021/12/29 16:15
-     */
-    public static function today(): array
-    {
-        return [
-            'time' => date('Y-m-d H:i:s'),
-
-            // 今日新增用户量
-            'today_new_user' => User::where('create_time', '>=', strtotime('today'))->count(),
-            // 总用户量
-            'total_new_user' => User::count(),
-
-        ];
-    }
-
-
-    /**
-     * @notes 访问数
-     * @return array
-     * @author 段誉
-     * @date 2021/12/29 16:57
-     */
-    public static function visitor(): array
-    {
-        $num = [];
-        $date = [];
-        for ($i = 0; $i < 15; $i++) {
-            $where_start = strtotime("- " . $i . "day");
-            $date[] = date('m/d', $where_start);
-            $num[$i] = rand(0, 100);
-        }
-
-        return [
-            'date' => $date,
-            'list' => [
-                ['name' => '访客数', 'data' => $num]
-            ]
-        ];
-    }
-
-    /**
-     * @notes 访问数
-     * @return array
-     * @author 段誉
-     * @date 2021/12/29 16:57
-     */
-    public static function sale(): array
-    {
-        $num = [];
-        $date = [];
-        for ($i = 0; $i < 7; $i++) {
-            $where_start = strtotime("- " . $i . "day");
-            $date[] = date('m/d', $where_start);
-            $num[$i] = rand(30, 200);
-        }
-
-        return [
-            'date' => $date,
-            'list' => [
-                ['name' => '销售量', 'data' => $num]
-            ]
         ];
     }
 

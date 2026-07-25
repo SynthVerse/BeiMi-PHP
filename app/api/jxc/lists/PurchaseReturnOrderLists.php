@@ -10,6 +10,10 @@ class PurchaseReturnOrderLists extends BaseDataLists
 {
     protected function baseQuery()
     {
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) {
+            throw new \RuntimeException('租户无效');
+        }
         $query = PurchaseReturnOrder::field([
             'id',
             'order_sn',
@@ -26,7 +30,7 @@ class PurchaseReturnOrderLists extends BaseDataLists
             'admin_id',
             'create_time',
             'update_time',
-        ]);
+        ])->where('tenant_id', $tenantId);
 
         $keyword = trim((string)($this->params['keyword'] ?? $this->params['order_sn'] ?? $this->params['supplier_name'] ?? ''));
         if ($keyword !== '') {

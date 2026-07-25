@@ -24,31 +24,59 @@ class PurchaseReturnOrderLogic extends BaseLogic
     public static function publish(array $params): array|false
     {
         self::clearError();
-
-        $idempotentKey = trim((string)($params['idempotent_key'] ?? ''));
-        if ($idempotentKey !== '') {
-            $existing = PurchaseReturnOrder::where('tenant_id', (int)(request()->tenantId ?? 0))
-                ->where('idempotent_key', $idempotentKey)
-                ->find();
-            if ($existing) {
-                return [
-                    'id' => (int)$existing->id,
-                    'order_sn' => (string)$existing->order_sn,
-                    'sn' => (string)$existing->order_sn,
-                ];
-            }
-        }
-
-        $built = self::buildOrderData($params);
-        if ($built === false) {
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) {
+            self::failWithCode('租户无效', 'RETURN_ORIGINAL_NOT_FOUND');
             return false;
         }
+        $idempotentKey = trim((string)($params['idempotent_key'] ?? ''));
 
         Db::startTrans();
         try {
+            $lockedTenantId = (int)Db::name('tenant')
+                ->where('id', $tenantId)
+                ->where('disable', 0)
+                ->lock(true)
+                ->value('id');
+            if ($lockedTenantId !== $tenantId) {
+                self::throwFailure('租户无效', 'RETURN_ORIGINAL_NOT_FOUND');
+            }
+            if ($idempotentKey !== '') {
+                $existing = PurchaseReturnOrder::where('tenant_id', $tenantId)
+                    ->where('idempotent_key', $idempotentKey)
+                    ->find();
+                if ($existing) {
+                    Db::commit();
+                    return [
+                        'id' => (int)$existing->id,
+                        'order_sn' => (string)$existing->order_sn,
+                        'sn' => (string)$existing->order_sn,
+                    ];
+                }
+            }
+
+            $originalOrderId = (int)($params['original_order_id'] ?? $params['original_supply_order_id'] ?? 0);
+            if ($originalOrderId <= 0) {
+                self::throwFailure('原进货单ID不能为空', 'RETURN_ORIGINAL_REQUIRED');
+            }
+            $params['original_order_id'] = $originalOrderId;
+            $params['original_supply_order_id'] = $originalOrderId;
+            $originalOrder = SupplyOrder::where('id', $originalOrderId)
+                ->where('tenant_id', $tenantId)
+                ->lock(true)
+                ->findOrEmpty();
+            if ($originalOrder->isEmpty()) {
+                self::throwFailure('原进货单不存在', 'RETURN_ORIGINAL_NOT_FOUND');
+            }
+            $built = self::buildOrderData($params);
+            if ($built === false) {
+                Db::rollback();
+                return false;
+            }
             $order = PurchaseReturnOrder::create($built['order']);
             self::replaceDetails((int)$order->id, $built['goods']);
 
+            usort($built['goods'], static fn(array $left, array $right): int => (int)$left['goods_id'] <=> (int)$right['goods_id']);
             foreach ($built['goods'] as $row) {
                 $stockOk = StockService::outbound(
                     (int)$built['order']['warehouse_id'],
@@ -58,7 +86,8 @@ class PurchaseReturnOrderLogic extends BaseLogic
                     self::ORDER_TYPE,
                     (string)$order->order_sn,
                     '采购退货-' . (string)$row['goods_name'],
-                    (int)($row['sku_id'] ?? 0)
+                    (int)($row['sku_id'] ?? 0),
+                    (int)($row['batch_id'] ?? 0)
                 );
                 if (!$stockOk) {
                     self::throwFailure('库存出库失败', 'RETURN_STOCK_FAILED');
@@ -118,32 +147,53 @@ class PurchaseReturnOrderLogic extends BaseLogic
     public static function edit(array $params): array|false
     {
         self::clearError();
-        $order = PurchaseReturnOrder::where('id', (int)$params['id'])
-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
-            ->findOrEmpty();
-        if ($order->isEmpty()) {
-            self::failWithCode('采购退货单不存在', 'RETURN_ORDER_NOT_FOUND');
-            return false;
-        }
-
-        $oldOriginalOrderId = (int)$order->original_supply_order_id;
-        $requestedOriginalOrderId = array_key_exists('original_order_id', $params) || array_key_exists('original_supply_order_id', $params)
-            ? (int)($params['original_order_id'] ?? $params['original_supply_order_id'] ?? 0)
-            : $oldOriginalOrderId;
-        if ($requestedOriginalOrderId > 0 && $requestedOriginalOrderId !== $oldOriginalOrderId) {
-            self::failWithCode('原进货单已锁定，不可修改', 'RETURN_ORIGINAL_LOCKED');
-            return false;
-        }
-
-        $params['original_order_id'] = $oldOriginalOrderId;
-        $params['original_supply_order_id'] = $oldOriginalOrderId;
-        $built = self::buildOrderData($params, $order->toArray());
-        if ($built === false) {
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) {
+            self::failWithCode('租户无效', 'RETURN_ORDER_NOT_FOUND');
             return false;
         }
 
         Db::startTrans();
         try {
+            $lockedTenantId = (int)Db::name('tenant')
+                ->where('id', $tenantId)
+                ->where('disable', 0)
+                ->lock(true)
+                ->value('id');
+            if ($lockedTenantId !== $tenantId) {
+                self::throwFailure('租户无效', 'RETURN_ORDER_NOT_FOUND');
+            }
+            $order = PurchaseReturnOrder::where('id', (int)$params['id'])
+                ->where('tenant_id', $tenantId)
+                ->lock(true)
+                ->findOrEmpty();
+            if ($order->isEmpty()) {
+                self::throwFailure('采购退货单不存在', 'RETURN_ORDER_NOT_FOUND');
+            }
+            $oldOriginalOrderId = (int)$order->original_supply_order_id;
+            $requestedOriginalOrderId = array_key_exists('original_order_id', $params) || array_key_exists('original_supply_order_id', $params)
+                ? (int)($params['original_order_id'] ?? $params['original_supply_order_id'] ?? 0)
+                : $oldOriginalOrderId;
+            if ($requestedOriginalOrderId !== $oldOriginalOrderId) {
+                self::throwFailure('原进货单已锁定，不可修改', 'RETURN_ORIGINAL_LOCKED');
+            }
+            if ($oldOriginalOrderId <= 0) {
+                self::throwFailure('原进货单不存在', 'RETURN_ORIGINAL_NOT_FOUND');
+            }
+            $originalOrder = SupplyOrder::where('id', $oldOriginalOrderId)
+                ->where('tenant_id', $tenantId)
+                ->lock(true)
+                ->findOrEmpty();
+            if ($originalOrder->isEmpty()) {
+                self::throwFailure('原进货单不存在', 'RETURN_ORIGINAL_NOT_FOUND');
+            }
+            $params['original_order_id'] = $oldOriginalOrderId;
+            $params['original_supply_order_id'] = $oldOriginalOrderId;
+            $built = self::buildOrderData($params, $order->toArray());
+            if ($built === false) {
+                Db::rollback();
+                return false;
+            }
             if (!StockService::rollback((int)$order->id, self::ORDER_TYPE)) {
                 self::throwFailure('旧库存回滚失败', 'RETURN_STOCK_FAILED');
             }
@@ -154,6 +204,7 @@ class PurchaseReturnOrderLogic extends BaseLogic
             $order->save($built['order']);
             self::replaceDetails((int)$order->id, $built['goods']);
 
+            usort($built['goods'], static fn(array $left, array $right): int => (int)$left['goods_id'] <=> (int)$right['goods_id']);
             foreach ($built['goods'] as $row) {
                 $stockOk = StockService::outbound(
                     (int)$built['order']['warehouse_id'],
@@ -163,7 +214,8 @@ class PurchaseReturnOrderLogic extends BaseLogic
                     self::ORDER_TYPE,
                     (string)$order->order_sn,
                     '采购退货-' . (string)$row['goods_name'],
-                    (int)($row['sku_id'] ?? 0)
+                    (int)($row['sku_id'] ?? 0),
+                    (int)($row['batch_id'] ?? 0)
                 );
                 if (!$stockOk) {
                     self::throwFailure('库存出库失败', 'RETURN_STOCK_FAILED');
@@ -224,29 +276,40 @@ class PurchaseReturnOrderLogic extends BaseLogic
     {
         self::clearError();
         $tenantId = (int)(request()->tenantId ?? 0);
-        $order = PurchaseReturnOrder::where('id', (int)$params['id'])
-            ->where('tenant_id', $tenantId)
-            ->findOrEmpty();
-        if ($order->isEmpty()) {
-            self::failWithCode('采购退货单不存在', 'RETURN_ORDER_NOT_FOUND');
+        if ($tenantId <= 0) {
+            self::failWithCode('租户无效', 'RETURN_ORDER_NOT_FOUND');
             return false;
-        }
-
-        $orderData = $order->toArray();
-        $originalOrderId = (int)$order->original_supply_order_id;
-        if ($originalOrderId > 0) {
-            $original = SupplyOrder::where('id', $originalOrderId)
-                ->where('tenant_id', $tenantId)
-                ->findOrEmpty();
-            if ($original->isEmpty()) {
-                self::failWithCode('原进货单不存在', 'RETURN_ORIGINAL_NOT_FOUND');
-                return false;
-            }
-
         }
 
         Db::startTrans();
         try {
+            $lockedTenantId = (int)Db::name('tenant')
+                ->where('id', $tenantId)
+                ->where('disable', 0)
+                ->lock(true)
+                ->value('id');
+            if ($lockedTenantId !== $tenantId) {
+                self::throwFailure('租户无效', 'RETURN_ORDER_NOT_FOUND');
+            }
+            $order = PurchaseReturnOrder::where('id', (int)$params['id'])
+                ->where('tenant_id', $tenantId)
+                ->lock(true)
+                ->findOrEmpty();
+            if ($order->isEmpty()) {
+                self::throwFailure('采购退货单不存在', 'RETURN_ORDER_NOT_FOUND');
+            }
+            $orderData = $order->toArray();
+            $originalOrderId = (int)$order->original_supply_order_id;
+            if ($originalOrderId <= 0) {
+                self::throwFailure('原进货单不存在', 'RETURN_ORIGINAL_NOT_FOUND');
+            }
+            $original = SupplyOrder::where('id', $originalOrderId)
+                ->where('tenant_id', $tenantId)
+                ->lock(true)
+                ->findOrEmpty();
+            if ($original->isEmpty()) {
+                self::throwFailure('原进货单不存在', 'RETURN_ORIGINAL_NOT_FOUND');
+            }
             if (!StockService::rollback((int)$order->id, self::ORDER_TYPE)) {
                 self::throwFailure('旧库存回滚失败', 'RETURN_STOCK_FAILED');
             }
@@ -254,7 +317,7 @@ class PurchaseReturnOrderLogic extends BaseLogic
                 self::throwFailure('旧应付回滚失败', 'RETURN_FINANCE_FAILED');
             }
             PurchaseReturnOrderDetail::where('purchase_return_order_id', (int)$order->id)
-                ->where('tenant_id', (int)(request()->tenantId ?? 0))
+                ->where('tenant_id', $tenantId)
                 ->delete();
             $order->delete();
             self::refreshSupplyReturnStatus($originalOrderId);
@@ -290,8 +353,13 @@ class PurchaseReturnOrderLogic extends BaseLogic
     public static function detail(array $params): array|false
     {
         self::clearError();
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) {
+            self::failWithCode('租户无效', 'RETURN_ORDER_NOT_FOUND');
+            return false;
+        }
         $order = PurchaseReturnOrder::where('id', (int)$params['id'])
-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->where('tenant_id', $tenantId)
             ->findOrEmpty();
         if ($order->isEmpty()) {
             self::failWithCode('采购退货单不存在', 'RETURN_ORDER_NOT_FOUND');
@@ -300,7 +368,7 @@ class PurchaseReturnOrderLogic extends BaseLogic
 
         $item = self::formatItem($order->toArray(), true);
         $detailRows = PurchaseReturnOrderDetail::where('purchase_return_order_id', (int)$order->id)
-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->where('tenant_id', $tenantId)
             ->order(['sort' => 'asc', 'id' => 'asc'])
             ->select()
             ->toArray();
@@ -469,8 +537,7 @@ class PurchaseReturnOrderLogic extends BaseLogic
         $byGoods = [];
         foreach ($originalRows as $row) {
             $byId[(int)$row['id']] = $row;
-            $key = (int)$row['goods_id'] . ':' . (int)($row['sku_id'] ?? 0);
-            $byGoods[$key] = $row;
+            $byGoods[self::goodsSkuPurchaseReturnKey($row)] = $row;
         }
 
         $returnedMap = self::returnedSupplyQtyMap($originalOrderId, $ignoreReturnOrderId);
@@ -479,7 +546,13 @@ class PurchaseReturnOrderLogic extends BaseLogic
             $originLineId = (int)($item['original_supply_order_list_id'] ?? $item['original_order_goods_id'] ?? $item['order_goods_id'] ?? 0);
             $goodsId = (int)($item['goods_id'] ?? $item['id'] ?? 0);
             $skuId = (int)($item['sku_id'] ?? 0);
-            $origin = $originLineId > 0 ? ($byId[$originLineId] ?? null) : ($byGoods[$goodsId . ':' . $skuId] ?? null);
+            $batchId = (int)($item['batch_id'] ?? 0);
+            $originKey = self::goodsSkuPurchaseReturnKey([
+                'goods_id' => $goodsId,
+                'sku_id' => $skuId,
+                'batch_id' => $batchId,
+            ]);
+            $origin = $originLineId > 0 ? ($byId[$originLineId] ?? null) : ($byGoods[$originKey] ?? null);
             if (!$origin) {
                 self::failWithCode('退货商品不属于原进货单', 'RETURN_ORIGINAL_NOT_FOUND');
                 return false;
@@ -515,6 +588,7 @@ class PurchaseReturnOrderLogic extends BaseLogic
                 'original_supply_order_list_id' => $originLineId,
                 'goods_id' => (int)$origin['goods_id'],
                 'sku_id' => (int)($origin['sku_id'] ?? 0),
+                'batch_id' => (int)($origin['batch_id'] ?? 0),
                 'goods_name' => (string)($origin['name'] ?? $goodsModel->name),
                 'unit_name' => (string)($origin['units'] ?? $goodsModel->units),
                 'original_num' => number_format((float)$originalQty, 4, '.', ''),
@@ -529,6 +603,15 @@ class PurchaseReturnOrderLogic extends BaseLogic
         return $rows;
     }
 
+    protected static function goodsSkuPurchaseReturnKey(array $row): string
+    {
+        $key = 'goods:' . (int)($row['goods_id'] ?? 0)
+            . ':' . (int)($row['sku_id'] ?? 0);
+        $batchId = (int)($row['batch_id'] ?? 0);
+
+        return $batchId === 0 ? $key : $key . ':' . $batchId;
+    }
+
     protected static function replaceDetails(int $orderId, array $rows): void
     {
         PurchaseReturnOrderDetail::where('purchase_return_order_id', $orderId)
@@ -537,6 +620,10 @@ class PurchaseReturnOrderLogic extends BaseLogic
 
         foreach ($rows as $row) {
             $row['purchase_return_order_id'] = $orderId;
+            // purchase_return_order_lists has no batch_id column. Keep the
+            // authoritative batch on the in-memory row used for StockService,
+            // but do not send a non-schema field to the detail insert.
+            unset($row['batch_id']);
             PurchaseReturnOrderDetail::create($row);
         }
     }

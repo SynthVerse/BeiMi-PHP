@@ -9,7 +9,6 @@ use app\common\model\jxc\PayableFlow;
 
 class FinanceService
 {
-    private const TYPE_SALES_ROLLBACK = 4;
     /**
      * 增加客户应收（销售出单时调用）
      */
@@ -87,11 +86,13 @@ class FinanceService
         $beforeAmount = (string)$customer->order_receivable;
         $afterAmount = bcsub($beforeAmount, $amount, 2);
 
-        Customer::where('id', $customerId)->where('tenant_id', $tenantId)->update([
-            'order_receivable' => $afterAmount,
-            'order_pay_money' => bcadd((string)$customer->order_pay_money, $amount, 2),
-            'update_time' => time(),
-        ]);
+        $update = ['order_receivable' => $afterAmount, 'update_time' => time()];
+        if ($flowType === ReceivableFlow::TYPE_RETURN_REDUCE) {
+            $update['order_money'] = bcsub((string)$customer->order_money, $amount, 2);
+        } else {
+            $update['order_pay_money'] = bcadd((string)$customer->order_pay_money, $amount, 2);
+        }
+        Customer::where('id', $customerId)->where('tenant_id', $tenantId)->update($update);
 
         ReceivableFlow::create([
             'tenant_id'     => (int)(request()->tenantId ?? 0),
@@ -124,38 +125,64 @@ class FinanceService
             ->lock(true)
             ->select();
 
+        $isReturn = $orderType === 'sales-return';
+        $sourceType = $isReturn ? ReceivableFlow::TYPE_RETURN_REDUCE : ReceivableFlow::TYPE_SALES_ADD;
+        $rollbackType = $isReturn ? ReceivableFlow::TYPE_RETURN_ROLLBACK : ReceivableFlow::TYPE_ORDER_ROLLBACK;
         $netByCustomer = [];
         foreach ($flows as $flow) {
             $customerId = (int)$flow->customer_id;
-            $amount = (string)$flow->amount;
-            if (!isset($netByCustomer[$customerId])) $netByCustomer[$customerId] = '0.00';
-            if ((int)$flow->flow_type === ReceivableFlow::TYPE_SALES_ADD) {
-                $netByCustomer[$customerId] = bcadd($netByCustomer[$customerId], $amount, 2);
-            } elseif ((int)$flow->flow_type === self::TYPE_SALES_ROLLBACK) {
-                $netByCustomer[$customerId] = bcsub($netByCustomer[$customerId], $amount, 2);
+            if (!isset($netByCustomer[$customerId])) {
+                $netByCustomer[$customerId] = [
+                    'source' => '0.00',
+                    'rollback' => '0.00',
+                    'order_sn' => (string)$flow->order_sn,
+                ];
+            }
+            if ((int)$flow->flow_type === $sourceType) {
+                $netByCustomer[$customerId]['source'] = bcadd(
+                    $netByCustomer[$customerId]['source'],
+                    (string)$flow->amount,
+                    2
+                );
+            } elseif ((int)$flow->flow_type === $rollbackType) {
+                $netByCustomer[$customerId]['rollback'] = bcadd(
+                    $netByCustomer[$customerId]['rollback'],
+                    (string)$flow->amount,
+                    2
+                );
             }
         }
         ksort($netByCustomer, SORT_NUMERIC);
-        foreach ($netByCustomer as $customerId => $net) {
-            if (bccomp($net, '0', 2) <= 0) continue;
+        foreach ($netByCustomer as $customerId => $totals) {
+            if (bccomp($totals['rollback'], $totals['source'], 2) > 0) {
+                throw new \RuntimeException('应收回滚补偿超过原始流水');
+            }
+            $remaining = bcsub($totals['source'], $totals['rollback'], 2);
+            if (bccomp($remaining, '0', 2) === 0) {
+                continue;
+            }
             $customer = Customer::where('id', (int)$customerId)->where('tenant_id', $tenantId)->lock(true)->find();
             if (!$customer) return false;
             $beforeAmount = (string)$customer->order_receivable;
-            $afterAmount = bcsub($beforeAmount, $net, 2);
+            $afterAmount = $isReturn
+                ? bcadd($beforeAmount, $remaining, 2)
+                : bcsub($beforeAmount, $remaining, 2);
+            $orderMoney = $isReturn
+                ? bcadd((string)$customer->order_money, $remaining, 2)
+                : bcsub((string)$customer->order_money, $remaining, 2);
             Customer::where('id', (int)$customerId)->where('tenant_id', $tenantId)->update([
                 'order_receivable' => $afterAmount,
-                'order_money' => bcsub((string)$customer->order_money, $net, 2),
+                'order_money' => $orderMoney,
                 'update_time' => time(),
             ]);
-            $firstFlow = $flows->first();
             ReceivableFlow::create([
                 'tenant_id' => $tenantId,
                 'customer_id' => (int)$customerId,
                 'order_id' => $orderId,
                 'order_type' => $orderType,
-                'order_sn' => (string)($firstFlow->order_sn ?? ''),
-                'flow_type' => self::TYPE_SALES_ROLLBACK,
-                'amount' => $net,
+                'order_sn' => $totals['order_sn'],
+                'flow_type' => $rollbackType,
+                'amount' => $remaining,
                 'before_amount' => $beforeAmount,
                 'after_amount' => $afterAmount,
                 'admin_id' => (int)(request()->adminId ?? 0),
@@ -178,11 +205,15 @@ class FinanceService
         string $orderSn,
         string $remark = ''
     ): bool {
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) {
+            return false;
+        }
         if (bccomp($amount, '0', 2) <= 0) {
             return true;
         }
 
-        $vendor = Vendor::where('id', $supplierId)->lock(true)->find();
+        $vendor = Vendor::where('id', $supplierId)->where('tenant_id', $tenantId)->lock(true)->find();
         if (!$vendor) {
             return false;
         }
@@ -190,7 +221,7 @@ class FinanceService
         $beforeAmount = (string)($vendor->order_payable ?? '0.00');
         $afterAmount = bcadd($beforeAmount, $amount, 2);
 
-        Vendor::where('id', $supplierId)->update([
+        Vendor::where('id', $supplierId)->where('tenant_id', $tenantId)->update([
             'order_payable' => $afterAmount,
             'order_money' => bcadd((string)$vendor->order_money, $amount, 2),
             'update_time' => time(),
@@ -226,11 +257,15 @@ class FinanceService
         string $remark = '',
         int $flowType = PayableFlow::TYPE_PAYMENT
     ): bool {
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) {
+            return false;
+        }
         if (bccomp($amount, '0', 2) <= 0) {
             return true;
         }
 
-        $vendor = Vendor::where('id', $supplierId)->lock(true)->find();
+        $vendor = Vendor::where('id', $supplierId)->where('tenant_id', $tenantId)->lock(true)->find();
         if (!$vendor) {
             return false;
         }
@@ -247,10 +282,10 @@ class FinanceService
         } else {
             $update['order_paid_money'] = bcadd((string)($vendor->order_paid_money ?? '0.00'), $amount, 2);
         }
-        Vendor::where('id', $supplierId)->update($update);
+        Vendor::where('id', $supplierId)->where('tenant_id', $tenantId)->update($update);
 
         PayableFlow::create([
-            'tenant_id'     => (int)(request()->tenantId ?? 0),
+            'tenant_id'     => $tenantId,
             'supplier_id'   => $supplierId,
             'order_id'      => $orderId,
             'order_type'    => $orderType,
@@ -272,60 +307,95 @@ class FinanceService
      */
     public static function rollbackPayable(int $orderId, string $orderType): bool
     {
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) {
+            return false;
+        }
         $flows = PayableFlow::where('order_id', $orderId)
             ->where('order_type', $orderType)
+            ->where('tenant_id', $tenantId)
+            ->lock(true)
             ->select();
 
+        $isReturn = $orderType === 'purchase-return';
+        $sourceType = $isReturn ? PayableFlow::TYPE_RETURN_REDUCE : PayableFlow::TYPE_SUPPLY_ADD;
+        $rollbackType = $isReturn ? PayableFlow::TYPE_RETURN_ROLLBACK : PayableFlow::TYPE_ORDER_ROLLBACK;
+        $netBySupplier = [];
         foreach ($flows as $flow) {
             $supplierId = (int)$flow->supplier_id;
-            $vendor = Vendor::where('id', $supplierId)->lock(true)->find();
+            if (!isset($netBySupplier[$supplierId])) {
+                $netBySupplier[$supplierId] = [
+                    'source' => '0.00',
+                    'rollback' => '0.00',
+                    'order_sn' => (string)$flow->order_sn,
+                ];
+            }
+            if ((int)$flow->flow_type === $sourceType) {
+                $netBySupplier[$supplierId]['source'] = bcadd(
+                    $netBySupplier[$supplierId]['source'],
+                    (string)$flow->amount,
+                    2
+                );
+            } elseif ((int)$flow->flow_type === $rollbackType) {
+                $netBySupplier[$supplierId]['rollback'] = bcadd(
+                    $netBySupplier[$supplierId]['rollback'],
+                    (string)$flow->amount,
+                    2
+                );
+            }
+        }
+
+        ksort($netBySupplier, SORT_NUMERIC);
+        foreach ($netBySupplier as $supplierId => $totals) {
+            if (bccomp($totals['rollback'], $totals['source'], 2) > 0) {
+                throw new \RuntimeException('应付回滚补偿超过原始流水');
+            }
+            $remaining = bcsub($totals['source'], $totals['rollback'], 2);
+            if (bccomp($remaining, '0', 2) === 0) {
+                continue;
+            }
+            $vendor = Vendor::where('id', (int)$supplierId)
+                ->where('tenant_id', $tenantId)
+                ->lock(true)
+                ->find();
             if (!$vendor) {
                 return false;
             }
-
-            if ($flow->flow_type == PayableFlow::TYPE_SUPPLY_ADD) {
-                $beforeAmount = (string)($vendor->order_payable ?? '0.00');
-                $afterAmount = bcsub($beforeAmount, (string)$flow->amount, 2);
-                $updated = Vendor::where('id', $supplierId)->update([
+            $beforeAmount = (string)($vendor->order_payable ?? '0.00');
+            $afterAmount = $isReturn
+                ? bcadd($beforeAmount, $remaining, 2)
+                : bcsub($beforeAmount, $remaining, 2);
+            $orderMoney = $isReturn
+                ? bcadd((string)($vendor->order_money ?? '0.00'), $remaining, 2)
+                : bcsub((string)($vendor->order_money ?? '0.00'), $remaining, 2);
+            $updated = Vendor::where('id', (int)$supplierId)
+                ->where('tenant_id', $tenantId)
+                ->update([
                     'order_payable' => $afterAmount,
-                    'order_money' => bcsub((string)($vendor->order_money ?? '0.00'), (string)$flow->amount, 2),
+                    'order_money' => $orderMoney,
                     'update_time' => time(),
                 ]);
-                if ($updated === false) {
-                    return false;
-                }
-                self::createPayableRollbackFlow($supplierId, $orderId, $orderType, (string)$flow->order_sn, PayableFlow::TYPE_PAYMENT, (string)$flow->amount, $beforeAmount, $afterAmount);
-            } elseif ($flow->flow_type == PayableFlow::TYPE_PAYMENT) {
-                $beforeAmount = (string)($vendor->order_payable ?? '0.00');
-                $afterAmount = bcadd($beforeAmount, (string)$flow->amount, 2);
-                $updated = Vendor::where('id', $supplierId)->update([
-                    'order_payable' => $afterAmount,
-                    'order_paid_money' => bcsub((string)($vendor->order_paid_money ?? '0.00'), (string)$flow->amount, 2),
-                    'update_time' => time(),
-                ]);
-                if ($updated === false) {
-                    return false;
-                }
-                self::createPayableRollbackFlow($supplierId, $orderId, $orderType, (string)$flow->order_sn, PayableFlow::TYPE_SUPPLY_ADD, (string)$flow->amount, $beforeAmount, $afterAmount);
-            } elseif ($flow->flow_type == PayableFlow::TYPE_RETURN_REDUCE) {
-                $beforeAmount = (string)($vendor->order_payable ?? '0.00');
-                $afterAmount = bcadd($beforeAmount, (string)$flow->amount, 2);
-                $updated = Vendor::where('id', $supplierId)->update([
-                    'order_payable' => $afterAmount,
-                    'order_money' => bcadd((string)($vendor->order_money ?? '0.00'), (string)$flow->amount, 2),
-                    'update_time' => time(),
-                ]);
-                if ($updated === false) {
-                    return false;
-                }
-                self::createPayableRollbackFlow($supplierId, $orderId, $orderType, (string)$flow->order_sn, PayableFlow::TYPE_SUPPLY_ADD, (string)$flow->amount, $beforeAmount, $afterAmount);
+            if ($updated === false) {
+                return false;
             }
+            self::createPayableRollbackFlow(
+                $tenantId,
+                (int)$supplierId,
+                $orderId,
+                $orderType,
+                $totals['order_sn'],
+                $rollbackType,
+                $remaining,
+                $beforeAmount,
+                $afterAmount
+            );
         }
 
         return true;
     }
 
     protected static function createPayableRollbackFlow(
+        int $tenantId,
         int $supplierId,
         int $orderId,
         string $orderType,
@@ -336,7 +406,7 @@ class FinanceService
         string $afterAmount
     ): void {
         PayableFlow::create([
-            'tenant_id'     => (int)(request()->tenantId ?? 0),
+            'tenant_id'     => $tenantId,
             'supplier_id'   => $supplierId,
             'order_id'      => $orderId,
             'order_type'    => $orderType,

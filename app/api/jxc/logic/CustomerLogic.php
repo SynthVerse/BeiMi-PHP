@@ -9,6 +9,7 @@ use app\common\model\jxc\SalesOrder;
 use app\common\model\jxc\SalesReturnOrder;
 use app\common\model\jxc\PurchaseOrder;
 use app\common\model\jxc\OrderGoods;
+use app\common\model\jxc\ReceivableFlow;
 use think\facade\Db;
 use think\facade\Log;
 use app\api\jxc\exception\BusinessException;
@@ -19,6 +20,11 @@ class CustomerLogic extends BaseLogic
 
     public static function add(array $params): array|false
     {
+        $tenantId = self::tenantId();
+        if ($tenantId <= 0) {
+            self::setError('租户无效');
+            return false;
+        }
         $params = self::normalizeCustomerTypeParams($params);
         if ($params === false) {
             return false;
@@ -30,7 +36,9 @@ class CustomerLogic extends BaseLogic
 
         $parent = null;
         if ($saveData['parent_id'] > 0) {
-            $parent = Customer::findOrEmpty($saveData['parent_id']);
+            $parent = Customer::where('id', $saveData['parent_id'])
+                ->where('tenant_id', $tenantId)
+                ->findOrEmpty();
             if ($parent->isEmpty() || (int)$parent->parent_id > 0) {
                 self::setError('所属客户不存在');
                 return false;
@@ -105,7 +113,9 @@ class CustomerLogic extends BaseLogic
                 self::setError('当前客户已拥有下属子客户，暂不支持再次绑定');
                 return false;
             }
-            $parent = Customer::findOrEmpty($newParentId);
+            $parent = Customer::where('id', $newParentId)
+                ->where('tenant_id', self::tenantId())
+                ->findOrEmpty();
             if ($parent->isEmpty() || (int)$parent->parent_id > 0) {
                 self::setError('所属客户不存在');
                 return false;
@@ -127,7 +137,9 @@ class CustomerLogic extends BaseLogic
                 self::refreshChildrenCount($newParentId);
             }
             if ($newParentId === 0 && $oldGroupId !== (int)$saveData['group_id']) {
-                Customer::where('parent_id', (int)$model->id)->update(['group_id' => (int)$saveData['group_id']]);
+                Customer::where('parent_id', (int)$model->id)
+                    ->where('tenant_id', self::tenantId())
+                    ->update(['group_id' => (int)$saveData['group_id']]);
             }
             self::refreshGroupCounts([$oldGroupId, (int)$saveData['group_id']]);
             Db::commit();
@@ -150,7 +162,14 @@ class CustomerLogic extends BaseLogic
 
     public static function delete(array $params): array|false
     {
-        $model = Customer::findOrEmpty((int)$params['id']);
+        $tenantId = self::tenantId();
+        if ($tenantId <= 0) {
+            self::setError('租户无效');
+            return false;
+        }
+        $model = Customer::where('id', (int)$params['id'])
+            ->where('tenant_id', $tenantId)
+            ->findOrEmpty();
         if ($model->isEmpty()) {
             self::setError('客户不存在');
             return false;
@@ -159,20 +178,22 @@ class CustomerLogic extends BaseLogic
         $customerId = (int)$model->id;
         $parentId = (int)$model->parent_id;
         $groupId = (int)$model->group_id;
-        $affectedStoreCount = self::childrenCount($customerId);
+        $affectedStoreCount = (int)Customer::where('parent_id', $customerId)
+            ->where('tenant_id', $tenantId)
+            ->count();
 
         // 业务占用检查
-        $salesCount = SalesOrder::where('customer_id', $customerId)->count();
+        $salesCount = SalesOrder::where('customer_id', $customerId)->where('tenant_id', $tenantId)->count();
         if ($salesCount > 0) {
             self::setError('该客户有关联销售单，请先删除相关订单后再删除');
             return false;
         }
-        $returnCount = SalesReturnOrder::where('customer_id', $customerId)->count();
+        $returnCount = SalesReturnOrder::where('customer_id', $customerId)->where('tenant_id', $tenantId)->count();
         if ($returnCount > 0) {
             self::setError('该客户有关联退货单，请先删除相关订单后再删除');
             return false;
         }
-        $purchaseCount = PurchaseOrder::where('customer_id', $customerId)->count();
+        $purchaseCount = PurchaseOrder::where('customer_id', $customerId)->where('tenant_id', $tenantId)->count();
         if ($purchaseCount > 0) {
             self::setError('该客户有关联订货单，请先删除相关订单后再删除');
             return false;
@@ -181,10 +202,12 @@ class CustomerLogic extends BaseLogic
         Db::startTrans();
         try {
             if ($affectedStoreCount > 0) {
-                Customer::where('parent_id', $customerId)->update([
-                    'parent_id' => 0,
-                    'is_store' => 0,
-                ]);
+                Customer::where('parent_id', $customerId)
+                    ->where('tenant_id', $tenantId)
+                    ->update([
+                        'parent_id' => 0,
+                        'is_store' => 0,
+                    ]);
             }
             $model->delete();
             self::refreshChildrenCount($parentId);
@@ -212,33 +235,51 @@ class CustomerLogic extends BaseLogic
 
     public static function detail(array $params): array
     {
-        $model = Customer::findOrEmpty((int)$params['id']);
+        $tenantId = self::tenantId();
+        if ($tenantId <= 0) {
+            return [];
+        }
+        $model = Customer::where('id', (int)$params['id'])
+            ->where('tenant_id', $tenantId)
+            ->findOrEmpty();
         if ($model->isEmpty()) {
             return [];
         }
 
-        return self::formatItem($model->toArray(), true);
+        return self::formatItem($model->toArray(), true, [], [], $tenantId);
     }
 
     public static function children(array $params): array
     {
+        $tenantId = self::tenantId();
+        if ($tenantId <= 0) {
+            return ['parent_id' => (int)$params['parent_id'], 'data' => []];
+        }
         $parentId = (int)$params['parent_id'];
         $children = Customer::where('parent_id', $parentId)
+            ->where('tenant_id', $tenantId)
             ->order(['customer_name' => 'asc', 'id' => 'desc'])
             ->select()
             ->toArray();
 
         return [
             'parent_id' => $parentId,
-            'data' => self::formatList($children),
+            'data' => self::formatList($children, false, $tenantId),
         ];
     }
 
     public static function summary(array $params): array
     {
+        $tenantId = self::tenantId();
+        if ($tenantId <= 0) {
+            return [];
+        }
         $parentId = (int)$params['parent_id'];
-        $target = Customer::findOrEmpty($parentId);
-        $children = self::formatList(Customer::where('parent_id', $parentId)->select()->toArray());
+        $target = Customer::where('id', $parentId)->where('tenant_id', $tenantId)->findOrEmpty();
+        $children = self::formatList(Customer::where('parent_id', $parentId)
+            ->where('tenant_id', $tenantId)
+            ->select()
+            ->toArray(), false, $tenantId);
         $selfAmount = $target->isEmpty() ? '0.00' : (string)$target->order_receivable;
         $storeAmount = array_reduce($children, function ($sum, $item) {
             return bcadd($sum, (string)($item['order_receivable'] ?? '0.00'), 2);
@@ -265,8 +306,8 @@ class CustomerLogic extends BaseLogic
     {
         $parentId = (int)$params['parent_id'];
         $storeId = (int)$params['store_id'];
-        $parent = Customer::findOrEmpty($parentId);
-        $store = Customer::findOrEmpty($storeId);
+        $parent = Customer::where('id', $parentId)->where('tenant_id', self::tenantId())->findOrEmpty();
+        $store = Customer::where('id', $storeId)->where('tenant_id', self::tenantId())->findOrEmpty();
 
         if ($parent->isEmpty() || $store->isEmpty()) {
             self::setError('绑定失败，客户不存在');
@@ -333,7 +374,7 @@ class CustomerLogic extends BaseLogic
             return false;
         }
 
-        $store = Customer::findOrEmpty($storeId);
+        $store = Customer::where('id', $storeId)->where('tenant_id', self::tenantId())->findOrEmpty();
         if ($store->isEmpty()) {
             self::setError('子客户不存在');
             return false;
@@ -368,7 +409,7 @@ class CustomerLogic extends BaseLogic
     public static function assignGroup(array $params): array|false
     {
         $customerId = (int)($params['customer_id'] ?? $params['id'] ?? 0);
-        $customer = Customer::findOrEmpty($customerId);
+        $customer = Customer::where('id', $customerId)->where('tenant_id', self::tenantId())->findOrEmpty();
         if ($customer->isEmpty()) {
             self::setError('客户不存在');
             return false;
@@ -388,7 +429,9 @@ class CustomerLogic extends BaseLogic
         Db::startTrans();
         try {
             $customer->save(['group_id' => (int)$group->id]);
-            Customer::where('parent_id', $customerId)->update(['group_id' => (int)$group->id]);
+            Customer::where('parent_id', $customerId)
+                ->where('tenant_id', self::tenantId())
+                ->update(['group_id' => (int)$group->id]);
             self::refreshGroupCounts([$oldGroupId, (int)$group->id]);
             Db::commit();
             return self::detail(['id' => $customerId]);
@@ -410,7 +453,9 @@ class CustomerLogic extends BaseLogic
 
     public static function setStatus(array $params): array|false
     {
-        $model = Customer::findOrEmpty((int)$params['id']);
+        $model = Customer::where('id', (int)$params['id'])
+            ->where('tenant_id', self::tenantId())
+            ->findOrEmpty();
         if ($model->isEmpty()) {
             self::setError('客户不存在');
             return false;
@@ -425,7 +470,9 @@ class CustomerLogic extends BaseLogic
         try {
             $model->save(['is_disabled' => $isDisabled]);
             if ($cascadeChildren && (int)$model->parent_id === 0) {
-                Customer::where('parent_id', (int)$model->id)->update(['is_disabled' => $isDisabled]);
+                Customer::where('parent_id', (int)$model->id)
+                    ->where('tenant_id', self::tenantId())
+                    ->update(['is_disabled' => $isDisabled]);
             }
             Db::commit();
             return self::detail(['id' => (int)$model->id]);
@@ -449,6 +496,10 @@ class CustomerLogic extends BaseLogic
     {
         $customerId = (int)$params['customer_id'];
         $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) {
+            self::setError('租户无效');
+            return false;
+        }
         $customer = Customer::where('id', $customerId)
             ->where('tenant_id', $tenantId)
             ->findOrEmpty();
@@ -457,8 +508,8 @@ class CustomerLogic extends BaseLogic
             return false;
         }
 
-        $amount = max(0, (float)($params['money'] ?? $params['amount'] ?? 0));
-        if ($amount <= 0) {
+        $amount = self::money(max(0, (float)($params['money'] ?? $params['amount'] ?? 0)));
+        if (bccomp($amount, '0', 2) <= 0) {
             self::setError('请输入付款金额');
             return false;
         }
@@ -480,12 +531,26 @@ class CustomerLogic extends BaseLogic
                 return false;
             }
 
-            $beforeReceivable = (float)($model->order_receivable ?? 0);
-            $beforePaid = (float)($model->order_pay_money ?? 0);
-            $model->save([
-                'order_receivable' => self::money(max(0, $beforeReceivable - $amount)),
-                'order_pay_money' => self::money($beforePaid + $amount),
-            ]);
+            $beforeReceivable = (string)($model->order_receivable ?? '0.00');
+            if (bccomp($amount, $beforeReceivable, 2) > 0) {
+                self::setError('收款金额不能超过当前欠额');
+                Db::rollback();
+                return false;
+            }
+            $orderSn = 'RECEIVE-' . date('YmdHis') . '-' . $customerId . '-' . random_int(1000, 9999);
+            if (!FinanceService::reduceReceivable(
+                $customerId,
+                $amount,
+                0,
+                'manual_receipt',
+                $orderSn,
+                ReceivableFlow::TYPE_PAYMENT,
+                trim((string)($params['remark'] ?? '客户收款'))
+            )) {
+                self::setError('收款失败，请稍后重试');
+                Db::rollback();
+                return false;
+            }
             Db::commit();
             return self::detail(['id' => $customerId]);
         } catch (BusinessException $e) {
@@ -515,7 +580,11 @@ class CustomerLogic extends BaseLogic
         $pageSize = max(1, min(100, (int)($params['pagesize'] ?? 15)));
 
         // 查询客户信息，判断是否为主客户（parent_id=0）
-        $customer = Customer::findOrEmpty($customerId);
+        $tenantId = self::tenantId();
+        if ($tenantId <= 0) {
+            return ['data' => [], 'total' => 0, 'page' => $page, 'pagesize' => $pageSize];
+        }
+        $customer = Customer::where('id', $customerId)->where('tenant_id', $tenantId)->findOrEmpty();
         if ($customer->isEmpty()) {
             return ['data' => [], 'total' => 0, 'page' => $page, 'pagesize' => $pageSize];
         }
@@ -523,13 +592,14 @@ class CustomerLogic extends BaseLogic
         // 构建 customer_id 查询条件：主客户包含所有子客户的销售单
         $customerIds = [$customerId];
         if ((int)$customer->parent_id === 0) {
-            $childIds = Customer::where('parent_id', $customerId)->column('id');
+            $childIds = Customer::where('parent_id', $customerId)->where('tenant_id', $tenantId)->column('id');
             if (!empty($childIds)) {
                 $customerIds = array_merge($customerIds, array_map('intval', $childIds));
             }
         }
 
         $query = SalesOrder::whereIn('customer_id', $customerIds)
+            ->where('tenant_id', $tenantId)
             ->order(['datetimesingle' => 'desc', 'id' => 'desc']);
 
         // 可选时间范围
@@ -598,7 +668,23 @@ class CustomerLogic extends BaseLogic
     {
         $page = max(1, (int)($params['page'] ?? 1));
         $pageSize = max(1, (int)($params['pagesize'] ?? 20));
-        $query = Customer::where('parent_id', 0);
+        $tenantId = self::tenantId();
+        if ($tenantId <= 0) {
+            return [
+                'customers' => [],
+                'total_amount' => '0.00',
+                'customer_count' => 0,
+                'store_count' => 0,
+                'current_page' => $page,
+                'page' => $page,
+                'last_page' => 1,
+                'total' => 0,
+                'pagesize' => $pageSize,
+                'has_more' => false,
+            ];
+        }
+        $query = Customer::where('parent_id', 0)
+            ->where('tenant_id', $tenantId);
         $status = $params['status'] ?? 'all';
         if ($status !== '' && $status !== 'all') {
             $query->where('is_disabled', self::normalizeDisabled($status));
@@ -612,7 +698,7 @@ class CustomerLogic extends BaseLogic
             ->limit(($page - 1) * $pageSize, $pageSize)
             ->select()
             ->toArray();
-        $customers = self::formatList($rows, true);
+        $customers = self::formatList($rows, true, $tenantId);
         $totalAmount = array_reduce($customers, function ($sum, $item) {
             return bcadd($sum, (string)($item['total_receivable'] ?? $item['order_receivable'] ?? '0.00'), 2);
         }, '0.00');
@@ -634,26 +720,38 @@ class CustomerLogic extends BaseLogic
         ];
     }
 
-    public static function formatList(array $rows, bool $includeChildren = false): array
+    public static function formatList(array $rows, bool $includeChildren = false, ?int $tenantId = null): array
     {
+        $tenantId = $tenantId ?? self::tenantId();
+        if ($tenantId <= 0) {
+            return [];
+        }
         $groupIds = array_values(array_unique(array_filter(array_map(fn($item) => (int)($item['group_id'] ?? 0), $rows))));
         $parentIds = array_values(array_unique(array_filter(array_map(fn($item) => (int)($item['parent_id'] ?? 0), $rows))));
-        $groupMap = self::groupNameMap($groupIds);
-        $parentMap = self::parentNameMap($parentIds);
+        $groupMap = self::groupNameMap($groupIds, $tenantId);
+        $parentMap = self::parentNameMap($parentIds, $tenantId);
 
-        return array_map(fn($item) => self::formatItem($item, $includeChildren, $groupMap, $parentMap), $rows);
+        return array_map(fn($item) => self::formatItem($item, $includeChildren, $groupMap, $parentMap, $tenantId), $rows);
     }
 
-    public static function formatItem(array $item, bool $includeChildren = false, array $groupMap = [], array $parentMap = []): array
+    public static function formatItem(array $item, bool $includeChildren = false, array $groupMap = [], array $parentMap = [], ?int $tenantId = null): array
     {
+        $tenantId = $tenantId ?? self::tenantId();
+        if ($tenantId <= 0) {
+            return [];
+        }
         $id = (int)($item['id'] ?? 0);
         $parentId = (int)($item['parent_id'] ?? 0);
         $groupId = (int)($item['group_id'] ?? 0);
-        $groupName = $groupMap[$groupId] ?? self::groupName($groupId);
+        $groupName = $groupMap[$groupId] ?? self::groupName($groupId, $tenantId);
         $childrenRows = $includeChildren && $id > 0
-            ? Customer::where('parent_id', $id)->order(['customer_name' => 'asc', 'id' => 'desc'])->select()->toArray()
+            ? Customer::where('parent_id', $id)
+                ->where('tenant_id', $tenantId)
+                ->order(['customer_name' => 'asc', 'id' => 'desc'])
+                ->select()
+                ->toArray()
             : [];
-        $children = $includeChildren ? self::formatList($childrenRows, false) : null;
+        $children = $includeChildren ? self::formatList($childrenRows, false, $tenantId) : null;
         $childrenCount = count($childrenRows) ?: (int)($item['children_count'] ?? 0);
         $selfReceivable = (string)($item['order_receivable'] ?? '0.00');
         $childrenReceivable = array_reduce($children ?: [], function ($sum, $child) {
@@ -698,16 +796,27 @@ class CustomerLogic extends BaseLogic
 
     public static function groupedCustomers(array $groups, array $params): array
     {
+        $tenantId = self::tenantId();
+        if ($tenantId <= 0) {
+            return [];
+        }
         $status = $params['status'] ?? 'all';
         $keyword = trim((string)($params['keyword'] ?? $params['name'] ?? $params['group_name'] ?? ''));
         $groupIds = array_map(fn($group) => (int)($group['id'] ?? 0), $groups);
         $customers = [];
         if (!empty($groupIds)) {
-            $query = Customer::where('parent_id', 0)->whereIn('group_id', $groupIds);
+            $tenantGroupIds = CustomerGroup::whereIn('id', $groupIds)
+                ->where('tenant_id', $tenantId)
+                ->column('id');
+            $tenantGroupIds = array_map('intval', $tenantGroupIds);
+            $groups = array_values(array_filter($groups, fn($group) => in_array((int)($group['id'] ?? 0), $tenantGroupIds, true)));
+            $query = Customer::where('parent_id', 0)
+                ->where('tenant_id', $tenantId)
+                ->whereIn('group_id', $tenantGroupIds);
             if ($status !== '' && $status !== 'all') {
                 $query->where('is_disabled', self::normalizeDisabled($status));
             }
-            $customers = self::formatList($query->order(['customer_name' => 'asc', 'id' => 'desc'])->select()->toArray(), true);
+            $customers = self::formatList($query->order(['customer_name' => 'asc', 'id' => 'desc'])->select()->toArray(), true, $tenantId);
         }
 
         $customersByGroup = [];
@@ -806,7 +915,8 @@ class CustomerLogic extends BaseLogic
             self::setError('请输入客户名称');
             return false;
         }
-        $query = Customer::where('customer_name', $name);
+        $query = Customer::where('customer_name', $name)
+            ->where('tenant_id', self::tenantId());
         if ($ignoreId > 0) {
             $query->where('id', '<>', $ignoreId);
         }
@@ -822,11 +932,15 @@ class CustomerLogic extends BaseLogic
         $groupId = (int)($params['group_id'] ?? 0);
         $groupName = trim((string)($params['group_name'] ?? $params['name'] ?? ''));
         if ($groupId > 0) {
-            $group = CustomerGroup::findOrEmpty($groupId);
+            $group = CustomerGroup::where('id', $groupId)
+                ->where('tenant_id', self::tenantId())
+                ->findOrEmpty();
             return $group->isEmpty() ? null : $group;
         }
         if ($groupName !== '') {
-            $group = CustomerGroup::where('group_name', $groupName)->findOrEmpty();
+            $group = CustomerGroup::where('group_name', $groupName)
+                ->where('tenant_id', self::tenantId())
+                ->findOrEmpty();
             return $group->isEmpty() ? null : $group;
         }
         return null;
@@ -834,11 +948,14 @@ class CustomerLogic extends BaseLogic
 
     protected static function ensureDefaultGroupId(): int
     {
-        $group = CustomerGroup::where('group_name', self::DEFAULT_GROUP_NAME)->findOrEmpty();
+        $group = CustomerGroup::where('group_name', self::DEFAULT_GROUP_NAME)
+            ->where('tenant_id', self::tenantId())
+            ->findOrEmpty();
         if (!$group->isEmpty()) {
             return (int)$group->id;
         }
         $group = CustomerGroup::create([
+            'tenant_id' => self::tenantId(),
             'group_name' => self::DEFAULT_GROUP_NAME,
             'customer_count' => 0,
             'sort' => 0,
@@ -851,7 +968,9 @@ class CustomerLogic extends BaseLogic
         if ($customerId <= 0) {
             return 0;
         }
-        return (int)Customer::where('parent_id', $customerId)->count();
+        return (int)Customer::where('parent_id', $customerId)
+            ->where('tenant_id', self::tenantId())
+            ->count();
     }
 
     protected static function refreshChildrenCount(int $customerId): void
@@ -859,45 +978,64 @@ class CustomerLogic extends BaseLogic
         if ($customerId <= 0) {
             return;
         }
-        Customer::where('id', $customerId)->update(['children_count' => self::childrenCount($customerId)]);
+        Customer::where('id', $customerId)
+            ->where('tenant_id', self::tenantId())
+            ->update(['children_count' => self::childrenCount($customerId)]);
     }
 
     protected static function refreshGroupCounts(array $groupIds): void
     {
         $groupIds = array_values(array_unique(array_filter(array_map('intval', $groupIds))));
         foreach ($groupIds as $groupId) {
-            $count = Customer::where('group_id', $groupId)->where('parent_id', 0)->count();
-            CustomerGroup::where('id', $groupId)->update(['customer_count' => $count]);
+            $count = Customer::where('group_id', $groupId)
+                ->where('parent_id', 0)
+                ->where('tenant_id', self::tenantId())
+                ->count();
+            CustomerGroup::where('id', $groupId)
+                ->where('tenant_id', self::tenantId())
+                ->update(['customer_count' => $count]);
         }
     }
 
-    protected static function groupNameMap(array $groupIds): array
+    protected static function groupNameMap(array $groupIds, int $tenantId): array
     {
-        if (empty($groupIds)) {
+        if ($tenantId <= 0 || empty($groupIds)) {
             return [];
         }
-        return CustomerGroup::whereIn('id', $groupIds)->column('group_name', 'id');
+        return CustomerGroup::whereIn('id', $groupIds)
+            ->where('tenant_id', $tenantId)
+            ->column('group_name', 'id');
     }
 
-    protected static function parentNameMap(array $parentIds): array
+    protected static function parentNameMap(array $parentIds, int $tenantId): array
     {
-        if (empty($parentIds)) {
+        if ($tenantId <= 0 || empty($parentIds)) {
             return [];
         }
-        return Customer::whereIn('id', $parentIds)->column('customer_name', 'id');
+        return Customer::whereIn('id', $parentIds)
+            ->where('tenant_id', $tenantId)
+            ->column('customer_name', 'id');
     }
 
-    protected static function groupName(int $groupId): string
+    protected static function groupName(int $groupId, int $tenantId): string
     {
-        if ($groupId <= 0) {
+        if ($tenantId <= 0 || $groupId <= 0) {
             return '未分组';
         }
-        return (string)(CustomerGroup::where('id', $groupId)->value('group_name') ?: '未分组');
+        return (string)(CustomerGroup::where('id', $groupId)
+            ->where('tenant_id', $tenantId)
+            ->value('group_name') ?: '未分组');
     }
 
     protected static function truthy(mixed $value): bool
     {
         return $value === true || $value === 1 || $value === '1' || $value === 'true';
+    }
+
+    private static function tenantId(): int
+    {
+        $tenantId = (int)(request()->tenantId ?? 0);
+        return $tenantId > 0 ? $tenantId : 0;
     }
 
     protected static function money(mixed $value): string
