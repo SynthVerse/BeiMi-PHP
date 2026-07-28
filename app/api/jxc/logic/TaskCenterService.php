@@ -515,6 +515,8 @@ class TaskCenterService
         $tasks = WorkTask::where('tenant_id', self::tenantId())
             ->where('reservation_id', $reservationId)
             ->whereIn('status', self::OPEN_STATUSES)
+            ->order(['id' => 'asc'])
+            ->lock(true)
             ->select();
         foreach ($tasks as $task) {
             $from = (string)$task->status;
@@ -532,18 +534,27 @@ class TaskCenterService
     {
         foreach ($rows as $row) {
             $goodsId = (int)($row['goods_id'] ?? 0);
+            $warehouseId = (int)($row['warehouse_id'] ?? 0);
+            $skuId = (int)($row['sku_id'] ?? 0);
+            $specId = (int)($row['spec_id'] ?? 0);
             $remaining = self::qty($row['number'] ?? $row['inbound_num'] ?? $row['actual_base_qty'] ?? 0);
             if ($goodsId <= 0 || bccomp($remaining, '0', 4) <= 0) {
                 continue;
             }
 
-            // P0 intentionally matches procurement inbound by same tenant + goods_id + open FIFO only.
-            // SKU, warehouse, batch, and complex unit matching belong to P2.
-            $tasks = WorkTask::where('tenant_id', self::tenantId())
-                ->where('task_kind', WorkTask::KIND_PROCUREMENT)
-                ->where('goods_id', $goodsId)
-                ->whereIn('status', self::OPEN_STATUSES)
-                ->order(['id' => 'asc'])
+            $tasks = WorkTask::alias('t')
+                ->join('sales_reservation_item i', 'i.id = t.source_id')
+                ->where('t.tenant_id', self::tenantId())
+                ->where('i.tenant_id', self::tenantId())
+                ->where('t.task_kind', WorkTask::KIND_PROCUREMENT)
+                ->where('t.goods_id', $goodsId)
+                ->where('i.warehouse_id', $warehouseId)
+                ->where('i.sku_id', $skuId)
+                ->where('i.spec_id', $specId)
+                ->whereIn('t.status', self::OPEN_STATUSES)
+                ->field('t.*')
+                ->order(['t.id' => 'asc'])
+                ->lock(true)
                 ->select();
 
             foreach ($tasks as $task) {
@@ -578,6 +589,115 @@ class TaskCenterService
                 }
                 $remaining = bcsub($remaining, $inboundNum, 4);
             }
+        }
+    }
+
+    /**
+     * Ensures the single automatic procurement task for one canonical shortage item.
+     * The caller owns the surrounding reservation transaction.
+     */
+    public static function ensureProcurementForReservationItem(array $item): array
+    {
+        $tenantId = self::tenantId();
+        if ($tenantId <= 0 || (int)($item['id'] ?? 0) <= 0 || bccomp((string)($item['shortage_num'] ?? 0), '0', 4) <= 0) {
+            throw new \RuntimeException('JXC_TASK_CREATE_FAILED|缺货采购任务参数无效');
+        }
+
+        $lockedItem = SalesReservationItem::where('tenant_id', $tenantId)
+            ->where('id', (int)$item['id'])
+            ->lock(true)
+            ->findOrEmpty();
+        if ($lockedItem->isEmpty()) {
+            throw new \RuntimeException('JXC_TASK_CREATE_FAILED|销售预定明细不存在');
+        }
+
+        $existing = WorkTask::where('tenant_id', $tenantId)
+            ->where('task_kind', WorkTask::KIND_PROCUREMENT)
+            ->where('role_code', WorkTask::ROLE_PROCUREMENT)
+            ->where('source_type', 'sales_reservation_item')
+            ->where('source_id', (int)$lockedItem->id)
+            ->lock(true)
+            ->find();
+        if ($existing) {
+            if (!in_array((string)$existing->status, [WorkTask::STATUS_PROCESSING, WorkTask::STATUS_COMPLETED, WorkTask::STATUS_CANCELLED], true)) {
+                $existing->save([
+                    'demand_num' => self::qty($lockedItem->shortage_num),
+                    'shortage_num' => self::qty($lockedItem->shortage_num),
+                    'update_by' => self::adminId(),
+                    'update_time' => time(),
+                ]);
+            }
+            return $existing->toArray();
+        }
+
+        $reservation = SalesReservation::where('tenant_id', $tenantId)
+            ->where('id', (int)$lockedItem->reservation_id)
+            ->lock(true)
+            ->findOrEmpty();
+        if ($reservation->isEmpty()) {
+            throw new \RuntimeException('JXC_TASK_CREATE_FAILED|销售预定不存在');
+        }
+
+        try {
+            $task = WorkTask::create([
+                'tenant_id' => $tenantId,
+                'sn' => self::generateTaskSn(),
+                'task_kind' => WorkTask::KIND_PROCUREMENT,
+                'role_code' => WorkTask::ROLE_PROCUREMENT,
+                'source_type' => 'sales_reservation_item',
+                'source_id' => (int)$lockedItem->id,
+                'reservation_id' => (int)$reservation->id,
+                'reservation_sn' => (string)$reservation->sn,
+                'customer_id' => (int)$reservation->customer_id,
+                'customer_name' => (string)$reservation->customer_name,
+                'goods_id' => (int)$lockedItem->goods_id,
+                'goods_name' => (string)$lockedItem->goods_name,
+                'goods_code' => (string)$lockedItem->goods_code,
+                'unit_id' => (int)$lockedItem->unit_id,
+                'unit_name' => (string)$lockedItem->unit_name,
+                'demand_num' => self::qty($lockedItem->shortage_num),
+                'progress_num' => '0.0000',
+                'reserved_num' => '0.0000',
+                'shortage_num' => self::qty($lockedItem->shortage_num),
+                'stock_status' => WorkTask::STOCK_SHORTAGE,
+                'status' => WorkTask::STATUS_PENDING,
+                'priority' => 'normal',
+                'create_by' => self::adminId(),
+                'update_by' => self::adminId(),
+                'create_time' => time(),
+                'update_time' => time(),
+                'delete_time' => null,
+            ]);
+        } catch (\Throwable $e) {
+            $existing = WorkTask::where('tenant_id', $tenantId)
+                ->where('task_kind', WorkTask::KIND_PROCUREMENT)
+                ->where('role_code', WorkTask::ROLE_PROCUREMENT)
+                ->where('source_type', 'sales_reservation_item')
+                ->where('source_id', (int)$lockedItem->id)
+                ->find();
+            if ($existing) {
+                return $existing->toArray();
+            }
+            throw new \RuntimeException('JXC_TASK_CREATE_FAILED|采购任务创建失败');
+        }
+
+        self::log((int)$task->id, 'auto_procurement_create', '销售预定缺货自动创建采购任务', '', WorkTask::STATUS_PENDING, $task->toArray());
+        return $task->toArray();
+    }
+
+    public static function cancelByReservationItem(int $reservationItemId): void
+    {
+        $tasks = WorkTask::where('tenant_id', self::tenantId())
+            ->where('source_type', 'sales_reservation_item')
+            ->where('source_id', $reservationItemId)
+            ->whereIn('status', self::OPEN_STATUSES)
+            ->order(['id' => 'asc'])
+            ->lock(true)
+            ->select();
+        foreach ($tasks as $task) {
+            $from = (string)$task->status;
+            $task->save(['status' => WorkTask::STATUS_CANCELLED, 'status_reason' => '销售预定编辑删除明细', 'update_by' => self::adminId(), 'update_time' => time()]);
+            self::log((int)$task->id, 'cancel_by_reservation_edit', '销售预定编辑删除明细', $from, WorkTask::STATUS_CANCELLED);
         }
     }
 
@@ -631,6 +751,7 @@ class TaskCenterService
             'role_name' => self::ROLE_LABELS[(string)($task['role_code'] ?? '')] ?? (string)($task['role_code'] ?? ''),
             'source_type' => (string)($task['source_type'] ?? ''),
             'source_id' => (int)($task['source_id'] ?? 0),
+            'reservation_item_id' => (string)($task['source_type'] ?? '') === 'sales_reservation_item' ? (int)($task['source_id'] ?? 0) : 0,
             'parent_task_id' => (int)($task['parent_task_id'] ?? 0),
             'reservation_id' => (int)($task['reservation_id'] ?? 0),
             'reservation_sn' => (string)($task['reservation_sn'] ?? ''),
@@ -748,7 +869,7 @@ class TaskCenterService
             ->where('i.tenant_id', self::tenantId())
             ->where('r.tenant_id', self::tenantId())
             ->whereNotIn('r.status', [SalesReservation::STATUS_CANCELLED, SalesReservation::STATUS_CONVERTED])
-            ->field('i.id,i.reservation_id,r.sn AS reservation_sn,r.customer_id,r.customer_name,i.goods_id,i.goods_name,i.goods_code,i.unit_id,i.unit_name,i.num,i.reserved_num,i.shortage_num,i.status');
+            ->field('i.id,i.reservation_id,r.sn AS reservation_sn,r.customer_id,r.customer_name,i.goods_id,i.goods_name,i.goods_code,i.warehouse_id,i.sku_id,i.spec_id,i.unit_id,i.unit_name,i.num,i.reserved_num,i.shortage_num,i.status');
         if (!empty($itemIds)) {
             $query->whereIn('i.id', $itemIds);
         } elseif (!empty($reservationIds)) {

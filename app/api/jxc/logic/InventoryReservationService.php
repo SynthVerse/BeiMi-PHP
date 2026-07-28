@@ -67,6 +67,8 @@ class InventoryReservationService
         $rows = InventoryReservation::where('reservation_id', $reservationId)
             ->where('tenant_id', self::tenantId())
             ->where('status', InventoryReservation::STATUS_ACTIVE)
+            ->order(['id' => 'asc'])
+            ->lock(true)
             ->select();
 
         foreach ($rows as $row) {
@@ -79,11 +81,27 @@ class InventoryReservationService
         }
     }
 
+    public static function releaseReservationItem(int $reservationItemId): void
+    {
+        $rows = InventoryReservation::where('tenant_id', self::tenantId())
+            ->where('reservation_item_id', $reservationItemId)
+            ->where('status', InventoryReservation::STATUS_ACTIVE)
+            ->order(['id' => 'asc'])
+            ->lock(true)
+            ->select();
+        foreach ($rows as $row) {
+            $remaining = bcsub((string)$row->reserved_num, bcadd((string)$row->consumed_num, (string)$row->released_num, 4), 4);
+            $row->save(['released_num' => self::qty(bcadd((string)$row->released_num, $remaining, 4)), 'status' => InventoryReservation::STATUS_RELEASED, 'update_time' => time()]);
+        }
+    }
+
     public static function consumeReservation(int $reservationId): void
     {
         $rows = InventoryReservation::where('reservation_id', $reservationId)
             ->where('tenant_id', self::tenantId())
             ->where('status', InventoryReservation::STATUS_ACTIVE)
+            ->order(['id' => 'asc'])
+            ->lock(true)
             ->select();
 
         foreach ($rows as $row) {

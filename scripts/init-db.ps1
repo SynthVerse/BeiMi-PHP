@@ -20,7 +20,6 @@ $phpPath      = 'C:\Users\ASUS\AppData\Local\Programs\PHP\8.2\php.exe'
 $projectRoot  = 'E:\object\BeiMi\BeiMi-PHP'
 $dbName       = 'lantu'
 $dbUser       = 'root'
-$dbPass       = 'sMBsMrAPSxetC6HR'
 $dbHost       = '127.0.0.1'
 $dbPort       = '3306'
 
@@ -37,7 +36,7 @@ Write-Host '[1/4] 检查 MySQL 是否运行 ...' -ForegroundColor Yellow
 
 $mysqlReady = $false
 try {
-    $result = & $mysqlPath -h $dbHost -P $dbPort -u $dbUser -p"${dbPass}" -e 'SELECT 1' 2>$null
+    $result = & $mysqlPath -h $dbHost -P $dbPort -u $dbUser -e 'SELECT 1' 2>$null
     if ($LASTEXITCODE -eq 0) {
         $mysqlReady = $true
         Write-Host '  MySQL 运行中。' -ForegroundColor Green
@@ -54,7 +53,7 @@ Write-Host ''
 Write-Host '[2/4] 确保数据库存在 ...' -ForegroundColor Yellow
 
 $createDbSql = "CREATE DATABASE IF NOT EXISTS `${dbName}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-& $mysqlPath -h $dbHost -P $dbPort -u $dbUser -p"${dbPass}" -e $createDbSql 2>$null
+& $mysqlPath -h $dbHost -P $dbPort -u $dbUser -e $createDbSql 2>$null
 if ($LASTEXITCODE -eq 0) {
     Write-Host "  数据库 '${dbName}' 已就绪。" -ForegroundColor Green
 } else {
@@ -71,10 +70,8 @@ if (-not (Test-Path $schemaFile)) {
     exit 1
 }
 
-$env:MYSQL_PWD = $dbPass
 & $mysqlPath -h $dbHost -P $dbPort -u $dbUser "${dbName}" -e "source $schemaFile" 2>$null
 $schemaExit = $LASTEXITCODE
-Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue
 
 if ($schemaExit -eq 0) {
     Write-Host '  Schema 执行成功。' -ForegroundColor Green

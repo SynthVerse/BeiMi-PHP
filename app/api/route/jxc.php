@@ -168,6 +168,7 @@ Route::group('', function () {
     // === 销售预定 ===
     Route::get('jxc/sales_reservation/detail', 'jxc.SalesReservation/detail');
     Route::post('jxc/sales_reservation/submit', 'jxc.SalesReservation/submit');
+    Route::post('jxc/sales_reservation/edit', 'jxc.SalesReservation/edit');
     Route::post('jxc/sales_reservation/cancel', 'jxc.SalesReservation/cancel');
     Route::post('jxc/sales_reservation/convert_sales', 'jxc.SalesReservation/convertSales');
     Route::get('jxc/sales_reservation/lists', 'jxc.SalesReservation/lists');

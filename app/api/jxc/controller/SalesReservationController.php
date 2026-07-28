@@ -39,6 +39,16 @@ class SalesReservationController extends BaseJxcController
         return $this->success('取消成功', $result, 1, 1);
     }
 
+    public function edit()
+    {
+        $params = (new SalesReservationValidate())->post()->goCheck('edit');
+        $result = SalesReservationLogic::edit($params);
+        if ($result === false) {
+            return $this->fail(SalesReservationLogic::getError(), SalesReservationLogic::getReturnData() ?: []);
+        }
+        return $this->success('编辑成功', $result, 1, 1);
+    }
+
     public function convertSales()
     {
         $params = (new SalesReservationValidate())->post()->goCheck('convertSales');

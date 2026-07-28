@@ -5,3 +5,17 @@ This repository is the ThinkPHP 8 and LikeAdmin backend. The user-level workflow
 Use project-local PHP, ThinkPHP, LikeAdmin, authentication, tenant-isolation, validation, test, risk-memory, and release guidance when it exists. The global `application-security-boundaries` skill provides the cross-project baseline; local PHP-specific guidance may add stricter requirements.
 
 Protect business files and existing user changes. The legacy BeiMi workflow is compatibility-only for tasks explicitly bound to it before the migration.
+
+## Agent skills
+
+### Issue tracker
+
+Tasks are managed in this repository's GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the default triage labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Use the single-context documentation layout. See `docs/agents/domain.md`.

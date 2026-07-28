@@ -12,5 +12,6 @@
     </testsuites>
     <php>
         <ini name="date.timezone" value="Asia/Shanghai"/>
+        <server name="JXC_PHPUNIT_ENV" value="testing"/>
     </php>
 </phpunit>

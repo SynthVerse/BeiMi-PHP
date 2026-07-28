@@ -25,6 +25,19 @@ class SalesOrderLogic extends BaseLogic
 
     public static function publish(array $params): array|false
     {
+        return self::publishInternal($params, true);
+    }
+
+    /**
+     * Used by canonical reservation conversion. The caller owns the outer transaction.
+     */
+    public static function publishWithinTransaction(array $params): array|false
+    {
+        return self::publishInternal($params, false);
+    }
+
+    private static function publishInternal(array $params, bool $ownsTransaction): array|false
+    {
         $tenantId = (int)(request()->tenantId ?? 0);
         if ($tenantId <= 0) { self::setError('租户无效'); return false; }
         $idempotentKey = trim((string)($params['idempotent_key'] ?? ''));
@@ -33,7 +46,9 @@ class SalesOrderLogic extends BaseLogic
             return false;
         }
 
-        Db::startTrans();
+        if ($ownsTransaction) {
+            Db::startTrans();
+        }
         try {
             $lockedTenantId = (int)Db::name('tenant')
                 ->where('id', $tenantId)
@@ -48,7 +63,9 @@ class SalesOrderLogic extends BaseLogic
                     ->where('idempotent_key', $idempotentKey)
                     ->find();
                 if ($existing) {
-                    Db::commit();
+                    if ($ownsTransaction) {
+                        Db::commit();
+                    }
                     return [
                         'id' => (int)$existing->id,
                         'order_sn' => (string)$existing->order_sn,
@@ -83,27 +100,35 @@ class SalesOrderLogic extends BaseLogic
                 )) { throw new BusinessException('应收处理失败'); }
             }
 
-            Db::commit();
+            if ($ownsTransaction) {
+                Db::commit();
+            }
 
-            AuditService::log(
-                AuditService::MODULE_SALES_ORDER,
-                AuditService::ACTION_CREATE,
-                (int)$order->id,
-                (string)$order->order_sn,
-                null,
-                $built['order']
-            );
+            if ($ownsTransaction) {
+                AuditService::log(
+                    AuditService::MODULE_SALES_ORDER,
+                    AuditService::ACTION_CREATE,
+                    (int)$order->id,
+                    (string)$order->order_sn,
+                    null,
+                    $built['order']
+                );
+            }
 
             return [
                 'id' => (int)$order->id,
                 'order_sn' => (string)$order->order_sn,
             ];
         } catch (BusinessException $e) {
-            Db::rollback();
+            if ($ownsTransaction) {
+                Db::rollback();
+            }
             self::setError($e->getMessage());
             return false;
         } catch (\Throwable $e) {
-            Db::rollback();
+            if ($ownsTransaction) {
+                Db::rollback();
+            }
             Log::error('销售单创建失败: ' . $e->getMessage(), [
                 'file'  => $e->getFile(),
                 'line'  => $e->getLine(),

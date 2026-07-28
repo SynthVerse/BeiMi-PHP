@@ -8,6 +8,11 @@ use app\api\jxc\validate\PurchaseOrderValidate;
 
 class PurchaseOrderController extends BaseJxcController
 {
+    private function legacyReservationRetired()
+    {
+        return $this->fail('旧销售预定写入口已退役', ['error_code' => 'JXC_LEGACY_PURCHASE_RESERVATION_RETIRED']);
+    }
+
     public function lists()
     {
         return $this->dataLists(PurchaseOrderLists::class);
@@ -21,69 +26,37 @@ class PurchaseOrderController extends BaseJxcController
 
     public function add()
     {
-        $params = (new PurchaseOrderValidate())->post()->goCheck('publish');
-        $result = PurchaseOrderLogic::add($params);
-        if ($result === false) {
-            return $this->fail(PurchaseOrderLogic::getError());
-        }
-        return $this->success('添加成功', $result, 1, 1);
+        return $this->legacyReservationRetired();
     }
 
     public function edit()
     {
-        $params = (new PurchaseOrderValidate())->post()->goCheck('edit');
-        $result = PurchaseOrderLogic::edit($params);
-        if ($result === false) {
-            return $this->fail(PurchaseOrderLogic::getError());
-        }
-        return $this->success('编辑成功', $result, 1, 1);
+        return $this->legacyReservationRetired();
     }
 
     public function remove()
     {
-        $params = (new PurchaseOrderValidate())->goCheck('remove');
-        $result = PurchaseOrderLogic::remove($params);
-        if ($result === false) {
-            return $this->fail(PurchaseOrderLogic::getError());
-        }
-        return $this->success('删除成功', $result, 1, 1);
+        return $this->legacyReservationRetired();
     }
 
     public function confirm()
     {
-        $params = (new PurchaseOrderValidate())->post()->goCheck('confirm');
-        $result = PurchaseOrderLogic::confirm($params);
-        if ($result === false) {
-            return $this->fail(PurchaseOrderLogic::getError());
-        }
-        return $this->success('操作成功', $result, 1, 1);
+        return $this->legacyReservationRetired();
     }
 
     public function cancel()
     {
-        $params = (new PurchaseOrderValidate())->post()->goCheck('cancel');
-        $result = PurchaseOrderLogic::cancel($params);
-        if ($result === false) {
-            return $this->fail(PurchaseOrderLogic::getError());
-        }
-        return $this->success('取消成功', $result, 1, 1);
+        return $this->legacyReservationRetired();
     }
 
     public function convertToSalesOrder()
     {
-        $params = (new PurchaseOrderValidate())->post()->goCheck('convertToSalesOrder');
-        $result = PurchaseOrderLogic::convertToSalesOrder($params);
-        if ($result === false) {
-            return $this->fail(PurchaseOrderLogic::getError());
-        }
-        return $this->success('转销售单成功', $result, 1, 1);
+        return $this->legacyReservationRetired();
     }
 
     public function parsePastedText()
     {
-        $params = (new PurchaseOrderValidate())->post()->goCheck('parsePastedText');
-        $result = PurchaseOrderLogic::parsePastedText($params);
-        return $this->data($result);
+        return $this->legacyReservationRetired();
     }
 
     public function statistics()

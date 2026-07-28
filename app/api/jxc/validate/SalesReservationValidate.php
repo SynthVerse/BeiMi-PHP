@@ -27,6 +27,11 @@ class SalesReservationValidate extends BaseValidate
         return $this->only(['id']);
     }
 
+    public function sceneEdit()
+    {
+        return $this->only(['id', 'customer_id', 'customer_name', 'items', 'goods', 'remark']);
+    }
+
     public function sceneConvertSales()
     {
         return $this->only(['id']);

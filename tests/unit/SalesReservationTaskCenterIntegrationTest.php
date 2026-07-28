@@ -30,7 +30,7 @@ final class SalesReservationTaskCenterIntegrationTest extends TestCase
         parent::tearDown();
     }
 
-    public function test_submit_no_longer_creates_work_tasks_and_cancel_cancels_open_task_center_tasks(): void
+    public function test_submit_creates_one_procurement_task_and_cancel_cancels_open_task_center_tasks(): void
     {
         self::assertTrue(class_exists(TaskCenterService::class), TaskCenterService::class . ' should exist');
 
@@ -40,7 +40,11 @@ final class SalesReservationTaskCenterIntegrationTest extends TestCase
         $reservation = $this->submitReservation($goodsId, 12, '取消客户');
 
         self::assertSame('0.0000', InventoryReservationService::availableForGoods($goodsId));
-        self::assertSame(0, WorkTask::where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame(1, WorkTask::where('tenant_id', self::TENANT_ID)
+            ->where('task_kind', WorkTask::KIND_PROCUREMENT)
+            ->where('source_type', 'sales_reservation_item')
+            ->where('source_id', (int)$reservation['items'][0]['id'])
+            ->count());
 
         TaskCenterService::saveAssignment([
             'task_date' => '2026-07-05',

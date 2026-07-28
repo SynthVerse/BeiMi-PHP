@@ -68,7 +68,7 @@ $mysqlStopped = $false
 # 优先使用 mysqladmin shutdown（安全关闭）
 if (Test-Path $mysqlAdmin) {
     try {
-        & $mysqlAdmin -u root -psMBsMrAPSxetC6HR shutdown 2>$null
+        & $mysqlAdmin -u root -p shutdown 2>$null
         if ($LASTEXITCODE -eq 0) {
             Write-Host '  MySQL 正在关闭 (mysqladmin shutdown) ...' -ForegroundColor Green
             # 等待进程退出
