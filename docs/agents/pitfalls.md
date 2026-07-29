@@ -112,3 +112,40 @@
 | 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
 |---|---|---|---|
 | 2026-07-29 | Project #1 / 仓库级库存余额与统一库存原语 | 完整 PHPUnit 在销售预定测试前执行路由契约测试后阻塞或走错连接 | 原契约测试只恢复容器，遗漏了 ThinkORM 静态 DbManager 与调用器。 |
+
+## PIT-0004：外层业务事务中再次开启嵌套事务
+
+- 状态：已防护
+- 首次发生：2026-07-29
+- 最近发生：2026-07-29
+- 复发次数：0
+- 适用范围：`CustomerReportLogic` 等已开启业务事务后调用仓库余额原语的路径
+- 相关问题：无
+
+### 触发场景
+
+两个独立客户报货请求同时对同一租户、仓库和商品提交预留；外层报货事务内调用会自行 `Db::transaction()` 的库存服务方法，或使用会隐式开启事务的 `Model::create()`。
+
+### 根因
+
+ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务入口，以及 `CustomerReport` 模型的 `create()` 隐式事务，都可能在外层客户报货事务中创建内层保存点；并发路径会丢失内层保存点并抛出 `SAVEPOINT trans2 does not exist`。修正保存点问题后，两个请求又会在“不存在的幂等键”或“不存在的客户商品偏好键”的悲观查询上互相持有间隙锁，插入不同键或同一偏好键时触发 MySQL `1213` 死锁。
+
+### 错误做法
+
+在已开启的业务事务中调用 `WarehouseGoodsBalanceService::reserveUpTo()`、`reserve()`、`release()` 或 `consumeReserved()` 等会自行开启事务的入口；或调用会自行管理事务的 ORM 创建接口；或对尚不存在的幂等键、客户商品偏好键做悲观锁查询后插入。
+
+### 正确做法
+
+外层业务事务应调用库存服务的 `*WithinTransaction` 同事务入口，并通过 `Db::name(...)->insert()` 写入报货主从表；只有没有外层事务的调用者才使用服务的独立事务入口。多商品操作必须以库存原语的实际取锁顺序 `(goods_id, warehouse_id)` 排序。幂等键先以普通查询判断，依靠唯一键兜底；客户商品偏好以唯一键上的原子 upsert 写入，不先锁不存在记录；所有客户报货写状态转换仅对 MySQL `1213`/`1205` 做有界重试，最终再按请求指纹回放已成功结果。
+
+### 防线
+
+- 自动化防线：`tests/unit/CustomerReportWorkflowTest.php` 的 `test_two_concurrent_submissions_cannot_over_reserve_one_warehouse_balance()` 使用两个 PHP 进程同时提交，断言一单 `submitted_ready`、一单 `submitted_shortage`，且总预留不超过余额。
+- 架构防线：`WarehouseGoodsBalanceService` 明确提供 `reserveWithinTransaction()`、`reserveUpToWithinTransaction()`、`releaseWithinTransaction()` 与 `consumeReservedWithinTransaction()`；`CustomerReportLogic` 在外层事务内只调用这些入口，并以 Query Builder 写入主表、明细和预留记录。`CustomerReportPreferenceService::remember()` 用唯一键原子 upsert 保存建议数据，不加间隙锁。`transactionWithRetry()` 统一包裹提交外的编辑、补预留、取消、转销售与履约事务；明细按 `(goods_id, warehouse_id)` 排序后才触发库存原语。
+- 决策与知识：本记录及 `docs/adr/0001-客户报货库存边界.md`。
+
+### 发生记录
+
+| 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-07-29 | Project #1 / 客户报货新链路 | 第 7 张并发提交验收 | 既有实现未区分外层事务与 ORM 隐式事务，也对不存在的幂等键和客户商品偏好键加悲观锁。 |

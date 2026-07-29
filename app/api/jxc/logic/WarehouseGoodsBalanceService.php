@@ -46,6 +46,63 @@ class WarehouseGoodsBalanceService
         return self::change($warehouseId, $goodsId, '0.0000', $quantity);
     }
 
+    /**
+     * 在调用方已开启的数据库事务中执行预留，避免嵌套事务保存点冲突。
+     */
+    public static function reserveWithinTransaction(int $warehouseId, int $goodsId, string $quantity)
+    {
+        $quantity = self::normalizeQuantity($quantity);
+        return $quantity === false ? false : self::changeWithinTransaction($warehouseId, $goodsId, '0.0000', $quantity);
+    }
+
+    /**
+     * 在同一行锁内预留当前可用库存与请求量的较小值。
+     *
+     * 返回实际预留的基础单位数量；返回 false 表示参数或租户/仓库/商品无效。
+     * 该方法供新客户报货链路处理缺货，不读取 Goods.stock。
+     */
+    public static function reserveUpTo(int $warehouseId, int $goodsId, string $quantity): string|false
+    {
+        $quantity = self::normalizeQuantity($quantity);
+        if ($quantity === false || $warehouseId <= 0 || $goodsId <= 0) {
+            return false;
+        }
+
+        try {
+            return Db::transaction(static fn() => self::reserveUpToWithinTransaction($warehouseId, $goodsId, $quantity));
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
+    /**
+     * 在调用方已开启的数据库事务中尽量预留可用量；不再建立嵌套事务。
+     */
+    public static function reserveUpToWithinTransaction(int $warehouseId, int $goodsId, string $quantity): string|false
+    {
+        $quantity = self::normalizeQuantity($quantity);
+        if ($quantity === false || $warehouseId <= 0 || $goodsId <= 0) {
+            return false;
+        }
+        $tenantId = self::tenantId();
+        if ($tenantId <= 0) {
+            return false;
+        }
+        $goods = Goods::where('id', $goodsId)->where('tenant_id', $tenantId)->lock(true)->find();
+        if (!$goods || !Db::name('warehouse')->where('id', $warehouseId)->where('tenant_id', $tenantId)->lock(true)->find()) {
+            return false;
+        }
+        $balance = WarehouseGoodsBalance::where('tenant_id', $tenantId)
+            ->where('warehouse_id', $warehouseId)->where('goods_id', $goodsId)
+            ->where('base_unit_id', (int)($goods->unit_id ?? 0))->lock(true)->find();
+        $available = $balance ? self::decimal((string)$balance->available_qty) : '0.0000';
+        $reserved = bccomp($available, $quantity, self::SCALE) < 0 ? $available : $quantity;
+        if (bccomp($reserved, '0.0000', self::SCALE) <= 0) {
+            return '0.0000';
+        }
+        return self::changeWithinTransaction($warehouseId, $goodsId, '0.0000', $reserved) === false ? false : $reserved;
+    }
+
     public static function release(int $warehouseId, int $goodsId, string $quantity)
     {
         $quantity = self::normalizeQuantity($quantity);
@@ -56,6 +113,13 @@ class WarehouseGoodsBalanceService
         return self::change($warehouseId, $goodsId, '0.0000', '-' . $quantity);
     }
 
+    /** 在调用方已开启的数据库事务中释放预留。 */
+    public static function releaseWithinTransaction(int $warehouseId, int $goodsId, string $quantity)
+    {
+        $quantity = self::normalizeQuantity($quantity);
+        return $quantity === false ? false : self::changeWithinTransaction($warehouseId, $goodsId, '0.0000', '-' . $quantity);
+    }
+
     public static function consumeReserved(int $warehouseId, int $goodsId, string $quantity)
     {
         $quantity = self::normalizeQuantity($quantity);
@@ -64,6 +128,13 @@ class WarehouseGoodsBalanceService
         }
 
         return self::change($warehouseId, $goodsId, '-' . $quantity, '-' . $quantity);
+    }
+
+    /** 在调用方已开启的数据库事务中消耗预留并出库。 */
+    public static function consumeReservedWithinTransaction(int $warehouseId, int $goodsId, string $quantity)
+    {
+        $quantity = self::normalizeQuantity($quantity);
+        return $quantity === false ? false : self::changeWithinTransaction($warehouseId, $goodsId, '-' . $quantity, '-' . $quantity);
     }
 
     public static function transfer(int $fromWarehouseId, int $toWarehouseId, int $goodsId, string $quantity)
