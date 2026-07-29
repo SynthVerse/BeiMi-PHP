@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace tests\unit;
 
 use app\api\jxc\logic\SalesReservationLogic;
+use app\api\jxc\logic\WarehouseGoodsBalanceService;
 use think\facade\Db;
 
 trait TaskCenterTestSupport
@@ -204,6 +205,8 @@ SQL;
         }
 
         $this->ensureCommonJxcTables($prefix);
+        $this->ensureTenantFixtures($prefix);
+        $this->ensureWarehouseGoodsBalanceTable();
         $this->ensureNewTaskColumns($prefix);
     }
 
@@ -211,7 +214,7 @@ SQL;
     {
         foreach ([
             'task_print_log', 'work_task_log', 'work_task', 'task_employee_role', 'task_employee',
-            'inventory_reservation', 'sales_reservation_item', 'sales_reservation',
+            'inventory_reservation', 'sales_reservation_item', 'sales_reservation', 'warehouse_goods_balance',
             'goods_loss_record', 'purchase_arrival_detail', 'purchase_arrival', 'goods_batch',
             'order_goods', 'supply_order', 'stock_flow', 'goods_supplier', 'goods_sku',
             'vendor', 'warehouse', 'goods', 'customer',
@@ -264,12 +267,28 @@ SQL;
         return $employeeId;
     }
 
-    protected function submitReservation(int $goodsId, float $num, string $customerName = '测试客户'): array
+    protected function submitReservation(int $goodsId, float $num, string $customerName = '测试客户', int $warehouseId = 0): array
     {
+        if ($warehouseId <= 0) {
+            $existingBalance = Db::name('warehouse_goods_balance')
+                ->where('tenant_id', self::TENANT_ID)
+                ->where('goods_id', $goodsId)
+                ->find();
+            if ($existingBalance) {
+                $warehouseId = (int)$existingBalance['warehouse_id'];
+            } else {
+                $warehouseId = $this->createWarehouse('预定测试仓');
+                $openingStock = (string)Db::name('goods')->where('tenant_id', self::TENANT_ID)->where('id', $goodsId)->value('stock');
+                if (bccomp($openingStock, '0', 4) > 0 && WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, $openingStock) === false) {
+                    throw new \RuntimeException('Unable to seed warehouse stock for reservation test.');
+                }
+            }
+        }
+
         $result = SalesReservationLogic::submit([
             'customer_id' => 1,
             'customer_name' => $customerName,
-            'items' => [['goods_id' => $goodsId, 'num' => $num]],
+            'items' => [['goods_id' => $goodsId, 'num' => $num, 'warehouse_id' => $warehouseId]],
         ]);
         self::assertNotFalse($result);
         return $result;
@@ -363,6 +382,20 @@ CREATE TABLE IF NOT EXISTS `{$prefix}goods` (
   `create_time` int(11) UNSIGNED NOT NULL DEFAULT 0,
   `update_time` int(11) UNSIGNED NOT NULL DEFAULT 0,
   PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE IF NOT EXISTS `{$prefix}goods_units_binding` (
+  `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT,
+  `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0,
+  `goods_id` int(11) UNSIGNED NOT NULL DEFAULT 0,
+  `unit_id` int(11) UNSIGNED NOT NULL DEFAULT 0,
+  `unit_name` varchar(50) NOT NULL DEFAULT '',
+  `is_base_unit` tinyint(1) NOT NULL DEFAULT 0,
+  `sort` int(11) NOT NULL DEFAULT 0,
+  `status` tinyint(1) NOT NULL DEFAULT 1,
+  `create_time` int(11) UNSIGNED NOT NULL DEFAULT 0,
+  `update_time` int(11) UNSIGNED NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_tenant_goods_unit` (`tenant_id`, `goods_id`, `unit_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE TABLE IF NOT EXISTS `{$prefix}warehouse` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -541,6 +574,49 @@ SQL;
         foreach (array_filter(array_map('trim', explode(';', $sql))) as $statement) {
             if ($statement !== '') {
                 Db::execute($statement);
+            }
+        }
+    }
+
+    private function ensureWarehouseGoodsBalanceTable(): void
+    {
+        $prefix = env('database.prefix', 'la_');
+        $tableName = $prefix . 'warehouse_goods_balance';
+        if (!empty(Db::query("SHOW TABLES LIKE '{$tableName}'"))) {
+            return;
+        }
+
+        $migration = dirname(__DIR__, 2) . '/database/migrations/20260729_000001_create_warehouse_goods_balance.sql';
+        $sql = (string)file_get_contents($migration);
+        foreach (array_filter(array_map('trim', explode(';', $sql))) as $statement) {
+            Db::execute($statement);
+        }
+    }
+
+    private function ensureTenantFixtures(string $prefix): void
+    {
+        Db::execute(<<<SQL
+CREATE TABLE IF NOT EXISTS `{$prefix}tenant` (
+  `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT,
+  `sn` varchar(50) NOT NULL,
+  `name` varchar(32) NOT NULL DEFAULT '',
+  `disable` tinyint(1) UNSIGNED NOT NULL DEFAULT 0,
+  `create_time` int(10) NOT NULL,
+  `update_time` int(10) NULL DEFAULT NULL,
+  `delete_time` int(10) NULL DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+SQL);
+
+        foreach ([self::TENANT_ID, self::OTHER_TENANT_ID] as $tenantId) {
+            if (!Db::name('tenant')->where('id', $tenantId)->find()) {
+                Db::name('tenant')->insert([
+                    'id' => $tenantId,
+                    'sn' => 'task-center-' . $tenantId,
+                    'name' => '任务中心测试租户',
+                    'disable' => 0,
+                    'create_time' => time(),
+                ]);
             }
         }
     }

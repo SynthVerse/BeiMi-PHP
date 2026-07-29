@@ -2,46 +2,24 @@
 
 namespace app\api\jxc\logic;
 
-use app\common\model\jxc\Goods;
 use app\common\model\jxc\InventoryReservation;
 use app\common\model\jxc\SalesReservationItem;
 
 class InventoryReservationService
 {
-    public static function availableForGoods(int $goodsId): string
+    public static function availableForGoods(int $goodsId, int $warehouseId): string
     {
-        $goods = Goods::where('id', $goodsId)
-            ->where('tenant_id', self::tenantId())
-            ->find();
-        if (!$goods) {
-            return '0.0000';
-        }
-
-        $stock = (string)$goods->stock;
-        if (bccomp($stock, '0', 4) < 0) {
-            $stock = '0.0000';
-        }
-
-        $rows = InventoryReservation::where('goods_id', $goodsId)
-            ->where('tenant_id', self::tenantId())
-            ->where('status', InventoryReservation::STATUS_ACTIVE)
-            ->select();
-
-        $reserved = '0.0000';
-        foreach ($rows as $row) {
-            $remaining = bcsub((string)$row->reserved_num, bcadd((string)$row->consumed_num, (string)$row->released_num, 4), 4);
-            if (bccomp($remaining, '0', 4) > 0) {
-                $reserved = bcadd($reserved, $remaining, 4);
-            }
-        }
-
-        $available = bcsub($stock, $reserved, 4);
-        return bccomp($available, '0', 4) < 0 ? '0.0000' : self::qty($available);
+        return WarehouseGoodsBalanceService::available($warehouseId, $goodsId);
     }
 
     public static function reserve(array $item, string $num): ?InventoryReservation
     {
-        if (bccomp($num, '0', 4) <= 0) {
+        $warehouseId = (int)($item['warehouse_id'] ?? 0);
+        $goodsId = (int)($item['goods_id'] ?? 0);
+        if ($warehouseId <= 0 || $goodsId <= 0 || bccomp($num, '0', 4) <= 0) {
+            return null;
+        }
+        if (WarehouseGoodsBalanceService::reserve($warehouseId, $goodsId, self::qty($num)) === false) {
             return null;
         }
 
@@ -49,8 +27,8 @@ class InventoryReservationService
             'tenant_id' => self::tenantId(),
             'reservation_id' => (int)$item['reservation_id'],
             'reservation_item_id' => (int)$item['id'],
-            'goods_id' => (int)$item['goods_id'],
-            'warehouse_id' => (int)($item['warehouse_id'] ?? 0),
+            'goods_id' => $goodsId,
+            'warehouse_id' => $warehouseId,
             'sku_id' => (int)($item['sku_id'] ?? 0),
             'spec_id' => (int)($item['spec_id'] ?? 0),
             'reserved_num' => self::qty($num),
@@ -73,6 +51,9 @@ class InventoryReservationService
 
         foreach ($rows as $row) {
             $remaining = bcsub((string)$row->reserved_num, bcadd((string)$row->consumed_num, (string)$row->released_num, 4), 4);
+            if (bccomp($remaining, '0', 4) > 0 && WarehouseGoodsBalanceService::release((int)$row->warehouse_id, (int)$row->goods_id, self::qty($remaining)) === false) {
+                throw new \RuntimeException('Unable to release warehouse reservation.');
+            }
             $row->save([
                 'released_num' => self::qty(bcadd((string)$row->released_num, $remaining, 4)),
                 'status' => InventoryReservation::STATUS_RELEASED,
@@ -91,6 +72,9 @@ class InventoryReservationService
             ->select();
         foreach ($rows as $row) {
             $remaining = bcsub((string)$row->reserved_num, bcadd((string)$row->consumed_num, (string)$row->released_num, 4), 4);
+            if (bccomp($remaining, '0', 4) > 0 && WarehouseGoodsBalanceService::release((int)$row->warehouse_id, (int)$row->goods_id, self::qty($remaining)) === false) {
+                throw new \RuntimeException('Unable to release warehouse reservation.');
+            }
             $row->save(['released_num' => self::qty(bcadd((string)$row->released_num, $remaining, 4)), 'status' => InventoryReservation::STATUS_RELEASED, 'update_time' => time()]);
         }
     }
@@ -106,6 +90,9 @@ class InventoryReservationService
 
         foreach ($rows as $row) {
             $remaining = bcsub((string)$row->reserved_num, bcadd((string)$row->consumed_num, (string)$row->released_num, 4), 4);
+            if (bccomp($remaining, '0', 4) > 0 && WarehouseGoodsBalanceService::release((int)$row->warehouse_id, (int)$row->goods_id, self::qty($remaining)) === false) {
+                throw new \RuntimeException('Unable to consume warehouse reservation.');
+            }
             $row->save([
                 'consumed_num' => self::qty(bcadd((string)$row->consumed_num, $remaining, 4)),
                 'status' => InventoryReservation::STATUS_CONSUMED,

@@ -73,6 +73,11 @@ class GoodsLogic extends BaseLogic
             return false;
         }
         self::applyBaseUnitToSaveData($saveData, $boundUnits);
+        if (self::hasWarehouseBalance((int)$model->id)
+            && ($oldBaseUnitId !== (int)$saveData['unit_id'] || $oldBaseUnitName !== (string)$saveData['units'])) {
+            self::setError('商品已有仓库库存余额，不能修改基础单位');
+            return false;
+        }
         if ((int)$saveData['tenant_id'] <= 0) {
             self::setError('商品租户上下文缺失，请重新登录');
             return false;
@@ -481,7 +486,8 @@ class GoodsLogic extends BaseLogic
             'unit_id' => $unitId,
             'price' => self::normalizeDecimal($params['price'] ?? $params['units_money'] ?? ($current['price'] ?? 0)),
             'cost' => self::normalizeDecimal($params['cost'] ?? $params['purchase_price'] ?? ($current['cost'] ?? 0)),
-            'stock' => self::normalizeDecimal($params['stock'] ?? ($current['stock'] ?? 0)),
+            // 商品主数据不能初始化或覆盖库存权威；新商品从首笔指定仓库入库建立库存。
+            'stock' => self::normalizeDecimal($current['stock'] ?? 0),
             'category_id' => (int)($params['category_id'] ?? ($current['category_id'] ?? 0)),
             'primary_supplier_id' => (int)($params['primary_supplier_id'] ?? $params['supplier_id'] ?? ($current['primary_supplier_id'] ?? 0)),
             'is_disabled' => (int)($isDisabled ?? ($current['is_disabled'] ?? 0)),
@@ -515,6 +521,14 @@ class GoodsLogic extends BaseLogic
         }
 
         return true;
+    }
+
+    protected static function hasWarehouseBalance(int $goodsId): bool
+    {
+        return $goodsId > 0 && Db::name('warehouse_goods_balance')
+            ->where('tenant_id', self::tenantId())
+            ->where('goods_id', $goodsId)
+            ->count() > 0;
     }
 
     protected static function resolveBoundUnitsForSave(array $params, array $saveData, int $goodsId = 0): array|null|false

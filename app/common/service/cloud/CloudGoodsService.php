@@ -192,7 +192,8 @@ class CloudGoodsService extends BaseLogic
                 'unit_id' => $unitId,
                 'price' => self::normalizeDecimal($source['price'] ?? 0),
                 'cost' => self::normalizeDecimal($source['cost'] ?? 0),
-                'stock' => self::normalizeDecimal($source['stock'] ?? 0),
+                // 云商品导入只创建主数据，库存必须由指定仓库的入库建立。
+                'stock' => '0.0000',
                 'category_id' => $categoryId,
                 'is_disabled' => (int)($source['is_disabled'] ?? 0),
                 'remark' => (string)($source['remark'] ?? ''),

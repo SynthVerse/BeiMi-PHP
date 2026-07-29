@@ -46,9 +46,10 @@ class SalesReservationLogic extends BaseLogic
 
             foreach (array_values($items) as $item) {
                 $goodsId = (int)($item['goods_id'] ?? $item['id'] ?? 0);
+                $warehouseId = (int)($item['warehouse_id'] ?? 0);
                 $num = InventoryReservationService::qty($item['num'] ?? $item['number'] ?? 0);
-                if ($goodsId <= 0) {
-                    throw new \RuntimeException('JXC_GOODS_NOT_FOUND|商品不存在');
+                if ($goodsId <= 0 || $warehouseId <= 0) {
+                    throw new \RuntimeException('JXC_STOCK_RESERVATION_CONFLICT|请选择指定仓库');
                 }
                 if (bccomp($num, '0', 4) <= 0) {
                     throw new \RuntimeException('JXC_QTY_INVALID|商品数量必须大于0');
@@ -62,7 +63,7 @@ class SalesReservationLogic extends BaseLogic
                     throw new \RuntimeException('JXC_GOODS_NOT_FOUND|商品不存在');
                 }
 
-                $available = InventoryReservationService::availableForGoods($goodsId);
+                $available = InventoryReservationService::availableForGoods($goodsId, $warehouseId);
                 $reserved = bccomp($available, $num, 4) > 0 ? $num : $available;
                 $shortage = bcsub($num, $reserved, 4);
                 if (bccomp($shortage, '0', 4) < 0) {
@@ -77,7 +78,7 @@ class SalesReservationLogic extends BaseLogic
                     'goods_code' => (string)$goods->product_code,
                     'unit_id' => (int)($goods->unit_id ?? 0),
                     'unit_name' => (string)($goods->units ?? ''),
-                    'warehouse_id' => (int)($item['warehouse_id'] ?? 0),
+                    'warehouse_id' => $warehouseId,
                     'sku_id' => (int)($item['sku_id'] ?? 0),
                     'spec_id' => (int)($item['spec_id'] ?? 0),
                     'num' => $num,
@@ -89,9 +90,12 @@ class SalesReservationLogic extends BaseLogic
                 ]);
 
                 if (bccomp($reserved, '0', 4) > 0) {
-                    InventoryReservationService::reserve(array_merge($row->toArray(), [
+                    $inventoryReservation = InventoryReservationService::reserve(array_merge($row->toArray(), [
                         'reservation_id' => (int)$reservation->id,
                     ]), $reserved);
+                    if ($inventoryReservation === null) {
+                        throw new \RuntimeException('JXC_STOCK_RESERVATION_CONFLICT|仓库可用库存已变化');
+                    }
                 }
 
                 $total = bcadd($total, $num, 4);
@@ -177,18 +181,19 @@ class SalesReservationLogic extends BaseLogic
                 $itemId = (int)($input['reservation_item_id'] ?? $input['id'] ?? 0);
                 $old = $existingById[$itemId] ?? null;
                 $goodsId = (int)($input['goods_id'] ?? ($old['goods_id'] ?? 0));
+                $warehouseId = (int)($input['warehouse_id'] ?? ($old['warehouse_id'] ?? 0));
                 $num = InventoryReservationService::qty($input['num'] ?? $input['number'] ?? 0);
-                if ($goodsId <= 0 || bccomp($num, '0', 4) <= 0) { throw new \RuntimeException('JXC_QTY_INVALID|商品数量必须大于0'); }
+                if ($goodsId <= 0 || $warehouseId <= 0 || bccomp($num, '0', 4) <= 0) { throw new \RuntimeException('JXC_QTY_INVALID|商品、仓库和数量必须有效'); }
                 $goods = Goods::where('tenant_id', self::tenantId())->where('id', $goodsId)->lock(true)->findOrEmpty();
                 if ($goods->isEmpty()) { throw new \RuntimeException('JXC_GOODS_NOT_FOUND|商品不存在'); }
                 if ($old) { InventoryReservationService::releaseReservationItem((int)$old['id']); }
-                $available = InventoryReservationService::availableForGoods($goodsId);
+                $available = InventoryReservationService::availableForGoods($goodsId, $warehouseId);
                 $reserved = bccomp($available, $num, 4) > 0 ? $num : $available;
                 $shortage = bcsub($num, $reserved, 4);
                 if (bccomp($shortage, '0', 4) < 0) { $shortage = '0.0000'; }
-                $data = ['goods_id' => $goodsId, 'goods_name' => (string)$goods->name, 'goods_code' => (string)$goods->product_code, 'warehouse_id' => (int)($input['warehouse_id'] ?? ($old['warehouse_id'] ?? 0)), 'sku_id' => (int)($input['sku_id'] ?? ($old['sku_id'] ?? 0)), 'spec_id' => (int)($input['spec_id'] ?? ($old['spec_id'] ?? 0)), 'num' => $num, 'reserved_num' => $reserved, 'shortage_num' => InventoryReservationService::qty($shortage), 'status' => bccomp($shortage, '0', 4) > 0 ? SalesReservationItem::STATUS_SHORTAGE : SalesReservationItem::STATUS_RESERVED, 'update_time' => time()];
+                $data = ['goods_id' => $goodsId, 'goods_name' => (string)$goods->name, 'goods_code' => (string)$goods->product_code, 'warehouse_id' => $warehouseId, 'sku_id' => (int)($input['sku_id'] ?? ($old['sku_id'] ?? 0)), 'spec_id' => (int)($input['spec_id'] ?? ($old['spec_id'] ?? 0)), 'num' => $num, 'reserved_num' => $reserved, 'shortage_num' => InventoryReservationService::qty($shortage), 'status' => bccomp($shortage, '0', 4) > 0 ? SalesReservationItem::STATUS_SHORTAGE : SalesReservationItem::STATUS_RESERVED, 'update_time' => time()];
                 if ($old) { $model = SalesReservationItem::where('tenant_id', self::tenantId())->where('id', (int)$old['id'])->findOrEmpty(); $model->save($data); } else { $model = SalesReservationItem::create(array_merge($data, ['tenant_id' => self::tenantId(), 'reservation_id' => (int)$reservation->id, 'unit_id' => (int)($goods->unit_id ?? 0), 'unit_name' => (string)($goods->units ?? ''), 'create_time' => time()])); }
-                if (bccomp($reserved, '0', 4) > 0) { InventoryReservationService::reserve($model->toArray(), $reserved); }
+                if (bccomp($reserved, '0', 4) > 0 && InventoryReservationService::reserve($model->toArray(), $reserved) === null) { throw new \RuntimeException('JXC_STOCK_RESERVATION_CONFLICT|仓库可用库存已变化'); }
                 if (bccomp($shortage, '0', 4) > 0) { TaskCenterService::ensureProcurementForReservationItem($model->toArray()); } else { TaskCenterService::cancelByReservationItem((int)$model->id); }
                 $seen[(int)$model->id] = true; $total = bcadd($total, $num, 4); $reservedTotal = bcadd($reservedTotal, $reserved, 4); $shortageTotal = bcadd($shortageTotal, $shortage, 4);
             }
@@ -311,6 +316,7 @@ class SalesReservationLogic extends BaseLogic
                 $goodsRows[] = ['goods_id' => (int)$item['goods_id'], 'name' => (string)$item['goods_name'], 'number' => (string)$item['num'], 'price' => (string)$goods->price, 'units' => (string)$item['unit_name']];
             }
 
+            InventoryReservationService::consumeReservation((int)$reservation->id);
             $sales = SalesOrderLogic::publishWithinTransaction([
                 'customer_id' => (int)$reservation->customer_id,
                 'warehouse_id' => $warehouseId,
@@ -321,7 +327,6 @@ class SalesReservationLogic extends BaseLogic
             if ($sales === false) {
                 throw new \RuntimeException('JXC_RESERVATION_CONVERT_FAILED|' . SalesOrderLogic::getError());
             }
-            InventoryReservationService::consumeReservation((int)$reservation->id);
             $reservation->save(['status' => SalesReservation::STATUS_CONVERTED, 'converted_sales_order_id' => (int)$sales['id'], 'update_by' => self::adminId(), 'update_time' => time()]);
             Db::commit();
             return ['id' => (int)$reservation->id, 'sales_order_id' => (int)$sales['id'], 'order_sn' => (string)($sales['order_sn'] ?? '')];

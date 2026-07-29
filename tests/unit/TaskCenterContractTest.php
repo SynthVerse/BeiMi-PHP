@@ -43,7 +43,7 @@ final class TaskCenterContractTest extends TestCase
         $readyReservation = $this->submitReservation($enoughGoodsId, 3, '客户A');
         $shortageReservation = $this->submitReservation($shortageGoodsId, 5, '客户B');
 
-        self::assertSame(0, WorkTask::where('tenant_id', self::TENANT_ID)->count(), 'submit must not auto-create task center tasks');
+        self::assertSame(1, WorkTask::where('tenant_id', self::TENANT_ID)->count(), 'shortage submit must create its procurement task');
 
         $result = TaskCenterService::saveAssignment([
             'task_date' => '2026-07-05',
@@ -70,7 +70,8 @@ final class TaskCenterContractTest extends TestCase
         ]);
 
         self::assertSame(2, $result['created']['fulfillment']);
-        self::assertSame(1, $result['created']['procurement']);
+        self::assertSame(0, $result['created']['procurement']);
+        self::assertSame(1, $result['updated']['procurement']);
 
         $fulfillment = WorkTask::where('tenant_id', self::TENANT_ID)
             ->where('task_kind', 'fulfillment')
@@ -93,6 +94,50 @@ final class TaskCenterContractTest extends TestCase
         self::assertSame('shortage', (string)$procurement->stock_status);
         self::assertSame($procurementEmployeeId, (int)$procurement->assignee_employee_id);
         self::assertGreaterThan(0, (int)$procurement->parent_task_id);
+    }
+
+    public function test_preview_reads_available_stock_from_the_selected_item_warehouse(): void
+    {
+        $goodsId = $this->createGoods('仓库预览商品', 'TC-PREVIEW', '0.0000');
+        $warehouseA = $this->createWarehouse('预览A仓');
+        $warehouseB = $this->createWarehouse('预览B仓');
+        \app\api\jxc\logic\WarehouseGoodsBalanceService::inbound($warehouseA, $goodsId, '2.0000');
+        \app\api\jxc\logic\WarehouseGoodsBalanceService::inbound($warehouseB, $goodsId, '7.0000');
+        $reservation = $this->submitReservation($goodsId, 3, '预览客户', $warehouseB);
+
+        $preview = TaskCenterService::preview([
+            'reservation_item_ids' => [(int)$reservation['items'][0]['id']],
+        ]);
+
+        self::assertSame('4.0000', (string)$preview['items'][0]['available_num']);
+    }
+
+    public function test_procurement_completion_rolls_back_when_warehouse_reservation_cannot_be_created(): void
+    {
+        $this->createEmployee('店长', 'manager', self::ADMIN_ID);
+        $goodsId = $this->createGoods('采购预留失败商品', 'TC-PROCUREMENT-RESERVE', '0.0000');
+        $warehouseId = $this->createWarehouse('采购预留失败仓');
+        $reservation = $this->submitReservation($goodsId, 1, '预留失败客户', $warehouseId);
+        $itemId = (int)$reservation['items'][0]['id'];
+        $taskId = (int)WorkTask::where('tenant_id', self::TENANT_ID)
+            ->where('task_kind', WorkTask::KIND_PROCUREMENT)
+            ->where('source_id', $itemId)
+            ->value('id');
+        Db::name('work_task')->where('id', $taskId)->update([
+            'status' => WorkTask::STATUS_PROCESSING,
+            'update_time' => time(),
+        ]);
+
+        try {
+            TaskCenterService::status(['id' => $taskId, 'status' => WorkTask::STATUS_COMPLETED]);
+            self::fail('库存预留失败时，采购任务不能被标记为完成。');
+        } catch (\RuntimeException $exception) {
+            self::assertStringContainsString('Unable to reserve warehouse stock', $exception->getMessage());
+        }
+
+        self::assertSame(WorkTask::STATUS_PROCESSING, (string)WorkTask::find($taskId)->status);
+        self::assertSame('shortage', (string)Db::name('sales_reservation_item')->where('id', $itemId)->value('status'));
+        self::assertSame('0.0000', (string)Db::name('sales_reservation_item')->where('id', $itemId)->value('reserved_num'));
     }
 
     public function test_task_center_exposes_only_the_new_nine_routes_and_no_legacy_task_entries(): void

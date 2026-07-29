@@ -44,8 +44,8 @@ final class SupplyOrderTaskCenterIntegrationTest extends TestCase
         $supplierId = $this->createVendor('任务中心供应商');
         $goodsId = $this->createGoods('采购回填商品', 'TC-SUPPLY', '0.0000');
 
-        $firstReservation = $this->submitReservation($goodsId, 3, 'FIFO客户A');
-        $secondReservation = $this->submitReservation($goodsId, 4, 'FIFO客户B');
+        $firstReservation = $this->submitReservation($goodsId, 3, 'FIFO客户A', $warehouseId);
+        $secondReservation = $this->submitReservation($goodsId, 4, 'FIFO客户B', $warehouseId);
         TaskCenterService::saveAssignment([
             'task_date' => '2026-07-05',
             'assignments' => [
@@ -87,7 +87,7 @@ final class SupplyOrderTaskCenterIntegrationTest extends TestCase
             ]],
         ]);
 
-        self::assertNotFalse($published);
+        self::assertNotFalse($published, SupplyOrderLogic::getError());
 
         $tasks = WorkTask::where('tenant_id', self::TENANT_ID)
             ->where('task_kind', 'procurement')
@@ -109,30 +109,22 @@ final class SupplyOrderTaskCenterIntegrationTest extends TestCase
     public function test_procurement_inbound_uses_same_tenant_goods_only_fifo_and_ignores_terminal_tasks(): void
     {
         $goodsId = $this->createGoods('goods-only商品', 'TC-GOODS-ONLY', '0.0000');
-        $terminalTaskId = $this->createTaskCenterTask([
-            'task_kind' => WorkTask::KIND_PROCUREMENT,
-            'role_code' => WorkTask::ROLE_PROCUREMENT,
-            'goods_id' => $goodsId,
-            'source_type' => 'test-terminal',
-            'source_id' => 8001,
-            'demand_num' => '2.0000',
-            'shortage_num' => '2.0000',
+        $warehouseId = $this->createWarehouse('采购回填测试仓');
+        $terminalReservation = $this->submitReservation($goodsId, 2, '已完成客户', $warehouseId);
+        $openReservation = $this->submitReservation($goodsId, 3, '待回填客户', $warehouseId);
+        $terminalTaskId = (int)WorkTask::where('tenant_id', self::TENANT_ID)
+            ->where('source_id', (int)$terminalReservation['items'][0]['id'])
+            ->value('id');
+        $openTaskId = (int)WorkTask::where('tenant_id', self::TENANT_ID)
+            ->where('source_id', (int)$openReservation['items'][0]['id'])
+            ->value('id');
+        Db::name('work_task')->where('id', $terminalTaskId)->update([
             'progress_num' => '2.0000',
             'stock_status' => WorkTask::STOCK_PROCUREMENT_DONE,
             'status' => WorkTask::STATUS_COMPLETED,
+            'update_time' => time(),
         ]);
-        $openTaskId = $this->createTaskCenterTask([
-            'task_kind' => WorkTask::KIND_PROCUREMENT,
-            'role_code' => WorkTask::ROLE_PROCUREMENT,
-            'goods_id' => $goodsId,
-            'source_type' => 'test-open',
-            'source_id' => 8002,
-            'demand_num' => '3.0000',
-            'shortage_num' => '3.0000',
-            'progress_num' => '0.0000',
-            'stock_status' => WorkTask::STOCK_SHORTAGE,
-            'status' => WorkTask::STATUS_PENDING,
-        ]);
+        \app\api\jxc\logic\WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, '3.0000');
         $otherTenantTaskId = $this->createTaskCenterTask([
             'tenant_id' => self::OTHER_TENANT_ID,
             'task_kind' => WorkTask::KIND_PROCUREMENT,
@@ -150,9 +142,9 @@ final class SupplyOrderTaskCenterIntegrationTest extends TestCase
         TaskCenterService::applyProcurementInbound(7001, [[
             'id' => 9001,
             'goods_id' => $goodsId,
-            'warehouse_id' => 999,
-            'sku_id' => 888,
-            'spec_id' => 777,
+            'warehouse_id' => $warehouseId,
+            'sku_id' => 0,
+            'spec_id' => 0,
             'number' => '3.0000',
         ]]);
 

@@ -100,16 +100,17 @@ final class LegacyCustomerOrderRetirementContractTest extends TestCase
 
     private static function dispatch(string $method, string $path): \think\Response
     {
-        $app = new \think\App(dirname(__DIR__, 2));
-        $app->initialize();
         $container = \think\Container::getInstance();
+        $modelDb = $container->make('db');
+        $app = new \think\App(dirname(__DIR__, 2));
         \think\Container::setInstance($app);
-        $request = $app->make('request', [], true);
-        $request->setMethod($method)->setPathinfo($path)->setUrl('/' . $path)->setHost('localhost');
-        $app->instance('request', $request);
         $scriptFilename = $_SERVER['SCRIPT_FILENAME'] ?? null;
         $_SERVER['SCRIPT_FILENAME'] = $app->getRootPath() . 'public/index.php';
         try {
+            $app->initialize();
+            $request = $app->make('request', [], true);
+            $request->setMethod($method)->setPathinfo($path)->setUrl('/' . $path)->setHost('localhost');
+            $app->instance('request', $request);
             return (new \think\app\MultiApp($app))->handle($request, function ($request) use ($app) {
                 $loadRoutes = function () use ($app): void {
                     foreach (glob($app->http->getRoutePath() . '*.php') as $file) {
@@ -120,6 +121,8 @@ final class LegacyCustomerOrderRetirementContractTest extends TestCase
             });
         } finally {
             \think\Container::setInstance($container);
+            \think\Model::setDb($modelDb);
+            \think\Model::setInvoker([$container, 'invoke']);
             if ($scriptFilename === null) {
                 unset($_SERVER['SCRIPT_FILENAME']);
             } else {

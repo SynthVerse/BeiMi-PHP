@@ -4,19 +4,15 @@ namespace app\api\jxc\logic;
 
 use app\common\model\jxc\Goods;
 use app\common\model\jxc\StockFlow;
+use think\facade\Db;
 
 class StockService
 {
     /**
-     * 入库操作
-     * @param int $warehouseId 仓库ID
-     * @param int $goodsId 商品ID
-     * @param string $quantity 入库数量（正数）
-     * @param int $orderId 关联单据ID
-     * @param string $orderType 单据类型
-     * @param string $orderSn 单据编号
-     * @param string $remark 备注
-     * @return bool
+     * 入库操作。
+     *
+     * 库存余额由 WarehouseGoodsBalanceService 维护；Goods.stock 仅由该服务
+     * 汇总更新，库存流水中的前后值记录指定仓库的现存量。
      */
     public static function inbound(
         int $warehouseId,
@@ -29,57 +25,35 @@ class StockService
         int $skuId = 0,
         int $batchId = 0
     ): bool {
-        $goods = Goods::where('id', $goodsId)
-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
-            ->lock(true)
-            ->find();
-        if (!$goods) {
+        try {
+            return Db::transaction(static function () use ($warehouseId, $goodsId, $quantity, $orderId, $orderType, $orderSn, $remark, $skuId, $batchId) {
+                $movement = WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, $quantity);
+                if ($movement === false) {
+                    throw new \RuntimeException('Unable to receive warehouse stock.');
+                }
+
+                self::writeFlow([
+                    'warehouse_id' => $warehouseId,
+                    'goods_id' => $goodsId,
+                    'sku_id' => $skuId,
+                    'batch_id' => $batchId,
+                    'order_id' => $orderId,
+                    'order_type' => $orderType,
+                    'order_sn' => $orderSn,
+                    'flow_type' => StockFlow::FLOW_IN,
+                    'quantity' => $quantity,
+                    'remark' => $remark ?: '入库-' . $orderType,
+                ], $movement);
+
+                return true;
+            });
+        } catch (\Throwable) {
             return false;
         }
-
-        $beforeStock = (string)$goods->stock;
-        $afterStock = bcadd($beforeStock, $quantity, 2);
-
-        // 更新商品库存
-        Goods::where('id', $goodsId)
-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
-            ->update([
-            'stock' => $afterStock,
-            'update_time' => time(),
-        ]);
-
-        // 写入库存流水
-        StockFlow::create([
-            'tenant_id'    => (int)(request()->tenantId ?? 0),
-            'warehouse_id' => $warehouseId,
-            'goods_id'     => $goodsId,
-            'sku_id'       => $skuId,
-            'batch_id'     => $batchId,
-            'order_id'     => $orderId,
-            'order_type'   => $orderType,
-            'order_sn'     => $orderSn,
-            'flow_type'    => StockFlow::FLOW_IN,
-            'quantity'     => $quantity,
-            'before_stock' => $beforeStock,
-            'after_stock'  => $afterStock,
-            'admin_id'     => (int)(request()->adminId ?? 0),
-            'remark'       => $remark ?: '入库-' . $orderType,
-            'create_time'  => time(),
-        ]);
-
-        return true;
     }
 
     /**
-     * 出库操作
-     * @param int $warehouseId 仓库ID
-     * @param int $goodsId 商品ID
-     * @param string $quantity 出库数量（正数）
-     * @param int $orderId 关联单据ID
-     * @param string $orderType 单据类型
-     * @param string $orderSn 单据编号
-     * @param string $remark 备注
-     * @return bool
+     * 出库操作。仓库可用量不足时拒绝，不能再写出负库存。
      */
     public static function outbound(
         int $warehouseId,
@@ -92,53 +66,35 @@ class StockService
         int $skuId = 0,
         int $batchId = 0
     ): bool {
-        $goods = Goods::where('id', $goodsId)
-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
-            ->lock(true)
-            ->find();
-        if (!$goods) {
+        try {
+            return Db::transaction(static function () use ($warehouseId, $goodsId, $quantity, $orderId, $orderType, $orderSn, $remark, $skuId, $batchId) {
+                $movement = WarehouseGoodsBalanceService::outbound($warehouseId, $goodsId, $quantity);
+                if ($movement === false) {
+                    throw new \RuntimeException('Unable to issue warehouse stock.');
+                }
+
+                self::writeFlow([
+                    'warehouse_id' => $warehouseId,
+                    'goods_id' => $goodsId,
+                    'sku_id' => $skuId,
+                    'batch_id' => $batchId,
+                    'order_id' => $orderId,
+                    'order_type' => $orderType,
+                    'order_sn' => $orderSn,
+                    'flow_type' => StockFlow::FLOW_OUT,
+                    'quantity' => $quantity,
+                    'remark' => $remark ?: '出库-' . $orderType,
+                ], $movement);
+
+                return true;
+            });
+        } catch (\Throwable) {
             return false;
         }
-
-        $beforeStock = (string)$goods->stock;
-        $afterStock = bcsub($beforeStock, $quantity, 2);
-        // 允许负库存（初期不阻断，只记录）
-
-        // 更新商品库存
-        Goods::where('id', $goodsId)
-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
-            ->update([
-            'stock' => $afterStock,
-            'update_time' => time(),
-        ]);
-
-        // 写入库存流水
-        StockFlow::create([
-            'tenant_id'    => (int)(request()->tenantId ?? 0),
-            'warehouse_id' => $warehouseId,
-            'goods_id'     => $goodsId,
-            'sku_id'       => $skuId,
-            'batch_id'     => $batchId,
-            'order_id'     => $orderId,
-            'order_type'   => $orderType,
-            'order_sn'     => $orderSn,
-            'flow_type'    => StockFlow::FLOW_OUT,
-            'quantity'     => $quantity,
-            'before_stock' => $beforeStock,
-            'after_stock'  => $afterStock,
-            'admin_id'     => (int)(request()->adminId ?? 0),
-            'remark'       => $remark ?: '出库-' . $orderType,
-            'create_time'  => time(),
-        ]);
-
-        return true;
     }
 
     /**
-     * 按单据回滚库存（根据已记录的流水反向操作）
-     * @param int $orderId 单据ID
-     * @param string $orderType 单据类型
-     * @return bool
+     * 按单据回滚库存。所有反向操作仍走仓库余额原语。
      */
     public static function rollback(int $orderId, string $orderType): bool
     {
@@ -147,110 +103,107 @@ class StockService
             return false;
         }
 
-        $flows = StockFlow::where('order_id', $orderId)
-            ->where('order_type', $orderType)
-            ->where('tenant_id', $tenantId)
-            ->lock(true)
-            ->select();
+        try {
+            return Db::transaction(static function () use ($tenantId, $orderId, $orderType) {
+                $flows = StockFlow::where('order_id', $orderId)
+                    ->where('order_type', $orderType)
+                    ->where('tenant_id', $tenantId)
+                    ->lock(true)
+                    ->select();
 
-        $netByDimension = [];
-        foreach ($flows as $flow) {
-            $dimension = implode(':', [
-                $tenantId,
-                $orderId,
-                $orderType,
-                (int)$flow->warehouse_id,
-                (int)$flow->goods_id,
-                (int)($flow->sku_id ?? 0),
-                (int)($flow->batch_id ?? 0),
-            ]);
-            if (!isset($netByDimension[$dimension])) {
-                $netByDimension[$dimension] = [
-                    'tenant_id' => $tenantId,
-                    'warehouse_id' => (int)$flow->warehouse_id,
-                    'goods_id' => (int)$flow->goods_id,
-                    'sku_id' => (int)($flow->sku_id ?? 0),
-                    'batch_id' => (int)($flow->batch_id ?? 0),
-                    'order_sn' => (string)$flow->order_sn,
-                    'net' => '0.00',
-                ];
-            }
-            $quantity = (string)$flow->quantity;
-            $netByDimension[$dimension]['net'] = (int)$flow->flow_type === StockFlow::FLOW_IN
-                ? bcadd($netByDimension[$dimension]['net'], $quantity, 2)
-                : bcsub($netByDimension[$dimension]['net'], $quantity, 2);
+                $netByDimension = [];
+                foreach ($flows as $flow) {
+                    $dimension = implode(':', [
+                        $tenantId,
+                        (int)$flow->warehouse_id,
+                        (int)$flow->goods_id,
+                        (int)($flow->sku_id ?? 0),
+                        (int)($flow->batch_id ?? 0),
+                    ]);
+                    if (!isset($netByDimension[$dimension])) {
+                        $netByDimension[$dimension] = [
+                            'warehouse_id' => (int)$flow->warehouse_id,
+                            'goods_id' => (int)$flow->goods_id,
+                            'sku_id' => (int)($flow->sku_id ?? 0),
+                            'batch_id' => (int)($flow->batch_id ?? 0),
+                            'order_sn' => (string)$flow->order_sn,
+                            'net' => '0.0000',
+                        ];
+                    }
+                    $quantity = (string)$flow->quantity;
+                    $netByDimension[$dimension]['net'] = (int)$flow->flow_type === StockFlow::FLOW_IN
+                        ? bcadd($netByDimension[$dimension]['net'], $quantity, 4)
+                        : bcsub($netByDimension[$dimension]['net'], $quantity, 4);
+                }
+
+                uasort($netByDimension, static function (array $left, array $right): int {
+                    return [$left['goods_id'], $left['warehouse_id'], $left['sku_id'], $left['batch_id']]
+                        <=> [$right['goods_id'], $right['warehouse_id'], $right['sku_id'], $right['batch_id']];
+                });
+
+                // 先按商品 ID 固定加锁顺序，再由余额原语继续锁定仓库余额，避免多商品回滚互相等待。
+                $goodsIds = array_values(array_unique(array_map(
+                    static fn(array $item): int => (int)$item['goods_id'],
+                    $netByDimension
+                )));
+                sort($goodsIds, SORT_NUMERIC);
+                foreach ($goodsIds as $goodsId) {
+                    $goods = Goods::where('id', $goodsId)
+                        ->where('tenant_id', $tenantId)
+                        ->lock(true)
+                        ->find();
+                    if (!$goods) {
+                        throw new \RuntimeException('Unable to find goods while rolling back warehouse stock.');
+                    }
+                }
+
+                foreach ($netByDimension as $item) {
+                    $net = (string)$item['net'];
+                    if (bccomp($net, '0.0000', 4) === 0) {
+                        continue;
+                    }
+
+                    $quantity = ltrim($net, '-');
+                    $flowType = bccomp($net, '0.0000', 4) > 0 ? StockFlow::FLOW_OUT : StockFlow::FLOW_IN;
+                    $movement = $flowType === StockFlow::FLOW_OUT
+                        ? WarehouseGoodsBalanceService::outbound((int)$item['warehouse_id'], (int)$item['goods_id'], $quantity)
+                        : WarehouseGoodsBalanceService::inbound((int)$item['warehouse_id'], (int)$item['goods_id'], $quantity);
+                    if ($movement === false) {
+                        throw new \RuntimeException('Unable to roll back warehouse stock.');
+                    }
+
+                    self::writeFlow([
+                        'warehouse_id' => (int)$item['warehouse_id'],
+                        'goods_id' => (int)$item['goods_id'],
+                        'sku_id' => (int)$item['sku_id'],
+                        'batch_id' => (int)$item['batch_id'],
+                        'order_id' => $orderId,
+                        'order_type' => $orderType,
+                        'order_sn' => (string)$item['order_sn'],
+                        'flow_type' => $flowType,
+                        'quantity' => $quantity,
+                        'remark' => '回滚-' . $orderType,
+                    ], $movement);
+                }
+
+                return true;
+            });
+        } catch (\Throwable) {
+            return false;
         }
+    }
 
-        uasort($netByDimension, static function (array $left, array $right): int {
-            return [
-                $left['goods_id'],
-                $left['warehouse_id'],
-                $left['sku_id'],
-                $left['batch_id'],
-            ] <=> [
-                $right['goods_id'],
-                $right['warehouse_id'],
-                $right['sku_id'],
-                $right['batch_id'],
-            ];
-        });
-
-        $goodsIds = array_values(array_unique(array_map(
-            static fn(array $item): int => $item['goods_id'],
-            $netByDimension
-        )));
-        sort($goodsIds, SORT_NUMERIC);
-        $stocks = [];
-        foreach ($goodsIds as $goodsId) {
-            $goods = Goods::where('id', $goodsId)
-                ->where('tenant_id', $tenantId)
-                ->lock(true)
-                ->find();
-            if (!$goods) {
-                return false;
-            }
-            $stocks[$goodsId] = (string)$goods->stock;
+    private static function writeFlow(array $attributes, array $movement): void
+    {
+        $flow = StockFlow::create(array_merge([
+            'tenant_id' => (int)(request()->tenantId ?? 0),
+            'before_stock' => $movement['before_on_hand_qty'],
+            'after_stock' => $movement['after_on_hand_qty'],
+            'admin_id' => (int)(request()->adminId ?? 0),
+            'create_time' => time(),
+        ], $attributes));
+        if (!$flow) {
+            throw new \RuntimeException('Unable to write stock flow.');
         }
-
-        foreach ($netByDimension as $item) {
-            $net = (string)$item['net'];
-            if (bccomp($net, '0', 2) === 0) {
-                continue;
-            }
-            $goodsId = (int)$item['goods_id'];
-            $quantity = ltrim($net, '-');
-            $flowType = bccomp($net, '0', 2) > 0 ? StockFlow::FLOW_OUT : StockFlow::FLOW_IN;
-            $beforeStock = $stocks[$goodsId];
-            $afterStock = $flowType === StockFlow::FLOW_IN
-                ? bcadd($beforeStock, $quantity, 2)
-                : bcsub($beforeStock, $quantity, 2);
-            $updated = Goods::where('id', $goodsId)
-                ->where('tenant_id', $tenantId)
-                ->update(['stock' => $afterStock, 'update_time' => time()]);
-            if ($updated === false) {
-                return false;
-            }
-            $stocks[$goodsId] = $afterStock;
-
-            StockFlow::create([
-                'tenant_id' => $tenantId,
-                'warehouse_id' => (int)$item['warehouse_id'],
-                'goods_id' => $goodsId,
-                'sku_id' => (int)$item['sku_id'],
-                'batch_id' => (int)$item['batch_id'],
-                'order_id' => $orderId,
-                'order_type' => $orderType,
-                'order_sn' => (string)$item['order_sn'],
-                'flow_type' => $flowType,
-                'quantity' => $quantity,
-                'before_stock' => $beforeStock,
-                'after_stock' => $afterStock,
-                'admin_id' => (int)(request()->adminId ?? 0),
-                'remark' => '回滚-' . $orderType,
-                'create_time' => time(),
-            ]);
-        }
-
-        return true;
     }
 }

@@ -38,8 +38,9 @@ final class SalesReservationTaskCenterIntegrationTest extends TestCase
         $procurementEmployeeId = $this->createEmployee('采购员', 'procurement');
         $goodsId = $this->createGoods('取消预定商品', 'TC-CANCEL', '10.0000');
         $reservation = $this->submitReservation($goodsId, 12, '取消客户');
+        $warehouseId = (int)$reservation['items'][0]['warehouse_id'];
 
-        self::assertSame('0.0000', InventoryReservationService::availableForGoods($goodsId));
+        self::assertSame('0.0000', InventoryReservationService::availableForGoods($goodsId, $warehouseId));
         self::assertSame(1, WorkTask::where('tenant_id', self::TENANT_ID)
             ->where('task_kind', WorkTask::KIND_PROCUREMENT)
             ->where('source_type', 'sales_reservation_item')
@@ -69,7 +70,7 @@ final class SalesReservationTaskCenterIntegrationTest extends TestCase
 
         self::assertNotFalse($cancelled);
         self::assertSame('cancelled', $cancelled['status']);
-        self::assertSame('10.0000', InventoryReservationService::availableForGoods($goodsId));
+        self::assertSame('10.0000', InventoryReservationService::availableForGoods($goodsId, $warehouseId));
         self::assertSame(2, WorkTask::where('tenant_id', self::TENANT_ID)
             ->where('reservation_id', (int)$reservation['id'])
             ->where('status', 'cancelled')

@@ -107,7 +107,7 @@ final class SalesReturnRollbackGuardTest extends TestCase
         }
         self::assertStringContainsString('uasort($netByDimension', $stock);
         self::assertStringContainsString('sort($goodsIds, SORT_NUMERIC)', $stock);
-        self::assertStringContainsString("bccomp(\$net, '0', 2) === 0", $stock);
+        self::assertStringContainsString("bccomp(\$net, '0.0000', 4) === 0", $stock);
 
         $finance = (string)file_get_contents(dirname(self::LOGIC_FILE) . '/FinanceService.php');
         self::assertStringContainsString('TYPE_ORDER_ROLLBACK', $finance);

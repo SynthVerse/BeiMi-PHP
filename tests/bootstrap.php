@@ -30,7 +30,7 @@ $isolated = strtolower(trim((string)($testingEnv['PHPUNIT']['ISOLATED_DATABASE']
 $database = trim((string)($testingEnv['DATABASE']['DATABASE'] ?? ''));
 $hostname = strtolower(trim((string)($testingEnv['DATABASE']['HOSTNAME'] ?? '')));
 $driver = strtolower(trim((string)($testingEnv['DATABASE']['TYPE'] ?? '')));
-$port = trim((string)($testingEnv['DATABASE']['PORT'] ?? ''));
+$port = trim((string)($testingEnv['DATABASE']['HOSTPORT'] ?? $testingEnv['DATABASE']['PORT'] ?? ''));
 if (!in_array($isolated, ['1', 'true', 'yes'], true)
     || !preg_match('/^beimi_test_[a-z0-9_]+$/i', $database)
     || !in_array($hostname, ['127.0.0.1', 'localhost', '::1'], true)

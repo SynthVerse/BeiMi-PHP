@@ -142,7 +142,7 @@ class TaskCenterService
         $items = [];
         foreach ($rows as $row) {
             $items[] = self::formatReservationItemForTask($row, [
-                'available_num' => InventoryReservationService::availableForGoods((int)$row['goods_id']),
+                'available_num' => InventoryReservationService::availableForGoods((int)$row['goods_id'], (int)$row['warehouse_id']),
             ]);
         }
 
@@ -918,7 +918,9 @@ class TaskCenterService
             return;
         }
 
-        InventoryReservationService::reserve($item->toArray(), (string)$item->shortage_num);
+        if (InventoryReservationService::reserve($item->toArray(), (string)$item->shortage_num) === null) {
+            throw new \RuntimeException('Unable to reserve warehouse stock for procurement completion.');
+        }
         $item->save([
             'reserved_num' => self::qty($item->num),
             'shortage_num' => '0.0000',
