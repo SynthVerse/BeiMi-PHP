@@ -117,8 +117,8 @@
 
 - 状态：已防护
 - 首次发生：2026-07-29
-- 最近发生：2026-07-29
-- 复发次数：0
+- 最近发生：2026-07-30
+- 复发次数：1
 - 适用范围：`CustomerReportLogic` 等已开启业务事务后调用仓库余额原语的路径
 - 相关问题：无
 
@@ -140,8 +140,10 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 
 ### 防线
 
+- 2026-07-30 扩展：跨仓转换在创建任何销售单前，按 `goods_id` 升序预锁本次涉及的全部商品；销售单、订单商品、库存流水和应收／应付在外层事务中统一使用 Query Builder 写入，禁止重新引入 ORM 隐式事务。
+- 自动化防线扩展：`tests/unit/CustomerReportWorkflowTest.php` 的多仓后置计价失败用例断言销售单、库存流水、应收及报货状态整体回滚；`tests/unit/CustomerReportRouteContractTest.php` 禁止外层事务路径重新引入 `Model::create()`，并断言商品预锁早于任何标准销售单发布。
 - 自动化防线：`tests/unit/CustomerReportWorkflowTest.php` 的 `test_two_concurrent_submissions_cannot_over_reserve_one_warehouse_balance()` 使用两个 PHP 进程同时提交，断言一单 `submitted_ready`、一单 `submitted_shortage`，且总预留不超过余额。
-- 架构防线：`WarehouseGoodsBalanceService` 明确提供 `reserveWithinTransaction()`、`reserveUpToWithinTransaction()`、`releaseWithinTransaction()` 与 `consumeReservedWithinTransaction()`；`CustomerReportLogic` 在外层事务内只调用这些入口，并以 Query Builder 写入主表、明细和预留记录。`CustomerReportPreferenceService::remember()` 用唯一键原子 upsert 保存建议数据，不加间隙锁。`transactionWithRetry()` 统一包裹提交外的编辑、补预留、取消、转销售与履约事务；明细按 `(goods_id, warehouse_id)` 排序后才触发库存原语。
+- 架构防线：`WarehouseGoodsBalanceService` 明确提供 `reserveWithinTransaction()`、`reserveUpToWithinTransaction()`、`releaseWithinTransaction()` 与 `consumeReservedWithinTransaction()`；`CustomerReportLogic` 在外层事务内只调用这些入口，并以 Query Builder 写入主表、明细和预留记录。`CustomerReportPreferenceService::remember()` 用唯一键原子 upsert 保存建议数据，不加间隙锁。`transactionWithRetry()` 统一包裹提交外的编辑、补预留、取消与转换销售事务；明细按 `(goods_id, warehouse_id)` 排序后才触发库存原语。
 - 决策与知识：本记录及 `docs/adr/0001-客户报货库存边界.md`。
 
 ### 发生记录
@@ -149,3 +151,346 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 | 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
 |---|---|---|---|
 | 2026-07-29 | Project #1 / 客户报货新链路 | 第 7 张并发提交验收 | 既有实现未区分外层事务与 ORM 隐式事务，也对不存在的幂等键和客户商品偏好键加悲观锁。 |
+| 2026-07-30 | 客户报货旧链路删除与标准销售单桥接 | 外层报货转换调用标准销售发布时重新使用 ORM `create()`，并按仓循环触发库存锁 | 原防线只覆盖报货主从表和直接库存原语，没有覆盖新接入的销售、库存流水、财务副作用，也没有对跨仓转换建立“先预锁全部商品”的结构契约。 |
+
+## PIT-0005：迁移静态探针替换前缀但真实执行器保留占位符
+
+- 状态：已防护
+- 首次发生：2026-07-29
+- 最近发生：2026-07-30
+- 复发次数：1
+- 适用范围：`scripts/migrate.php`、`scripts/migrate_probe_core.js`、测试数据库辅助器与包含 `{{prefix}}` 的 SQL 迁移
+- 相关问题：无
+
+### 触发场景
+
+通过 `scripts/migrate.php` 执行包含 `{{prefix}}` 的采购退货迁移，或绕过预处理直接导入该 SQL；phpMyAdmin 随后显示字面量表 `{{prefix}}purchase_return_order` 和 `{{prefix}}purchase_return_order_lists`。
+
+### 根因
+
+真实迁移执行器读取 SQL 后直接拆分并交给 PDO，没有把 `{{prefix}}` 替换成 `.env` 的 `DATABASE.PREFIX`；静态迁移探针却只对两份已知迁移硬编码替换为 `la_`，使验证路径与生产执行路径不一致，无法阻止未解析占位符进入数据库。
+
+### 错误做法
+
+在静态探针中维护迁移文件特例并自行替换前缀，或把包含 `{{prefix}}` 的原始 SQL 直接交给 PDO／phpMyAdmin。
+
+### 正确做法
+
+真实迁移执行器与迁移探针必须复用同一个 SQL 预处理边界：按当前配置替换全部 `{{prefix}}`，并在执行前拒绝任何残留占位符；迁移验证应覆盖非默认前缀，证明结果来自配置而不是硬编码。
+
+### 防线
+
+- 2026-07-30 扩展：24 份正式迁移源文件全部只保存 `{{prefix}}`，`scripts/migrate_probe_metadata_contract.test.js` 逐份以 `tenantx_` 处理并拒绝 `la_` 泄漏；`scripts/rebuild_dev_database_contract.test.js` 动态验证错库名、非开发环境和非白名单库均被拒绝。
+- 2026-07-30 扩展：`CustomerReportTestSupport::prepareMigration()` 与 `WarehouseGoodsBalanceServiceTest` 的测试数据库建表路径也统一调用 `MigrationSqlPreprocessor`；禁止测试辅助器自行 `str_replace` 或直接执行带占位符 SQL。
+- 2026-07-30 扩展：`public/install/db/like.sql` 与 `database/sql/jxc_phase1_schema.sql` 也只保存 `{{prefix}}`；`scripts/rebuild-dev-database.ps1` 通过 `scripts/prepare-sql.php` 调用同一 PHP 预处理器后才导入基础结构，并把同一配置显式传给迁移执行器。使用临时 `-ConfigPath` 时强制 `-SkipSeed`，防止种子误写默认 `.env` 的数据库。
+- 开发库重建由 `scripts/lib/RebuildDatabaseSafety.ps1` 额外绑定 `.env` 库名、显式 `-ExpectedDatabase`、`APP_ENV=development` 与开发库白名单。
+- 自动化防线：`tests/unit/MigrationSqlPreprocessorTest.php` 验证非默认前缀、残留模板拒绝和危险前缀拒绝；`scripts/migrate_probe_metadata_contract.test.js` 比对 PHP 与 JavaScript 预处理输出并验证两端契约；全部 `scripts/*contract.test.js` 与静态迁移探针覆盖 24 份迁移、177 条语句和 98 张最终表；`scripts/rebuild_dev_database_contract.test.js` 验证开发库必须先备份再重建，并固定基础结构、JXC 结构和正式迁移的执行顺序；`scripts/nondefault_prefix_rebuild_integration.test.js` 在 3307 隔离测试库上以 `tenantx_` 实际重建、核验 98 张表与 24 条迁移历史，再恢复原测试库。
+- 架构防线：`scripts/lib/MigrationSqlPreprocessor.php` 是真实 PHP 迁移执行器进入拆分与 PDO 前的统一边界；`scripts/migrate_probe_core.js` 的静态与固定运行时路径共同调用其唯一 JavaScript 契约实现，不再按迁移文件名特判。前缀安全校验在数据库连接与迁移历史表名拼接前执行。
+- 决策与知识：本记录；数据库前缀当前以 `config/database.php` 和运行环境 `DATABASE.PREFIX` 为准。
+
+### 发生记录
+
+| 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-07-29 | 非 `la_` 表归属与旧链路迁移调查 | phpMyAdmin 出现两个字面量 `{{prefix}}*` 表；只读数据库连接不可用，现场行数与迁移历史尚未核验 | 静态探针在测试内部硬编码替换，真实执行器没有同等预处理与残留占位符拒绝。 |
+| 2026-07-30 | 客户报货新链路全量回归 | 两条测试数据库建表路径仍各自读取迁移并替换固定前缀 | 原防线只覆盖正式执行器与静态探针，没有把测试数据库消费者纳入统一预处理边界。 |
+| 2026-07-30 | 最终双轴审查 | 基础结构 SQL 仍硬编码 `la_`，非默认前缀只有静态替换、不能实际从零重建 | 原防线只覆盖正式迁移和测试辅助器，遗漏重建脚本导入的 `like.sql`／JXC 基础结构。 |
+
+旧链路代码和新建库结构已不再包含字面量占位符表。2026-07-30 已在受隔离的
+本地开发实例上实际执行 `scripts/rebuild-dev-database.ps1 -ConfirmRebuild
+-ExpectedDatabase lantu`：24 份迁移全部成功，`lantu` 包含 98 张表，且旧链路
+表与字面量占位符表均为零。旧 XAMPP 数据目录在先生成并校验原始备份后已删除；
+代码防线与现场开发库清理均已完成。
+
+## PIT-0006：本地 MySQL 启动脚本把认证当作端口就绪探针
+
+- 状态：已防护
+- 首次发生：2026-07-30
+- 最近发生：2026-07-30
+- 复发次数：0
+- 适用范围：`scripts/start-local-dev-mysql.ps1`、隔离开发 MySQL 初始化与账号配置
+- 相关问题：无
+
+### 触发场景
+
+脚本以 `--initialize-insecure` 创建新的数据目录后，立即以 TCP `root` 登录作为
+服务就绪判断。
+
+### 根因
+
+MySQL 初始账户仅为 `root@localhost`；经 `127.0.0.1` 的 TCP 登录属于不同主机项。
+服务其实已启动时，认证仍会失败并让脚本持续等待或误判为启动失败。将账号授权与
+端口存活混为一个检查，导致启动脚本依赖尚未完成的账号引导状态。
+
+### 错误做法
+
+以某个数据库账号通过 TCP 的登录成功作为本地 MySQL 是否已监听的唯一判断。
+
+### 正确做法
+
+启动阶段仅检查目标 TCP 端口可连接并检测 `mysqld` 是否提前退出；账号创建或授权
+作为独立、显式的引导步骤完成，随后再用应用 `.env` 的只读连接确认可用性。
+
+### 防线
+
+- 自动化防线：`scripts/local_dev_mysql_contract.test.js` 断言启动脚本使用无认证的 TCP 就绪探针、保留提前退出诊断，并禁止重新引入 MySQL 客户端登录轮询。
+- 架构防线：`start-local-dev-mysql.ps1` 只负责实例启动；账号配置不再隐式耦合到端口探针。
+- 决策与知识：本记录；开发实例固定为 `.local/mysql/my-dev-lantu.ini` 的 3306 端口，PHPUnit 隔离实例继续使用 3307。
+
+### 发生记录
+
+| 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-07-30 | 客户报货旧链路删除与开发库重建 | 新隔离实例初始化后，启动脚本通过 TCP 登录 `root` 等待就绪 | 原脚本没有区分“服务器已监听”和“账号已获 TCP 授权”。 |
+
+## PIT-0007：迁移动态 SQL 的结果集未释放
+
+- 状态：已防护
+- 首次发生：2026-07-30
+- 最近发生：2026-07-30
+- 复发次数：0
+- 适用范围：`scripts/migrate.php` 与使用 MySQL `PREPARE`／`EXECUTE` 的 SQL 迁移
+- 相关问题：PIT-0005
+
+### 触发场景
+
+迁移以动态 SQL 回退执行 `SELECT 1`，随后迁移执行器继续执行下一条 SQL。
+
+### 根因
+
+`PDO::exec()` 不会消耗动态 `EXECUTE` 产生的结果集；即使启用 PDO 缓冲查询，未释放的
+结果集仍会让 MySQL 8 在下一条语句抛出 `SQLSTATE[HY000] 2014`。
+
+### 错误做法
+
+在迁移循环中对所有语句一律调用 `PDO::exec()`，并假定只有显式 `SELECT` 才会产生
+需要关闭的结果集。
+
+### 正确做法
+
+所有迁移语句通过同一执行边界 `prepare()`／`execute()` 运行，逐行集消耗结果，最后
+始终 `closeCursor()`；动态 SQL 的回退查询与 DDL 因而具有相同的资源释放语义。
+
+### 防线
+
+- 自动化防线：`scripts/migrate_executor_contract.test.js` 断言迁移循环只能调用统一执行边界，且该边界包含 `fetchAll()`、`nextRowset()` 与 `closeCursor()`；实际干净重建已覆盖含动态回退的 `20260602_000003_platform_goodscat_and_cloud_goods_category.sql`。
+- 架构防线：`executeMigrationStatement()` 是 `scripts/migrate.php` 的唯一迁移语句执行边界，迁移历史记录仅在所有语句成功后写入。
+- 决策与知识：本记录及 PIT-0005 的迁移预处理边界。
+
+### 发生记录
+
+| 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-07-30 | 客户报货旧链路删除与开发库重建 | 重建执行 `20260602_000003_platform_goodscat_and_cloud_goods_category.sql` 后继续下一条语句 | 原执行器仅缓冲连接级查询，未在每条动态 SQL 后消费并关闭结果集。 |
+
+## PIT-0008：原始数据库恢复归档未排除在 Git 之外
+
+- 状态：已防护
+- 首次发生：2026-07-30
+- 最近发生：2026-07-30
+- 复发次数：0
+- 适用范围：`storage/backups` 下的本地 MySQL 原始恢复归档
+- 相关问题：无
+
+### 触发场景
+
+在仓库工作区内生成原始 MySQL 数据目录 ZIP，用于在损坏实例无法逻辑备份时保留恢复证据，
+随后执行宽泛的 `git add .`。
+
+### 根因
+
+归档位于项目目录而 `.gitignore` 没有排除 `storage/backups/*.zip`；原始数据目录可能包含
+业务数据、用户记录或认证元数据，因此无意提交会造成数据泄露风险。
+
+### 错误做法
+
+把原始数据库恢复归档当作普通项目产物留在未忽略目录中。
+
+### 正确做法
+
+恢复归档可本地保留以支持隔离灾难恢复，但必须由 Git 忽略规则排除；版本库只保留归档
+路径、校验值和恢复说明，不保存归档内容。
+
+### 防线
+
+- 自动化防线：`scripts/backup_archive_ignore_contract.test.js` 通过 `git check-ignore` 验证原始恢复归档以及 `.env*`、`.local`、`vendor` 均始终被忽略。
+- 架构防线：`/.gitignore` 在保留既有本地凭据、依赖和运行数据排除规则的基础上，额外排除 `/storage/backups/*.zip`；正常开发库备份继续存放在仓库外的 `.local/backups`。
+- 决策与知识：本记录及 `.scratch/customer-report-new-workflow/数据库前缀与旧链路迁移审计报告.md` 中的归档 SHA-256。
+
+### 发生记录
+
+| 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-07-30 | 客户报货旧链路删除与开发库重建的最终审查 | 发现 `storage/backups/xampp-mysql-data-raw-20260730-1430.zip` 未被忽略 | 原重建安全边界覆盖备份生成和恢复，没有覆盖版本控制泄露风险。 |
+
+## PIT-0009：宝塔切换站点目录后 open_basedir 仍指向旧发布目录
+
+- 状态：防护中
+- 首次发生：2026-07-31
+- 最近发生：2026-07-31
+- 复发次数：0
+- 适用范围：宝塔站点目录从旧发布目录切换到新发布目录的 PHP-FPM 部署
+- 相关问题：无
+
+### 触发场景
+
+将 `lantu.makesgoal.com` 的宝塔网站目录从 `server/public` 切换为
+`server-next/public`，但保留已启用的“防跨站攻击（open_basedir）”。
+
+### 根因
+
+宝塔保留了旧目录的 `open_basedir` 白名单
+`/www/wwwroot/lantu.makesgoal.com/server/:/tmp/`，PHP-FPM 因而拒绝读取新的
+`server-next/public/index.php`。nginx 对外表现为 404，虽然站点根目录、入口文件和
+迁移数据库均已正确。
+
+### 错误做法
+
+只修改宝塔的网站目录与运行目录后直接访问域名，未重新生成 `open_basedir` 白名单，或
+仅因看到 nginx 404 就回滚代码／数据库。
+
+### 正确做法
+
+新发布目录准备完成后，先切换网站目录和 `/public` 运行目录；再关闭并立即重新开启
+“防跨站攻击（open_basedir）”，使宝塔按新目录生成白名单。随后在服务器本机以 TLS
+SNI 请求根路径和 `/index.php`，两者必须不再返回 404，才将发布目录视为可用。
+
+### 防线
+
+- 自动化防线：待在已确认的“服务器本机 HTTPS 响应码”公共接口上补充可复用部署校验脚本。
+- 架构防线：发布目录采用 `server-next` 并保留旧 `server` 作为未激活回滚副本；不在原目录上覆盖上传，从而可把代码同步问题与站点运行环境问题分开验证。
+- 决策与知识：当前服务器已通过
+  `curl --resolve lantu.makesgoal.com:443:127.0.0.1 https://lantu.makesgoal.com/`
+  验证根路径为 `302`，并验证 `/index.php` 为 `200`。
+
+### 发生记录
+
+| 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-07-31 | 客户报货新链路宝塔发布 | `server-next/public` 已存在且 nginx `root` 正确，站点仍返回 404 | 发布流程只验证了代码、依赖和数据库迁移，没有验证宝塔对新发布目录保留的 `open_basedir` 白名单。 |
+
+## PIT-0010：数据库菜单组件路径未纳入静态平台前端发布契约
+
+- 状态：防护中
+- 首次发生：2026-07-31
+- 最近发生：2026-07-31
+- 复发次数：0
+- 适用范围：`BeiMi-PHP` 的平台菜单迁移、`public/platform` 静态前端发布及其部署验收
+- 相关问题：无
+
+### 触发场景
+
+在空库中导入基础结构并应用 24 份正式迁移后，平台超级管理员登录
+`lantu.makesgoal.com`，打开“微信用户列表”“公共商品库”“商品归档列表”或“分类管理”。
+
+### 根因
+
+迁移向 `la_system_menu` 写入了 `tenant/wechat_user/index`、
+`goods/cloud_goods/index`、`goods/cloud_goods/archive` 与 `goods/cate/index` 等组件路径，
+但已发布的 `public/platform` 静态构建包不包含对应组件映射。前端在解析菜单时直接报
+“找不到组件”，因此页面主体未挂载，且不会发起列表 API 请求。
+
+### 错误做法
+
+只以迁移数量、表数量、入口 HTTP 响应和登录成功作为发布验收通过条件，未验证迁移新增的
+平台菜单组件是否能由实际发布的前端包解析。
+
+### 正确做法
+
+平台菜单迁移与平台前端必须作为同一发布单元：构建并部署包含对应页面组件的前端包；发布前
+对迁移会激活的每个菜单组件路径执行前端组件清单校验，发布后以管理员登录态逐项验证页面
+至少完成组件挂载和列表请求。
+
+### 防线
+
+- 自动化防线：待在获授权的 `tenant` 前端子项目中建立“活动菜单 `component` 字段必须存在于
+  平台前端构建组件清单”的构建／发布契约测试，并将其加入发布校验。
+- 架构防线：前端组件清单与后端菜单迁移必须具有可验证的显式契约；不允许仅依靠运行时
+  `import.meta.glob` 失败后再由浏览器提示缺失组件。
+- 决策与知识：2026-07-31 的生产浏览器控制台已确认四个路径均报“找不到组件”；同次网络
+  记录显示 `mySelf`、`getConfig` 均为 `200`，但没有任何对应列表 API 请求。
+
+### 发生记录
+
+| 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-07-31 | 客户报货新链路宝塔发布 | 新库、迁移、PHP 入口及平台登录均成功后，迁移新增的菜单页面全为空白 | 发布流程没有把独立前端子项目的组件构建结果与数据库菜单配置进行匹配验证。 |
+
+## PIT-0011：认证会话写入字段未同步到存量迁移和新租户模板
+
+- 状态：已防护
+- 首次发生：2026-07-31
+- 最近发生：2026-07-31
+- 复发次数：0
+- 适用范围：`UserTokenService`、`la_user_session` 迁移与 `TenantCreatService` 的新租户建表
+- 相关问题：PIT-0005、PIT-0007
+
+### 触发场景
+
+微信小程序用户首次为当前终端创建会话；`UserTokenService` 向 `la_user_session` 写入 `create_time`。
+
+### 根因
+
+认证会话写入代码在 2026-06-06 增加 `create_time`，但既有数据库没有补列迁移，
+`app/platformapi/db/tenant.sql` 的新租户会话表也未同步该字段。ThinkPHP 严格字段校验因而在
+写入前抛出 `fields not exists:[create_time]`。
+
+### 错误做法
+
+只修改会话写入代码，假定已有表或新租户模板会自动获得新增字段。
+
+### 正确做法
+
+为存量 `{{prefix}}user_session` 提供幂等补列迁移，并在同一变更中更新新租户的
+`la_user_session_{tenantSn}` 建表模板；两者必须一起通过 schema 契约测试。
+
+### 防线
+
+- 自动化防线：`tests/unit/UserSessionSchemaContractTest.php` 断言迁移检查并补齐
+  `{{prefix}}user_session.create_time`，同时断言新租户会话表模板包含该列。
+- 架构防线：`database/migrations/20260731_000001_add_user_session_create_time.sql` 使用
+  `information_schema` 条件补列，并通过 `scripts/migrate.php` 的统一迁移执行边界运行。
+- 决策与知识：本记录；所有认证会话字段变更必须同时覆盖存量库迁移与租户初始化模板。
+
+### 发生记录
+
+| 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-07-31 | 微信小程序登录字段错误修复 | 终端会话首次创建 | 原有迁移防线只覆盖既有业务表，未建立认证会话字段与租户模板的一致性契约。 |
+
+## PIT-0012：JXC 显式路由覆盖小程序既有用户信息入口
+
+- 状态：防护中
+- 首次发生：2026-08-01
+- 最近发生：2026-08-01
+- 复发次数：0
+- 适用范围：`app/api/route/jxc.php`、小程序 `GET /api/user/info` 与 JXC 新用户入店流程
+- 相关问题：无
+
+### 触发场景
+
+在 JXC 新用户入店白名单中注册 `Route::get('user/info', 'jxc.Auth/info')`，随后小程序微信登录成功后按既有协议请求 `GET /api/user/info`。
+
+### 根因
+
+JXC 路由与既有小程序个人信息路由使用了相同的 HTTP 方法和路径。显式 JXC 路由优先命中 `app\api\controller\jxc\AuthController`，而不是常规 `UserController::info()`。新小程序 token 的 `tenant_id=0` 在 `enforce-onboarding` 模式下不会建立 JXC 管理员身份，因此 JXC `AuthController::info()` 返回“登录超时，请重新登录”。
+
+### 错误做法
+
+在共享 `/api` 命名空间中为 JXC 新入口添加未加前缀的 `user/info` 路由，并假定它只会被 JXC 客户端调用。
+
+### 正确做法
+
+保留 `/api/user/info` 给常规用户控制器，并显式绑定常规 `LoginMiddleware`，确保 token 解析结果注入 `userId`；JXC 身份信息必须使用独立且不冲突的路径，并同步更新对应 JXC 客户端调用。
+
+### 防线
+
+- 自动化防线：待补充路由契约测试，断言 `GET /api/user/info` 解析到携带常规 `LoginMiddleware` 的 `UserController::info()`，且 JXC 路由不得占用既有小程序入口。
+- 架构防线：JXC 专用接口使用显式 `jxc/` 路径前缀，避免与用户端历史路由共享同一命名空间。
+- 决策与知识：本记录；生产复现命令为携带有效小程序 token 的 `GET /api/user/info?trace=...`。
+
+### 发生记录
+
+| 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-08-01 | 微信小程序登录故障诊断 | `mnpLogin` 成功后 `GET /api/user/info` 返回 `code=-1` | 没有覆盖路由冲突与目标控制器的契约测试。 |

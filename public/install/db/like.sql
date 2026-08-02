@@ -3,10 +3,10 @@ SET
     FOREIGN_KEY_CHECKS = 0;
 
 -- ----------------------------
--- Table structure for la_admin
+-- Table structure for {{prefix}}admin
 -- ----------------------------
-DROP TABLE IF EXISTS `la_admin`;
-CREATE TABLE `la_admin`
+DROP TABLE IF EXISTS `{{prefix}}admin`;
+CREATE TABLE `{{prefix}}admin`
 (
     `id`               int(11) UNSIGNED                                              NOT NULL AUTO_INCREMENT,
     `root`             tinyint(1) UNSIGNED                                           NOT NULL DEFAULT 0 COMMENT '是否超级管理员 0-否 1-是',
@@ -29,10 +29,10 @@ CREATE TABLE `la_admin`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_admin_dept
+-- Table structure for {{prefix}}admin_dept
 -- ----------------------------
-DROP TABLE IF EXISTS `la_admin_dept`;
-CREATE TABLE `la_admin_dept`
+DROP TABLE IF EXISTS `{{prefix}}admin_dept`;
+CREATE TABLE `{{prefix}}admin_dept`
 (
     `admin_id` int(10) NOT NULL DEFAULT 0 COMMENT '管理员id',
     `dept_id`  int(10) NOT NULL DEFAULT 0 COMMENT '部门id',
@@ -43,10 +43,10 @@ CREATE TABLE `la_admin_dept`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_admin_jobs
+-- Table structure for {{prefix}}admin_jobs
 -- ----------------------------
-DROP TABLE IF EXISTS `la_admin_jobs`;
-CREATE TABLE `la_admin_jobs`
+DROP TABLE IF EXISTS `{{prefix}}admin_jobs`;
+CREATE TABLE `{{prefix}}admin_jobs`
 (
     `admin_id` int(10) NOT NULL COMMENT '管理员id',
     `jobs_id`  int(10) NOT NULL COMMENT '岗位id',
@@ -57,10 +57,10 @@ CREATE TABLE `la_admin_jobs`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_admin_role
+-- Table structure for {{prefix}}admin_role
 -- ----------------------------
-DROP TABLE IF EXISTS `la_admin_role`;
-CREATE TABLE `la_admin_role`
+DROP TABLE IF EXISTS `{{prefix}}admin_role`;
+CREATE TABLE `{{prefix}}admin_role`
 (
     `admin_id` int(10) NOT NULL COMMENT '管理员id',
     `role_id`  int(10) NOT NULL COMMENT '角色id',
@@ -71,10 +71,10 @@ CREATE TABLE `la_admin_role`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_admin_session
+-- Table structure for {{prefix}}admin_session
 -- ----------------------------
-DROP TABLE IF EXISTS `la_admin_session`;
-CREATE TABLE `la_admin_session`
+DROP TABLE IF EXISTS `{{prefix}}admin_session`;
+CREATE TABLE `{{prefix}}admin_session`
 (
     `id`          int(11) UNSIGNED                                             NOT NULL AUTO_INCREMENT,
     `admin_id`    int(11) UNSIGNED                                             NOT NULL COMMENT '用户id',
@@ -92,10 +92,10 @@ CREATE TABLE `la_admin_session`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_article
+-- Table structure for {{prefix}}article
 -- ----------------------------
-DROP TABLE IF EXISTS `la_article`;
-CREATE TABLE `la_article`
+DROP TABLE IF EXISTS `{{prefix}}article`;
+CREATE TABLE `{{prefix}}article`
 (
     `id`            int(11)                                                       NOT NULL AUTO_INCREMENT COMMENT '文章id',
     `tenant_id`     int(11)                                                       NOT NULL COMMENT '租户ID',
@@ -121,10 +121,10 @@ CREATE TABLE `la_article`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Records of la_article
+-- Records of {{prefix}}article
 -- ----------------------------
 BEGIN;
-INSERT INTO `la_article`
+INSERT INTO `{{prefix}}article`
 VALUES (1, 0, 3, '让生活更精致！五款居家好物推荐，实用性超高', '##好物推荐🔥',
         '随着当代生活节奏的忙碌，很多人在闲暇之余都想好好的享受生活。随着科技的发展，也出现了越来越多可以帮助我们提升幸福感，让生活变得更精致的产品，下面周周就给大家盘点五款居家必备的好物，都是实用性很高的产品，周周可以保证大家买了肯定会喜欢。',
         'resource/image/tenantapi/default/article01.png', '红花',
@@ -144,10 +144,10 @@ VALUES (1, 0, 3, '让生活更精致！五款居家好物推荐，实用性超�
 COMMIT;
 
 -- ----------------------------
--- Table structure for la_article_cate
+-- Table structure for {{prefix}}article_cate
 -- ----------------------------
-DROP TABLE IF EXISTS `la_article_cate`;
-CREATE TABLE `la_article_cate`
+DROP TABLE IF EXISTS `{{prefix}}article_cate`;
+CREATE TABLE `{{prefix}}article_cate`
 (
     `id`          int(11)                                                      NOT NULL AUTO_INCREMENT COMMENT '文章分类id',
     `tenant_id`   int(11)                                                      NOT NULL COMMENT '租户ID',
@@ -165,20 +165,20 @@ CREATE TABLE `la_article_cate`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Records of la_article_cate
+-- Records of {{prefix}}article_cate
 -- ----------------------------
 BEGIN;
-INSERT INTO `la_article_cate`
+INSERT INTO `{{prefix}}article_cate`
 VALUES (1, 0, '科技', 0, 1, 1663317280, 1663317280, NULL),
        (2, 0, '生活', 0, 1, 1663317280, 1663321464, NULL),
        (3, 0, '好物', 0, 1, 1727070858, 1727070858, NULL);
 COMMIT;
 
 -- ----------------------------
--- Table structure for la_article_collect
+-- Table structure for {{prefix}}article_collect
 -- ----------------------------
-DROP TABLE IF EXISTS `la_article_collect`;
-CREATE TABLE `la_article_collect`
+DROP TABLE IF EXISTS `{{prefix}}article_collect`;
+CREATE TABLE `{{prefix}}article_collect`
 (
     `id`          int(10) UNSIGNED    NOT NULL AUTO_INCREMENT COMMENT '主键',
     `tenant_id`   int(11)             NOT NULL COMMENT '租户ID',
@@ -195,10 +195,10 @@ CREATE TABLE `la_article_collect`
   COLLATE = utf8mb4_general_ci COMMENT = '文章收藏表'
   ROW_FORMAT = Dynamic;
 -- ----------------------------
--- Table structure for la_cloud_goods
+-- Table structure for {{prefix}}cloud_goods
 -- ----------------------------
-DROP TABLE IF EXISTS `la_cloud_goods`;
-CREATE TABLE `la_cloud_goods`
+DROP TABLE IF EXISTS `{{prefix}}cloud_goods`;
+CREATE TABLE `{{prefix}}cloud_goods`
 (
     `id`             int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '云端商品ID',
     `scope`          tinyint(1) UNSIGNED NOT NULL DEFAULT 1 COMMENT '商品库类型：1=平台公共',
@@ -232,10 +232,10 @@ CREATE TABLE `la_cloud_goods`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_cloud_goods_import
+-- Table structure for {{prefix}}cloud_goods_import
 -- ----------------------------
-DROP TABLE IF EXISTS `la_cloud_goods_import`;
-CREATE TABLE `la_cloud_goods_import`
+DROP TABLE IF EXISTS `{{prefix}}cloud_goods_import`;
+CREATE TABLE `{{prefix}}cloud_goods_import`
 (
     `id`               int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '导入记录ID',
     `tenant_id`        int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
@@ -261,10 +261,10 @@ CREATE TABLE `la_cloud_goods_import`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_config
+-- Table structure for {{prefix}}config
 -- ----------------------------
-DROP TABLE IF EXISTS `la_config`;
-CREATE TABLE `la_config`
+DROP TABLE IF EXISTS `{{prefix}}config`;
+CREATE TABLE `{{prefix}}config`
 (
     `id`          int(11)                                                      NOT NULL AUTO_INCREMENT,
     `type`        varchar(30) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL     DEFAULT NULL COMMENT '类型',
@@ -280,10 +280,10 @@ CREATE TABLE `la_config`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_decorate_page
+-- Table structure for {{prefix}}decorate_page
 -- ----------------------------
-DROP TABLE IF EXISTS `la_decorate_page`;
-CREATE TABLE `la_decorate_page`
+DROP TABLE IF EXISTS `{{prefix}}decorate_page`;
+CREATE TABLE `{{prefix}}decorate_page`
 (
     `id`          int(10) UNSIGNED                                              NOT NULL AUTO_INCREMENT COMMENT '主键',
     `tenant_id`   int(10)                                                       NOT NULL COMMENT '租户ID',
@@ -301,38 +301,38 @@ CREATE TABLE `la_decorate_page`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Records of la_decorate_page
+-- Records of {{prefix}}decorate_page
 -- ----------------------------
 BEGIN;
-INSERT INTO `la_decorate_page`
+INSERT INTO `{{prefix}}decorate_page`
 VALUES (1, 0, 1, '商城首页',
         '[{\"title\":\"搜索\",\"name\":\"search\",\"disabled\":1,\"content\":{},\"styles\":{}},{\"title\":\"首页轮播图\",\"name\":\"banner\",\"content\":{\"enabled\":1,\"data\":[{\"image\":\"/resource/image/tenantapi/default/banner001.png\",\"name\":\"\",\"link\":{\"id\":6,\"name\":\"来自瓷器的爱\",\"path\":\"/pages/news_detail/news_detail\",\"query\":{\"id\":6},\"type\":\"article\"},\"is_show\":\"1\",\"bg\":\"/resource/image/tenantapi/default/banner001_bg.png\"},{\"image\":\"/resource/image/tenantapi/default/banner002.png\",\"name\":\"\",\"link\":{\"id\":3,\"name\":\"金山电池公布“沪广深市民绿色生活方式”调查结果\",\"path\":\"/pages/news_detail/news_detail\",\"query\":{\"id\":3},\"type\":\"article\"},\"is_show\":\"1\",\"bg\":\"/resource/image/tenantapi/default/banner002_bg.png\"},{\"is_show\":\"1\",\"image\":\"/resource/image/tenantapi/default/banner003.png\",\"name\":\"\",\"link\":{\"id\":1,\"name\":\"让生活更精致！五款居家好物推荐，实用性超高\",\"path\":\"/pages/news_detail/news_detail\",\"query\":{\"id\":1},\"type\":\"article\"},\"bg\":\"/resource/image/tenantapi/default/banner003_bg.png\"}],\"style\":1,\"bg_style\":1},\"styles\":{}},{\"title\":\"导航菜单\",\"name\":\"nav\",\"content\":{\"enabled\":1,\"data\":[{\"image\":\"/resource/image/tenantapi/default/nav01.png\",\"name\":\"资讯中心\",\"link\":{\"path\":\"/pages/news/news\",\"name\":\"文章资讯\",\"type\":\"shop\",\"canTab\":true},\"is_show\":\"1\"},{\"image\":\"/resource/image/tenantapi/default/nav03.png\",\"name\":\"个人设置\",\"link\":{\"path\":\"/pages/user_set/user_set\",\"name\":\"个人设置\",\"type\":\"shop\"},\"is_show\":\"1\"},{\"image\":\"/resource/image/tenantapi/default/nav02.png\",\"name\":\"我的收藏\",\"link\":{\"path\":\"/pages/collection/collection\",\"name\":\"我的收藏\",\"type\":\"shop\"},\"is_show\":\"1\"},{\"image\":\"/resource/image/tenantapi/default/nav05.png\",\"name\":\"关于我们\",\"link\":{\"path\":\"/pages/as_us/as_us\",\"name\":\"关于我们\",\"type\":\"shop\"},\"is_show\":\"1\"},{\"image\":\"/resource/image/tenantapi/default/nav04.png\",\"name\":\"联系客服\",\"link\":{\"path\":\"/pages/customer_service/customer_service\",\"name\":\"联系客服\",\"type\":\"shop\"},\"is_show\":\"1\"}],\"style\":2,\"per_line\":5,\"show_line\":2},\"styles\":{}},{\"title\":\"首页中部轮播图\",\"name\":\"middle-banner\",\"content\":{\"enabled\":1,\"data\":[{\"is_show\":\"1\",\"image\":\"/resource/image/tenantapi/default/index_ad01.png\",\"name\":\"\",\"link\":{\"path\":\"/pages/agreement/agreement\",\"name\":\"隐私政策\",\"query\":{\"type\":\"privacy\"},\"type\":\"shop\"}}]},\"styles\":{}},{\"id\":\"l84almsk2uhyf\",\"title\":\"资讯\",\"name\":\"news\",\"disabled\":1,\"content\":{},\"styles\":{}}]',
         '[{\"title\":\"页面设置\",\"name\":\"page-meta\",\"content\":{\"title\":\"首页\",\"bg_type\":\"2\",\"bg_color\":\"#2F80ED\",\"bg_image\":\"/resource/image/tenantapi/default/page_meta_bg01.png\",\"text_color\":\"2\",\"title_type\":\"2\",\"title_img\":\"/resource/image/tenantapi/default/page_mate_title.png\"},\"styles\":{}}]',
         1661757188, 1710989700);
-INSERT INTO `la_decorate_page`
+INSERT INTO `{{prefix}}decorate_page`
 VALUES (2, 0, 2, '个人中心',
         '[{\"title\":\"用户信息\",\"name\":\"user-info\",\"disabled\":1,\"content\":{},\"styles\":{}},{\"title\":\"我的服务\",\"name\":\"my-service\",\"content\":{\"style\":1,\"title\":\"我的服务\",\"data\":[{\"image\":\"/resource/image/tenantapi/default/user_collect.png\",\"name\":\"我的收藏\",\"link\":{\"path\":\"/pages/collection/collection\",\"name\":\"我的收藏\",\"type\":\"shop\"},\"is_show\":\"1\"},{\"image\":\"/resource/image/tenantapi/default/user_setting.png\",\"name\":\"个人设置\",\"link\":{\"path\":\"/pages/user_set/user_set\",\"name\":\"个人设置\",\"type\":\"shop\"},\"is_show\":\"1\"},{\"image\":\"/resource/image/tenantapi/default/user_kefu.png\",\"name\":\"联系客服\",\"link\":{\"path\":\"/pages/customer_service/customer_service\",\"name\":\"联系客服\",\"type\":\"shop\"},\"is_show\":\"1\"},{\"image\":\"/resource/image/tenantapi/default/wallet.png\",\"name\":\"我的钱包\",\"link\":{\"path\":\"/packages/pages/user_wallet/user_wallet\",\"name\":\"我的钱包\",\"type\":\"shop\"},\"is_show\":\"1\"}],\"enabled\":1},\"styles\":{}},{\"title\":\"个人中心广告图\",\"name\":\"user-banner\",\"content\":{\"enabled\":1,\"data\":[{\"image\":\"/resource/image/tenantapi/default/user_ad01.png\",\"name\":\"\",\"link\":{\"path\":\"/pages/customer_service/customer_service\",\"name\":\"联系客服\",\"type\":\"shop\"},\"is_show\":\"1\"},{\"image\":\"/resource/image/tenantapi/default/user_ad02.png\",\"name\":\"\",\"link\":{\"path\":\"/pages/customer_service/customer_service\",\"name\":\"联系客服\",\"type\":\"shop\"},\"is_show\":\"1\"}]},\"styles\":{}}]',
         '[{\"title\":\"页面设置\",\"name\":\"page-meta\",\"content\":{\"title\":\"个人中心\",\"bg_type\":\"1\",\"bg_color\":\"#2F80ED\",\"bg_image\":\"\",\"text_color\":\"1\",\"title_type\":\"2\",\"title_img\":\"/resource/image/tenantapi/default/page_mate_title.png\"},\"styles\":{}}]',
         1661757188, 1710933097);
-INSERT INTO `la_decorate_page`
+INSERT INTO `{{prefix}}decorate_page`
 VALUES (3, 0, 3, '客服设置',
         '[{\"title\":\"客服设置\",\"name\":\"customer-service\",\"content\":{\"title\":\"添加客服二维码\",\"time\":\"早上 9:30 - 19:00\",\"mobile\":\"18578768757\",\"qrcode\":\"/resource/image/common/kefu01.png\",\"remark\":\"长按添加客服或拨打客服热线\"},\"styles\":{}}]',
         '', 1661757188, 1710929953);
-INSERT INTO `la_decorate_page`
+INSERT INTO `{{prefix}}decorate_page`
 VALUES (4, 0, 4, 'PC设置',
         '[{\"id\":\"lajcn8d0hzhed\",\"title\":\"首页轮播图\",\"name\":\"pc-banner\",\"content\":{\"enabled\":1,\"data\":[{\"image\":\"/resource/image/tenantapi/default/banner003.png\",\"name\":\"\",\"link\":{\"path\":\"/pages/news/news\",\"name\":\"文章资讯\",\"type\":\"shop\"}},{\"image\":\"/resource/image/tenantapi/default/banner002.png\",\"name\":\"\",\"link\":{\"path\":\"/pages/collection/collection\",\"name\":\"我的收藏\",\"type\":\"shop\"}},{\"image\":\"/resource/image/tenantapi/default/banner001.png\",\"name\":\"\",\"link\":{}}]},\"styles\":{\"position\":\"absolute\",\"left\":\"40\",\"top\":\"75px\",\"width\":\"750px\",\"height\":\"340px\"}}]',
         '', 1661757188, 1710990175);
-INSERT INTO `la_decorate_page`
+INSERT INTO `{{prefix}}decorate_page`
 VALUES (5, 0, 5, '系统风格',
         '{\"themeColorId\":3,\"topTextColor\":\"white\",\"navigationBarColor\":\"#A74BFD\",\"themeColor1\":\"#A74BFD\",\"themeColor2\":\"#CB60FF\",\"buttonColor\":\"white\"}',
         '', 1710410915, 1710990415);
 COMMIT;
 
 -- ----------------------------
--- Table structure for la_decorate_tabbar
+-- Table structure for {{prefix}}decorate_tabbar
 -- ----------------------------
-DROP TABLE IF EXISTS `la_decorate_tabbar`;
-CREATE TABLE `la_decorate_tabbar`
+DROP TABLE IF EXISTS `{{prefix}}decorate_tabbar`;
+CREATE TABLE `{{prefix}}decorate_tabbar`
 (
     `id`          int(10) UNSIGNED                                              NOT NULL AUTO_INCREMENT COMMENT '主键',
     `tenant_id`   int(10)                                                       NOT NULL COMMENT '租户ID',
@@ -351,19 +351,19 @@ CREATE TABLE `la_decorate_tabbar`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Records of la_decorate_tabbar
+-- Records of {{prefix}}decorate_tabbar
 -- ----------------------------
 BEGIN;
-INSERT INTO `la_decorate_tabbar`
+INSERT INTO `{{prefix}}decorate_tabbar`
 VALUES (1, 0, '首页', 'resource/image/tenantapi/default/tabbar_home_sel.png',
         'resource/image/tenantapi/default/tabbar_home.png',
         '{\"path\":\"/pages/index/index\",\"name\":\"商城首页\",\"type\":\"shop\"}', 1, 1662688157, 1662688157);
-INSERT INTO `la_decorate_tabbar`
+INSERT INTO `{{prefix}}decorate_tabbar`
 VALUES (2, 0, '资讯', 'resource/image/tenantapi/default/tabbar_text_sel.png',
         'resource/image/tenantapi/default/tabbar_text.png',
         '{\"path\":\"/pages/news/news\",\"name\":\"文章资讯\",\"type\":\"shop\",\"canTab\":\"1\"}', 1, 1662688157,
         1662688157);
-INSERT INTO `la_decorate_tabbar`
+INSERT INTO `{{prefix}}decorate_tabbar`
 VALUES (3, 0, '我的', 'resource/image/tenantapi/default/tabbar_me_sel.png',
         'resource/image/tenantapi/default/tabbar_me.png',
         '{\"path\":\"/pages/user/user\",\"name\":\"个人中心\",\"type\":\"shop\",\"canTab\":\"1\"}', 1, 1662688157,
@@ -371,10 +371,10 @@ VALUES (3, 0, '我的', 'resource/image/tenantapi/default/tabbar_me_sel.png',
 COMMIT;
 
 -- ----------------------------
--- Table structure for la_dept
+-- Table structure for {{prefix}}dept
 -- ----------------------------
-DROP TABLE IF EXISTS `la_dept`;
-CREATE TABLE `la_dept`
+DROP TABLE IF EXISTS `{{prefix}}dept`;
+CREATE TABLE `{{prefix}}dept`
 (
     `id`          int(11)                                                      NOT NULL AUTO_INCREMENT COMMENT 'id',
     `name`        varchar(30) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT '' COMMENT '部门名称',
@@ -394,18 +394,18 @@ CREATE TABLE `la_dept`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Records of la_dept
+-- Records of {{prefix}}dept
 -- ----------------------------
 BEGIN;
-INSERT INTO `la_dept`
+INSERT INTO `{{prefix}}dept`
 VALUES (1, '公司', 0, 0, 'boss', '12345698745', 1, 1650592684, 1653640368, NULL);
 COMMIT;
 
 -- ----------------------------
--- Table structure for la_dev_crontab
+-- Table structure for {{prefix}}dev_crontab
 -- ----------------------------
-DROP TABLE IF EXISTS `la_dev_crontab`;
-CREATE TABLE `la_dev_crontab`
+DROP TABLE IF EXISTS `{{prefix}}dev_crontab`;
+CREATE TABLE `{{prefix}}dev_crontab`
 (
     `id`          int(11)     NOT NULL AUTO_INCREMENT,
     `name`        varchar(32) NOT NULL COMMENT '定时任务名称',
@@ -428,10 +428,10 @@ CREATE TABLE `la_dev_crontab`
   DEFAULT CHARSET = utf8mb4 COMMENT ='计划任务表';
 
 -- ----------------------------
--- Table structure for la_dict_data
+-- Table structure for {{prefix}}dict_data
 -- ----------------------------
-DROP TABLE IF EXISTS `la_dict_data`;
-CREATE TABLE `la_dict_data`
+DROP TABLE IF EXISTS `{{prefix}}dict_data`;
+CREATE TABLE `{{prefix}}dict_data`
 (
     `id`          int(11)                                                       NOT NULL AUTO_INCREMENT COMMENT 'id',
     `name`        varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '数据名称',
@@ -452,42 +452,42 @@ CREATE TABLE `la_dict_data`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Records of la_dict_data
+-- Records of {{prefix}}dict_data
 -- ----------------------------
 BEGIN;
-INSERT INTO `la_dict_data`
+INSERT INTO `{{prefix}}dict_data`
 VALUES (1, '隐藏', '0', 1, 'show_status', 0, 1, '', 1656381543, 1656381543, NULL);
-INSERT INTO `la_dict_data`
+INSERT INTO `{{prefix}}dict_data`
 VALUES (2, '显示', '1', 1, 'show_status', 0, 1, '', 1656381550, 1656381550, NULL);
-INSERT INTO `la_dict_data`
+INSERT INTO `{{prefix}}dict_data`
 VALUES (3, '进行中', '0', 2, 'business_status', 0, 1, '', 1656381410, 1656381410, NULL);
-INSERT INTO `la_dict_data`
+INSERT INTO `{{prefix}}dict_data`
 VALUES (4, '成功', '1', 2, 'business_status', 0, 1, '', 1656381437, 1656381437, NULL);
-INSERT INTO `la_dict_data`
+INSERT INTO `{{prefix}}dict_data`
 VALUES (5, '失败', '2', 2, 'business_status', 0, 1, '', 1656381449, 1656381449, NULL);
-INSERT INTO `la_dict_data`
+INSERT INTO `{{prefix}}dict_data`
 VALUES (6, '待处理', '0', 3, 'event_status', 0, 1, '', 1656381212, 1656381212, NULL);
-INSERT INTO `la_dict_data`
+INSERT INTO `{{prefix}}dict_data`
 VALUES (7, '已处理', '1', 3, 'event_status', 0, 1, '', 1656381315, 1656381315, NULL);
-INSERT INTO `la_dict_data`
+INSERT INTO `{{prefix}}dict_data`
 VALUES (8, '拒绝处理', '2', 3, 'event_status', 0, 1, '', 1656381331, 1656381331, NULL);
-INSERT INTO `la_dict_data`
+INSERT INTO `{{prefix}}dict_data`
 VALUES (9, '禁用', '1', 4, 'system_disable', 0, 1, '', 1656312030, 1656312030, NULL);
-INSERT INTO `la_dict_data`
+INSERT INTO `{{prefix}}dict_data`
 VALUES (10, '正常', '0', 4, 'system_disable', 0, 1, '', 1656312040, 1656312040, NULL);
-INSERT INTO `la_dict_data`
+INSERT INTO `{{prefix}}dict_data`
 VALUES (11, '未知', '0', 5, 'sex', 0, 1, '', 1656062988, 1656062988, NULL);
-INSERT INTO `la_dict_data`
+INSERT INTO `{{prefix}}dict_data`
 VALUES (12, '男', '1', 5, 'sex', 0, 1, '', 1656062999, 1656062999, NULL);
-INSERT INTO `la_dict_data`
+INSERT INTO `{{prefix}}dict_data`
 VALUES (13, '女', '2', 5, 'sex', 0, 1, '', 1656063009, 1656063009, NULL);
 COMMIT;
 
 -- ----------------------------
--- Table structure for la_dict_type
+-- Table structure for {{prefix}}dict_type
 -- ----------------------------
-DROP TABLE IF EXISTS `la_dict_type`;
-CREATE TABLE `la_dict_type`
+DROP TABLE IF EXISTS `{{prefix}}dict_type`;
+CREATE TABLE `{{prefix}}dict_type`
 (
     `id`          int(11)                                                       NOT NULL AUTO_INCREMENT COMMENT 'id',
     `name`        varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT '' COMMENT '字典名称',
@@ -505,26 +505,26 @@ CREATE TABLE `la_dict_type`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Records of la_dict_type
+-- Records of {{prefix}}dict_type
 -- ----------------------------
 BEGIN;
-INSERT INTO `la_dict_type`
+INSERT INTO `{{prefix}}dict_type`
 VALUES (1, '显示状态', 'show_status', 1, '', 1656381520, 1656381520, NULL);
-INSERT INTO `la_dict_type`
+INSERT INTO `{{prefix}}dict_type`
 VALUES (2, '业务状态', 'business_status', 1, '', 1656381393, 1656381393, NULL);
-INSERT INTO `la_dict_type`
+INSERT INTO `{{prefix}}dict_type`
 VALUES (3, '事件状态', 'event_status', 1, '', 1656381075, 1656381075, NULL);
-INSERT INTO `la_dict_type`
+INSERT INTO `{{prefix}}dict_type`
 VALUES (4, '禁用状态', 'system_disable', 1, '', 1656311838, 1656311838, NULL);
-INSERT INTO `la_dict_type`
+INSERT INTO `{{prefix}}dict_type`
 VALUES (5, '用户性别', 'sex', 1, '', 1656062946, 1656380925, NULL);
 COMMIT;
 
 -- ----------------------------
--- Table structure for la_file
+-- Table structure for {{prefix}}file
 -- ----------------------------
-DROP TABLE IF EXISTS `la_file`;
-CREATE TABLE `la_file`
+DROP TABLE IF EXISTS `{{prefix}}file`;
+CREATE TABLE `{{prefix}}file`
 (
     `id`          int(10) UNSIGNED                                              NOT NULL AUTO_INCREMENT COMMENT '主键ID',
     `cid`         int(10) UNSIGNED                                              NOT NULL DEFAULT 0 COMMENT '类目ID',
@@ -544,10 +544,10 @@ CREATE TABLE `la_file`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_file_cate
+-- Table structure for {{prefix}}file_cate
 -- ----------------------------
-DROP TABLE IF EXISTS `la_file_cate`;
-CREATE TABLE `la_file_cate`
+DROP TABLE IF EXISTS `{{prefix}}file_cate`;
+CREATE TABLE `{{prefix}}file_cate`
 (
     `id`          int(10) UNSIGNED                                             NOT NULL AUTO_INCREMENT COMMENT '主键ID',
     `pid`         int(10) UNSIGNED                                             NOT NULL DEFAULT 0 COMMENT '父级ID',
@@ -564,10 +564,10 @@ CREATE TABLE `la_file_cate`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_generate_column
+-- Table structure for {{prefix}}generate_column
 -- ----------------------------
-DROP TABLE IF EXISTS `la_generate_column`;
-CREATE TABLE `la_generate_column`
+DROP TABLE IF EXISTS `{{prefix}}generate_column`;
+CREATE TABLE `{{prefix}}generate_column`
 (
     `id`             int(11)                                                       NOT NULL AUTO_INCREMENT COMMENT 'id',
     `table_id`       int(11)                                                       NOT NULL DEFAULT 0 COMMENT '表id',
@@ -593,10 +593,10 @@ CREATE TABLE `la_generate_column`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_generate_table
+-- Table structure for {{prefix}}generate_table
 -- ----------------------------
-DROP TABLE IF EXISTS `la_generate_table`;
-CREATE TABLE `la_generate_table`
+DROP TABLE IF EXISTS `{{prefix}}generate_table`;
+CREATE TABLE `{{prefix}}generate_table`
 (
     `id`            int(11)                                                       NOT NULL AUTO_INCREMENT COMMENT 'id',
     `table_name`    varchar(200) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT '' COMMENT '表名称',
@@ -623,10 +623,10 @@ CREATE TABLE `la_generate_table`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_hot_search
+-- Table structure for {{prefix}}hot_search
 -- ----------------------------
-DROP TABLE IF EXISTS `la_hot_search`;
-CREATE TABLE `la_hot_search`
+DROP TABLE IF EXISTS `{{prefix}}hot_search`;
+CREATE TABLE `{{prefix}}hot_search`
 (
     `id`          int(10) UNSIGNED                                              NOT NULL AUTO_INCREMENT COMMENT '主键',
     `tenant_id`  int(11)                                                       NOT NULL COMMENT '租户ID',
@@ -641,10 +641,10 @@ CREATE TABLE `la_hot_search`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_jobs
+-- Table structure for {{prefix}}jobs
 -- ----------------------------
-DROP TABLE IF EXISTS `la_jobs`;
-CREATE TABLE `la_jobs`
+DROP TABLE IF EXISTS `{{prefix}}jobs`;
+CREATE TABLE `{{prefix}}jobs`
 (
     `id`          int(11)                                                       NOT NULL AUTO_INCREMENT COMMENT 'id',
     `name`        varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci  NOT NULL COMMENT '岗位名称',
@@ -663,10 +663,10 @@ CREATE TABLE `la_jobs`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_notice_record
+-- Table structure for {{prefix}}notice_record
 -- ----------------------------
-DROP TABLE IF EXISTS `la_notice_record`;
-CREATE TABLE `la_notice_record`
+DROP TABLE IF EXISTS `{{prefix}}notice_record`;
+CREATE TABLE `{{prefix}}notice_record`
 (
     `id`          int(10) UNSIGNED                                              NOT NULL AUTO_INCREMENT COMMENT 'ID',
     `user_id`     int(10) UNSIGNED                                              NOT NULL COMMENT '用户id',
@@ -689,10 +689,10 @@ CREATE TABLE `la_notice_record`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_notice_setting
+-- Table structure for {{prefix}}notice_setting
 -- ----------------------------
-DROP TABLE IF EXISTS `la_notice_setting`;
-CREATE TABLE `la_notice_setting`
+DROP TABLE IF EXISTS `{{prefix}}notice_setting`;
+CREATE TABLE `{{prefix}}notice_setting`
 (
     `id`            int(11)                                                       NOT NULL AUTO_INCREMENT,
     `scene_id`      int(10)                                                       NOT NULL COMMENT '场景id',
@@ -714,31 +714,31 @@ CREATE TABLE `la_notice_setting`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Records of la_notice_setting
+-- Records of {{prefix}}notice_setting
 -- ----------------------------
 BEGIN;
-INSERT INTO `la_notice_setting`
+INSERT INTO `{{prefix}}notice_setting`
 VALUES (1, 101, '登录验证码', '用户手机号码登录时发送', 1, 2,
         '{\"type\":\"system\",\"title\":\"\",\"content\":\"\",\"status\":\"0\",\"is_show\":\"\",\"tips\":[\"可选变量 验证码:code\"]}',
         '{\"type\":\"sms\",\"template_id\":\"SMS_123456\",\"content\":\"您正在登录，验证码${code}，切勿将验证码泄露于他人，本条验证码有效期5分钟。\",\"status\":\"1\",\"is_show\":\"1\"}',
         '{\"type\":\"oa\",\"template_id\":\"\",\"template_sn\":\"\",\"name\":\"\",\"first\":\"\",\"remark\":\"\",\"tpl\":[],\"status\":\"0\",\"is_show\":\"\",\"tips\":[\"可选变量 验证码:code\",\"配置路径：小程序后台 > 功能 > 订阅消息\"]}',
         '{\"type\":\"mnp\",\"template_id\":\"\",\"template_sn\":\"\",\"name\":\"\",\"tpl\":[],\"status\":\"0\",\"is_show\":\"\",\"tips\":[\"可选变量 验证码:code\",\"配置路径：小程序后台 > 功能 > 订阅消息\"]}',
         '2', NULL);
-INSERT INTO `la_notice_setting`
+INSERT INTO `{{prefix}}notice_setting`
 VALUES (2, 102, '绑定手机验证码', '用户绑定手机号码时发送', 1, 2,
         '{\"type\":\"system\",\"title\":\"\",\"content\":\"\",\"status\":\"0\",\"is_show\":\"\"}',
         '{\"type\":\"sms\",\"template_id\":\"SMS_123456\",\"content\":\"您正在绑定手机号，验证码${code}，切勿将验证码泄露于他人，本条验证码有效期5分钟。\",\"status\":\"1\",\"is_show\":\"1\"}',
         '{\"type\":\"oa\",\"template_id\":\"\",\"template_sn\":\"\",\"name\":\"\",\"first\":\"\",\"remark\":\"\",\"tpl\":[],\"status\":\"0\",\"is_show\":\"\"}',
         '{\"type\":\"mnp\",\"template_id\":\"\",\"template_sn\":\"\",\"name\":\"\",\"tpl\":[],\"status\":\"0\",\"is_show\":\"\"}',
         '2', NULL);
-INSERT INTO `la_notice_setting`
+INSERT INTO `{{prefix}}notice_setting`
 VALUES (3, 103, '变更手机验证码', '用户变更手机号码时发送', 1, 2,
         '{\"type\":\"system\",\"title\":\"\",\"content\":\"\",\"status\":\"0\",\"is_show\":\"\",\"tips\":[\"可选变量 验证码:code\"]}',
         '{\"type\":\"sms\",\"template_id\":\"SMS_123456\",\"content\":\"您正在变更手机号，验证码${code}，切勿将验证码泄露于他人，本条验证码有效期5分钟。\",\"status\":\"1\",\"is_show\":\"1\"}',
         '{\"type\":\"oa\",\"template_id\":\"\",\"template_sn\":\"\",\"name\":\"\",\"first\":\"\",\"remark\":\"\",\"tpl\":[],\"status\":\"0\",\"is_show\":\"\",\"tips\":[\"可选变量 验证码:code\",\"配置路径：小程序后台 > 功能 > 订阅消息\"]}',
         '{\"type\":\"mnp\",\"template_id\":\"\",\"template_sn\":\"\",\"name\":\"\",\"tpl\":[],\"status\":\"0\",\"is_show\":\"\",\"tips\":[\"可选变量 验证码:code\",\"配置路径：小程序后台 > 功能 > 订阅消息\"]}',
         '2', NULL);
-INSERT INTO `la_notice_setting`
+INSERT INTO `{{prefix}}notice_setting`
 VALUES (4, 104, '找回登录密码验证码', '用户找回登录密码号码时发送', 1, 2,
         '{\"type\":\"system\",\"title\":\"\",\"content\":\"\",\"status\":\"0\",\"is_show\":\"\",\"tips\":[\"可选变量 验证码:code\"]}',
         '{\"type\":\"sms\",\"template_id\":\"SMS_123456\",\"content\":\"您正在找回登录密码，验证码${code}，切勿将验证码泄露于他人，本条验证码有效期5分钟。\",\"status\":\"0\",\"is_show\":\"1\",\"tips\":[\"可选变量 验证码:code\",\"示例：您正在找回登录密码，验证码${code}，切勿将验证码泄露于他人，本条验证码有效期5分钟。\",\"生效条件：1、管理后台完成短信设置。 2、第三方短信平台申请模板。\"]}',
@@ -748,10 +748,10 @@ VALUES (4, 104, '找回登录密码验证码', '用户找回登录密码号码�
 COMMIT;
 
 -- ----------------------------
--- Table structure for la_official_account_reply
+-- Table structure for {{prefix}}official_account_reply
 -- ----------------------------
-DROP TABLE IF EXISTS `la_official_account_reply`;
-CREATE TABLE `la_official_account_reply`
+DROP TABLE IF EXISTS `{{prefix}}official_account_reply`;
+CREATE TABLE `{{prefix}}official_account_reply`
 (
     `id`            int(11) UNSIGNED                                             NOT NULL AUTO_INCREMENT,
     `tenant_id`     int(11)                                                      NOT NULL COMMENT '租户ID',
@@ -774,10 +774,10 @@ CREATE TABLE `la_official_account_reply`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_operation_log
+-- Table structure for {{prefix}}operation_log
 -- ----------------------------
-DROP TABLE IF EXISTS `la_operation_log`;
-CREATE TABLE `la_operation_log`
+DROP TABLE IF EXISTS `{{prefix}}operation_log`;
+CREATE TABLE `{{prefix}}operation_log`
 (
     `id`          int(11)                                                       NOT NULL AUTO_INCREMENT,
     `admin_id`    int(11)                                                       NOT NULL COMMENT '管理员ID',
@@ -800,10 +800,10 @@ CREATE TABLE `la_operation_log`
 
 
 -- ----------------------------
--- Table structure for la_pay_config
+-- Table structure for {{prefix}}pay_config
 -- ----------------------------
-DROP TABLE IF EXISTS `la_pay_config`;
-CREATE TABLE `la_pay_config`
+DROP TABLE IF EXISTS `{{prefix}}pay_config`;
+CREATE TABLE `{{prefix}}pay_config`
 (
     `id`      int(11) UNSIGNED                                              NOT NULL AUTO_INCREMENT,
     `name`    varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci  NOT NULL DEFAULT '' COMMENT '模版名称',
@@ -820,26 +820,26 @@ CREATE TABLE `la_pay_config`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Records of la_pay_config
+-- Records of {{prefix}}pay_config
 -- ----------------------------
 BEGIN;
-INSERT INTO `la_pay_config`
+INSERT INTO `{{prefix}}pay_config`
 VALUES (1, '余额支付', 1, '', 'resource/image/common/balance_pay.png', 128, '余额支付备注');
-INSERT INTO `la_pay_config`
+INSERT INTO `{{prefix}}pay_config`
 VALUES (2, '微信支付', 2,
         '{\"interface_version\":\"v3\",\"merchant_type\":\"ordinary_merchant\",\"mch_id\":\"\",\"pay_sign_key\":\"\",\"apiclient_cert\":\"\",\"apiclient_key\":\"\"}',
         '/resource/image/common/wechat_pay.png', 123, '微信支付备注');
-INSERT INTO `la_pay_config`
+INSERT INTO `{{prefix}}pay_config`
 VALUES (3, '支付宝支付', 3,
         '{\"mode\":\"normal_mode\",\"merchant_type\":\"ordinary_merchant\",\"app_id\":\"\",\"private_key\":\"\",\"ali_public_key\":\"\"}',
         '/resource/image/common/ali_pay.png', 123, '支付宝支付');
 COMMIT;
 
 -- ----------------------------
--- Table structure for la_pay_way
+-- Table structure for {{prefix}}pay_way
 -- ----------------------------
-DROP TABLE IF EXISTS `la_pay_way`;
-CREATE TABLE `la_pay_way`
+DROP TABLE IF EXISTS `{{prefix}}pay_way`;
+CREATE TABLE `{{prefix}}pay_way`
 (
     `id`            int(11) UNSIGNED NOT NULL AUTO_INCREMENT,
     `pay_config_id` int(11)          NOT NULL COMMENT '支付配置ID',
@@ -854,30 +854,30 @@ CREATE TABLE `la_pay_way`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Records of la_pay_way
+-- Records of {{prefix}}pay_way
 -- ----------------------------
 BEGIN;
-INSERT INTO `la_pay_way`
+INSERT INTO `{{prefix}}pay_way`
 VALUES (1, 1, 1, 0, 1);
-INSERT INTO `la_pay_way`
+INSERT INTO `{{prefix}}pay_way`
 VALUES (2, 2, 1, 1, 1);
-INSERT INTO `la_pay_way`
+INSERT INTO `{{prefix}}pay_way`
 VALUES (3, 1, 2, 0, 1);
-INSERT INTO `la_pay_way`
+INSERT INTO `{{prefix}}pay_way`
 VALUES (4, 2, 2, 1, 1);
-INSERT INTO `la_pay_way`
+INSERT INTO `{{prefix}}pay_way`
 VALUES (5, 1, 3, 0, 1);
-INSERT INTO `la_pay_way`
+INSERT INTO `{{prefix}}pay_way`
 VALUES (6, 2, 3, 1, 1);
-INSERT INTO `la_pay_way`
+INSERT INTO `{{prefix}}pay_way`
 VALUES (7, 3, 3, 0, 1);
 COMMIT;
 
 -- ----------------------------
--- Table structure for la_recharge_order
+-- Table structure for {{prefix}}recharge_order
 -- ----------------------------
-DROP TABLE IF EXISTS `la_recharge_order`;
-CREATE TABLE `la_recharge_order`
+DROP TABLE IF EXISTS `{{prefix}}recharge_order`;
+CREATE TABLE `{{prefix}}recharge_order`
 (
     `id`                    int(11)                                                       NOT NULL AUTO_INCREMENT COMMENT 'id',
     `tenant_id`             int(11)                                                       NOT NULL COMMENT '租户ID',
@@ -903,10 +903,10 @@ CREATE TABLE `la_recharge_order`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_refund_log
+-- Table structure for {{prefix}}refund_log
 -- ----------------------------
-DROP TABLE IF EXISTS `la_refund_log`;
-CREATE TABLE `la_refund_log`
+DROP TABLE IF EXISTS `{{prefix}}refund_log`;
+CREATE TABLE `{{prefix}}refund_log`
 (
     `id`            int(11)                                                      NOT NULL AUTO_INCREMENT COMMENT 'id',
     `tenant_id`     int(11)                                                      NOT NULL COMMENT '租户ID',
@@ -928,10 +928,10 @@ CREATE TABLE `la_refund_log`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_refund_record
+-- Table structure for {{prefix}}refund_record
 -- ----------------------------
-DROP TABLE IF EXISTS `la_refund_record`;
-CREATE TABLE `la_refund_record`
+DROP TABLE IF EXISTS `{{prefix}}refund_record`;
+CREATE TABLE `{{prefix}}refund_record`
 (
     `id`             int(11)                                                       NOT NULL AUTO_INCREMENT COMMENT 'id',
     `tenant_id`      int(11)                                                       NOT NULL COMMENT '租户ID',
@@ -956,10 +956,10 @@ CREATE TABLE `la_refund_record`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_sms_log
+-- Table structure for {{prefix}}sms_log
 -- ----------------------------
-DROP TABLE IF EXISTS `la_sms_log`;
-CREATE TABLE `la_sms_log`
+DROP TABLE IF EXISTS `{{prefix}}sms_log`;
+CREATE TABLE `{{prefix}}sms_log`
 (
     `id`          int(11)                                                       NOT NULL AUTO_INCREMENT COMMENT 'id',
     `tenant_id`   int(11)                                                       NOT NULL COMMENT '租户ID',
@@ -983,10 +983,10 @@ CREATE TABLE `la_sms_log`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_system_menu
+-- Table structure for {{prefix}}system_menu
 -- ----------------------------
-DROP TABLE IF EXISTS `la_system_menu`;
-CREATE TABLE `la_system_menu`
+DROP TABLE IF EXISTS `{{prefix}}system_menu`;
+CREATE TABLE `{{prefix}}system_menu`
 (
     `id`          int(10) UNSIGNED                                              NOT NULL AUTO_INCREMENT COMMENT '主键',
     `pid`         int(10) UNSIGNED                                              NOT NULL DEFAULT 0 COMMENT '上级菜单',
@@ -1012,261 +1012,261 @@ CREATE TABLE `la_system_menu`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Records of la_system_menu
+-- Records of {{prefix}}system_menu
 -- ----------------------------
 BEGIN;
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (4, 0, 'M', '权限管理', 'el-icon-Lock', 300, '', 'permission', '', '', '', 0, 1, 0, 1656664556, 1710472802);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (5, 0, 'C', '工作台', 'el-icon-Monitor', 1000, 'workbench/index', 'workbench', 'workbench/index', '', '', 0, 1,
         0, 1656664793, 1664354981);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (6, 4, 'C', '菜单', 'el-icon-Operation', 100, 'auth.menu/lists', 'menu', 'permission/menu/index', '', '', 1, 1,
         0, 1656664960, 1710472994);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (7, 4, 'C', '管理员', 'local-icon-shouyiren', 80, 'auth.admin/lists', 'admin', 'permission/admin/index', '', '',
         0, 1, 0, 1656901567, 1710473013);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (8, 4, 'C', '角色', 'el-icon-Female', 90, 'auth.role/lists', 'role', 'permission/role/index', '', '', 0, 1, 0,
         1656901660, 1710473000);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (12, 8, 'A', '新增', '', 1, 'auth.role/add', '', '', '', '', 0, 1, 0, 1657001790, 1663750625);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (14, 8, 'A', '编辑', '', 1, 'auth.role/edit', '', '', '', '', 0, 1, 0, 1657001924, 1663750631);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (15, 8, 'A', '删除', '', 1, 'auth.role/delete', '', '', '', '', 0, 1, 0, 1657001982, 1663750637);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (16, 6, 'A', '新增', '', 1, 'auth.menu/add', '', '', '', '', 0, 1, 0, 1657072523, 1663750565);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (17, 6, 'A', '编辑', '', 1, 'auth.menu/edit', '', '', '', '', 0, 1, 0, 1657073955, 1663750570);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (18, 6, 'A', '删除', '', 1, 'auth.menu/delete', '', '', '', '', 0, 1, 0, 1657073987, 1663750578);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (19, 7, 'A', '新增', '', 1, 'auth.admin/add', '', '', '', '', 0, 1, 0, 1657074035, 1663750596);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (20, 7, 'A', '编辑', '', 1, 'auth.admin/edit', '', '', '', '', 0, 1, 0, 1657074071, 1663750603);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (21, 7, 'A', '删除', '', 1, 'auth.admin/delete', '', '', '', '', 0, 1, 0, 1657074108, 1663750609);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (23, 28, 'M', '开发工具', 'el-icon-EditPen', 40, '', 'dev_tools', '', '', '', 0, 1, 0, 1657097744, 1710473127);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (24, 23, 'C', '代码生成器', 'el-icon-DocumentAdd', 1, 'tools.generator/generateTable', 'code',
         'dev_tools/code/index', '', '', 0, 1, 0, 1657098110, 1658989423);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (25, 0, 'M', '组织管理', 'el-icon-OfficeBuilding', 400, '', 'organization', '', '', '', 0, 1, 0, 1657099914,
         1710472797);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (26, 25, 'C', '部门管理', 'el-icon-Coordinate', 100, 'dept.dept/lists', 'department',
         'organization/department/index', '', '', 1, 1, 0, 1657099989, 1710472962);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (27, 25, 'C', '岗位管理', 'el-icon-PriceTag', 90, 'dept.jobs/lists', 'post', 'organization/post/index', '', '',
         0, 1, 0, 1657100044, 1710472967);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (28, 0, 'M', '系统设置', 'el-icon-Setting', 200, '', 'setting', '', '', '', 0, 1, 0, 1657100164, 1710472807);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (29, 28, 'M', '网站设置', 'el-icon-Basketball', 100, '', 'website', '', '', '', 0, 1, 0, 1657100230, 1710473049);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (30, 29, 'C', '网站信息', '', 1, 'setting.web.web_setting/getWebsite', 'information',
         'setting/website/information', '', '', 0, 1, 0, 1657100306, 1657164412);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (31, 29, 'C', '网站备案', '', 1, 'setting.web.web_setting/getCopyright', 'filing', 'setting/website/filing', '',
         '', 0, 1, 1, 1657100434, 1657164723);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (32, 29, 'C', '政策协议', '', 1, 'setting.web.web_setting/getAgreement', 'protocol', 'setting/website/protocol',
         '', '', 0, 1, 1, 1657100571, 1657164770);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (33, 28, 'C', '存储设置', 'el-icon-FolderOpened', 70, 'setting.storage/lists', 'storage',
         'setting/storage/index', '', '', 0, 1, 0, 1657160959, 1710473095);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (34, 23, 'C', '字典管理', 'el-icon-Box', 1, 'setting.dict.dict_type/lists', 'dict', 'setting/dict/type/index',
         '', '', 0, 1, 0, 1657161211, 1663225935);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (35, 28, 'M', '系统维护', 'el-icon-SetUp', 50, '', 'system', '', '', '', 0, 1, 0, 1657161569, 1710473122);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (36, 35, 'C', '系统日志', '', 90, 'setting.system.log/lists', 'journal', 'setting/system/journal', '', '', 0, 1,
         0, 1657161696, 1710473253);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (37, 35, 'C', '系统缓存', '', 80, '', 'cache', 'setting/system/cache', '', '', 0, 1, 0, 1657161896, 1710473258);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (38, 35, 'C', '系统环境', '', 70, 'setting.system.system/info', 'environment', 'setting/system/environment', '',
         '', 0, 1, 0, 1657162000, 1710473265);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (39, 24, 'A', '导入数据表', '', 1, 'tools.generator/selectTable', '', '', '', '', 0, 1, 0, 1657162736,
         1657162736);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (40, 24, 'A', '代码生成', '', 1, 'tools.generator/generate', '', '', '', '', 0, 1, 0, 1657162806, 1657162806);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (41, 23, 'C', '编辑数据表', '', 1, 'tools.generator/edit', 'code/edit', 'dev_tools/code/edit', '/dev_tools/code',
         '', 1, 0, 0, 1657162866, 1663748668);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (42, 24, 'A', '同步表结构', '', 1, 'tools.generator/syncColumn', '', '', '', '', 0, 1, 0, 1657162934,
         1657162934);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (43, 24, 'A', '删除数据表', '', 1, 'tools.generator/delete', '', '', '', '', 0, 1, 0, 1657163015, 1657163015);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (44, 24, 'A', '预览代码', '', 1, 'tools.generator/preview', '', '', '', '', 0, 1, 0, 1657163263, 1657163263);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (51, 30, 'A', '保存', '', 1, 'setting.web.web_setting/setWebsite', '', '', '', '', 0, 1, 0, 1657164469,
         1663750649);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (52, 31, 'A', '保存', '', 1, 'setting.web.web_setting/setCopyright', '', '', '', '', 0, 1, 0, 1657164692,
         1663750657);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (53, 32, 'A', '保存', '', 1, 'setting.web.web_setting/setAgreement', '', '', '', '', 0, 1, 0, 1657164824,
         1663750665);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (54, 33, 'A', '设置', '', 1, 'setting.storage/setup', '', '', '', '', 0, 1, 0, 1657165303, 1663750673);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (55, 34, 'A', '新增', '', 1, 'setting.dict.dict_type/add', '', '', '', '', 0, 1, 0, 1657166966, 1663750783);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (56, 34, 'A', '编辑', '', 1, 'setting.dict.dict_type/edit', '', '', '', '', 0, 1, 0, 1657166997, 1663750789);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (57, 34, 'A', '删除', '', 1, 'setting.dict.dict_type/delete', '', '', '', '', 0, 1, 0, 1657167038, 1663750796);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (58, 62, 'A', '新增', '', 1, 'setting.dict.dict_data/add', '', '', '', '', 0, 1, 0, 1657167317, 1663750758);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (59, 62, 'A', '编辑', '', 1, 'setting.dict.dict_data/edit', '', '', '', '', 0, 1, 0, 1657167371, 1663750751);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (60, 62, 'A', '删除', '', 1, 'setting.dict.dict_data/delete', '', '', '', '', 0, 1, 0, 1657167397, 1663750768);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (61, 37, 'A', '清除系统缓存', '', 1, 'setting.system.cache/clear', '', '', '', '', 0, 1, 0, 1657173837,
         1657173939);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (62, 23, 'C', '字典数据管理', '', 1, 'setting.dict.dict_data/lists', 'dict/data', 'setting/dict/data/index',
         '/dev_tools/dict', '', 1, 0, 0, 1657174351, 1663745617);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (63, 158, 'M', '素材管理', 'el-icon-Picture', 0, '', 'material', '', '', '', 0, 1, 0, 1657507133, 1710472243);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (64, 63, 'C', '素材中心', 'el-icon-PictureRounded', 0, '', 'index', 'material/index', '', '', 0, 1, 0,
         1657507296, 1664355653);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (68, 6, 'A', '详情', '', 0, 'auth.menu/detail', '', '', '', '', 0, 1, 0, 1663725564, 1663750584);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (69, 7, 'A', '详情', '', 0, 'auth.admin/detail', '', '', '', '', 0, 1, 0, 1663725623, 1663750615);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (101, 158, 'M', '消息管理', 'el-icon-ChatDotRound', 80, '', 'message', '', '', '', 0, 1, 0, 1663838602,
         1710471874);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (102, 101, 'C', '通知设置', '', 0, 'notice.notice/settingLists', 'notice', 'message/notice/index', '', '', 0, 1,
         0, 1663839195, 1663839195);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (103, 102, 'A', '详情', '', 0, 'notice.notice/detail', '', '', '', '', 0, 1, 0, 1663839537, 1663839537);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (104, 101, 'C', '通知设置编辑', '', 0, 'notice.notice/set', 'notice/edit', 'message/notice/edit',
         '/message/notice', '', 0, 0, 0, 1663839873, 1663898477);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (107, 101, 'C', '短信设置', '', 0, 'notice.sms_config/getConfig', 'short_letter', 'message/short_letter/index',
         '', '', 0, 1, 0, 1663898591, 1664355708);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (108, 107, 'A', '设置', '', 0, 'notice.sms_config/setConfig', '', '', '', '', 0, 1, 0, 1663898644, 1663898644);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (109, 107, 'A', '详情', '', 0, 'notice.sms_config/detail', '', '', '', '', 0, 1, 0, 1663898661, 1663898661);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (112, 28, 'M', '用户设置', 'local-icon-keziyuyue', 90, '', 'user', '', '', '', 0, 1, 1, 1663903302, 1710473056);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (113, 112, 'C', '用户设置', '', 0, 'setting.user.user/getConfig', 'setup', 'setting/user/setup', '', '', 0, 1, 1,
         1663903506, 1663903506);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (114, 113, 'A', '保存', '', 0, 'setting.user.user/setConfig', '', '', '', '', 0, 1, 0, 1663903522, 1663903522);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (115, 112, 'C', '登录注册', '', 0, 'setting.user.user/getRegisterConfig', 'login_register',
         'setting/user/login_register', '', '', 0, 1, 0, 1663903832, 1663903832);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (116, 115, 'A', '保存', '', 0, 'setting.user.user/setRegisterConfig', '', '', '', '', 0, 1, 0, 1663903852,
         1663903852);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (117, 0, 'M', '店铺管理', 'local-icon-user_biaoqian', 900, '', 'tenant', '', '', '', 0, 1, 0, 1663904351,
         1724998415);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (118, 117, 'C', '店铺列表', 'local-icon-user_guanli', 100, 'tenant.tenant/lists', 'lists', 'tenant/lists/index',
         '', '', 0, 1, 0, 1663904392, 1724998428);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (170, 117, 'C', '微信用户列表', 'local-icon-user_guanli', 90, 'user.user/lists', 'wechat_user', 'tenant/wechat_user/index',
         '', '', 0, 1, 0, 1779566400, 1779566400);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (171, 117, 'C', '店铺回收站列表', 'local-icon-user_guanli', 80, 'tenant.tenant/recycleLists', 'recycle',
         'tenant/recycle/index', '', '', 0, 1, 0, 1779566400, 1779566400);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (143, 35, 'C', '定时任务', '', 100, 'crontab.crontab/lists', 'scheduled_task',
         'setting/system/scheduled_task/index', '', '', 0, 1, 0, 1669357509, 1710473246);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (144, 35, 'C', '定时任务添加/编辑', '', 0, 'crontab.crontab/add:edit', 'scheduled_task/edit',
         'setting/system/scheduled_task/edit', '/setting/system/scheduled_task', '', 0, 0, 0, 1669357670, 1669357765);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (145, 143, 'A', '添加', '', 0, 'crontab.crontab/add', '', '', '', '', 0, 1, 0, 1669358282, 1669358282);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (146, 143, 'A', '编辑', '', 0, 'crontab.crontab/edit', '', '', '', '', 0, 1, 0, 1669358303, 1669358303);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (147, 143, 'A', '删除', '', 0, 'crontab.crontab/delete', '', '', '', '', 0, 1, 0, 1669358334, 1669358334);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (158, 0, 'M', '应用管理', 'el-icon-Postcard', 800, '', 'app', '', '', '', 0, 1, 0, 1677143430, 1710472079);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (161, 28, 'M', '支付设置', 'local-icon-set_pay', 80, '', 'pay', '', '', '', 0, 1, 1, 1677148075, 1710473061);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (162, 161, 'C', '支付方式', '', 0, 'setting.pay.pay_way/getPayWay', 'method', 'setting/pay/method/index', '', '',
         0, 1, 0, 1677148207, 1677148207);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (163, 161, 'C', '支付配置', '', 0, 'setting.pay.pay_config/lists', 'config', 'setting/pay/config/index', '', '',
         0, 1, 0, 1677148260, 1677148374);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (164, 162, 'A', '设置支付方式', '', 0, 'setting.pay.pay_way/setPayWay', '', '', '', '', 0, 1, 0, 1677219624,
         1677219624);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (165, 163, 'A', '配置', '', 0, 'setting.pay.pay_config/setConfig', '', '', '', '', 0, 1, 0, 1677219655,
         1677219655);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (166, 118, 'A', '新增店铺', '', 0, 'tenant.tenant/add', '', '', '', '', 1, 1, 0, 1726822307, 1726822435);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (167, 118, 'A', '编辑店铺', '', 0, 'tenant.tenant/edit', '', '', '', '', 1, 1, 0, 1726822372, 1726822440);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (168, 118, 'A', '店铺详情', '', 0, 'tenant.tenant/detail', '', '', '', '', 1, 1, 0, 1726822396, 1726822444);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (169, 118, 'A', '放入回收站', '', 0, 'tenant.tenant/delete', '', '', '', '', 1, 1, 0, 1726822416, 1726822449);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (172, 171, 'A', '恢复店铺', '', 0, 'tenant.tenant/restore', '', '', '', '', 1, 1, 0, 1779566400,
         1779566400);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (173, 0, 'M', '商品管理', 'local-icon-goods', 700, '', 'goods', '', '', '', 0, 1, 0, 1780156800, 1780156800);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (174, 173, 'C', '公共商品库', 'local-icon-goods', 70, 'goods.cloud_goods/lists', 'cloud_goods',
         'goods/cloud_goods/index', '', '', 0, 1, 0, 1780156800, 1780156800);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (175, 174, 'A', '新增', '', 0, 'goods.cloud_goods/add', '', '', '', '', 1, 1, 0, 1780156800,
         1780156800);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (176, 174, 'A', '编辑', '', 0, 'goods.cloud_goods/edit', '', '', '', '', 1, 1, 0, 1780156800,
         1780156800);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (177, 174, 'A', '删除', '', 0, 'goods.cloud_goods/delete', '', '', '', '', 1, 1, 0, 1780156800,
         1780156800);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (184, 173, 'C', '商品归档列表', 'local-icon-goods', 80, 'goods.cloud_goods/archive', 'cloud_goods_archive',
         'goods/cloud_goods/archive', '', '', 0, 1, 0, 1780156800, 1780156800);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (178, 173, 'C', '分类管理', 'local-icon-goods', 60, 'goods.tenant_goodscat/lists', 'cate',
         'goods/cate/index', '', '', 0, 1, 0, 1780156800, 1780156800);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (179, 178, 'A', '新增', '', 0, 'goods.tenant_goodscat/add', '', '', '', '', 1, 1, 0, 1780156800,
         1780156800);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (180, 178, 'A', '编辑', '', 0, 'goods.tenant_goodscat/edit', '', '', '', '', 1, 1, 0, 1780156800,
         1780156800);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (181, 178, 'A', '删除', '', 0, 'goods.tenant_goodscat/delete', '', '', '', '', 1, 1, 0, 1780156800,
         1780156800);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (182, 178, 'A', '详情', '', 0, 'goods.tenant_goodscat/detail', '', '', '', '', 1, 1, 0, 1780156800,
         1780156800);
-INSERT INTO `la_system_menu`
+INSERT INTO `{{prefix}}system_menu`
 VALUES (183, 178, 'A', '全部分类', '', 0, 'goods.tenant_goodscat/all', '', '', '', '', 1, 1, 0, 1780156800,
         1780156800);
 COMMIT;
 
 -- ----------------------------
--- Table structure for la_system_role
+-- Table structure for {{prefix}}system_role
 -- ----------------------------
-DROP TABLE IF EXISTS `la_system_role`;
-CREATE TABLE `la_system_role`
+DROP TABLE IF EXISTS `{{prefix}}system_role`;
+CREATE TABLE `{{prefix}}system_role`
 (
     `id`          int(11) UNSIGNED                                             NOT NULL AUTO_INCREMENT,
     `name`        varchar(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT '' COMMENT '名称',
@@ -1283,10 +1283,10 @@ CREATE TABLE `la_system_role`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_system_role_menu
+-- Table structure for {{prefix}}system_role_menu
 -- ----------------------------
-DROP TABLE IF EXISTS `la_system_role_menu`;
-CREATE TABLE `la_system_role_menu`
+DROP TABLE IF EXISTS `{{prefix}}system_role_menu`;
+CREATE TABLE `{{prefix}}system_role_menu`
 (
     `role_id` int(10) UNSIGNED NOT NULL DEFAULT 0 COMMENT '角色ID',
     `menu_id` int(10) UNSIGNED NOT NULL DEFAULT 0 COMMENT '菜单ID',
@@ -1297,10 +1297,10 @@ CREATE TABLE `la_system_role_menu`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_tenant
+-- Table structure for {{prefix}}tenant
 -- ----------------------------
-DROP TABLE IF EXISTS `la_tenant`;
-CREATE TABLE `la_tenant`
+DROP TABLE IF EXISTS `{{prefix}}tenant`;
+CREATE TABLE `{{prefix}}tenant`
 (
     `id`                  int(11) UNSIGNED                                              NOT NULL AUTO_INCREMENT COMMENT '主键',
     `sn`                  varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci  NOT NULL COMMENT '编号',
@@ -1323,10 +1323,10 @@ CREATE TABLE `la_tenant`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_tenant_admin
+-- Table structure for {{prefix}}tenant_admin
 -- ----------------------------
-DROP TABLE IF EXISTS `la_tenant_admin`;
-CREATE TABLE `la_tenant_admin`
+DROP TABLE IF EXISTS `{{prefix}}tenant_admin`;
+CREATE TABLE `{{prefix}}tenant_admin`
 (
     `id`               int(11) UNSIGNED                                              NOT NULL AUTO_INCREMENT,
     `tenant_id`        int(10)                                                       NOT NULL COMMENT '租户ID',
@@ -1350,10 +1350,10 @@ CREATE TABLE `la_tenant_admin`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_tenant_admin_dept
+-- Table structure for {{prefix}}tenant_admin_dept
 -- ----------------------------
-DROP TABLE IF EXISTS `la_tenant_admin_dept`;
-CREATE TABLE `la_tenant_admin_dept`
+DROP TABLE IF EXISTS `{{prefix}}tenant_admin_dept`;
+CREATE TABLE `{{prefix}}tenant_admin_dept`
 (
     `admin_id` int(10) NOT NULL DEFAULT 0 COMMENT '管理员id',
     `dept_id`  int(10) NOT NULL DEFAULT 0 COMMENT '部门id',
@@ -1364,10 +1364,10 @@ CREATE TABLE `la_tenant_admin_dept`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_tenant_admin_jobs
+-- Table structure for {{prefix}}tenant_admin_jobs
 -- ----------------------------
-DROP TABLE IF EXISTS `la_tenant_admin_jobs`;
-CREATE TABLE `la_tenant_admin_jobs`
+DROP TABLE IF EXISTS `{{prefix}}tenant_admin_jobs`;
+CREATE TABLE `{{prefix}}tenant_admin_jobs`
 (
     `admin_id` int(10) NOT NULL COMMENT '管理员id',
     `jobs_id`  int(10) NOT NULL COMMENT '岗位id',
@@ -1378,10 +1378,10 @@ CREATE TABLE `la_tenant_admin_jobs`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_tenant_admin_role
+-- Table structure for {{prefix}}tenant_admin_role
 -- ----------------------------
-DROP TABLE IF EXISTS `la_tenant_admin_role`;
-CREATE TABLE `la_tenant_admin_role`
+DROP TABLE IF EXISTS `{{prefix}}tenant_admin_role`;
+CREATE TABLE `{{prefix}}tenant_admin_role`
 (
     `admin_id` int(10) NOT NULL COMMENT '管理员id',
     `role_id`  int(10) NOT NULL COMMENT '角色id',
@@ -1392,10 +1392,10 @@ CREATE TABLE `la_tenant_admin_role`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_tenant_admin_session
+-- Table structure for {{prefix}}tenant_admin_session
 -- ----------------------------
-DROP TABLE IF EXISTS `la_tenant_admin_session`;
-CREATE TABLE `la_tenant_admin_session`
+DROP TABLE IF EXISTS `{{prefix}}tenant_admin_session`;
+CREATE TABLE `{{prefix}}tenant_admin_session`
 (
     `id`          int(11) UNSIGNED                                             NOT NULL AUTO_INCREMENT,
     `admin_id`    int(11) UNSIGNED                                             NOT NULL COMMENT '租户id',
@@ -1413,10 +1413,10 @@ CREATE TABLE `la_tenant_admin_session`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_tenant_config
+-- Table structure for {{prefix}}tenant_config
 -- ----------------------------
-DROP TABLE IF EXISTS `la_tenant_config`;
-CREATE TABLE `la_tenant_config`
+DROP TABLE IF EXISTS `{{prefix}}tenant_config`;
+CREATE TABLE `{{prefix}}tenant_config`
 (
     `id`          int(11)                                                      NOT NULL AUTO_INCREMENT,
     `tenant_id`   int(11)                                                      NOT NULL COMMENT '租户ID',
@@ -1433,10 +1433,10 @@ CREATE TABLE `la_tenant_config`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_tenant_dept
+-- Table structure for {{prefix}}tenant_dept
 -- ----------------------------
-DROP TABLE IF EXISTS `la_tenant_dept`;
-CREATE TABLE `la_tenant_dept`
+DROP TABLE IF EXISTS `{{prefix}}tenant_dept`;
+CREATE TABLE `{{prefix}}tenant_dept`
 (
     `id`          int(11)                                                      NOT NULL AUTO_INCREMENT COMMENT 'id',
     `tenant_id`   int(11)                                                      NOT NULL COMMENT '租户ID',
@@ -1457,10 +1457,10 @@ CREATE TABLE `la_tenant_dept`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_tenant_goodscat
+-- Table structure for {{prefix}}tenant_goodscat
 -- ----------------------------
-DROP TABLE IF EXISTS `la_tenant_goodscat`;
-CREATE TABLE `la_tenant_goodscat`
+DROP TABLE IF EXISTS `{{prefix}}tenant_goodscat`;
+CREATE TABLE `{{prefix}}tenant_goodscat`
 (
     `id`          int(11) UNSIGNED                                             NOT NULL AUTO_INCREMENT COMMENT '主键',
     `tenant_id`   int(11) UNSIGNED                                             NOT NULL DEFAULT 0 COMMENT '租户ID',
@@ -1478,18 +1478,18 @@ CREATE TABLE `la_tenant_goodscat`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Records of la_tenant_dept
+-- Records of {{prefix}}tenant_dept
 -- ----------------------------
 BEGIN;
-INSERT INTO `la_tenant_dept`
+INSERT INTO `{{prefix}}tenant_dept`
 VALUES (1, 0, '公司', 0, 0, 'boss', '12345698745', 1, 1650592684, 1653640368, NULL);
 COMMIT;
 
 -- ----------------------------
--- Table structure for la_tenant_file
+-- Table structure for {{prefix}}tenant_file
 -- ----------------------------
-DROP TABLE IF EXISTS `la_tenant_file`;
-CREATE TABLE `la_tenant_file`
+DROP TABLE IF EXISTS `{{prefix}}tenant_file`;
+CREATE TABLE `{{prefix}}tenant_file`
 (
     `id`          int(10) UNSIGNED                                              NOT NULL AUTO_INCREMENT COMMENT '主键ID',
     `tenant_id`   int(11)                                                       NOT NULL COMMENT '租户ID',
@@ -1510,10 +1510,10 @@ CREATE TABLE `la_tenant_file`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_tenant_file_cate
+-- Table structure for {{prefix}}tenant_file_cate
 -- ----------------------------
-DROP TABLE IF EXISTS `la_tenant_file_cate`;
-CREATE TABLE `la_tenant_file_cate`
+DROP TABLE IF EXISTS `{{prefix}}tenant_file_cate`;
+CREATE TABLE `{{prefix}}tenant_file_cate`
 (
     `id`          int(10) UNSIGNED                                             NOT NULL AUTO_INCREMENT COMMENT '主键ID',
     `tenant_id`   int(11)                                                      NOT NULL COMMENT '租户ID',
@@ -1531,10 +1531,10 @@ CREATE TABLE `la_tenant_file_cate`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_tenant_jobs
+-- Table structure for {{prefix}}tenant_jobs
 -- ----------------------------
-DROP TABLE IF EXISTS `la_tenant_jobs`;
-CREATE TABLE `la_tenant_jobs`
+DROP TABLE IF EXISTS `{{prefix}}tenant_jobs`;
+CREATE TABLE `{{prefix}}tenant_jobs`
 (
     `id`          int(11)                                                       NOT NULL AUTO_INCREMENT COMMENT 'id',
     `tenant_id`   int(11)                                                       NOT NULL COMMENT '租户ID',
@@ -1554,10 +1554,10 @@ CREATE TABLE `la_tenant_jobs`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_tenant_notice_record
+-- Table structure for {{prefix}}tenant_notice_record
 -- ----------------------------
-DROP TABLE IF EXISTS `la_tenant_notice_record`;
-CREATE TABLE `la_tenant_notice_record`
+DROP TABLE IF EXISTS `{{prefix}}tenant_notice_record`;
+CREATE TABLE `{{prefix}}tenant_notice_record`
 (
     `id`          int(10) UNSIGNED                                              NOT NULL AUTO_INCREMENT COMMENT 'ID',
     `tenant_id`   int(11)                                                       NOT NULL COMMENT '租户ID',
@@ -1581,10 +1581,10 @@ CREATE TABLE `la_tenant_notice_record`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_tenant_notice_setting
+-- Table structure for {{prefix}}tenant_notice_setting
 -- ----------------------------
-DROP TABLE IF EXISTS `la_tenant_notice_setting`;
-CREATE TABLE `la_tenant_notice_setting`
+DROP TABLE IF EXISTS `{{prefix}}tenant_notice_setting`;
+CREATE TABLE `{{prefix}}tenant_notice_setting`
 (
     `id`            int(11)                                                       NOT NULL AUTO_INCREMENT,
     `tenant_id`     int(11)                                                       NOT NULL COMMENT '租户ID',
@@ -1607,38 +1607,38 @@ CREATE TABLE `la_tenant_notice_setting`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Records of la_tenant_notice_setting
+-- Records of {{prefix}}tenant_notice_setting
 -- ----------------------------
 BEGIN;
-INSERT INTO `la_tenant_notice_setting`
+INSERT INTO `{{prefix}}tenant_notice_setting`
 VALUES (1, 0, 101, '登录验证码', '用户手机号码登录时发送', 1, 2,
         '{\"type\":\"system\",\"title\":\"\",\"content\":\"\",\"status\":\"0\",\"is_show\":\"\",\"tips\":[\"可选变量 验证码:code\"]}',
         '{\"type\":\"sms\",\"template_id\":\"SMS_123456\",\"content\":\"您正在登录，验证码${code}，切勿将验证码泄露于他人，本条验证码有效期5分钟。\",\"status\":\"1\",\"is_show\":\"1\"}',
         '{\"type\":\"oa\",\"template_id\":\"\",\"template_sn\":\"\",\"name\":\"\",\"first\":\"\",\"remark\":\"\",\"tpl\":[],\"status\":\"0\",\"is_show\":\"\",\"tips\":[\"可选变量 验证码:code\",\"配置路径：小程序后台 > 功能 > 订阅消息\"]}',
         '{\"type\":\"mnp\",\"template_id\":\"\",\"template_sn\":\"\",\"name\":\"\",\"tpl\":[],\"status\":\"0\",\"is_show\":\"\",\"tips\":[\"可选变量 验证码:code\",\"配置路径：小程序后台 > 功能 > 订阅消息\"]}',
         '2', NULL);
-INSERT INTO `la_tenant_notice_setting`
+INSERT INTO `{{prefix}}tenant_notice_setting`
 VALUES (2, 0, 102, '绑定手机验证码', '用户绑定手机号码时发送', 1, 2,
         '{\"type\":\"system\",\"title\":\"\",\"content\":\"\",\"status\":\"0\",\"is_show\":\"\"}',
         '{\"type\":\"sms\",\"template_id\":\"SMS_123456\",\"content\":\"您正在绑定手机号，验证码${code}，切勿将验证码泄露于他人，本条验证码有效期5分钟。\",\"status\":\"1\",\"is_show\":\"1\"}',
         '{\"type\":\"oa\",\"template_id\":\"\",\"template_sn\":\"\",\"name\":\"\",\"first\":\"\",\"remark\":\"\",\"tpl\":[],\"status\":\"0\",\"is_show\":\"\"}',
         '{\"type\":\"mnp\",\"template_id\":\"\",\"template_sn\":\"\",\"name\":\"\",\"tpl\":[],\"status\":\"0\",\"is_show\":\"\"}',
         '2', NULL);
-INSERT INTO `la_tenant_notice_setting`
+INSERT INTO `{{prefix}}tenant_notice_setting`
 VALUES (3, 0, 103, '变更手机验证码', '用户变更手机号码时发送', 1, 2,
         '{\"type\":\"system\",\"title\":\"\",\"content\":\"\",\"status\":\"0\",\"is_show\":\"\",\"tips\":[\"可选变量 验证码:code\"]}',
         '{\"type\":\"sms\",\"template_id\":\"SMS_123456\",\"content\":\"您正在变更手机号，验证码${code}，切勿将验证码泄露于他人，本条验证码有效期5分钟。\",\"status\":\"1\",\"is_show\":\"1\"}',
         '{\"type\":\"oa\",\"template_id\":\"\",\"template_sn\":\"\",\"name\":\"\",\"first\":\"\",\"remark\":\"\",\"tpl\":[],\"status\":\"0\",\"is_show\":\"\",\"tips\":[\"可选变量 验证码:code\",\"配置路径：小程序后台 > 功能 > 订阅消息\"]}',
         '{\"type\":\"mnp\",\"template_id\":\"\",\"template_sn\":\"\",\"name\":\"\",\"tpl\":[],\"status\":\"0\",\"is_show\":\"\",\"tips\":[\"可选变量 验证码:code\",\"配置路径：小程序后台 > 功能 > 订阅消息\"]}',
         '2', NULL);
-INSERT INTO `la_tenant_notice_setting`
+INSERT INTO `{{prefix}}tenant_notice_setting`
 VALUES (4, 0, 104, '找回登录密码验证码', '用户找回登录密码号码时发送', 1, 2,
         '{\"type\":\"system\",\"title\":\"\",\"content\":\"\",\"status\":\"0\",\"is_show\":\"\",\"tips\":[\"可选变量 验证码:code\"]}',
         '{\"type\":\"sms\",\"template_id\":\"SMS_123456\",\"content\":\"您正在找回登录密码，验证码${code}，切勿将验证码泄露于他人，本条验证码有效期5分钟。\",\"status\":\"0\",\"is_show\":\"1\",\"tips\":[\"可选变量 验证码:code\",\"示例：您正在找回登录密码，验证码${code}，切勿将验证码泄露于他人，本条验证码有效期5分钟。\",\"生效条件：1、管理后台完成短信设置。 2、第三方短信平台申请模板。\"]}',
         '{\"type\":\"oa\",\"template_id\":\"\",\"template_sn\":\"\",\"name\":\"\",\"first\":\"\",\"remark\":\"\",\"tpl\":[],\"status\":\"0\",\"is_show\":\"\",\"tips\":[\"可选变量 验证码:code\",\"配置路径：小程序后台 > 功能 > 订阅消息\"]}',
         '{\"type\":\"mnp\",\"template_id\":\"\",\"template_sn\":\"\",\"name\":\"\",\"tpl\":[],\"status\":\"0\",\"is_show\":\"\",\"tips\":[\"可选变量 验证码:code\",\"配置路径：小程序后台 > 功能 > 订阅消息\"]}',
         '2', NULL);
-INSERT INTO `la_tenant_notice_setting`
+INSERT INTO `{{prefix}}tenant_notice_setting`
 VALUES (5, 0, 105, '注册验证码', '用户注册账号时发送', 1, 2,
         '{\"type\":\"system\",\"title\":\"\",\"content\":\"\",\"status\":\"0\",\"is_show\":\"\",\"tips\":[\"可选变量 验证码:code\"]}',
         '{\"type\":\"sms\",\"template_id\":\"SMS_175615071\",\"content\":\"验证码${code}，您正在注册成为新用户，感谢您的支持！\",\"status\":\"1\",\"is_show\":\"1\",\"tips\":[\"可选变量 验证码:code\",\"示例：您正在申请注册，验证码${code}，切勿将验证码泄露于他人，本条验证码有效期5分钟。\",\"生效条件：1、管理后台完成短信设置。 2、第三方短信平台申请模板。\"]}',
@@ -1648,10 +1648,10 @@ VALUES (5, 0, 105, '注册验证码', '用户注册账号时发送', 1, 2,
 COMMIT;
 
 -- ----------------------------
--- Table structure for la_tenant_pay_config
+-- Table structure for {{prefix}}tenant_pay_config
 -- ----------------------------
-DROP TABLE IF EXISTS `la_tenant_pay_config`;
-CREATE TABLE `la_tenant_pay_config`
+DROP TABLE IF EXISTS `{{prefix}}tenant_pay_config`;
+CREATE TABLE `{{prefix}}tenant_pay_config`
 (
     `id`        int(11) UNSIGNED                                              NOT NULL AUTO_INCREMENT,
     `tenant_id` int(11)                                                       NOT NULL COMMENT '租户ID',
@@ -1669,26 +1669,26 @@ CREATE TABLE `la_tenant_pay_config`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Records of la_tenant_pay_config
+-- Records of {{prefix}}tenant_pay_config
 -- ----------------------------
 BEGIN;
-INSERT INTO `la_tenant_pay_config`
+INSERT INTO `{{prefix}}tenant_pay_config`
 VALUES (1, 0, '余额支付', 1, '', 'resource/image/common/balance_pay.png', 128, '余额支付备注');
-INSERT INTO `la_tenant_pay_config`
+INSERT INTO `{{prefix}}tenant_pay_config`
 VALUES (2, 0, '微信支付', 2,
         '{\"interface_version\":\"v3\",\"merchant_type\":\"ordinary_merchant\",\"mch_id\":\"\",\"pay_sign_key\":\"\",\"apiclient_cert\":\"\",\"apiclient_key\":\"\"}',
         '/resource/image/common/wechat_pay.png', 123, '微信支付备注');
-INSERT INTO `la_tenant_pay_config`
+INSERT INTO `{{prefix}}tenant_pay_config`
 VALUES (3, 0, '支付宝支付', 3,
         '{\"mode\":\"normal_mode\",\"merchant_type\":\"ordinary_merchant\",\"app_id\":\"\",\"private_key\":\"\",\"ali_public_key\":\"\"}',
         '/resource/image/common/ali_pay.png', 123, '支付宝支付');
 COMMIT;
 
 -- ----------------------------
--- Table structure for la_tenant_pay_way
+-- Table structure for {{prefix}}tenant_pay_way
 -- ----------------------------
-DROP TABLE IF EXISTS `la_tenant_pay_way`;
-CREATE TABLE `la_tenant_pay_way`
+DROP TABLE IF EXISTS `{{prefix}}tenant_pay_way`;
+CREATE TABLE `{{prefix}}tenant_pay_way`
 (
     `id`            int(11) UNSIGNED NOT NULL AUTO_INCREMENT,
     `tenant_id`     int(11)          NOT NULL COMMENT '租户ID',
@@ -1704,10 +1704,10 @@ CREATE TABLE `la_tenant_pay_way`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_tenant_sms_log
+-- Table structure for {{prefix}}tenant_sms_log
 -- ----------------------------
-DROP TABLE IF EXISTS `la_tenant_sms_log`;
-CREATE TABLE `la_tenant_sms_log`
+DROP TABLE IF EXISTS `{{prefix}}tenant_sms_log`;
+CREATE TABLE `{{prefix}}tenant_sms_log`
 (
     `id`          int(11) NOT NULL AUTO_INCREMENT COMMENT 'id',
     `tenant_id`   int(11) NOT NULL COMMENT '租户ID',
@@ -1727,30 +1727,30 @@ CREATE TABLE `la_tenant_sms_log`
 ) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COMMENT='租户短信记录表';
 
 -- ----------------------------
--- Records of la_tenant_pay_way
+-- Records of {{prefix}}tenant_pay_way
 -- ----------------------------
 BEGIN;
-INSERT INTO `la_tenant_pay_way`
+INSERT INTO `{{prefix}}tenant_pay_way`
 VALUES (1, 0, 1, 1, 0, 1);
-INSERT INTO `la_tenant_pay_way`
+INSERT INTO `{{prefix}}tenant_pay_way`
 VALUES (2, 0, 2, 1, 1, 1);
-INSERT INTO `la_tenant_pay_way`
+INSERT INTO `{{prefix}}tenant_pay_way`
 VALUES (3, 0, 1, 2, 0, 1);
-INSERT INTO `la_tenant_pay_way`
+INSERT INTO `{{prefix}}tenant_pay_way`
 VALUES (4, 0, 2, 2, 1, 1);
-INSERT INTO `la_tenant_pay_way`
+INSERT INTO `{{prefix}}tenant_pay_way`
 VALUES (5, 0, 1, 3, 0, 1);
-INSERT INTO `la_tenant_pay_way`
+INSERT INTO `{{prefix}}tenant_pay_way`
 VALUES (6, 0, 2, 3, 1, 1);
-INSERT INTO `la_tenant_pay_way`
+INSERT INTO `{{prefix}}tenant_pay_way`
 VALUES (7, 0, 3, 3, 0, 1);
 COMMIT;
 
 -- ----------------------------
--- Table structure for la_tenant_system_menu
+-- Table structure for {{prefix}}tenant_system_menu
 -- ----------------------------
-DROP TABLE IF EXISTS `la_tenant_system_menu`;
-CREATE TABLE `la_tenant_system_menu`
+DROP TABLE IF EXISTS `{{prefix}}tenant_system_menu`;
+CREATE TABLE `{{prefix}}tenant_system_menu`
 (
     `id`          int(10) UNSIGNED                                              NOT NULL AUTO_INCREMENT COMMENT '主键',
     `tenant_id`   int(11)                                                       NOT NULL COMMENT '租户ID',
@@ -1777,333 +1777,333 @@ CREATE TABLE `la_tenant_system_menu`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Records of la_tenant_system_menu
+-- Records of {{prefix}}tenant_system_menu
 -- ----------------------------
 BEGIN;
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (4, 0, 0, 'M', '权限管理', 'el-icon-Lock', 300, '', 'permission', '', '', '', 0, 1, 0, 1656664556, 1710472802);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (5, 0, 0, 'C', '工作台', 'el-icon-Monitor', 1000, 'workbench/index', 'workbench', 'workbench/index', '', '', 0,
         1, 0, 1656664793, 1664354981);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (6, 0, 4, 'C', '菜单', 'el-icon-Operation', 100, 'auth.menu/lists', 'menu', 'permission/menu/index', '', '', 1,
         1, 0, 1656664960, 1710472994);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (7, 0, 4, 'C', '管理员', 'local-icon-shouyiren', 80, 'auth.admin/lists', 'admin', 'permission/admin/index', '',
         '', 0, 1, 0, 1656901567, 1710473013);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (8, 0, 4, 'C', '角色', 'el-icon-Female', 90, 'auth.role/lists', 'role', 'permission/role/index', '', '', 0, 1, 0,
         1656901660, 1710473000);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (12, 0, 8, 'A', '新增', '', 1, 'auth.role/add', '', '', '', '', 0, 1, 0, 1657001790, 1663750625);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (14, 0, 8, 'A', '编辑', '', 1, 'auth.role/edit', '', '', '', '', 0, 1, 0, 1657001924, 1663750631);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (15, 0, 8, 'A', '删除', '', 1, 'auth.role/delete', '', '', '', '', 0, 1, 0, 1657001982, 1663750637);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (16, 0, 6, 'A', '新增', '', 1, 'auth.menu/add', '', '', '', '', 0, 1, 0, 1657072523, 1663750565);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (17, 0, 6, 'A', '编辑', '', 1, 'auth.menu/edit', '', '', '', '', 0, 1, 0, 1657073955, 1663750570);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (18, 0, 6, 'A', '删除', '', 1, 'auth.menu/delete', '', '', '', '', 0, 1, 0, 1657073987, 1663750578);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (19, 0, 7, 'A', '新增', '', 1, 'auth.admin/add', '', '', '', '', 0, 1, 0, 1657074035, 1663750596);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (20, 0, 7, 'A', '编辑', '', 1, 'auth.admin/edit', '', '', '', '', 0, 1, 0, 1657074071, 1663750603);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (21, 0, 7, 'A', '删除', '', 1, 'auth.admin/delete', '', '', '', '', 0, 1, 0, 1657074108, 1663750609);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (25, 0, 0, 'M', '组织管理', 'el-icon-OfficeBuilding', 400, '', 'organization', '', '', '', 0, 1, 0, 1657099914,
         1710472797);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (26, 0, 25, 'C', '部门管理', 'el-icon-Coordinate', 100, 'dept.dept/lists', 'department',
         'organization/department/index', '', '', 1, 1, 0, 1657099989, 1710472962);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (27, 0, 25, 'C', '岗位管理', 'el-icon-PriceTag', 90, 'dept.jobs/lists', 'post', 'organization/post/index', '',
         '', 0, 1, 0, 1657100044, 1710472967);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (28, 0, 0, 'M', '系统设置', 'el-icon-Setting', 200, '', 'setting', '', '', '', 0, 1, 0, 1657100164, 1710472807);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (29, 0, 28, 'M', '网站设置', 'el-icon-Basketball', 100, '', 'website', '', '', '', 0, 1, 0, 1657100230,
         1710473049);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (30, 0, 29, 'C', '网站信息', '', 1, 'setting.web.web_setting/getWebsite', 'information',
         'setting/website/information', '', '', 0, 1, 0, 1657100306, 1657164412);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (31, 0, 29, 'C', '网站备案', '', 1, 'setting.web.web_setting/getCopyright', 'filing', 'setting/website/filing',
         '', '', 0, 1, 0, 1657100434, 1657164723);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (32, 0, 29, 'C', '政策协议', '', 1, 'setting.web.web_setting/getAgreement', 'protocol',
         'setting/website/protocol', '', '', 0, 1, 0, 1657100571, 1657164770);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (35, 0, 28, 'M', '系统维护', 'el-icon-SetUp', 50, '', 'system', '', '', '', 0, 1, 0, 1657161569, 1710473122);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (37, 0, 35, 'C', '系统缓存', '', 80, '', 'cache', 'setting/system/cache', '', '', 0, 1, 0, 1657161896,
         1710473258);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (45, 0, 26, 'A', '新增', '', 1, 'dept.dept/add', '', '', '', '', 0, 1, 0, 1657163548, 1663750492);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (46, 0, 26, 'A', '编辑', '', 1, 'dept.dept/edit', '', '', '', '', 0, 1, 0, 1657163599, 1663750498);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (47, 0, 26, 'A', '删除', '', 1, 'dept.dept/delete', '', '', '', '', 0, 1, 0, 1657163687, 1663750504);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (48, 0, 27, 'A', '新增', '', 1, 'dept.jobs/add', '', '', '', '', 0, 1, 0, 1657163778, 1663750524);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (49, 0, 27, 'A', '编辑', '', 1, 'dept.jobs/edit', '', '', '', '', 0, 1, 0, 1657163800, 1663750530);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (50, 0, 27, 'A', '删除', '', 1, 'dept.jobs/delete', '', '', '', '', 0, 1, 0, 1657163820, 1663750535);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (51, 0, 30, 'A', '保存', '', 1, 'setting.web.web_setting/setWebsite', '', '', '', '', 0, 1, 0, 1657164469,
         1663750649);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (52, 0, 31, 'A', '保存', '', 1, 'setting.web.web_setting/setCopyright', '', '', '', '', 0, 1, 0, 1657164692,
         1663750657);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (53, 0, 32, 'A', '保存', '', 1, 'setting.web.web_setting/setAgreement', '', '', '', '', 0, 1, 0, 1657164824,
         1663750665);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (61, 0, 37, 'A', '清除系统缓存', '', 1, 'setting.system.cache/clear', '', '', '', '', 0, 1, 0, 1657173837,
         1657173939);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (63, 0, 158, 'M', '素材管理', 'el-icon-Picture', 0, '', 'material', '', '', '', 0, 1, 0, 1657507133, 1710472243);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (64, 0, 63, 'C', '素材中心', 'el-icon-PictureRounded', 0, '', 'index', 'material/index', '', '', 0, 1, 0,
         1657507296, 1664355653);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (66, 0, 26, 'A', '详情', '', 0, 'dept.dept/detail', '', '', '', '', 0, 1, 0, 1663725459, 1663750516);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (67, 0, 27, 'A', '详情', '', 0, 'dept.jobs/detail', '', '', '', '', 0, 1, 0, 1663725514, 1663750559);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (68, 0, 6, 'A', '详情', '', 0, 'auth.menu/detail', '', '', '', '', 0, 1, 0, 1663725564, 1663750584);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (69, 0, 7, 'A', '详情', '', 0, 'auth.admin/detail', '', '', '', '', 0, 1, 0, 1663725623, 1663750615);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (70, 0, 158, 'M', '文章资讯', 'el-icon-ChatLineSquare', 90, '', 'article', '', '', '', 0, 1, 0, 1663749965,
         1710471867);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (71, 0, 70, 'C', '文章管理', 'el-icon-ChatDotSquare', 0, 'article.article/lists', 'lists', 'article/lists/index',
         '', '', 0, 1, 0, 1663750101, 1664354615);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (72, 0, 70, 'C', '文章添加/编辑', '', 0, 'article.article/add:edit', 'lists/edit', 'article/lists/edit',
         '/article/lists', '', 0, 0, 0, 1663750153, 1664356275);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (73, 0, 70, 'C', '文章栏目', 'el-icon-CollectionTag', 0, 'article.articleCate/lists', 'column',
         'article/column/index', '', '', 1, 1, 0, 1663750287, 1664354678);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (74, 0, 71, 'A', '新增', '', 0, 'article.article/add', '', '', '', '', 0, 1, 0, 1663750335, 1663750335);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (75, 0, 71, 'A', '详情', '', 0, 'article.article/detail', '', '', '', '', 0, 1, 0, 1663750354, 1663750383);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (76, 0, 71, 'A', '删除', '', 0, 'article.article/delete', '', '', '', '', 0, 1, 0, 1663750413, 1663750413);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (77, 0, 71, 'A', '修改状态', '', 0, 'article.article/updateStatus', '', '', '', '', 0, 1, 0, 1663750442,
         1663750442);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (78, 0, 73, 'A', '添加', '', 0, 'article.articleCate/add', '', '', '', '', 0, 1, 0, 1663750483, 1663750483);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (79, 0, 73, 'A', '删除', '', 0, 'article.articleCate/delete', '', '', '', '', 0, 1, 0, 1663750895, 1663750895);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (80, 0, 73, 'A', '详情', '', 0, 'article.articleCate/detail', '', '', '', '', 0, 1, 0, 1663750913, 1663750913);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (81, 0, 73, 'A', '修改状态', '', 0, 'article.articleCate/updateStatus', '', '', '', '', 0, 1, 0, 1663750936,
         1663750936);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (82, 0, 0, 'M', '渠道设置', 'el-icon-Message', 500, '', 'channel', '', '', '', 0, 1, 0, 1663754084, 1710472649);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (83, 0, 82, 'C', 'h5设置', 'el-icon-Cellphone', 100, 'channel.web_page_setting/getConfig', 'h5', 'channel/h5',
         '', '', 0, 1, 0, 1663754158, 1710472929);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (84, 0, 83, 'A', '保存', '', 0, 'channel.web_page_setting/setConfig', '', '', '', '', 0, 1, 0, 1663754259,
         1663754259);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (85, 0, 82, 'M', '微信公众号', 'local-icon-dingdan', 80, '', 'wx_oa', '', '', '', 0, 1, 0, 1663755470,
         1710472946);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (86, 0, 85, 'C', '公众号配置', '', 0, 'channel.official_account_setting/getConfig', 'config',
         'channel/wx_oa/config', '', '', 0, 1, 0, 1663755663, 1664355450);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (87, 0, 85, 'C', '菜单管理', '', 0, 'channel.official_account_menu/detail', 'menu', 'channel/wx_oa/menu', '', '',
         0, 1, 0, 1663755767, 1664355456);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (88, 0, 86, 'A', '保存', '', 0, 'channel.official_account_setting/setConfig', '', '', '', '', 0, 1, 0,
         1663755799, 1663755799);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (89, 0, 86, 'A', '保存并发布', '', 0, 'channel.official_account_menu/save', '', '', '', '', 0, 1, 0, 1663756490,
         1663756490);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (90, 0, 85, 'C', '关注回复', '', 0, 'channel.official_account_reply/lists', 'follow',
         'channel/wx_oa/reply/follow_reply', '', '', 0, 1, 0, 1663818358, 1663818366);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (91, 0, 85, 'C', '关键字回复', '', 0, '', 'keyword', 'channel/wx_oa/reply/keyword_reply', '', '', 0, 1, 0,
         1663818445, 1663818445);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (93, 0, 85, 'C', '默认回复', '', 0, '', 'default', 'channel/wx_oa/reply/default_reply', '', '', 0, 1, 0,
         1663818580, 1663818580);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (94, 0, 82, 'C', '微信小程序', 'local-icon-weixin', 90, 'channel.mnp_settings/getConfig', 'weapp',
         'channel/weapp', '', '', 0, 1, 0, 1663831396, 1710472941);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (95, 0, 94, 'A', '保存', '', 0, 'channel.mnp_settings/setConfig', '', '', '', '', 0, 1, 0, 1663831436,
         1663831436);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (96, 0, 0, 'M', '装修管理', 'el-icon-Brush', 600, '', 'decoration', '', '', '', 0, 1, 0, 1663834825, 1710472099);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (97, 0, 175, 'C', '页面装修', 'el-icon-CopyDocument', 100, 'decorate.page/detail', 'pages',
         'decoration/pages/index', '', '', 0, 1, 0, 1663834879, 1710929256);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (98, 0, 97, 'A', '保存', '', 0, 'decorate.page/save', '', '', '', '', 0, 1, 0, 1663834956, 1663834956);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (99, 0, 175, 'C', '底部导航', 'el-icon-Position', 90, 'decorate.tabbar/detail', 'tabbar', 'decoration/tabbar',
         '', '', 0, 1, 0, 1663835004, 1710929262);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (100, 0, 99, 'A', '保存', '', 0, 'decorate.tabbar/save', '', '', '', '', 0, 1, 0, 1663835018, 1663835018);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (101, 0, 158, 'M', '消息管理', 'el-icon-ChatDotRound', 80, '', 'message', '', '', '', 0, 1, 0, 1663838602,
         1710471874);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (102, 0, 101, 'C', '通知设置', '', 0, 'notice.notice/settingLists', 'notice', 'message/notice/index', '', '', 0,
         1, 0, 1663839195, 1663839195);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (103, 0, 102, 'A', '详情', '', 0, 'notice.notice/detail', '', '', '', '', 0, 1, 0, 1663839537, 1663839537);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (104, 0, 101, 'C', '通知设置编辑', '', 0, 'notice.notice/set', 'notice/edit', 'message/notice/edit',
         '/message/notice', '', 0, 0, 0, 1663839873, 1663898477);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (105, 0, 71, 'A', '编辑', '', 0, 'article.article/edit', '', '', '', '', 0, 1, 0, 1663840043, 1663840053);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (107, 0, 101, 'C', '短信设置', '', 0, 'notice.sms_config/getConfig', 'short_letter',
         'message/short_letter/index', '', '', 0, 1, 0, 1663898591, 1664355708);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (108, 0, 107, 'A', '设置', '', 0, 'notice.sms_config/setConfig', '', '', '', '', 0, 1, 0, 1663898644,
         1663898644);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (109, 0, 107, 'A', '详情', '', 0, 'notice.sms_config/detail', '', '', '', '', 0, 1, 0, 1663898661, 1663898661);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (110, 0, 28, 'C', '热门搜索', 'el-icon-Search', 60, 'setting.hot_search/getConfig', 'search',
         'setting/search/index', '', '', 0, 1, 0, 1663901821, 1710473109);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (111, 0, 110, 'A', '保存', '', 0, 'setting.hot_search/setConfig', '', '', '', '', 0, 1, 0, 1663901856,
         1663901856);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (112, 0, 28, 'M', '用户设置', 'local-icon-keziyuyue', 90, '', 'user', '', '', '', 0, 1, 0, 1663903302,
         1710473056);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (113, 0, 112, 'C', '用户设置', '', 0, 'setting.user.user/getConfig', 'setup', 'setting/user/setup', '', '', 0, 1,
         0, 1663903506, 1663903506);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (114, 0, 113, 'A', '保存', '', 0, 'setting.user.user/setConfig', '', '', '', '', 0, 1, 0, 1663903522,
         1663903522);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (115, 0, 112, 'C', '登录注册', '', 0, 'setting.user.user/getRegisterConfig', 'login_register',
         'setting/user/login_register', '', '', 0, 1, 0, 1663903832, 1663903832);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (116, 0, 115, 'A', '保存', '', 0, 'setting.user.user/setRegisterConfig', '', '', '', '', 0, 1, 0, 1663903852,
         1663903852);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (117, 0, 0, 'M', '用户管理', 'el-icon-User', 900, '', 'consumer', '', '', '', 0, 1, 0, 1663904351, 1710472074);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (118, 0, 117, 'C', '用户列表', 'local-icon-user_guanli', 100, 'user.user/lists', 'lists', 'consumer/lists/index',
         '', '', 0, 1, 0, 1663904392, 1710471845);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (119, 0, 117, 'C', '用户详情', '', 90, 'user.user/detail', 'lists/detail', 'consumer/lists/detail',
         '/consumer/lists', '', 0, 0, 0, 1663904470, 1710471851);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (120, 0, 119, 'A', '编辑', '', 0, 'user.user/edit', '', '', '', '', 0, 1, 0, 1663904499, 1663904499);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (140, 0, 82, 'C', '微信开放平台', 'local-icon-notice_buyer', 70, 'channel.open_setting/getConfig',
         'open_setting', 'channel/open_setting', '', '', 0, 1, 0, 1666085713, 1710472951);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (141, 0, 140, 'A', '保存', '', 0, 'channel.open_setting/setConfig', '', '', '', '', 0, 1, 0, 1666085751,
         1666085776);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (142, 0, 176, 'C', 'PC端装修', 'el-icon-Monitor', 8, '', 'pc', 'decoration/pc', '', '', 0, 1, 0, 1668423284,
         1710901602);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (148, 0, 0, 'M', '模板示例', 'el-icon-SetUp', 100, '', 'template', '', '', '', 0, 1, 0, 1670206819, 1710472811);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (149, 0, 148, 'M', '组件示例', 'el-icon-Coin', 0, '', 'component', '', '', '', 0, 1, 0, 1670207182, 1670207244);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (150, 0, 149, 'C', '富文本', '', 90, '', 'rich_text', 'template/component/rich_text', '', '', 0, 1, 0,
         1670207751, 1710473315);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (151, 0, 149, 'C', '上传文件', '', 80, '', 'upload', 'template/component/upload', '', '', 0, 1, 0, 1670208925,
         1710473322);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (152, 0, 149, 'C', '图标', '', 100, '', 'icon', 'template/component/icon', '', '', 0, 1, 0, 1670230069,
         1710473306);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (153, 0, 149, 'C', '文件选择器', '', 60, '', 'file', 'template/component/file', '', '', 0, 1, 0, 1670232129,
         1710473341);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (154, 0, 149, 'C', '链接选择器', '', 50, '', 'link', 'template/component/link', '', '', 0, 1, 0, 1670292636,
         1710473346);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (155, 0, 149, 'C', '超出自动打点', '', 40, '', 'overflow', 'template/component/overflow', '', '', 0, 1, 0,
         1670292883, 1710473351);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (156, 0, 149, 'C', '悬浮input', '', 70, '', 'popover_input', 'template/component/popover_input', '', '', 0, 1, 0,
         1670293336, 1710473329);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (157, 0, 119, 'A', '余额调整', '', 0, 'user.user/adjustMoney', '', '', '', '', 0, 1, 0, 1677143088, 1677143088);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (158, 0, 0, 'M', '应用管理', 'el-icon-Postcard', 800, '', 'app', '', '', '', 0, 1, 0, 1677143430, 1710472079);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (159, 0, 158, 'C', '用户充值', 'local-icon-fukuan', 100, 'recharge.recharge/getConfig', 'recharge',
         'app/recharge/index', '', '', 0, 1, 0, 1677144284, 1710471860);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (160, 0, 159, 'A', '保存', '', 0, 'recharge.recharge/setConfig', '', '', '', '', 0, 1, 0, 1677145012,
         1677145012);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (161, 0, 28, 'M', '支付设置', 'local-icon-set_pay', 80, '', 'pay', '', '', '', 0, 1, 0, 1677148075, 1710473061);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (162, 0, 161, 'C', '支付方式', '', 0, 'setting.pay.pay_way/getPayWay', 'method', 'setting/pay/method/index', '',
         '', 0, 1, 0, 1677148207, 1677148207);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (163, 0, 161, 'C', '支付配置', '', 0, 'setting.pay.pay_config/lists', 'config', 'setting/pay/config/index', '',
         '', 0, 1, 0, 1677148260, 1677148374);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (164, 0, 162, 'A', '设置支付方式', '', 0, 'setting.pay.pay_way/setPayWay', '', '', '', '', 0, 1, 0, 1677219624,
         1677219624);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (165, 0, 163, 'A', '配置', '', 0, 'setting.pay.pay_config/setConfig', '', '', '', '', 0, 1, 0, 1677219655,
         1677219655);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (166, 0, 0, 'M', '财务管理', 'local-icon-user_gaikuang', 700, '', 'finance', '', '', '', 0, 1, 0, 1677552269,
         1710472085);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (167, 0, 166, 'C', '充值记录', 'el-icon-Wallet', 90, 'recharge.recharge/lists', 'recharge_record',
         'finance/recharge_record', '', '', 0, 1, 0, 1677552757, 1710472902);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (168, 0, 166, 'C', '余额明细', 'local-icon-qianbao', 100, 'finance.account_log/lists', 'balance_details',
         'finance/balance_details', '', '', 0, 1, 0, 1677552976, 1710472894);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (169, 0, 167, 'A', '退款', '', 0, 'recharge.recharge/refund', '', '', '', '', 0, 1, 0, 1677809715, 1677809715);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (170, 0, 166, 'C', '退款记录', 'local-icon-heshoujilu', 0, 'finance.refund/record', 'refund_record',
         'finance/refund_record', '', '', 0, 1, 0, 1677811271, 1677811271);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (171, 0, 170, 'A', '重新退款', '', 0, 'recharge.recharge/refundAgain', '', '', '', '', 0, 1, 0, 1677811295,
         1677811295);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (172, 0, 170, 'A', '退款日志', '', 0, 'finance.refund/log', '', '', '', '', 0, 1, 0, 1677811361, 1677811361);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (173, 0, 175, 'C', '系统风格', 'el-icon-Brush', 80, '', 'style', 'decoration/style/style', '', '', 0, 1, 0,
         1681635044, 1710929278);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (175, 0, 96, 'M', '移动端', '', 100, '', 'mobile', '', '', '', 0, 1, 0, 1710901543, 1710929294);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (176, 0, 96, 'M', 'PC端', '', 90, '', 'pc', '', '', '', 0, 1, 0, 1710901592, 1710929299);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (177, 0,29, 'C', '站点统计', '', 0, 'setting.web.web_setting/getSiteStatistics', 'statistics', 'setting/website/statistics', '', '', 0, 1, 0, 1726841481, 1726843434);
-INSERT INTO `la_tenant_system_menu`
+INSERT INTO `{{prefix}}tenant_system_menu`
 VALUES (178, 0,177, 'A', '保存', '', 0, 'setting.web.web_setting/saveSiteStatistics', '', '', '', '', 1, 1, 0, 1726841507, 1726841507);
 COMMIT;
 
 -- ----------------------------
--- Table structure for la_tenant_system_role
+-- Table structure for {{prefix}}tenant_system_role
 -- ----------------------------
-DROP TABLE IF EXISTS `la_tenant_system_role`;
-CREATE TABLE `la_tenant_system_role`
+DROP TABLE IF EXISTS `{{prefix}}tenant_system_role`;
+CREATE TABLE `{{prefix}}tenant_system_role`
 (
     `id`          int(11) UNSIGNED                                             NOT NULL AUTO_INCREMENT,
     `tenant_id`   int(11)                                                      NOT NULL COMMENT '租户ID',
@@ -2121,10 +2121,10 @@ CREATE TABLE `la_tenant_system_role`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_tenant_system_role_menu
+-- Table structure for {{prefix}}tenant_system_role_menu
 -- ----------------------------
-DROP TABLE IF EXISTS `la_tenant_system_role_menu`;
-CREATE TABLE `la_tenant_system_role_menu`
+DROP TABLE IF EXISTS `{{prefix}}tenant_system_role_menu`;
+CREATE TABLE `{{prefix}}tenant_system_role_menu`
 (
     `role_id` int(10) UNSIGNED NOT NULL DEFAULT 0 COMMENT '角色ID',
     `menu_id` int(10) UNSIGNED NOT NULL DEFAULT 0 COMMENT '菜单ID',
@@ -2135,10 +2135,10 @@ CREATE TABLE `la_tenant_system_role_menu`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_user
+-- Table structure for {{prefix}}user
 -- ----------------------------
-DROP TABLE IF EXISTS `la_user`;
-CREATE TABLE `la_user`
+DROP TABLE IF EXISTS `{{prefix}}user`;
+CREATE TABLE `{{prefix}}user`
 (
     `id`                    int(10) UNSIGNED                                              NOT NULL AUTO_INCREMENT COMMENT '主键',
     `tenant_id`             int(11)                                                       NOT NULL COMMENT '租户ID',
@@ -2170,10 +2170,10 @@ CREATE TABLE `la_user`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_user_account_log
+-- Table structure for {{prefix}}user_account_log
 -- ----------------------------
-DROP TABLE IF EXISTS `la_user_account_log`;
-CREATE TABLE `la_user_account_log`
+DROP TABLE IF EXISTS `{{prefix}}user_account_log`;
+CREATE TABLE `{{prefix}}user_account_log`
 (
     `id`            int(11) UNSIGNED                                              NOT NULL AUTO_INCREMENT,
     `tenant_id`     int(11)                                                       NOT NULL COMMENT '租户ID',
@@ -2198,10 +2198,10 @@ CREATE TABLE `la_user_account_log`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_user_auth
+-- Table structure for {{prefix}}user_auth
 -- ----------------------------
-DROP TABLE IF EXISTS `la_user_auth`;
-CREATE TABLE `la_user_auth`
+DROP TABLE IF EXISTS `{{prefix}}user_auth`;
+CREATE TABLE `{{prefix}}user_auth`
 (
     `id`          int(11)                                                       NOT NULL AUTO_INCREMENT,
     `tenant_id`   int(11)                                                       NOT NULL COMMENT '租户ID',
@@ -2220,10 +2220,10 @@ CREATE TABLE `la_user_auth`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for la_user_session
+-- Table structure for {{prefix}}user_session
 -- ----------------------------
-DROP TABLE IF EXISTS `la_user_session`;
-CREATE TABLE `la_user_session`
+DROP TABLE IF EXISTS `{{prefix}}user_session`;
+CREATE TABLE `{{prefix}}user_session`
 (
     `id`          int(11)                                                      NOT NULL AUTO_INCREMENT,
     `tenant_id`   int(11)                                                      NOT NULL COMMENT '租户ID',
@@ -2242,7 +2242,7 @@ CREATE TABLE `la_user_session`
   ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Records of la_user_session
+-- Records of {{prefix}}user_session
 -- ----------------------------
 
 SET

@@ -4,10 +4,13 @@ use think\facade\Route;
 
 Route::post('user/login', 'jxc.Auth/login');
 Route::post('user/mnpLogin', 'login/mnpLogin');
+// 小程序既有个人信息入口必须使用普通用户控制器及其 token 校验。
+Route::get('user/info', 'User/info')
+    ->middleware(\app\api\http\middleware\LoginMiddleware::class);
 
 // 新用户开店/入店入口：精确白名单允许已登录但尚未加入店铺的用户访问。
 Route::group('', function () {
-    Route::get('user/info', 'jxc.Auth/info');
+    Route::get('jxc/auth/info', 'jxc.Auth/info');
     Route::post('user/logout', 'jxc.Auth/logout');
     Route::get('user/store/status', 'jxc.Store/status');
     Route::get('user/store/current', 'jxc.Store/detail');
@@ -142,36 +145,17 @@ Route::group('', function () {
     Route::post('purchase-return/edit',      'jxc.PurchaseReturnOrder/edit');
     Route::delete('purchase-return/remove',  'jxc.PurchaseReturnOrder/remove');
 
-    // === 订货单 ===
-    Route::get('purchase/lists',              'jxc.PurchaseOrder/lists');
-    Route::get('purchase/details',            'jxc.PurchaseOrder/detail');
-    Route::post('purchase/publish',           'jxc.PurchaseOrder/add');
-    Route::post('purchase/edit',              'jxc.PurchaseOrder/edit');
-    Route::delete('purchase/remove',          'jxc.PurchaseOrder/remove');
-    Route::post('purchase/confirm',           'jxc.PurchaseOrder/confirm');
-    Route::post('purchase/cancel',            'jxc.PurchaseOrder/cancel');
-    Route::post('purchase/convert-to-sales',  'jxc.PurchaseOrder/convertToSalesOrder');
-    Route::post('purchase/parse-text',        'jxc.PurchaseOrder/parsePastedText');
-    Route::get('purchase/statistics',         'jxc.PurchaseOrder/statistics');
-
-    // === 任务中心 ===
-    Route::get('jxc/task/dashboard', 'jxc.Task/dashboard');
-    Route::get('jxc/task/reservations/select', 'jxc.Task/reservationsSelect');
-    Route::post('jxc/task/reservations/preview', 'jxc.Task/reservationsPreview');
-    Route::get('jxc/task/items', 'jxc.Task/items');
-    Route::post('jxc/task/assignment/save', 'jxc.Task/assignmentSave');
-    Route::get('jxc/task/employee-board', 'jxc.Task/employeeBoard');
-    Route::get('jxc/task/procurement/shortage', 'jxc.Task/procurementShortage');
-    Route::post('jxc/task/print-data', 'jxc.Task/printData');
-    Route::post('jxc/task/status', 'jxc.Task/status');
-
-    // === 销售预定 ===
-    Route::get('jxc/sales_reservation/detail', 'jxc.SalesReservation/detail');
-    Route::post('jxc/sales_reservation/submit', 'jxc.SalesReservation/submit');
-    Route::post('jxc/sales_reservation/edit', 'jxc.SalesReservation/edit');
-    Route::post('jxc/sales_reservation/cancel', 'jxc.SalesReservation/cancel');
-    Route::post('jxc/sales_reservation/convert_sales', 'jxc.SalesReservation/convertSales');
-    Route::get('jxc/sales_reservation/lists', 'jxc.SalesReservation/lists');
+    // === 客户报货（唯一客户需求与库存预留入口）===
+    Route::post('jxc/customer_report/recognize', 'jxc.CustomerReport/recognize');
+    Route::post('jxc/customer_report/quick_create_goods', 'jxc.CustomerReport/quickCreateGoods');
+    Route::get('jxc/customer_report/lists', 'jxc.CustomerReport/lists');
+    Route::post('jxc/customer_report/submit', 'jxc.CustomerReport/submit');
+    Route::get('jxc/customer_report/detail', 'jxc.CustomerReport/detail');
+    Route::get('jxc/customer_report/availability', 'jxc.CustomerReport/availability');
+    Route::post('jxc/customer_report/edit', 'jxc.CustomerReport/edit');
+    Route::post('jxc/customer_report/retry', 'jxc.CustomerReport/retry');
+    Route::post('jxc/customer_report/convert', 'jxc.CustomerReport/convert');
+    Route::post('jxc/customer_report/cancel', 'jxc.CustomerReport/cancel');
 
     // === 审计日志 ===
     Route::get('audit/lists', 'jxc.Audit/lists');

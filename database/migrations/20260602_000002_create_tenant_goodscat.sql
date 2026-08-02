@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS `la_tenant_goodscat` (
+CREATE TABLE IF NOT EXISTS `{{prefix}}tenant_goodscat` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
   `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
   `name` varchar(64) NOT NULL DEFAULT '' COMMENT '分类名称',

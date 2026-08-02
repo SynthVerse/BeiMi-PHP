@@ -6,13 +6,22 @@ const path = require('path');
 const childProcess = require('child_process');
 const wrapper = fs.readFileSync(path.join(__dirname, 'migrate_probe.js'), 'utf8');
 const core = fs.readFileSync(path.join(__dirname, 'migrate_probe_core.js'), 'utf8');
+const coreModule = require('./migrate_probe_core.js');
 function assert(condition, message) { if (!condition) throw new Error(message); }
+const migrationDirectory = path.join(__dirname, '..', 'database', 'migrations');
+const migrationNames = fs.readdirSync(migrationDirectory).filter(name => name.endsWith('.sql')).sort();
 assert((wrapper.match(/const TARGET/g) || []).length === 0, 'wrapper_must_not_define_target');
 assert((wrapper.match(/beimi_r4_probe_20260726_plan020/g) || []).length === 0, 'wrapper_must_not_contain_target_literal');
 assert(wrapper.indexOf("args['--target'] !== core.runStaticProbe.fixedTarget") < wrapper.indexOf('core.runStaticProbe()'), 'target_comparator_must_precede_static_call');
 assert((core.match(/const TARGET = 'beimi_r4_probe_20260726_plan020';/g) || []).length === 1, 'core_target_must_have_single_authority');
 assert(/Object\.defineProperty\(runStaticProbe, 'fixedTarget', \{ value: TARGET, enumerable: false, writable: false, configurable: false \}\);/.test(core), 'fixed_target_descriptor_mismatch');
-assert(/module\.exports = \{ runStaticProbe, runFixedRuntimeProbe \};/.test(core), 'core_exports_mismatch');
+assert(/module\.exports = \{ prepareMigrationSql, runStaticProbe, runFixedRuntimeProbe \};/.test(core), 'core_exports_mismatch');
+assert(typeof coreModule.prepareMigrationSql === 'function', 'preprocessor_export_missing');
+assert((core.match(/prepareMigrationSql\(/g) || []).length === 10, 'static_and_runtime_paths_must_share_preprocessor');
+assert(/const like = prepareMigrationSql\(read\(LIKE\), 'la_'\);[\s\S]*?const jxc = prepareMigrationSql\(read\(JXC\), 'la_'\);[\s\S]*?const tenantLike = prepareMigrationSql\(read\(LIKE\), 'tenantx_'\);[\s\S]*?const tenantJxc = prepareMigrationSql\(read\(JXC\), 'tenantx_'\);/.test(core), 'baseline_static_preprocessor_missing');
+assert(/const like = prepareMigrationSql\(runtimeRead\(LIKE\), 'la_'\);[\s\S]*?const jxc = prepareMigrationSql\(runtimeRead\(JXC\), 'la_'\);/.test(core), 'baseline_runtime_preprocessor_missing');
+assert(!/if \(name === '20260630_000001_create_purchase_return_order\.sql'/.test(core), 'static_file_specific_prefix_rule_forbidden');
+assert(!/if \(names\[index\] === '20260630_000001_create_purchase_return_order\.sql'/.test(core), 'runtime_file_specific_prefix_rule_forbidden');
 assert(!/process\.argv|os\.argv|process\.env/.test(core), 'core_must_not_have_dynamic_top_level_input');
 assert(/if \(!IS_NODE\) fail\('node_runtime_required'\);[\s\S]*?const fs = require\('fs'\);[\s\S]*?nodeDependencies = \{ fs, path, crypto: require\('crypto'\), root: path\.resolve\(__dirname, '\.\.'\) \};/.test(core), 'node_dependencies_must_be_delayed_and_guarded');
 assert(/function metadataQuery\(operation, params\)/.test(core), 'missing_metadata_selector');
@@ -26,7 +35,36 @@ const fixed = runWrapper(['--mode', 'static', '--target', 'beimi_r4_probe_202607
 assert(fixed.status === 0 && fixed.stderr === '', 'fresh_fixed_cli_exit_contract_mismatch');
 const fixedResult = JSON.parse(fixed.stdout);
 assert(fixed.stdout === JSON.stringify(fixedResult) + '\n', 'fresh_fixed_cli_stdout_must_be_single_json');
-assert(fixedResult.status === 'static_passed' && fixedResult.code === 'static_passed' && fixedResult.migration_count === 26 && fixedResult.statement_count === 204 && fixedResult.baseline_tables === 75 && fixedResult.final_tables === 102, 'fresh_fixed_cli_result_contract_mismatch');
+assert(fixedResult.status === 'static_passed' && fixedResult.code === 'static_passed' && fixedResult.migration_count === 25 && fixedResult.statement_count === 183 && fixedResult.baseline_tables === 74 && fixedResult.final_tables === 98, 'fresh_fixed_cli_result_contract_mismatch');
+const contractSql = 'CREATE TABLE `{{prefix}}orders` (`id` int NOT NULL);';
+const phpPreprocessor = path.join(__dirname, 'lib', 'MigrationSqlPreprocessor.php').replace(/\\/g, '/');
+const phpContract = childProcess.spawnSync(
+  'php',
+  ['-r', `require ${JSON.stringify(phpPreprocessor)}; echo \\BeiMi\\Migration\\MigrationSqlPreprocessor::prepare(${JSON.stringify(contractSql)}, 'tenantx_');`],
+  { encoding: 'utf8' }
+);
+assert(phpContract.status === 0 && phpContract.stderr === '', 'php_preprocessor_contract_failed');
+assert(
+  coreModule.prepareMigrationSql(contractSql, 'tenantx_') === phpContract.stdout,
+  'php_js_preprocessor_contract_mismatch'
+);
+let unresolvedRejected = false;
+try { coreModule.prepareMigrationSql('{{prefix}}orders {{schema}}', 'tenantx_'); }
+catch (error) { unresolvedRejected = error && error.probeCode === 'unresolved_prefix'; }
+assert(unresolvedRejected, 'js_preprocessor_must_reject_unresolved_placeholders');
+let unsafePrefixRejected = false;
+try { coreModule.prepareMigrationSql('{{prefix}}orders', 'tenant`; DROP TABLE users; --'); }
+catch (error) { unsafePrefixRejected = error && error.probeCode === 'invalid_database_prefix'; }
+assert(unsafePrefixRejected, 'js_preprocessor_must_reject_unsafe_prefix');
+for (const name of migrationNames) {
+  const raw = fs.readFileSync(path.join(migrationDirectory, name), 'utf8');
+  assert(raw.includes('{{prefix}}'), `migration_prefix_placeholder_missing:${name}`);
+  assert(!/\bla_[A-Za-z0-9_]+/.test(raw), `migration_hardcoded_default_prefix:${name}`);
+  const tenantSql = coreModule.prepareMigrationSql(raw, 'tenantx_');
+  assert(!tenantSql.includes('{{'), `migration_placeholder_leaked:${name}`);
+  assert(!/\bla_[A-Za-z0-9_]+/.test(tenantSql), `migration_default_prefix_leaked:${name}`);
+  assert(tenantSql.includes('tenantx_'), `migration_non_default_prefix_not_applied:${name}`);
+}
 const wrongTarget = runWrapper(['--mode', 'static', '--target', 'not_allowed']);
 assert(wrongTarget.status === 1 && wrongTarget.stdout === '{"status":"blocked","code":"target_not_allowed"}\n', 'target_gate_must_reject_before_core');
 const wrongMode = runWrapper(['--mode', 'runtime', '--target', 'beimi_r4_probe_20260726_plan020']);

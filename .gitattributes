@@ -1,0 +1,6 @@
+# 迁移探针按内容哈希校验 SQL；固定文本换行，避免 core.autocrlf 改写校验输入。
+*.php text eol=lf
+*.js text eol=lf
+*.sql text eol=lf
+*.ps1 text eol=lf
+.gitignore text eol=lf

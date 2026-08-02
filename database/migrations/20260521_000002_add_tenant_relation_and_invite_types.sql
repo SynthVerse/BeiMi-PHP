@@ -1,5 +1,5 @@
 -- 扩展租户邀请码：兼容历史 member 邀请，并支持 tenant -> tenant 层级邀请。
-ALTER TABLE `la_tenant_invite`
+ALTER TABLE `{{prefix}}tenant_invite`
   ADD COLUMN `invite_type` varchar(32) NOT NULL DEFAULT 'member' COMMENT 'member个人加入/relation店铺层级' AFTER `code`,
   ADD COLUMN `target_user_id` int(11) unsigned NOT NULL DEFAULT '0' COMMENT '限定接受用户ID，0不限' AFTER `invite_type`,
   ADD COLUMN `target_tenant_id` int(11) unsigned NOT NULL DEFAULT '0' COMMENT '限定目标店铺ID，0不限' AFTER `target_user_id`,
@@ -9,17 +9,17 @@ ALTER TABLE `la_tenant_invite`
   ADD COLUMN `used_count` int(11) unsigned NOT NULL DEFAULT '0' COMMENT '已使用次数' AFTER `max_uses`,
   ADD COLUMN `extra` json DEFAULT NULL COMMENT '扩展信息' AFTER `used_count`;
 
-CREATE INDEX `idx_invite_type_status` ON `la_tenant_invite` (`invite_type`, `status`);
-CREATE INDEX `idx_target_user` ON `la_tenant_invite` (`target_user_id`);
-CREATE INDEX `idx_target_tenant` ON `la_tenant_invite` (`target_tenant_id`);
+CREATE INDEX `idx_invite_type_status` ON `{{prefix}}tenant_invite` (`invite_type`, `status`);
+CREATE INDEX `idx_target_user` ON `{{prefix}}tenant_invite` (`target_user_id`);
+CREATE INDEX `idx_target_tenant` ON `{{prefix}}tenant_invite` (`target_tenant_id`);
 
-UPDATE `la_tenant_invite`
+UPDATE `{{prefix}}tenant_invite`
 SET `invite_type` = 'member',
     `role` = IF(`role` = '', 'member', `role`)
 WHERE `invite_type` = '';
 
 -- 店铺层级关系：tenant -> tenant。tenant_member 仍只表达 user -> tenant。
-CREATE TABLE IF NOT EXISTS `la_tenant_relation` (
+CREATE TABLE IF NOT EXISTS `{{prefix}}tenant_relation` (
   `id` int(11) unsigned NOT NULL AUTO_INCREMENT,
   `parent_tenant_id` int(11) unsigned NOT NULL DEFAULT '0' COMMENT '父店铺ID',
   `child_tenant_id` int(11) unsigned NOT NULL DEFAULT '0' COMMENT '子店铺ID',

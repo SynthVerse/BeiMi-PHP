@@ -1009,7 +1009,7 @@ class GoodsLogic extends BaseLogic
 
         return [
             'supplier_count' => $supplierCount,
-            'purchase_order_count' => (int)($stats['order_count'] ?? 0),
+            'supply_order_count' => (int)($stats['order_count'] ?? 0),
             'purchase_amount' => (string)($stats['purchase_amount'] ?? '0.00'),
             'purchase_quantity' => (string)($stats['purchase_quantity'] ?? '0.00'),
         ];

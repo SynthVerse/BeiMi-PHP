@@ -369,6 +369,7 @@ CREATE TABLE `la_user_session_{tenantSn}`  (
                                     `user_id` int(11) NOT NULL COMMENT '用户id',
                                     `terminal` tinyint(1) NOT NULL DEFAULT 1 COMMENT '客户端类型：1-微信小程序；2-微信公众号；3-手机H5；4-电脑PC；5-苹果APP；6-安卓APP',
                                     `token` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '令牌',
+                                    `create_time` int(10) NULL DEFAULT NULL COMMENT '创建时间',
                                     `update_time` int(10) NULL DEFAULT NULL COMMENT '更新时间',
                                     `expire_time` int(10) NOT NULL COMMENT '到期时间',
                                     PRIMARY KEY (`id`) USING BTREE,

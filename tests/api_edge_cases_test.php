@@ -154,27 +154,6 @@ if ($fixtureReady) {
     ], $token);
     $runtime->assertTrue((int)($invalidSupply['code'] ?? 0) !== 1, '进货单使用非法供应商被拒绝');
 
-    $invalidPurchase = http_request('POST', $BASE_URL . '/api/purchase/publish', [
-        'customer_id' => 99999999,
-        'warehouse_id' => $ids['warehouse'],
-        'goods' => [[
-            'goods_id' => $ids['goods'],
-            'name' => 'EDGE_商品',
-            'number' => 1,
-            'price' => 5,
-            'units' => '个',
-        ]],
-    ], $token);
-    $runtime->assertTrue((int)($invalidPurchase['code'] ?? 0) !== 1, '订货单使用非法客户被拒绝');
-
-    $emptyParse = http_request('POST', $BASE_URL . '/api/purchase/parse-text', [], $token);
-    $runtime->assertTrue((int)($emptyParse['code'] ?? 0) !== 1, 'AI 文本解析缺少 pastedText 被拒绝');
-
-    $badConfirm = http_request('POST', $BASE_URL . '/api/purchase/confirm', [
-        'id' => 99999999,
-    ], $token);
-    $runtime->assertTrue((int)($badConfirm['code'] ?? 0) !== 1, '订货单确认非法 ID 被拒绝');
-
     $badReturn = http_request('POST', $BASE_URL . '/api/return/publish', [
         'customer_id' => $ids['customer'],
         'warehouse_id' => $ids['warehouse'],

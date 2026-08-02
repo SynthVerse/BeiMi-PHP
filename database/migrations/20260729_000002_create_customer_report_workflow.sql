@@ -1,12 +1,12 @@
--- 独立客户报货链路；不读取或修改销售预定、订单、预留历史表。
+-- 客户报货是唯一客户需求与库存预留入口；转换后进入标准销售单链路。
 
-CREATE TABLE IF NOT EXISTS `la_customer_report` (
+CREATE TABLE IF NOT EXISTS `{{prefix}}customer_report` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '客户报货单ID',
   `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
   `sn` varchar(64) NOT NULL DEFAULT '' COMMENT '报货单号',
   `main_customer_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '结算主客户ID',
   `main_customer_name` varchar(100) NOT NULL DEFAULT '' COMMENT '结算主客户名称快照',
-  `status` varchar(32) NOT NULL DEFAULT 'submitted_ready' COMMENT 'submitted_ready/submitted_shortage/fulfilling/completed/cancelled',
+  `status` varchar(32) NOT NULL DEFAULT 'submitted_ready' COMMENT 'submitted_ready/submitted_shortage/completed/cancelled',
   `total_base_qty` decimal(18,2) NOT NULL DEFAULT 0.00 COMMENT '基础单位总需求',
   `reserved_base_qty` decimal(18,2) NOT NULL DEFAULT 0.00 COMMENT '已预留基础单位总量',
   `shortage_base_qty` decimal(18,2) NOT NULL DEFAULT 0.00 COMMENT '缺货基础单位总量',
@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS `la_customer_report` (
   KEY `idx_tenant_customer_report_status` (`tenant_id`,`main_customer_id`,`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='独立客户报货单';
 
-CREATE TABLE IF NOT EXISTS `la_customer_report_item` (
+CREATE TABLE IF NOT EXISTS `{{prefix}}customer_report_item` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '报货行ID',
   `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
   `report_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '客户报货单ID',
@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS `la_customer_report_item` (
   KEY `idx_tenant_customer_report_item_goods` (`tenant_id`,`warehouse_id`,`goods_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='独立客户报货行';
 
-CREATE TABLE IF NOT EXISTS `la_customer_report_reservation` (
+CREATE TABLE IF NOT EXISTS `{{prefix}}customer_report_reservation` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '客户报货库存预留记录ID',
   `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0,
   `report_id` int(11) UNSIGNED NOT NULL DEFAULT 0,
@@ -79,7 +79,6 @@ CREATE TABLE IF NOT EXISTS `la_customer_report_reservation` (
   `reserved_base_qty` decimal(18,2) NOT NULL DEFAULT 0.00,
   `consumed_base_qty` decimal(18,2) NOT NULL DEFAULT 0.00,
   `released_base_qty` decimal(18,2) NOT NULL DEFAULT 0.00,
-  `fulfillment_key` varchar(96) NOT NULL DEFAULT '' COMMENT '最近履约幂等键',
   `status` varchar(32) NOT NULL DEFAULT 'reserved' COMMENT 'reserved/fulfilled/released',
   `create_time` int(11) UNSIGNED NOT NULL DEFAULT 0,
   `update_time` int(11) UNSIGNED NOT NULL DEFAULT 0,
@@ -88,7 +87,7 @@ CREATE TABLE IF NOT EXISTS `la_customer_report_reservation` (
   KEY `idx_tenant_customer_report_reservation_report` (`tenant_id`,`report_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='独立客户报货库存预留';
 
-CREATE TABLE IF NOT EXISTS `la_customer_goods_report_preference` (
+CREATE TABLE IF NOT EXISTS `{{prefix}}customer_goods_report_preference` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '客户商品报货偏好ID',
   `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0,
   `customer_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '配送客户ID',
@@ -105,56 +104,3 @@ CREATE TABLE IF NOT EXISTS `la_customer_goods_report_preference` (
   UNIQUE KEY `uk_tenant_customer_goods_report_preference` (`tenant_id`,`customer_id`,`goods_id`),
   KEY `idx_tenant_customer_goods_report_preference_goods` (`tenant_id`,`goods_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='客户商品报货重量偏好（仅建议）';
-
-CREATE TABLE IF NOT EXISTS `la_customer_report_sale` (
-  `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '独立客户报货转销售主单ID',
-  `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0,
-  `report_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '来源客户报货单ID',
-  `report_version` int(11) UNSIGNED NOT NULL DEFAULT 0,
-  `sn` varchar(64) NOT NULL DEFAULT '',
-  `main_customer_id` int(11) UNSIGNED NOT NULL DEFAULT 0,
-  `main_customer_name` varchar(200) NOT NULL DEFAULT '',
-  `status` varchar(32) NOT NULL DEFAULT 'submitted_ready' COMMENT '与来源报货单同步的状态',
-  `total_base_qty` decimal(18,2) NOT NULL DEFAULT 0.00,
-  `reserved_base_qty` decimal(18,2) NOT NULL DEFAULT 0.00,
-  `shortage_base_qty` decimal(18,2) NOT NULL DEFAULT 0.00,
-  `create_time` int(11) UNSIGNED NOT NULL DEFAULT 0,
-  `update_time` int(11) UNSIGNED NOT NULL DEFAULT 0,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_tenant_customer_report_sale_report` (`tenant_id`,`report_id`),
-  UNIQUE KEY `uk_tenant_customer_report_sale_sn` (`tenant_id`,`sn`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='独立客户报货转销售主单';
-
-CREATE TABLE IF NOT EXISTS `la_customer_report_sale_item` (
-  `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '独立客户报货转销售明细ID',
-  `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0,
-  `sale_id` int(11) UNSIGNED NOT NULL DEFAULT 0,
-  `report_item_id` int(11) UNSIGNED NOT NULL DEFAULT 0,
-  `warehouse_id` int(11) UNSIGNED NOT NULL DEFAULT 0,
-  `goods_id` int(11) UNSIGNED NOT NULL DEFAULT 0,
-  `goods_name` varchar(200) NOT NULL DEFAULT '',
-  `sku_id` int(11) UNSIGNED NOT NULL DEFAULT 0,
-  `main_customer_id` int(11) UNSIGNED NOT NULL DEFAULT 0,
-  `delivery_customer_id` int(11) UNSIGNED NOT NULL DEFAULT 0,
-  `delivery_customer_name` varchar(200) NOT NULL DEFAULT '',
-  `unit_id` int(11) UNSIGNED NOT NULL DEFAULT 0,
-  `unit_name` varchar(50) NOT NULL DEFAULT '',
-  `order_qty` decimal(18,2) NOT NULL DEFAULT 0.00,
-  `expected_base_qty` decimal(18,2) NOT NULL DEFAULT 0.00,
-  `reserved_base_qty` decimal(18,2) NOT NULL DEFAULT 0.00,
-  `shortage_base_qty` decimal(18,2) NOT NULL DEFAULT 0.00,
-  `fulfilled_base_qty` decimal(18,2) NOT NULL DEFAULT 0.00,
-  `quality_snapshot` varchar(200) NOT NULL DEFAULT '',
-  `specification_snapshot` varchar(200) NOT NULL DEFAULT '',
-  `processing_requirement` varchar(500) NOT NULL DEFAULT '',
-  `price_status` varchar(32) NOT NULL DEFAULT 'unpriced',
-  `price` decimal(18,2) NOT NULL DEFAULT 0.00,
-  `pricing_unit_id` int(11) UNSIGNED NOT NULL DEFAULT 0,
-  `pricing_unit_name` varchar(50) NOT NULL DEFAULT '',
-  `status` varchar(32) NOT NULL DEFAULT 'submitted_ready',
-  `create_time` int(11) UNSIGNED NOT NULL DEFAULT 0,
-  `update_time` int(11) UNSIGNED NOT NULL DEFAULT 0,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_tenant_customer_report_sale_item_source` (`tenant_id`,`sale_id`,`report_item_id`),
-  KEY `idx_tenant_customer_report_sale_item_sale` (`tenant_id`,`sale_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='独立客户报货转销售明细';

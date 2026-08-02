@@ -85,13 +85,25 @@ class CustomerReportLogic extends BaseLogic
     {
         $pageNo = max(1, (int)($params['page_no'] ?? 1));
         $pageSize = min(100, max(1, (int)($params['page_size'] ?? 20)));
-        $count = CustomerReport::where('tenant_id', self::tenantId())->count();
+        $statusScope = (string)($params['status_scope'] ?? '');
+        $count = self::listQuery($statusScope)->count();
         return [
-            'lists' => CustomerReport::where('tenant_id', self::tenantId())->order(['id' => 'desc'])->page($pageNo, $pageSize)->select()->toArray(),
+            'lists' => self::listQuery($statusScope)->order(['id' => 'desc'])->page($pageNo, $pageSize)->select()->toArray(),
             'count' => $count,
             'page_no' => $pageNo,
             'page_size' => $pageSize,
         ];
+    }
+
+    private static function listQuery(string $statusScope)
+    {
+        $query = CustomerReport::where('tenant_id', self::tenantId());
+        return match ($statusScope) {
+            'pending' => $query->whereIn('status', self::SUBMITTED),
+            'completed' => $query->where('status', 'completed'),
+            'cancelled' => $query->where('status', 'cancelled'),
+            default => $query,
+        };
     }
 
     /** @return array{warehouse_id:int,goods_id:int,available_base_qty:string} */
@@ -106,7 +118,7 @@ class CustomerReportLogic extends BaseLogic
         ];
     }
 
-    /** 将已提交报货单转为独立销售单；不触碰冻结的旧订单链路。 */
+    /** 将无缺货且已计价的报货单按仓库转为标准销售单。 */
     public static function convert(array $params): array|false
     {
         self::clearError();
@@ -116,43 +128,107 @@ class CustomerReportLogic extends BaseLogic
             return self::transactionWithRetry(static function () use ($reportId, $version) {
                 $report = CustomerReport::where('tenant_id', self::tenantId())->where('id', $reportId)->lock(true)->find();
                 if (!$report) { self::setError('报货单不存在、版本冲突或不可转销售'); return false; }
-                $existing = self::saleByReport($reportId, true);
-                if ($existing !== null) {
+                $existing = self::salesOrdersByReport($reportId, true);
+                if ($existing !== []) {
                     return self::detailById($reportId);
                 }
-                if ((int)$report->version !== $version || !in_array((string)$report->status, self::SUBMITTED, true)) {
+                if (
+                    (int)$report->version !== $version
+                    || (string)$report->status !== 'submitted_ready'
+                    || bccomp((string)$report->shortage_base_qty, '0', self::SCALE) !== 0
+                ) {
                     self::setError('报货单不存在、版本冲突或不可转销售'); return false;
                 }
                 $items = CustomerReportItem::where('tenant_id', self::tenantId())->where('report_id', $reportId)
-                    ->order(['goods_id' => 'asc', 'warehouse_id' => 'asc', 'id' => 'asc'])->lock(true)->select()->toArray();
+                    ->whereNull('delete_time')->order(['goods_id' => 'asc', 'warehouse_id' => 'asc', 'id' => 'asc'])
+                    ->lock(true)->select()->toArray();
                 if ($items === []) { self::setError('报货单没有可转销售的明细'); return false; }
-                $now = time();
-                $saleId = (int)Db::name('customer_report_sale')->insertGetId([
-                    'tenant_id' => self::tenantId(), 'report_id' => $reportId, 'report_version' => $version,
-                    'sn' => self::saleSn(), 'main_customer_id' => (int)$report->main_customer_id,
-                    'main_customer_name' => (string)$report->main_customer_name, 'status' => (string)$report->status,
-                    'total_base_qty' => self::decimal((string)$report->total_base_qty),
-                    'reserved_base_qty' => self::decimal((string)$report->reserved_base_qty),
-                    'shortage_base_qty' => self::decimal((string)$report->shortage_base_qty),
-                    'create_time' => $now, 'update_time' => $now,
-                ]);
+
+                $itemsByWarehouse = [];
                 foreach ($items as $item) {
-                    Db::name('customer_report_sale_item')->insert([
-                        'tenant_id' => self::tenantId(), 'sale_id' => $saleId, 'report_item_id' => (int)$item['id'],
-                        'warehouse_id' => (int)$item['warehouse_id'], 'goods_id' => (int)$item['goods_id'],
-                        'goods_name' => (string)$item['goods_name'], 'sku_id' => (int)$item['sku_id'],
-                        'main_customer_id' => (int)$item['main_customer_id'], 'delivery_customer_id' => (int)$item['delivery_customer_id'],
-                        'delivery_customer_name' => (string)$item['delivery_customer_name'], 'unit_id' => (int)$item['unit_id'],
-                        'unit_name' => (string)$item['unit_name'], 'order_qty' => self::decimal((string)$item['order_qty']),
-                        'expected_base_qty' => self::decimal((string)$item['expected_base_qty']),
-                        'reserved_base_qty' => self::decimal((string)$item['reserved_base_qty']),
-                        'shortage_base_qty' => self::decimal((string)$item['shortage_base_qty']), 'fulfilled_base_qty' => self::decimal((string)$item['fulfilled_base_qty']),
-                        'quality_snapshot' => (string)$item['quality_snapshot'], 'specification_snapshot' => (string)$item['specification_snapshot'],
-                        'processing_requirement' => (string)$item['processing_requirement'], 'price_status' => (string)$item['price_status'],
-                        'price' => self::decimal((string)$item['price']), 'pricing_unit_id' => (int)$item['pricing_unit_id'],
-                        'pricing_unit_name' => (string)$item['pricing_unit_name'], 'status' => (string)$item['status'], 'create_time' => $now, 'update_time' => $now,
+                    if ((string)$item['price_status'] !== 'priced') {
+                        self::setError('报货单存在未定价明细，不能转销售');
+                        return false;
+                    }
+                    if (
+                        bccomp((string)$item['shortage_base_qty'], '0', self::SCALE) !== 0
+                        || bccomp((string)$item['reserved_base_qty'], (string)$item['expected_base_qty'], self::SCALE) !== 0
+                    ) {
+                        self::setError('报货单库存预留不完整，不能转销售');
+                        return false;
+                    }
+                    $itemsByWarehouse[(int)$item['warehouse_id']][] = $item;
+                }
+
+                self::lockGoodsForConversion($items);
+                foreach ($itemsByWarehouse as $warehouseId => $warehouseItems) {
+                    $goods = [];
+                    foreach ($warehouseItems as $item) {
+                        $pricingQuantity = self::pricingQuantity($item);
+                        if ($pricingQuantity === false) {
+                            throw new \RuntimeException('unsupported_pricing_quantity');
+                        }
+                        $goods[] = [
+                            'goods_id' => (int)$item['goods_id'],
+                            'name' => (string)$item['goods_name'],
+                            'units' => (string)$item['pricing_unit_name'],
+                            'number' => $pricingQuantity,
+                            'base_quantity' => self::decimal((string)$item['expected_base_qty']),
+                            'price' => self::decimal((string)$item['price']),
+                            'pricing_unit_id' => (int)$item['pricing_unit_id'],
+                            'source_line_type' => 'customer_report_item',
+                            'source_line_id' => (int)$item['id'],
+                            'remark' => (string)$item['line_remark'],
+                        ];
+                    }
+                    $published = SalesOrderLogic::publishReservedWithinTransaction([
+                        'customer_id' => (int)$report->main_customer_id,
+                        'warehouse_id' => $warehouseId,
+                        'goods' => $goods,
+                        'order_pay_money' => '0.00',
+                        'purpose_type' => 'customer_report',
+                        'remarks' => trim('来源报货单：' . (string)$report->sn . ' ' . (string)$report->remark),
+                        'source_type' => 'customer_report',
+                        'source_id' => $reportId,
+                        'source_version' => $version,
+                        'idempotent_key' => 'customer-report:' . $reportId . ':warehouse:' . $warehouseId,
+                    ]);
+                    if ($published === false) {
+                        self::setError(SalesOrderLogic::getError() ?: '标准销售单创建失败');
+                        throw new \RuntimeException('canonical_sales_order_publish_failed');
+                    }
+                }
+
+                $now = time();
+                foreach ($items as $item) {
+                    $reserved = self::decimal((string)$item['reserved_base_qty']);
+                    $reservation = Db::name('customer_report_reservation')
+                        ->where('tenant_id', self::tenantId())->where('report_item_id', (int)$item['id'])
+                        ->lock(true)->find();
+                    if (!$reservation) {
+                        throw new \RuntimeException('customer_report_reservation_not_found');
+                    }
+                    Db::name('customer_report_reservation')->where('id', (int)$reservation['id'])->update([
+                        'reserved_base_qty' => '0.00',
+                        'consumed_base_qty' => bcadd((string)$reservation['consumed_base_qty'], $reserved, self::SCALE),
+                        'status' => 'fulfilled',
+                        'update_time' => $now,
+                    ]);
+                    CustomerReportItem::where('tenant_id', self::tenantId())->where('id', (int)$item['id'])->update([
+                        'reserved_base_qty' => '0.00',
+                        'fulfilled_base_qty' => bcadd((string)$item['fulfilled_base_qty'], $reserved, self::SCALE),
+                        'shortage_base_qty' => '0.00',
+                        'status' => 'completed',
+                        'update_time' => $now,
                     ]);
                 }
+                CustomerReport::where('tenant_id', self::tenantId())->where('id', $reportId)->where('version', $version)->update([
+                    'status' => 'completed',
+                    'reserved_base_qty' => '0.00',
+                    'shortage_base_qty' => '0.00',
+                    'version' => $version + 1,
+                    'update_time' => $now,
+                ]);
                 return self::detailById($reportId);
             });
         } catch (\Throwable) {
@@ -202,7 +278,6 @@ class CustomerReportLogic extends BaseLogic
                     'remark' => trim((string)($params['remark'] ?? '')), 'version' => $version + 1, 'update_time' => $now,
                 ]);
                 if ($updated !== 1) { throw new \RuntimeException('version_conflict'); }
-                self::syncSaleFromReport($reportId, $now);
                 return self::detailById($reportId);
             });
         } catch (\Throwable $exception) {
@@ -236,7 +311,6 @@ class CustomerReportLogic extends BaseLogic
                 }
                 $summary = self::summary($summaryRows);
                 CustomerReport::where('tenant_id', self::tenantId())->where('id', $reportId)->where('version', $version)->update($summary + ['version'=>$version+1,'update_time'=>$now]);
-                self::syncSaleFromReport($reportId, $now);
                 return self::detailById($reportId);
             });
         } catch (\Throwable $exception) {
@@ -252,7 +326,7 @@ class CustomerReportLogic extends BaseLogic
         try {
             return self::transactionWithRetry(static function () use ($reportId, $version) {
                 $report = CustomerReport::where('tenant_id', self::tenantId())->where('id', $reportId)->lock(true)->find();
-                if (!$report || (int)$report->version !== $version || in_array((string)$report->status, ['fulfilling','completed','cancelled'], true)) {
+                if (!$report || (int)$report->version !== $version || in_array((string)$report->status, ['completed','cancelled'], true)) {
                     self::setError('报货单不存在、版本冲突或不可取消'); return false;
                 }
                 $items = CustomerReportItem::where('tenant_id', self::tenantId())->where('report_id', $reportId)->order(['goods_id' => 'asc', 'warehouse_id' => 'asc', 'id' => 'asc'])->lock(true)->select()->toArray();
@@ -263,63 +337,9 @@ class CustomerReportLogic extends BaseLogic
                     CustomerReportReservation::where('tenant_id', self::tenantId())->where('report_item_id',(int)$item['id'])->update(['reserved_base_qty'=>'0.00','released_base_qty'=>self::decimal((string)$item['reserved_base_qty']),'status'=>'released','update_time'=>$now]);
                 }
                 CustomerReport::where('tenant_id', self::tenantId())->where('id',$reportId)->where('version',$version)->update(['status'=>'cancelled','reserved_base_qty'=>'0.00','shortage_base_qty'=>'0.00','version'=>$version+1,'update_time'=>$now]);
-                self::syncSaleFromReport($reportId, $now);
                 return self::detailById($reportId);
             });
         } catch (\Throwable) { if (!self::hasError()) { self::setError('取消客户报货失败'); } return false; }
-    }
-
-    /** @return array<string,mixed>|false */
-    public static function fulfill(array $params): array|false
-    {
-        self::clearError(); $reportId=(int)($params['id']??0); $version=(int)($params['version']??0); $requested=(array)($params['items']??[]);
-        if ($requested === []) { self::setError('请填写实际履约数量'); return false; }
-        try {
-            return self::transactionWithRetry(static function () use ($reportId,$version,$requested) {
-                $report=CustomerReport::where('tenant_id',self::tenantId())->where('id',$reportId)->lock(true)->find();
-                if (!$report) { self::setError('报货单不存在、版本冲突或不可履约'); return false; }
-                if ((string)$report->status === 'completed') {
-                    foreach ($requested as $request) {
-                        $actual=self::quantity($request['actual_base_qty']??$request['actual_qty']??null, true); $key=trim((string)($request['fulfillment_key']??''));
-                        $reservation=CustomerReportReservation::where('tenant_id',self::tenantId())->where('report_item_id',(int)($request['id']??0))->lock(true)->find();
-                        if ($actual===false || $key==='' || !$reservation || (string)$reservation->fulfillment_key!==$key || bccomp(self::decimal((string)$reservation->consumed_base_qty),$actual,self::SCALE)!==0) { self::setError('履约幂等键已用于不同内容'); return false; }
-                    }
-                    return self::detailById($reportId);
-                }
-                if ((int)$report->version !== $version || (string)$report->status === 'cancelled') { self::setError('报货单不存在、版本冲突或不可履约'); return false; }
-                $now=time();
-                foreach (self::orderedFulfillmentRequests($reportId, $requested) as $request) {
-                    $itemId=(int)($request['id']??0); $actual=self::quantity($request['actual_base_qty']??$request['actual_qty']??null, true); $key=trim((string)($request['fulfillment_key']??''));
-                    if ($itemId<=0 || $actual===false || $key==='' || strlen($key)>96) { self::setError('履约行、实际数量或幂等键无效'); return false; }
-                    $item=CustomerReportItem::where('tenant_id',self::tenantId())->where('report_id',$reportId)->where('id',$itemId)->lock(true)->find();
-                    $reservation=CustomerReportReservation::where('tenant_id',self::tenantId())->where('report_item_id',$itemId)->lock(true)->find();
-                    if (!$item || !$reservation) { self::setError('履约行不存在'); return false; }
-                    if ((string)$reservation->fulfillment_key === $key) {
-                        if (bccomp(self::decimal((string)$reservation->consumed_base_qty),$actual,self::SCALE)!==0) { self::setError('履约幂等键已用于不同数量'); return false; }
-                        continue;
-                    }
-                    if ((string)$reservation->fulfillment_key !== '' || (string)$item->status === 'fulfilled') { self::setError('报货行已经履约'); return false; }
-                    $reserved=self::decimal((string)$item->reserved_base_qty);
-                    if (bccomp($actual,$reserved,self::SCALE)>0) {
-                        $extra=bcsub($actual,$reserved,self::SCALE);
-                        if (WarehouseGoodsBalanceService::reserveWithinTransaction((int)$item->warehouse_id,(int)$item->goods_id,$extra)===false) { self::setError('可用库存不足，无法补足实际履约量'); return false; }
-                        $reserved=$actual;
-                    }
-                    if (bccomp($actual,'0.00',self::SCALE)>0 && WarehouseGoodsBalanceService::consumeReservedWithinTransaction((int)$item->warehouse_id,(int)$item->goods_id,$actual)===false) { self::setError('扣减已预留库存失败'); return false; }
-                    $release=bcsub($reserved,$actual,self::SCALE);
-                    if (bccomp($release,'0.00',self::SCALE)>0 && WarehouseGoodsBalanceService::releaseWithinTransaction((int)$item->warehouse_id,(int)$item->goods_id,$release)===false) { self::setError('释放未履约预留失败'); return false; }
-                    CustomerReportItem::where('tenant_id',self::tenantId())->where('id',$itemId)->update(['reserved_base_qty'=>'0.00','shortage_base_qty'=>'0.00','fulfilled_base_qty'=>$actual,'status'=>'fulfilled','update_time'=>$now]);
-                    CustomerReportReservation::where('tenant_id',self::tenantId())->where('id',(int)$reservation->id)->update(['reserved_base_qty'=>'0.00','consumed_base_qty'=>$actual,'released_base_qty'=>$release,'fulfillment_key'=>$key,'status'=>'fulfilled','update_time'=>$now]);
-                }
-                $all=CustomerReportItem::where('tenant_id',self::tenantId())->where('report_id',$reportId)->select()->toArray();
-                $complete=$all!==[] && count(array_filter($all,static fn(array $item):bool => (string)$item['status']!=='fulfilled'))===0;
-                $remainingReserved='0.00'; $remainingShortage='0.00';
-                foreach ($all as $line) { $remainingReserved=bcadd($remainingReserved,self::decimal((string)$line['reserved_base_qty']),self::SCALE); $remainingShortage=bcadd($remainingShortage,self::decimal((string)$line['shortage_base_qty']),self::SCALE); }
-                CustomerReport::where('tenant_id',self::tenantId())->where('id',$reportId)->where('version',$version)->update(['status'=>$complete?'completed':'fulfilling','reserved_base_qty'=>$remainingReserved,'shortage_base_qty'=>$remainingShortage,'version'=>$version+1,'update_time'=>$now]);
-                self::syncSaleFromReport($reportId, $now);
-                return self::detailById($reportId);
-            });
-        } catch (\Throwable) { if (!self::hasError()) { self::setError('客户报货履约失败'); } return false; }
     }
 
     /** @param array<int,array<string,mixed>> $items @return array<string,mixed> */
@@ -378,6 +398,22 @@ class CustomerReportLogic extends BaseLogic
         usort($items, [self::class, 'compareBalanceKey']);
         return $items;
     }
+    /** @param array<int,array<string,mixed>> $items */
+    private static function lockGoodsForConversion(array $items): void
+    {
+        $goodsIds = array_values(array_unique(array_map(
+            static fn(array $item): int => (int)$item['goods_id'],
+            $items
+        )));
+        sort($goodsIds, SORT_NUMERIC);
+        foreach ($goodsIds as $goodsId) {
+            $lockedId = (int)Db::name('goods')->where('tenant_id', self::tenantId())
+                ->where('id', $goodsId)->lock(true)->value('id');
+            if ($lockedId !== $goodsId) {
+                throw new \RuntimeException('customer_report_goods_not_found');
+            }
+        }
+    }
     /** @param array<string,mixed> $left @param array<string,mixed> $right */
     private static function compareBalanceKey(array $left, array $right): int
     {
@@ -397,62 +433,49 @@ class CustomerReportLogic extends BaseLogic
         if (!$report) { self::setError('客户报货单不存在'); return false; }
         $data=$report->toArray();
         $data['items']=CustomerReportItem::where('tenant_id',self::tenantId())->where('report_id',$id)->whereNull('delete_time')->order('sort asc,id asc')->select()->toArray();
-        $data['sale'] = self::saleByReport($id);
+        $data['sales_orders'] = self::salesOrdersByReport($id);
         return $data;
     }
-    /** @return array<string,mixed>|null */
-    private static function saleByReport(int $reportId, bool $lock = false): ?array
+
+    /** @return array<int,array<string,mixed>> */
+    private static function salesOrdersByReport(int $reportId, bool $lock = false): array
     {
-        $query = Db::name('customer_report_sale')->where('tenant_id', self::tenantId())->where('report_id', $reportId);
+        $query = Db::name('sales_order')->where('tenant_id', self::tenantId())
+            ->where('source_type', 'customer_report')->where('source_id', $reportId)
+            ->order(['warehouse_id' => 'asc', 'id' => 'asc']);
         if ($lock) { $query->lock(true); }
-        $sale = $query->find();
-        if (!$sale) { return null; }
-        $sale['items'] = Db::name('customer_report_sale_item')->where('tenant_id', self::tenantId())->where('sale_id', (int)$sale['id'])->order('id asc')->select()->toArray();
-        return $sale;
-    }
-    /** 将已转出的独立销售单与来源报货单在同一事务中同步，绝不回写旧订单链路。 */
-    private static function syncSaleFromReport(int $reportId, int $now): void
-    {
-        $sale = Db::name('customer_report_sale')->where('tenant_id', self::tenantId())->where('report_id', $reportId)->find();
-        if (!$sale) { return; }
-        $report = CustomerReport::where('tenant_id', self::tenantId())->where('id', $reportId)->find();
-        if (!$report) { throw new \RuntimeException('report_not_found_for_sale_sync'); }
-        Db::name('customer_report_sale')->where('id', (int)$sale['id'])->where('tenant_id', self::tenantId())->update([
-            'report_version' => (int)$report->version, 'main_customer_id' => (int)$report->main_customer_id,
-            'main_customer_name' => (string)$report->main_customer_name, 'status' => (string)$report->status,
-            'total_base_qty' => self::decimal((string)$report->total_base_qty), 'reserved_base_qty' => self::decimal((string)$report->reserved_base_qty),
-            'shortage_base_qty' => self::decimal((string)$report->shortage_base_qty), 'update_time' => $now,
-        ]);
-        Db::name('customer_report_sale_item')->where('tenant_id', self::tenantId())->where('sale_id', (int)$sale['id'])->delete();
-        $items = CustomerReportItem::where('tenant_id', self::tenantId())->where('report_id', $reportId)->whereNull('delete_time')->order('sort asc,id asc')->select()->toArray();
-        foreach ($items as $item) {
-            Db::name('customer_report_sale_item')->insert([
-                'tenant_id' => self::tenantId(), 'sale_id' => (int)$sale['id'], 'report_item_id' => (int)$item['id'],
-                'warehouse_id' => (int)$item['warehouse_id'], 'goods_id' => (int)$item['goods_id'], 'goods_name' => (string)$item['goods_name'],
-                'sku_id' => (int)$item['sku_id'], 'main_customer_id' => (int)$item['main_customer_id'], 'delivery_customer_id' => (int)$item['delivery_customer_id'],
-                'delivery_customer_name' => (string)$item['delivery_customer_name'], 'unit_id' => (int)$item['unit_id'], 'unit_name' => (string)$item['unit_name'],
-                'order_qty' => self::decimal((string)$item['order_qty']), 'expected_base_qty' => self::decimal((string)$item['expected_base_qty']),
-                'reserved_base_qty' => self::decimal((string)$item['reserved_base_qty']), 'shortage_base_qty' => self::decimal((string)$item['shortage_base_qty']),
-                'fulfilled_base_qty' => self::decimal((string)$item['fulfilled_base_qty']), 'quality_snapshot' => (string)$item['quality_snapshot'],
-                'specification_snapshot' => (string)$item['specification_snapshot'], 'processing_requirement' => (string)$item['processing_requirement'],
-                'price_status' => (string)$item['price_status'], 'price' => self::decimal((string)$item['price']), 'pricing_unit_id' => (int)$item['pricing_unit_id'],
-                'pricing_unit_name' => (string)$item['pricing_unit_name'], 'status' => (string)$item['status'], 'create_time' => $now, 'update_time' => $now,
-            ]);
+        $orders = $query->select()->toArray();
+        foreach ($orders as &$order) {
+            $order['items'] = Db::name('order_goods')->where('tenant_id', self::tenantId())
+                ->where('order_type', 'sales')->where('order_id', (int)$order['id'])
+                ->order(['sort' => 'asc', 'id' => 'asc'])->select()->toArray();
         }
+        unset($order);
+        return $orders;
     }
-    /** @param array<int,array<string,mixed>> $requested @return array<int,array<string,mixed>> */
-    private static function orderedFulfillmentRequests(int $reportId, array $requested): array
+
+    private static function pricingQuantity(array $item): string|false
     {
-        $keys = [];
-        foreach ($requested as $index => $request) { $keys[(int)($request['id'] ?? 0)] = $index; }
-        $rows = CustomerReportItem::where('tenant_id', self::tenantId())->where('report_id', $reportId)
-            ->whereIn('id', array_keys($keys))->field(['id', 'goods_id', 'warehouse_id'])->select()->toArray();
-        $order = [];
-        foreach ($rows as $row) { $order[(int)$row['id']] = [(int)$row['goods_id'], (int)$row['warehouse_id'], (int)$row['id']]; }
-        usort($requested, static function (array $left, array $right) use ($order): int {
-            return ($order[(int)($left['id'] ?? 0)] ?? [PHP_INT_MAX, PHP_INT_MAX, PHP_INT_MAX]) <=> ($order[(int)($right['id'] ?? 0)] ?? [PHP_INT_MAX, PHP_INT_MAX, PHP_INT_MAX]);
-        });
-        return $requested;
+        $pricingUnitId = (int)$item['pricing_unit_id'];
+        $pricingUnitName = trim((string)$item['pricing_unit_name']);
+        $baseUnitId = (int)$item['base_unit_id'];
+        $baseUnitName = trim((string)$item['base_unit_name']);
+        if (
+            ($pricingUnitId > 0 && $baseUnitId > 0 && $pricingUnitId === $baseUnitId)
+            || ($pricingUnitName !== '' && $pricingUnitName === $baseUnitName)
+        ) {
+            return self::decimal((string)$item['expected_base_qty']);
+        }
+        $orderUnitId = (int)$item['unit_id'];
+        $orderUnitName = trim((string)$item['unit_name']);
+        if (
+            ($pricingUnitId > 0 && $orderUnitId > 0 && $pricingUnitId === $orderUnitId)
+            || ($pricingUnitName !== '' && $pricingUnitName === $orderUnitName)
+        ) {
+            return self::decimal((string)$item['order_qty']);
+        }
+        self::setError('计价单位暂不支持转换为标准销售单');
+        return false;
     }
     /** @template T @param callable():T $operation @return T */
     private static function transactionWithRetry(callable $operation): mixed
@@ -478,7 +501,6 @@ class CustomerReportLogic extends BaseLogic
     private static function decimal(string $value): string { return bcadd($value,'0',self::SCALE); }
     private static function tenantId(): int { return (int)(request()->tenantId??0); }
     private static function sn(): string { return 'CR'.date('YmdHis').random_int(1000,9999); }
-    private static function saleSn(): string { return 'CRS'.date('YmdHis').random_int(1000,9999); }
     private static function isRetryableTransactionError(\Throwable $exception): bool
     {
         return str_contains($exception->getMessage(), '1213') || str_contains($exception->getMessage(), '1205');

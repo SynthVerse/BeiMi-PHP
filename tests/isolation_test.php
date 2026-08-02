@@ -352,8 +352,6 @@ function cleanupSecondTenant(): void
         'jxc_supply_order',
         'jxc_sales_return_order_item',
         'jxc_sales_return_order',
-        'jxc_purchase_order_item',
-        'jxc_purchase_order',
         'jxc_goods_stock',
         'jxc_goods',
         'jxc_goods_unit',

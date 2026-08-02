@@ -10,7 +10,7 @@ if (typeof process === 'undefined' || typeof require !== 'function') {
   function fail(code) { throw { probeCode: code }; }
   function code(error) { return error && error.probeCode ? error.probeCode : 'static_failed'; }
   try {
-    if (!core || Object.keys(core).length !== 2 || typeof core.runStaticProbe !== 'function' || typeof core.runFixedRuntimeProbe !== 'function' || typeof core.runStaticProbe.fixedTarget !== 'string') fail('fixed_core_contract_invalid');
+    if (!core || Object.keys(core).length !== 3 || typeof core.prepareMigrationSql !== 'function' || typeof core.runStaticProbe !== 'function' || typeof core.runFixedRuntimeProbe !== 'function' || typeof core.runStaticProbe.fixedTarget !== 'string') fail('fixed_core_contract_invalid');
     const args = {}; for (let index = 0; index < argv.length; index += 2) args[argv[index]] = argv[index + 1];
     if (args['--target'] !== core.runStaticProbe.fixedTarget) fail('target_not_allowed');
     if (args['--mode'] !== 'static') fail('runtime_not_enabled_pending_independent_verify');

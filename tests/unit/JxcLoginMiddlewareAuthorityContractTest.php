@@ -88,18 +88,16 @@ final class JxcLoginMiddlewareAuthorityContractTest extends TestCase
             'user/info',
             'goods/cloud/index',
             'customer/index',
+            'jxc/customer_report/lists',
             'customer/groups',
             'goods/index',
             'units/index',
-            'purchase/lists',
             'purchase-return/lists',
             'order/lists',
-            'jxc/sales_reservation/lists',
             'return/lists',
             'user/store/current',
             'supplier/index',
             'supply/lists',
-            'jxc/task/dashboard',
             'warehouse/index',
         ];
         foreach ($explicit as $path) {
@@ -111,7 +109,7 @@ final class JxcLoginMiddlewareAuthorityContractTest extends TestCase
     {
         $expected = Db::name('goods')->where('id', 0)->count();
 
-        self::dispatch('GET', 'api/jxc/task/dashboard');
+        self::dispatch('GET', 'api/jxc/customer_report/lists');
 
         self::assertSame($expected, Goods::where('id', 0)->count());
     }

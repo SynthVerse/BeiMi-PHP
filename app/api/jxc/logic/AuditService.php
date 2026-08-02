@@ -3,7 +3,8 @@ declare(strict_types=1);
 
 namespace app\api\jxc\logic;
 
-use app\common\model\jxc\AuditLog;
+use think\facade\Db;
+use think\facade\Log;
 
 class AuditService
 {
@@ -12,7 +13,6 @@ class AuditService
     const MODULE_SUPPLY_ORDER   = 'supply_order';
     const MODULE_RETURN_ORDER   = 'return_order';
     const MODULE_PURCHASE_RETURN_ORDER = 'purchase_return_order';
-    const MODULE_PURCHASE_ORDER = 'purchase_order';
 
     // 操作常量
     const ACTION_CREATE  = 'create';
@@ -43,26 +43,52 @@ class AuditService
         string $remark = ''
     ): void {
         try {
-            $tenantId = request()->tenantId ?? 0;
-            $adminId  = request()->adminId  ?? 0;
-            $ip       = request()->ip()     ?? '';
-
-            AuditLog::create([
-                'tenant_id'   => (int)$tenantId,
-                'admin_id'    => (int)$adminId,
-                'module'      => $module,
-                'action'      => $action,
-                'target_id'   => $targetId,
-                'target_sn'   => $targetSn,
-                'before_data' => $beforeData !== null ? json_encode($beforeData, JSON_UNESCAPED_UNICODE) : null,
-                'after_data'  => $afterData  !== null ? json_encode($afterData,  JSON_UNESCAPED_UNICODE) : null,
-                'ip'          => $ip,
-                'remark'      => $remark,
-                'create_time' => time(),
-            ]);
+            self::insert($module, $action, $targetId, $targetSn, $beforeData, $afterData, $remark);
         } catch (\Throwable $e) {
             // 审计日志写入失败不应影响主业务
-            \think\facade\Log::error('审计日志写入失败: ' . $e->getMessage());
+            Log::error('审计日志写入失败: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * 调用方拥有事务时使用；审计失败必须抛出并使主业务整体回滚。
+     */
+    public static function logWithinTransaction(
+        string $module,
+        string $action,
+        int $targetId,
+        string $targetSn = '',
+        ?array $beforeData = null,
+        ?array $afterData = null,
+        string $remark = ''
+    ): void {
+        self::insert($module, $action, $targetId, $targetSn, $beforeData, $afterData, $remark);
+    }
+
+    private static function insert(
+        string $module,
+        string $action,
+        int $targetId,
+        string $targetSn,
+        ?array $beforeData,
+        ?array $afterData,
+        string $remark
+    ): void {
+        $inserted = Db::name('audit_log')->insert([
+            'tenant_id' => (int)(request()->tenantId ?? 0),
+            'admin_id' => (int)(request()->adminId ?? 0),
+            'module' => $module,
+            'action' => $action,
+            'target_id' => $targetId,
+            'target_sn' => $targetSn,
+            'before_data' => $beforeData !== null ? json_encode($beforeData, JSON_UNESCAPED_UNICODE) : null,
+            'after_data' => $afterData !== null ? json_encode($afterData, JSON_UNESCAPED_UNICODE) : null,
+            'ip' => (string)(request()->ip() ?? ''),
+            'remark' => $remark,
+            'create_time' => time(),
+        ]);
+        if ($inserted !== 1) {
+            throw new \RuntimeException('audit_log_insert_failed');
         }
     }
 }

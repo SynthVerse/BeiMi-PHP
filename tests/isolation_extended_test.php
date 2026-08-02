@@ -111,7 +111,6 @@ function cleanup_second_tenant_extended(): void
         'payable_flow',
         'sales_return_order',
         'sales_order',
-        'purchase_order',
         'supply_order',
         'goods',
         'customer',
@@ -144,7 +143,6 @@ function create_isolation_bundle(string $baseUrl, string $token, string $label, 
         'goodsId' => null,
         'salesOrderId' => null,
         'salesOrderSn' => '',
-        'purchaseOrderId' => null,
         'returnOrderId' => null,
         'storeId' => null,
         'customerName' => test_name($label . '_客户'),
@@ -196,20 +194,6 @@ function create_isolation_bundle(string $baseUrl, string $token, string $label, 
     $bundle['salesOrderId'] = extract_id($sales);
     $bundle['salesOrderSn'] = (string)($sales['data']['order_sn'] ?? '');
 
-    $purchase = http_request('POST', $baseUrl . '/api/purchase/publish', [
-        'customer_id' => $bundle['customerId'],
-        'warehouse_id' => $bundle['warehouseId'],
-        'datetimesingle' => $timestamp,
-        'goods' => [[
-            'goods_id' => $bundle['goodsId'],
-            'name' => $bundle['goodsName'],
-            'number' => 3,
-            'price' => 10,
-            'units' => '个',
-        ]],
-    ], $token);
-    $bundle['purchaseOrderId'] = extract_id($purchase);
-
     $return = http_request('POST', $baseUrl . '/api/return/publish', [
         'customer_id' => $bundle['customerId'],
         'warehouse_id' => $bundle['warehouseId'],
@@ -244,9 +228,6 @@ function cleanup_isolation_bundle(string $baseUrl, string $token, array $bundle)
     }
     if (!empty($bundle['salesOrderId'])) {
         http_request('DELETE', $baseUrl . '/api/order/remove', ['id' => $bundle['salesOrderId']], $token);
-    }
-    if (!empty($bundle['purchaseOrderId'])) {
-        http_request('DELETE', $baseUrl . '/api/purchase/remove', ['id' => $bundle['purchaseOrderId']], $token);
     }
     if (!empty($bundle['storeId'])) {
         http_request('DELETE', $baseUrl . '/api/customer/del', ['id' => $bundle['storeId']], $token);
@@ -299,24 +280,19 @@ $timestampA = $eventBaseTs;
 $bundleA = create_isolation_bundle($BASE_URL, $tokenA, 'ISOX_A', $timestampA);
 $timestampB = $eventBaseTs + 1;
 $bundleB = create_isolation_bundle($BASE_URL, $tokenB, 'ISOX_B', $timestampB);
-$readyA = !empty($bundleA['customerId']) && !empty($bundleA['purchaseOrderId']) && !empty($bundleA['returnOrderId']) && !empty($bundleA['storeId']);
-$readyB = !empty($bundleB['customerId']) && !empty($bundleB['purchaseOrderId']) && !empty($bundleB['returnOrderId']) && !empty($bundleB['storeId']);
+$readyA = !empty($bundleA['customerId']) && !empty($bundleA['salesOrderId']) && !empty($bundleA['returnOrderId']) && !empty($bundleA['storeId']);
+$readyB = !empty($bundleB['customerId']) && !empty($bundleB['salesOrderId']) && !empty($bundleB['returnOrderId']) && !empty($bundleB['storeId']);
 echo ($readyA && $readyB) ? "OK\n" : "FAIL\n";
 $runtime->assertTrue($readyA && $readyB, '扩展隔离前置数据创建成功');
 
 if ($readyA && $readyB) {
-    $purchaseListA = http_request('GET', $BASE_URL . '/api/purchase/lists', [], $tokenA);
-    $purchaseListB = http_request('GET', $BASE_URL . '/api/purchase/lists', [], $tokenB);
-    $runtime->assertTrue(!list_contains_id(extract_list($purchaseListA), (int)$bundleB['purchaseOrderId']), '租户A订货单列表不含租户B数据');
-    $runtime->assertTrue(!list_contains_id(extract_list($purchaseListB), (int)$bundleA['purchaseOrderId']), '租户B订货单列表不含租户A数据');
-
     $returnListA = http_request('GET', $BASE_URL . '/api/return/lists', [], $tokenA);
     $returnListB = http_request('GET', $BASE_URL . '/api/return/lists', [], $tokenB);
     $runtime->assertTrue(!list_contains_id(extract_list($returnListA), (int)$bundleB['returnOrderId']), '租户A退货单列表不含租户B数据');
     $runtime->assertTrue(!list_contains_id(extract_list($returnListB), (int)$bundleA['returnOrderId']), '租户B退货单列表不含租户A数据');
 
-    $crossPurchaseDetail = http_request('GET', $BASE_URL . '/api/purchase/details', ['id' => $bundleA['purchaseOrderId']], $tokenB);
-    $runtime->assertTrue(detail_hidden_from_tenant($crossPurchaseDetail, (int)$bundleA['purchaseOrderId']), '租户B无法查看租户A订货单详情');
+    $crossSalesDetail = http_request('GET', $BASE_URL . '/api/order/details', ['id' => $bundleA['salesOrderId']], $tokenB);
+    $runtime->assertTrue(detail_hidden_from_tenant($crossSalesDetail, (int)$bundleA['salesOrderId']), '租户B无法查看租户A销售单详情');
 
     $crossReturnDetail = http_request('GET', $BASE_URL . '/api/return/details', ['id' => $bundleB['returnOrderId']], $tokenA);
     $runtime->assertTrue(detail_hidden_from_tenant($crossReturnDetail, (int)$bundleB['returnOrderId']), '租户A无法查看租户B退货单详情');
@@ -344,19 +320,15 @@ if ($readyA && $readyB) {
     $auditB = http_request('GET', $BASE_URL . '/api/audit/lists', ['pagesize' => 100], $tokenB);
     $auditItemsA = extract_list($auditA);
     $auditItemsB = extract_list($auditB);
-    $runtime->assertTrue(!list_contains_id($auditItemsA, (int)$bundleB['purchaseOrderId'], 'target_id'), '租户A审计日志不含租户B订货单');
+    $runtime->assertTrue(!list_contains_id($auditItemsA, (int)$bundleB['salesOrderId'], 'target_id'), '租户A审计日志不含租户B销售单');
     $runtime->assertTrue(!list_contains_id($auditItemsA, (int)$bundleB['returnOrderId'], 'target_id'), '租户A审计日志不含租户B退货单');
     $runtime->assertTrue(!list_contains_id($auditItemsB, (int)$bundleA['storeId'], 'target_id'), '租户B审计日志不含租户A店铺');
 
     $statsEnd = $eventBaseTs + 5;
     $orderStatsA = http_request('GET', $BASE_URL . '/api/order/statistics', ['start_time' => $windowStart, 'end_time' => $statsEnd], $tokenA);
     $orderStatsB = http_request('GET', $BASE_URL . '/api/order/statistics', ['start_time' => $windowStart, 'end_time' => $statsEnd], $tokenB);
-    $purchaseStatsA = http_request('GET', $BASE_URL . '/api/purchase/statistics', ['start_time' => $windowStart, 'end_time' => $statsEnd], $tokenA);
-    $purchaseStatsB = http_request('GET', $BASE_URL . '/api/purchase/statistics', ['start_time' => $windowStart, 'end_time' => $statsEnd], $tokenB);
     $runtime->assertInt($orderStatsA['data']['number'] ?? 0, 1, '租户A销售统计仅统计自己的销售单');
     $runtime->assertInt($orderStatsB['data']['number'] ?? 0, 1, '租户B销售统计仅统计自己的销售单');
-    $runtime->assertInt($purchaseStatsA['data']['total_orders'] ?? 0, 1, '租户A订货统计仅统计自己的订货单');
-    $runtime->assertInt($purchaseStatsB['data']['total_orders'] ?? 0, 1, '租户B订货统计仅统计自己的订货单');
 }
 
 echo "\nStep 2: 清理测试数据 ... ";

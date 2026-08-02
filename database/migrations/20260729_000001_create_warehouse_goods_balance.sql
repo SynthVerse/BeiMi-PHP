@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS `la_warehouse_goods_balance` (
+CREATE TABLE IF NOT EXISTS `{{prefix}}warehouse_goods_balance` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '仓库商品库存余额ID',
   `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
   `warehouse_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '仓库ID',
@@ -19,10 +19,10 @@ CREATE TABLE IF NOT EXISTS `la_warehouse_goods_balance` (
   CONSTRAINT `chk_warehouse_goods_available_consistent` CHECK (`available_qty` = (`on_hand_qty` - `reserved_qty`))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='仓库商品库存权威余额表';
 
-ALTER TABLE `la_goods`
+ALTER TABLE `{{prefix}}goods`
   MODIFY COLUMN `stock` decimal(18,4) NOT NULL DEFAULT 0.0000 COMMENT '库存汇总展示';
 
-ALTER TABLE `la_stock_flow`
+ALTER TABLE `{{prefix}}stock_flow`
   MODIFY COLUMN `quantity` decimal(18,4) NOT NULL DEFAULT 0.0000 COMMENT '变动数量',
   MODIFY COLUMN `before_stock` decimal(18,4) NOT NULL DEFAULT 0.0000 COMMENT '变动前仓库现存量',
   MODIFY COLUMN `after_stock` decimal(18,4) NOT NULL DEFAULT 0.0000 COMMENT '变动后仓库现存量';

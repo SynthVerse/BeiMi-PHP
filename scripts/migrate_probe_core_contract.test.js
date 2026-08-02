@@ -3,7 +3,8 @@
 
 const assert = require('assert');
 const core = require('./migrate_probe_core.js');
-assert.deepStrictEqual(Object.keys(core), ['runStaticProbe', 'runFixedRuntimeProbe']);
+assert.deepStrictEqual(Object.keys(core), ['prepareMigrationSql', 'runStaticProbe', 'runFixedRuntimeProbe']);
+assert.strictEqual(typeof core.prepareMigrationSql, 'function');
 assert.strictEqual(core.runStaticProbe.fixedTarget, 'beimi_r4_probe_20260726_plan020');
 assert.deepStrictEqual(Object.getOwnPropertyDescriptor(core.runStaticProbe, 'fixedTarget'), { value: 'beimi_r4_probe_20260726_plan020', writable: false, enumerable: false, configurable: false });
 assert.throws(() => core.runFixedRuntimeProbe('unexpected'), error => error && error.probeCode === 'runtime_arguments_not_allowed');

@@ -6,6 +6,7 @@ use app\common\model\jxc\Customer;
 use app\common\model\jxc\Vendor;
 use app\common\model\jxc\ReceivableFlow;
 use app\common\model\jxc\PayableFlow;
+use think\facade\Db;
 
 class FinanceService
 {
@@ -42,7 +43,7 @@ class FinanceService
         ]);
 
         // 写入应收流水
-        ReceivableFlow::create([
+        Db::name('receivable_flow')->insert([
             'tenant_id'     => (int)(request()->tenantId ?? 0),
             'customer_id'   => $customerId,
             'order_id'      => $orderId,
@@ -94,7 +95,7 @@ class FinanceService
         }
         Customer::where('id', $customerId)->where('tenant_id', $tenantId)->update($update);
 
-        ReceivableFlow::create([
+        Db::name('receivable_flow')->insert([
             'tenant_id'     => (int)(request()->tenantId ?? 0),
             'customer_id'   => $customerId,
             'order_id'      => $orderId,
@@ -175,7 +176,7 @@ class FinanceService
                 'order_money' => $orderMoney,
                 'update_time' => time(),
             ]);
-            ReceivableFlow::create([
+            Db::name('receivable_flow')->insert([
                 'tenant_id' => $tenantId,
                 'customer_id' => (int)$customerId,
                 'order_id' => $orderId,
@@ -227,7 +228,7 @@ class FinanceService
             'update_time' => time(),
         ]);
 
-        PayableFlow::create([
+        Db::name('payable_flow')->insert([
             'tenant_id'     => (int)(request()->tenantId ?? 0),
             'supplier_id'   => $supplierId,
             'order_id'      => $orderId,
@@ -284,7 +285,7 @@ class FinanceService
         }
         Vendor::where('id', $supplierId)->where('tenant_id', $tenantId)->update($update);
 
-        PayableFlow::create([
+        Db::name('payable_flow')->insert([
             'tenant_id'     => $tenantId,
             'supplier_id'   => $supplierId,
             'order_id'      => $orderId,
@@ -405,7 +406,7 @@ class FinanceService
         string $beforeAmount,
         string $afterAmount
     ): void {
-        PayableFlow::create([
+        Db::name('payable_flow')->insert([
             'tenant_id'     => $tenantId,
             'supplier_id'   => $supplierId,
             'order_id'      => $orderId,

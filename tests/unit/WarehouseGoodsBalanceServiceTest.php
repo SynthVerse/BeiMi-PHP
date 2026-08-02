@@ -7,41 +7,37 @@ namespace tests\unit;
 use app\api\jxc\logic\StockService;
 use app\api\jxc\logic\WarehouseGoodsBalanceService;
 use app\api\jxc\logic\GoodsLogic;
-use app\api\jxc\logic\InventoryReservationService;
 use app\common\model\jxc\Goods;
 use PHPUnit\Framework\TestCase;
 use think\facade\Db;
 
-require_once __DIR__ . '/TaskCenterTestSupport.php';
+require_once __DIR__ . '/CustomerReportTestSupport.php';
 
 final class WarehouseGoodsBalanceServiceTest extends TestCase
 {
-    use TaskCenterTestSupport;
+    use CustomerReportTestSupport;
 
     protected function setUp(): void
     {
         parent::setUp();
-        $this->prepareRequestContext();
-        $this->ensureTaskCenterTables();
+        $this->prepareCustomerReportRequestContext();
+        $this->ensureCustomerReportTables();
         $this->resetWarehouseGoodsBalanceSchema();
         $this->cleanWarehouseGoodsBalanceTenantData();
-        $this->cleanTaskCenterTenantData();
     }
 
     protected function tearDown(): void
     {
         $this->cleanWarehouseGoodsBalanceTenantData();
         $this->cleanWarehouseGoodsBalanceTenantData(self::OTHER_TENANT_ID);
-        $this->cleanTaskCenterTenantData();
-        $this->cleanTaskCenterTenantData(self::OTHER_TENANT_ID);
         parent::tearDown();
     }
 
     public function test_inbound_stock_is_isolated_by_warehouse_and_updates_the_total_stock_display(): void
     {
-        $goodsId = $this->createGoods('仓库隔离商品', 'WH-BALANCE', '0.0000');
-        $warehouseA = $this->createWarehouse('A仓');
-        $warehouseB = $this->createWarehouse('B仓');
+        $goodsId = $this->createCustomerReportGoods('仓库隔离商品', 'WH-BALANCE');
+        $warehouseA = $this->createCustomerReportWarehouse('A仓');
+        $warehouseB = $this->createCustomerReportWarehouse('B仓');
 
         self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseA, $goodsId, '10.0000'));
         self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseB, $goodsId, '5.0000'));
@@ -56,8 +52,8 @@ final class WarehouseGoodsBalanceServiceTest extends TestCase
 
     public function test_outbound_and_reservation_cannot_make_a_warehouse_balance_negative(): void
     {
-        $goodsId = $this->createGoods('负库存保护商品', 'WH-NEGATIVE', '0.0000');
-        $warehouseId = $this->createWarehouse('负库存保护仓');
+        $goodsId = $this->createCustomerReportGoods('负库存保护商品', 'WH-NEGATIVE');
+        $warehouseId = $this->createCustomerReportWarehouse('负库存保护仓');
 
         self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, '10.0000'));
         self::assertNotFalse(WarehouseGoodsBalanceService::reserve($warehouseId, $goodsId, '6.0000'));
@@ -72,8 +68,8 @@ final class WarehouseGoodsBalanceServiceTest extends TestCase
 
     public function test_invalid_first_movement_does_not_create_a_zero_balance_row(): void
     {
-        $goodsId = $this->createGoods('首笔库存商品', 'WH-FIRST-MOVEMENT', '0.0000');
-        $warehouseId = $this->createWarehouse('首笔库存仓');
+        $goodsId = $this->createCustomerReportGoods('首笔库存商品', 'WH-FIRST-MOVEMENT');
+        $warehouseId = $this->createCustomerReportWarehouse('首笔库存仓');
 
         self::assertFalse(WarehouseGoodsBalanceService::outbound($warehouseId, $goodsId, '1.0000'));
         self::assertFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, '-1.0000'));
@@ -81,30 +77,11 @@ final class WarehouseGoodsBalanceServiceTest extends TestCase
         self::assertSame(0, Db::name('warehouse_goods_balance')->where('tenant_id', self::TENANT_ID)->where('warehouse_id', $warehouseId)->where('goods_id', $goodsId)->count());
     }
 
-    public function test_inventory_reservation_uses_warehouse_available_balance_and_releases_it(): void
-    {
-        $goodsId = $this->createGoods('预留库存商品', 'WH-RESERVATION', '0.0000');
-        $warehouseId = $this->createWarehouse('预留库存仓');
-        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, '10.0000'));
-
-        $record = InventoryReservationService::reserve([
-            'id' => 701,
-            'reservation_id' => 700,
-            'goods_id' => $goodsId,
-            'warehouse_id' => $warehouseId,
-        ], '4.0000');
-
-        self::assertNotNull($record);
-        self::assertSame('6.0000', InventoryReservationService::availableForGoods($goodsId, $warehouseId));
-        InventoryReservationService::releaseReservation(700);
-        self::assertSame('10.0000', InventoryReservationService::availableForGoods($goodsId, $warehouseId));
-    }
-
     public function test_transfer_preserves_total_stock_and_moves_only_the_specified_warehouse_balance(): void
     {
-        $goodsId = $this->createGoods('调拨守恒商品', 'WH-TRANSFER', '0.0000');
-        $warehouseA = $this->createWarehouse('调出仓');
-        $warehouseB = $this->createWarehouse('调入仓');
+        $goodsId = $this->createCustomerReportGoods('调拨守恒商品', 'WH-TRANSFER');
+        $warehouseA = $this->createCustomerReportWarehouse('调出仓');
+        $warehouseB = $this->createCustomerReportWarehouse('调入仓');
 
         self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseA, $goodsId, '10.0000'));
         self::assertNotFalse(WarehouseGoodsBalanceService::transfer($warehouseA, $warehouseB, $goodsId, '4.0000'));
@@ -116,8 +93,8 @@ final class WarehouseGoodsBalanceServiceTest extends TestCase
 
     public function test_stock_service_uses_the_warehouse_balance_primitive(): void
     {
-        $goodsId = $this->createGoods('统一入口商品', 'WH-STOCK-SERVICE', '0.0000');
-        $warehouseId = $this->createWarehouse('统一入口仓');
+        $goodsId = $this->createCustomerReportGoods('统一入口商品', 'WH-STOCK-SERVICE');
+        $warehouseId = $this->createCustomerReportWarehouse('统一入口仓');
 
         self::assertTrue(StockService::inbound($warehouseId, $goodsId, '3.0000', 1001, 'supply', 'SUP1001'));
         self::assertTrue(StockService::outbound($warehouseId, $goodsId, '1.0000', 1002, 'sales', 'SAL1002'));
@@ -130,8 +107,8 @@ final class WarehouseGoodsBalanceServiceTest extends TestCase
 
     public function test_stock_balance_and_flow_roll_back_together_when_flow_write_fails(): void
     {
-        $goodsId = $this->createGoods('流水原子性商品', 'WH-FLOW-ATOMIC', '0.0000');
-        $warehouseId = $this->createWarehouse('流水原子性仓');
+        $goodsId = $this->createCustomerReportGoods('流水原子性商品', 'WH-FLOW-ATOMIC');
+        $warehouseId = $this->createCustomerReportWarehouse('流水原子性仓');
         Db::execute('ALTER TABLE `la_stock_flow` ADD UNIQUE KEY `uk_test_stock_flow_order` (`tenant_id`, `order_sn`)');
 
         try {
@@ -146,17 +123,17 @@ final class WarehouseGoodsBalanceServiceTest extends TestCase
 
     public function test_balance_is_isolated_by_tenant(): void
     {
-        $goodsId = $this->createGoods('租户一商品', 'WH-TENANT-A', '0.0000');
-        $warehouseId = $this->createWarehouse('租户一仓');
+        $goodsId = $this->createCustomerReportGoods('租户一商品', 'WH-TENANT-A');
+        $warehouseId = $this->createCustomerReportWarehouse('租户一仓');
         self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, '3.0000'));
 
-        $this->prepareRequestContext(self::OTHER_TENANT_ID);
+        $this->prepareCustomerReportRequestContext(self::OTHER_TENANT_ID);
         $otherGoodsId = $this->createGoodsForTenant(self::OTHER_TENANT_ID, '租户二商品', 'WH-TENANT-B');
         $otherWarehouseId = $this->createWarehouseForTenant(self::OTHER_TENANT_ID, '租户二仓');
         self::assertNotFalse(WarehouseGoodsBalanceService::inbound($otherWarehouseId, $otherGoodsId, '8.0000'));
         self::assertSame('8.0000', WarehouseGoodsBalanceService::available($otherWarehouseId, $otherGoodsId));
 
-        $this->prepareRequestContext();
+        $this->prepareCustomerReportRequestContext();
         self::assertSame('3.0000', WarehouseGoodsBalanceService::available($warehouseId, $goodsId));
     }
 
@@ -196,8 +173,8 @@ final class WarehouseGoodsBalanceServiceTest extends TestCase
 
     public function test_goods_with_a_warehouse_balance_cannot_change_its_base_unit(): void
     {
-        $goodsId = $this->createGoods('基础单位锁定商品', 'WH-UNIT-LOCK', '0.0000');
-        $warehouseId = $this->createWarehouse('基础单位锁定仓');
+        $goodsId = $this->createCustomerReportGoods('基础单位锁定商品', 'WH-UNIT-LOCK');
+        $warehouseId = $this->createCustomerReportWarehouse('基础单位锁定仓');
         self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, '1.0000'));
         self::assertSame(1, Db::name('warehouse_goods_balance')->where('tenant_id', self::TENANT_ID)->where('goods_id', $goodsId)->count());
 
@@ -212,7 +189,7 @@ final class WarehouseGoodsBalanceServiceTest extends TestCase
     private function runWarehouseGoodsBalanceMigration(): void
     {
         $migration = dirname(__DIR__, 2) . '/database/migrations/20260729_000001_create_warehouse_goods_balance.sql';
-        $sql = (string)file_get_contents($migration);
+        $sql = $this->prepareMigration((string)file_get_contents($migration));
         foreach (array_filter(array_map('trim', explode(';', $sql))) as $statement) {
             Db::execute($statement);
         }

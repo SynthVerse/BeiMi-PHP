@@ -36,7 +36,20 @@ class SalesOrderLogic extends BaseLogic
         return self::publishInternal($params, false);
     }
 
-    private static function publishInternal(array $params, bool $ownsTransaction): array|false
+    /**
+     * Publish a canonical sales order from stock already reserved by an
+     * upstream workflow. The caller owns the transaction.
+     */
+    public static function publishReservedWithinTransaction(array $params): array|false
+    {
+        return self::publishInternal($params, false, true);
+    }
+
+    private static function publishInternal(
+        array $params,
+        bool $ownsTransaction,
+        bool $consumeReserved = false
+    ): array|false
     {
         $tenantId = (int)(request()->tenantId ?? 0);
         if ($tenantId <= 0) { self::setError('租户无效'); return false; }
@@ -72,20 +85,37 @@ class SalesOrderLogic extends BaseLogic
                     ];
                 }
             }
-            $order = SalesOrder::create($built['order']);
-            self::replaceGoods((int)$order->id, $built['goods']);
+            $now = time();
+            $built['order']['create_time'] = $now;
+            $built['order']['update_time'] = $now;
+            $orderId = (int)Db::name('sales_order')->insertGetId($built['order']);
+            if ($orderId <= 0) {
+                throw new BusinessException('销售单创建失败');
+            }
+            self::replaceGoods($orderId, $built['goods']);
 
             // === 库存出库 ===
             usort($built['goods'], static fn(array $left, array $right): int => (int)$left['goods_id'] <=> (int)$right['goods_id']);
             foreach ($built['goods'] as $row) {
-                if (!StockService::outbound(
-                    (int)$built['order']['warehouse_id'],
-                    (int)$row['goods_id'],
-                    (string)$row['number'],
-                    (int)$order->id,
-                    'sales',
-                    $built['order']['order_sn']
-                )) { throw new BusinessException('库存处理失败'); }
+                $quantity = (string)($row['base_quantity'] ?? $row['number']);
+                $issued = $consumeReserved
+                    ? StockService::outboundReservedWithinTransaction(
+                        (int)$built['order']['warehouse_id'],
+                        (int)$row['goods_id'],
+                        $quantity,
+                        $orderId,
+                        'sales',
+                        $built['order']['order_sn']
+                    )
+                    : StockService::outbound(
+                        (int)$built['order']['warehouse_id'],
+                        (int)$row['goods_id'],
+                        $quantity,
+                        $orderId,
+                        'sales',
+                        $built['order']['order_sn']
+                    );
+                if (!$issued) { throw new BusinessException('库存处理失败'); }
             }
 
             // === 应收增加 ===
@@ -94,10 +124,22 @@ class SalesOrderLogic extends BaseLogic
                 if (!FinanceService::addReceivable(
                     (int)$built['order']['customer_id'],
                     $arrearsMoney,
-                    (int)$order->id,
+                    $orderId,
                     'sales',
                     $built['order']['order_sn']
                 )) { throw new BusinessException('应收处理失败'); }
+            }
+
+            if (!$ownsTransaction) {
+                AuditService::logWithinTransaction(
+                    AuditService::MODULE_SALES_ORDER,
+                    AuditService::ACTION_CREATE,
+                    $orderId,
+                    (string)$built['order']['order_sn'],
+                    null,
+                    $built['order'],
+                    '上游工作流事务内创建标准销售单'
+                );
             }
 
             if ($ownsTransaction) {
@@ -108,16 +150,16 @@ class SalesOrderLogic extends BaseLogic
                 AuditService::log(
                     AuditService::MODULE_SALES_ORDER,
                     AuditService::ACTION_CREATE,
-                    (int)$order->id,
-                    (string)$order->order_sn,
+                    $orderId,
+                    (string)$built['order']['order_sn'],
                     null,
                     $built['order']
                 );
             }
 
             return [
-                'id' => (int)$order->id,
-                'order_sn' => (string)$order->order_sn,
+                'id' => $orderId,
+                'order_sn' => (string)$built['order']['order_sn'],
             ];
         } catch (BusinessException $e) {
             if ($ownsTransaction) {
@@ -150,6 +192,10 @@ class SalesOrderLogic extends BaseLogic
             self::setError('销售单不存在');
             return false;
         }
+        if (self::isCustomerReportSource($order->toArray())) {
+            self::setError('客户报货生成的销售单不可直接编辑，请通过销售退货处理');
+            return false;
+        }
 
         $built = self::buildOrderData($params, $order->toArray());
         if ($built === false) {
@@ -164,6 +210,9 @@ class SalesOrderLogic extends BaseLogic
                 ->findOrEmpty();
             if ($order->isEmpty()) {
                 throw new BusinessException('销售单不存在');
+            }
+            if (self::isCustomerReportSource($order->toArray())) {
+                throw new BusinessException('客户报货生成的销售单不可直接编辑，请通过销售退货处理');
             }
             $built = self::buildOrderData($params, $order->toArray());
             if ($built === false) {
@@ -183,7 +232,7 @@ class SalesOrderLogic extends BaseLogic
                 if (!StockService::outbound(
                     (int)$built['order']['warehouse_id'],
                     (int)$row['goods_id'],
-                    (string)$row['number'],
+                    (string)($row['base_quantity'] ?? $row['number']),
                     (int)$order->id,
                     'sales',
                     $order->order_sn
@@ -242,6 +291,10 @@ class SalesOrderLogic extends BaseLogic
             self::setError('销售单不存在');
             return false;
         }
+        if (self::isCustomerReportSource($order->toArray())) {
+            self::setError('客户报货生成的销售单不可直接删除，请通过销售退货处理');
+            return false;
+        }
 
         Db::startTrans();
         try {
@@ -251,6 +304,9 @@ class SalesOrderLogic extends BaseLogic
                 ->findOrEmpty();
             if ($order->isEmpty()) {
                 throw new BusinessException('销售单不存在');
+            }
+            if (self::isCustomerReportSource($order->toArray())) {
+                throw new BusinessException('客户报货生成的销售单不可直接删除，请通过销售退货处理');
             }
             // === 回滚库存和应收 ===
             if (!StockService::rollback((int)$order->id, 'sales')) { throw new BusinessException('库存回滚失败'); }
@@ -407,10 +463,19 @@ class SalesOrderLogic extends BaseLogic
             'purpose_type' => (string)($item['purpose_type'] ?? self::DEFAULT_PURPOSE_TYPE),
             'remarks' => (string)($item['remarks'] ?? ''),
             'remark' => (string)($item['remarks'] ?? ''),
+            'source_type' => (string)($item['source_type'] ?? ''),
+            'source_id' => (int)($item['source_id'] ?? 0),
+            'source_version' => (int)($item['source_version'] ?? 0),
             'admin_id' => (int)($item['admin_id'] ?? 0),
             'create_time' => $item['create_time'] ?? '',
             'update_time' => $item['update_time'] ?? '',
         ];
+    }
+
+    /** @param array<string,mixed> $order */
+    private static function isCustomerReportSource(array $order): bool
+    {
+        return (string)($order['source_type'] ?? '') === 'customer_report';
     }
 
     protected static function buildOrderData(array $params, array $current = []): array|false
@@ -450,6 +515,9 @@ class SalesOrderLogic extends BaseLogic
         } elseif (!self::assertOrderSnUnique($orderSn, (int)($current['id'] ?? 0))) {
             return false;
         }
+        $sourceType = trim((string)($params['source_type'] ?? ($current['source_type'] ?? '')));
+        $sourceId = (int)($params['source_id'] ?? ($current['source_id'] ?? 0));
+        $sourceVersion = (int)($params['source_version'] ?? ($current['source_version'] ?? 0));
 
         return [
             'order' => [
@@ -465,7 +533,9 @@ class SalesOrderLogic extends BaseLogic
                 'status' => (int)($current['status'] ?? 1),
                 'purpose_type' => trim((string)($params['purpose_type'] ?? $params['purpose'] ?? ($current['purpose_type'] ?? self::DEFAULT_PURPOSE_TYPE))),
                 'remarks' => trim((string)($params['remarks'] ?? $params['remark'] ?? ($current['remarks'] ?? ''))),
-                'from_purchase_order_id' => (int)($params['from_purchase_order_id'] ?? ($current['from_purchase_order_id'] ?? 0)),
+                'source_type' => $sourceType !== '' ? $sourceType : null,
+                'source_id' => $sourceType !== '' && $sourceId > 0 ? $sourceId : null,
+                'source_version' => $sourceType !== '' && $sourceVersion > 0 ? $sourceVersion : null,
                 'admin_id' => $adminId,
                 'idempotent_key' => $idempotentKey,
             ],
@@ -503,6 +573,11 @@ class SalesOrderLogic extends BaseLogic
                 self::setError('商品数量必须大于0');
                 return false;
             }
+            $baseQuantity = round(max(0, (float)($item['base_quantity'] ?? $number)), 4);
+            if ($baseQuantity <= 0) {
+                self::setError('商品基础数量必须大于0');
+                return false;
+            }
 
             $price = self::money($item['price'] ?? $item['units_money'] ?? $goodsModel->price);
             $amount = bcmul((string)$number, (string)$price, 2);
@@ -513,8 +588,12 @@ class SalesOrderLogic extends BaseLogic
                 'name' => trim((string)($item['name'] ?? $item['product_name'] ?? $goodsModel->name)),
                 'units' => trim((string)($item['units'] ?? $item['unit'] ?? $goodsModel->units)),
                 'number' => number_format($number, 4, '.', ''),
+                'base_quantity' => number_format($baseQuantity, 4, '.', ''),
                 'price' => $price,
                 'amount' => $amount,
+                'pricing_unit_id' => (int)($item['pricing_unit_id'] ?? 0),
+                'source_line_type' => trim((string)($item['source_line_type'] ?? '')),
+                'source_line_id' => (int)($item['source_line_id'] ?? 0),
                 'remark' => trim((string)($item['remark'] ?? '')),
                 'sort' => $index,
             ];
@@ -532,7 +611,9 @@ class SalesOrderLogic extends BaseLogic
 
         foreach ($rows as $row) {
             $row['order_id'] = $orderId;
-            OrderGoods::create($row);
+            $row['create_time'] = time();
+            $row['update_time'] = $row['create_time'];
+            Db::name('order_goods')->insert($row);
         }
     }
 

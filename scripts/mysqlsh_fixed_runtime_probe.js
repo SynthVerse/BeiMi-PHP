@@ -16,7 +16,7 @@ if (missing.length !== 0) {
   try { core = require('./migrate_probe_core.js'); }
   catch (error) { print(JSON.stringify({ status: 'blocked', code: 'fixed_core_load_failed', stage: 'bootstrap', migration_count: 0, createdByThisRun: false })); core = null; }
   if (core !== null) {
-    if (Object.keys(core).length !== 2 || typeof core.runStaticProbe !== 'function' || typeof core.runFixedRuntimeProbe !== 'function') {
+    if (Object.keys(core).length !== 3 || typeof core.prepareMigrationSql !== 'function' || typeof core.runStaticProbe !== 'function' || typeof core.runFixedRuntimeProbe !== 'function') {
       print(JSON.stringify({ status: 'blocked', code: 'fixed_core_contract_invalid', stage: 'bootstrap', migration_count: 0, createdByThisRun: false }));
     } else {
       try { print(JSON.stringify(core.runFixedRuntimeProbe())); }

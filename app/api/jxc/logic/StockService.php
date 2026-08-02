@@ -94,6 +94,53 @@ class StockService
     }
 
     /**
+     * Consume stock that was already reserved by an upstream workflow.
+     *
+     * The caller owns the transaction. This path must not use the normal
+     * available-stock outbound primitive, otherwise the same quantity would be
+     * checked and deducted twice.
+     */
+    public static function outboundReservedWithinTransaction(
+        int $warehouseId,
+        int $goodsId,
+        string $quantity,
+        int $orderId,
+        string $orderType,
+        string $orderSn,
+        string $remark = '',
+        int $skuId = 0,
+        int $batchId = 0
+    ): bool {
+        try {
+            $movement = WarehouseGoodsBalanceService::consumeReservedWithinTransaction(
+                $warehouseId,
+                $goodsId,
+                $quantity
+            );
+            if ($movement === false) {
+                throw new \RuntimeException('Unable to issue reserved warehouse stock.');
+            }
+
+            self::writeFlow([
+                'warehouse_id' => $warehouseId,
+                'goods_id' => $goodsId,
+                'sku_id' => $skuId,
+                'batch_id' => $batchId,
+                'order_id' => $orderId,
+                'order_type' => $orderType,
+                'order_sn' => $orderSn,
+                'flow_type' => StockFlow::FLOW_OUT,
+                'quantity' => $quantity,
+                'remark' => $remark ?: '预留出库-' . $orderType,
+            ], $movement);
+
+            return true;
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
+    /**
      * 按单据回滚库存。所有反向操作仍走仓库余额原语。
      */
     public static function rollback(int $orderId, string $orderType): bool
@@ -195,14 +242,14 @@ class StockService
 
     private static function writeFlow(array $attributes, array $movement): void
     {
-        $flow = StockFlow::create(array_merge([
+        $inserted = Db::name('stock_flow')->insert(array_merge([
             'tenant_id' => (int)(request()->tenantId ?? 0),
             'before_stock' => $movement['before_on_hand_qty'],
             'after_stock' => $movement['after_on_hand_qty'],
             'admin_id' => (int)(request()->adminId ?? 0),
             'create_time' => time(),
         ], $attributes));
-        if (!$flow) {
+        if ($inserted !== 1) {
             throw new \RuntimeException('Unable to write stock flow.');
         }
     }

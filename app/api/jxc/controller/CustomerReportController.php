@@ -26,7 +26,6 @@ class CustomerReportController extends BaseJxcController
     public function retry() { return $this->respond('retry'); }
     public function convert() { return $this->respond('convert'); }
     public function cancel() { return $this->respond('cancel'); }
-    public function fulfill() { return $this->respond('fulfill'); }
 
     public function lists()
     {

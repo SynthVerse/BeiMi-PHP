@@ -7,7 +7,6 @@ use app\common\model\jxc\Customer;
 use app\common\model\jxc\CustomerGroup;
 use app\common\model\jxc\SalesOrder;
 use app\common\model\jxc\SalesReturnOrder;
-use app\common\model\jxc\PurchaseOrder;
 use app\common\model\jxc\OrderGoods;
 use app\common\model\jxc\ReceivableFlow;
 use think\facade\Db;
@@ -191,11 +190,6 @@ class CustomerLogic extends BaseLogic
         $returnCount = SalesReturnOrder::where('customer_id', $customerId)->where('tenant_id', $tenantId)->count();
         if ($returnCount > 0) {
             self::setError('该客户有关联退货单，请先删除相关订单后再删除');
-            return false;
-        }
-        $purchaseCount = PurchaseOrder::where('customer_id', $customerId)->where('tenant_id', $tenantId)->count();
-        if ($purchaseCount > 0) {
-            self::setError('该客户有关联订货单，请先删除相关订单后再删除');
             return false;
         }
 

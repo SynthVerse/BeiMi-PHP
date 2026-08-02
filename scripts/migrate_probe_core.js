@@ -17,16 +17,15 @@ const TARGET = 'beimi_r4_probe_20260726_plan020';
 const LIKE = 'public/install/db/like.sql';
 const JXC = 'database/sql/jxc_phase1_schema.sql';
 const EXPECTED = {
-  [LIKE]: '6E049D6E5737FDED26B24213BC818496805BB37641F08AB5B52D4AA09CF5FAFB',
-  [JXC]: '0AA6618AECA986ACF87110D9A0938FBC04C2F24D12DC2F6FACDE89EACAB5B468',
+  [LIKE]: '5D786014A6832EFD1280BC1F891904776A9BE36FBBA271E575236CC3E7F5F3CB',
+  [JXC]: '55240B8B94175FEFD9748E1B8F81A3FBCB873B9B0700B4342B865ADC621D9934',
 };
 const EXPECTED_MIGRATION_HASHES = {
-  '20260419_000001_add_idempotent_key.sql':'8C478C23B803C191BCA719804D4D832A0A1C5712DDEFA1830257034ECDF668B6',
-  '20260419_000002_create_audit_log.sql':'3EB346B820DDC11092E0EC5D62262677D48FB3C88770500F65AABB08FB3A989A',
-  '20260419_000003_create_migration_history.sql':'AB5DFBBFD72ECBB21551873FCA5F52D3C2385A07F9F955396FFD779CF2940C4E',
-  '20260420_000001_add_from_purchase_order_id.sql':'551E3CDDCC547D75C5A9256AEFFEA456DD83AAD8B8C52954CF60ECB9D64B459A',
-  '20260501_000001_fix_user_tenant_default.sql':'47CBB3657D612E37EC8A04710B943C4B74AD6434BA1822942154C107C401C9DD',
-  '20260508_000001_add_tenant_expired_time.sql':'FC5A2E6C2DAC8F22D9FFD4CBB5330FCF922A2C6DCD85206D1692552DB9BE6965',
+  '20260419_000001_add_idempotent_key.sql':'44FB3A5EBED070048A34358C3D3CE786F354DDF0AD43F0E721AC23EC63C75BCB',
+  '20260419_000002_create_audit_log.sql':'A3BAE8C87C28C733DE2D7C19BAACF062C11410B16AAB97D812FC6E665F7CE92D',
+  '20260419_000003_create_migration_history.sql':'0AEE8C80C7072135AD6B109B816D8E458967F73D8D1FA04EDF6D5E9B93681889',
+  '20260501_000001_fix_user_tenant_default.sql':'5C532D692D4023C18F1A52DBC5D7B3F64AC6ED59FCE422C9EB65A3003363E400',
+  '20260508_000001_add_tenant_expired_time.sql':'1C5CA300DDB6C2D40D7609681587E4FD4A5B4A8B19397057F11597D11F6A3554',
   '20260521_000001_create_tenant_membership.sql':'114B739F9CFEBB56BADD05ADA9A65A027C643E97181EDA25A1878612A25FA567',
   '20260521_000002_add_tenant_relation_and_invite_types.sql':'EB754EA1E6EE7D34F6AB464855F65354C0DD1132778666379FA7F98549958943',
   '20260524_000001_add_platform_wechat_user_menu.sql':'D7A813A93F1A91CFF8A6F4F69E0392A77A00278D9258A81724526E50A8EB0430',
@@ -38,32 +37,51 @@ const EXPECTED_MIGRATION_HASHES = {
   '20260603_000001_archive_cloud_goods.sql':'2A1BBE567ADD143CB4608AC7F7811EB62830BDF87CEE340A0A1DCA0B585BAF68',
   '20260603_000002_aquatic_goods_v1.sql':'255C824ED7815DFD8A2BD5F8B85AA2AB25A6C337C34361B4231332A550F84143',
   '20260609_000001_create_goods_units_binding.sql':'3ADB999F67BD2923095652EE7887C172B5CF66BECF8887BBBDA17F03796F9A12',
-  '20260613_000001_add_goods_is_archived.sql':'9C0A50EDEE49F2C15EFF6505112569D285B4A6F9C3F93A6D8BBB0FF14F7B587A',
-  '20260614_000001_quality_spec_separation.sql':'75EF915BA30581C63744D54AF479955A2E6D7841021DE63CE8BEAEEFDDFEA218',
-  '20260614_000002_spec_value_goods_id.sql':'FDA50CCE6B18166D11E44E737DB228CC4ABE200B99CA8BEE42A4AFDCF611D32F',
+  '20260613_000001_add_goods_is_archived.sql':'013C7EC9136414F556D7DE16F0FE21195B789FDCD086DEF4A46A0A806A01F063',
+  '20260614_000001_quality_spec_separation.sql':'556A4CCDEAB9A2B9D519697ED03013F366F06602C7802BCD3D53DB72611D5723',
+  '20260614_000002_spec_value_goods_id.sql':'5DB592DE31CF262EBEB85524D3AA3C38FDBD025058D56E509C3A35DB0F1740D5',
   '20260630_000001_create_purchase_return_order.sql':'772772C427D0387FFD41BD765D7C630B284D5A5E624483E604436A7294EBFADF',
   '20260630_000002_add_sales_return_original_line_to_order_goods.sql':'3E32BC71D3E246211D291C6CF99A5FF1D9DBE5B487EC10CD42D9336C493B8B53',
-  '20260703_000001_create_sales_reservation_procurement_task.sql':'C41E75743266C6DCCD87C2A2F628BB3C539B8683FF111738FCC2BC8CB2F4A241',
-  '20260704_000001_create_task_management.sql':'E6DF0AF6E848D95526FD63234D3B4A96FF80A4E65A29C9AC8684A0B4A0AAD93B',
-  '20260704_000002_drop_legacy_procurement_task.sql':'4AB0A3D611AC6F471B337D84DD49964458F894A4422F924DE99613E04CFB172A',
-  '20260705_000001_rebuild_task_center.sql':'FDAA003DDA4B8D687E261CA4EA10068ED7A30C491C26CE03075466D1956996FA',
+  '20260729_000001_create_warehouse_goods_balance.sql':'0E29F49C57B3D28F3C5AFB42D777F3F3DE63653377C9698CCC07671E22913D70',
+  '20260729_000002_create_customer_report_workflow.sql':'E9848A7AED829E1950A4CEF2D23BC982C08A087E1BD8346BA74FABC8246C65D6',
+  '20260730_000001_customer_report_sales_order_bridge.sql':'B676C77B47A69CDF799418C3DB4B897E76BFC287AF86D310A9A7D55412CD5DAB',
+  '20260731_000001_add_user_session_create_time.sql':'E1017FAE04C72FD2216AA1512EFCE0C3B82DB90CF0C402248C136F206992B67A',
 };
 const POSITIVE = [
-  'la_sales_reservation', 'la_sales_reservation_item',
+  'la_warehouse_goods_balance', 'la_customer_report',
+  'la_customer_report_item', 'la_customer_report_reservation',
+  'la_customer_goods_report_preference', 'la_sales_order',
+  'la_order_goods', 'la_stock_flow', 'la_receivable_flow',
+  'la_supply_order', 'la_purchase_return_order',
+  'la_purchase_return_order_lists', 'la_audit_log',
+  'la_migration_history',
+];
+const NEGATIVE = [
+  'la_purchase_order', 'la_sales_reservation', 'la_sales_reservation_item',
   'la_inventory_reservation', 'la_work_task', 'la_work_task_log',
   'la_task_employee', 'la_task_employee_role', 'la_task_print_log',
+  'la_procurement_task', 'la_procurement_task_inbound',
+  'la_task_role', 'la_task_type', 'la_task_type_role',
+  'la_customer_report_sale', 'la_customer_report_sale_item',
 ];
-const NEGATIVE = ['la_procurement_task', 'la_procurement_task_inbound', 'la_task_role', 'la_task_type', 'la_task_type_role'];
 
 function fail(code) { throw { probeCode: code }; }
 function safeCode(error, fallback) { return error && Object.prototype.hasOwnProperty.call(error, 'probeCode') ? error.probeCode : fallback; }
-function sha(text) { return nodeDeps().crypto.createHash('sha256').update(text).digest('hex').toUpperCase(); }
+function normalizeLineEndings(text) { return text.replace(/\r\n?/g, '\n'); }
+function sha(text) { return nodeDeps().crypto.createHash('sha256').update(normalizeLineEndings(text)).digest('hex').toUpperCase(); }
 function read(relative) {
   const deps = nodeDeps(), file = deps.path.join(deps.root, relative);
   if (!deps.fs.existsSync(file)) fail('input_missing');
   const text = deps.fs.readFileSync(file, 'utf8');
   if (text.charCodeAt(0) === 0xFEFF) fail('utf8_bom');
   return text;
+}
+
+function prepareMigrationSql(sql, prefix) {
+  if (!/^[A-Za-z0-9_]*$/.test(prefix)) fail('invalid_database_prefix');
+  const prepared = sql.replaceAll('{{prefix}}', prefix);
+  if (/\{\{[^{}]+\}\}/.test(prepared)) fail('unresolved_prefix');
+  return prepared;
 }
 
 // Only split semicolons outside quoted identifiers/strings and comments.
@@ -103,17 +121,25 @@ function stripLeadingSqlComments(statement) {
 
 function runStaticProbe() {
   assertMetadataContract();
-  const like = read(LIKE), jxc = read(JXC);
+  const like = prepareMigrationSql(read(LIKE), 'la_');
+  const jxc = prepareMigrationSql(read(JXC), 'la_');
+  const tenantLike = prepareMigrationSql(read(LIKE), 'tenantx_');
+  const tenantJxc = prepareMigrationSql(read(JXC), 'tenantx_');
+  if (/\bla_[A-Za-z0-9_]+/.test(tenantLike) || /\bla_[A-Za-z0-9_]+/.test(tenantJxc)) fail('baseline_non_default_prefix_leak');
+  const productionRunner = read('scripts/migrate.php');
+  if (!productionRunner.includes('MigrationSqlPreprocessor::prepare($sql, $prefix)')) fail('production_preprocessor_not_wired');
   if (sha(like) !== EXPECTED[LIKE] || sha(jxc) !== EXPECTED[JXC]) fail('baseline_hash_mismatch');
   const deps = nodeDeps();
   const names = deps.fs.readdirSync(deps.path.join(deps.root, 'database/migrations')).filter(x => x.endsWith('.sql')).sort();
-  if (names.length !== 26) fail('migration_count_mismatch');
+  if (names.length !== 25) fail('migration_count_mismatch');
   const migrationHashes = {}; let statements = 0; const finalTables = new Set();
   for (const source of [like, jxc]) for (const match of source.matchAll(/CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+`?([A-Za-z0-9_]+)/gi)) finalTables.add(match[1]);
   for (const name of names) {
-    let text = read(deps.path.join('database/migrations', name));
-    if (name === '20260630_000001_create_purchase_return_order.sql' || name === '20260630_000002_add_sales_return_original_line_to_order_goods.sql') text = text.replaceAll('{{prefix}}', 'la_');
-    if (/\{\{prefix\}\}/.test(text)) fail('unresolved_prefix');
+    const raw = read(deps.path.join('database/migrations', name));
+    if (!raw.includes('{{prefix}}') || /\bla_[A-Za-z0-9_]+/.test(raw)) fail('migration_source_prefix_contract');
+    const tenantText = prepareMigrationSql(raw, 'tenantx_');
+    if (/\bla_[A-Za-z0-9_]+/.test(tenantText) || !tenantText.includes('tenantx_')) fail('non_default_prefix_leak');
+    const text = prepareMigrationSql(raw, 'la_');
     migrationHashes[name] = sha(text); if (migrationHashes[name] !== EXPECTED_MIGRATION_HASHES[name]) fail('migration_hash_mismatch');
     for (const statement of splitSql(text)) {
       const reducerStatement = stripLeadingSqlComments(statement);
@@ -130,15 +156,16 @@ function runStaticProbe() {
     }
     statements += splitSql(text).length;
   }
-  if (statements !== 204) fail('statement_count_mismatch');
-  if (finalTables.size !== 102) fail('final_table_count_mismatch');
+  if (statements !== 183) fail('statement_count_mismatch');
+  if (finalTables.size !== 98) fail('final_table_count_mismatch');
   if (Object.keys(EXPECTED_MIGRATION_HASHES).length !== names.length) fail('migration_manifest_mismatch');
   for (const table of POSITIVE) if (!finalTables.has(table)) fail('positive_assertion_missing');
   for (const table of NEGATIVE) if (finalTables.has(table)) fail('negative_assertion_failed');
-  return { status: 'static_passed', code: 'static_passed', migration_count: names.length, statement_count: statements, baseline_tables: 75, final_tables: 102 };
+  return { status: 'static_passed', code: 'static_passed', migration_count: names.length, statement_count: statements, baseline_tables: 74, final_tables: 98 };
 }
 
 function runtimeSha256(text) {
+  text = normalizeLineEndings(text);
   const k = [0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
   const bytes = [];
   for (let i = 0; i < text.length; i++) { let code = text.charCodeAt(i); if (code >= 0xD800 && code <= 0xDBFF && i + 1 < text.length) { const low = text.charCodeAt(i + 1); if (low >= 0xDC00 && low <= 0xDFFF) { code = 0x10000 + ((code - 0xD800) << 10) + low - 0xDC00; i++; } } if (code < 0x80) bytes.push(code); else if (code < 0x800) bytes.push(0xC0 | (code >>> 6), 0x80 | (code & 0x3F)); else if (code < 0x10000) bytes.push(0xE0 | (code >>> 12), 0x80 | ((code >>> 6) & 0x3F), 0x80 | (code & 0x3F)); else bytes.push(0xF0 | (code >>> 18), 0x80 | ((code >>> 12) & 0x3F), 0x80 | ((code >>> 6) & 0x3F), 0x80 | (code & 0x3F)); }
@@ -249,12 +276,12 @@ function executeLocked(text, migration) {
   return statements.length;
 }
 function runtimeAssert(names, createdByThisRun) {
-  if (Number(runtimeMetadataScalar('target_table_count', [])) !== 102) runtimeFail('final_table_count_mismatch');
+  if (Number(runtimeMetadataScalar('target_table_count', [])) !== 98) runtimeFail('final_table_count_mismatch');
   for (const table of POSITIVE) if (!runtimeExists(table)) runtimeFail('positive_assertion_missing');
   for (const table of NEGATIVE) if (runtimeExists(table)) runtimeFail('negative_assertion_failed');
   const rows = session.runSql('SELECT version FROM la_migration_history ORDER BY version').fetchAll();
   if (!rows || rows.length !== names.length || rows.some((row, index) => row[0] !== names[index])) runtimeFail('history_mismatch');
-  return { status: 'runtime_passed', code: 'runtime_passed', stage: 'complete', migration_count: names.length, baseline_tables: 75, final_tables: 102, createdByThisRun: createdByThisRun };
+  return { status: 'runtime_passed', code: 'runtime_passed', stage: 'complete', migration_count: names.length, baseline_tables: 74, final_tables: 98, createdByThisRun: createdByThisRun };
 }
 function runFixedRuntimeProbe() {
   if (arguments.length !== 0) runtimeFail('runtime_arguments_not_allowed');
@@ -264,21 +291,21 @@ function runFixedRuntimeProbe() {
   try {
     if (Number(runtimeMetadataScalar('target_preflight_exists', [])) !== 0) return { status: 'blocked', code: 'target_exists_stop', stage: 'preflight', migration_count: 0, createdByThisRun: false };
     session.runSql('CREATE DATABASE ' + targetQuoted); createdByThisRun = true; session.runSql('USE ' + targetQuoted);
-    const like = runtimeRead(LIKE), jxc = runtimeRead(JXC);
+    const like = prepareMigrationSql(runtimeRead(LIKE), 'la_');
+    const jxc = prepareMigrationSql(runtimeRead(JXC), 'la_');
     if (runtimeSha256(like) !== EXPECTED[LIKE] || runtimeSha256(jxc) !== EXPECTED[JXC]) runtimeFail('baseline_hash_mismatch');
     executeLocked(like, false); executeLocked(jxc, false);
-    if (Number(runtimeMetadataScalar('target_table_count', [])) !== 75) runtimeFail('baseline_table_count_mismatch');
+    if (Number(runtimeMetadataScalar('target_table_count', [])) !== 74) runtimeFail('baseline_table_count_mismatch');
     const names = Object.keys(EXPECTED_MIGRATION_HASHES).sort();
-    if (names.length !== 26) runtimeFail('migration_manifest_mismatch');
+  if (names.length !== 25) runtimeFail('migration_manifest_mismatch');
     let migrationStatements = 0;
     for (let index = 0; index < names.length; index++) {
-      let text = runtimeRead('database/migrations/' + names[index]);
-      if (names[index] === '20260630_000001_create_purchase_return_order.sql' || names[index] === '20260630_000002_add_sales_return_original_line_to_order_goods.sql') text = text.replace(/\{\{prefix\}\}/g, 'la_');
-      if (/\{\{prefix\}\}/.test(text) || runtimeSha256(text) !== EXPECTED_MIGRATION_HASHES[names[index]]) runtimeFail('migration_hash_mismatch');
+      const text = prepareMigrationSql(runtimeRead('database/migrations/' + names[index]), 'la_');
+      if (runtimeSha256(text) !== EXPECTED_MIGRATION_HASHES[names[index]]) runtimeFail('migration_hash_mismatch');
       migrationStatements += executeLocked(text, true);
       if (index >= 2) { const first = index === 2 ? 0 : index; const last = index === 2 ? 2 : index; for (let history = first; history <= last; history++) session.runSql('INSERT INTO la_migration_history (version) VALUES (?)', [names[history]]); }
     }
-    if (migrationStatements !== 204) runtimeFail('statement_count_mismatch');
+  if (migrationStatements !== 183) runtimeFail('statement_count_mismatch');
     return runtimeAssert(names, createdByThisRun);
   } finally {
     if (createdByThisRun) {
@@ -289,4 +316,4 @@ function runFixedRuntimeProbe() {
 }
 
 Object.defineProperty(runStaticProbe, 'fixedTarget', { value: TARGET, enumerable: false, writable: false, configurable: false });
-module.exports = { runStaticProbe, runFixedRuntimeProbe };
+module.exports = { prepareMigrationSql, runStaticProbe, runFixedRuntimeProbe };

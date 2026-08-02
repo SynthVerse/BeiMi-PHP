@@ -1,5 +1,5 @@
 -- 用户-店铺成员关系：用户可以创建或加入多个 tenant（店铺/账套）。
-CREATE TABLE IF NOT EXISTS `la_tenant_member` (
+CREATE TABLE IF NOT EXISTS `{{prefix}}tenant_member` (
   `id` int(11) unsigned NOT NULL AUTO_INCREMENT,
   `tenant_id` int(11) unsigned NOT NULL DEFAULT '0' COMMENT '租户/店铺ID',
   `user_id` int(11) unsigned NOT NULL DEFAULT '0' COMMENT '用户ID',
@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS `la_tenant_member` (
   KEY `idx_invite_code` (`invite_code`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户租户成员关系';
 
-CREATE TABLE IF NOT EXISTS `la_tenant_invite` (
+CREATE TABLE IF NOT EXISTS `{{prefix}}tenant_invite` (
   `id` int(11) unsigned NOT NULL AUTO_INCREMENT,
   `tenant_id` int(11) unsigned NOT NULL DEFAULT '0' COMMENT '租户/店铺ID',
   `creator_user_id` int(11) unsigned NOT NULL DEFAULT '0' COMMENT '创建邀请码的用户ID',

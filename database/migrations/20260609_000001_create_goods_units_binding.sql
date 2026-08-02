@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS `la_goods_units_binding` (
+CREATE TABLE IF NOT EXISTS `{{prefix}}goods_units_binding` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '绑定ID',
   `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
   `goods_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '商品ID',
@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS `la_goods_units_binding` (
   KEY `idx_base_unit` (`tenant_id`, `goods_id`, `is_base_unit`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='商品-计量单位绑定表';
 
-INSERT IGNORE INTO `la_goods_units_binding`
+INSERT IGNORE INTO `{{prefix}}goods_units_binding`
   (`tenant_id`, `goods_id`, `unit_id`, `unit_name`, `is_base_unit`, `sort`, `status`, `create_time`, `update_time`)
 SELECT
   `tenant_id`,
@@ -27,5 +27,5 @@ SELECT
   1,
   UNIX_TIMESTAMP(),
   UNIX_TIMESTAMP()
-FROM `la_goods`
+FROM `{{prefix}}goods`
 WHERE `unit_id` > 0;

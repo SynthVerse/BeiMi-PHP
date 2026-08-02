@@ -84,11 +84,6 @@ class SupplyOrderLogic extends BaseLogic
                     throw new BusinessException('库存处理失败');
                 }
             }
-            TaskCenterService::applyProcurementInbound(
-                (int)$order->id,
-                self::procurementInboundRows($createdGoods, (int)$built['order']['warehouse_id'])
-            );
-
             // === 应付增加 ===
             $arrearsMoney = (string)$built['order']['order_arrears_money'];
             if (bccomp($arrearsMoney, '0', 2) > 0) {
@@ -668,15 +663,6 @@ class SupplyOrderLogic extends BaseLogic
     {
         unset($row['spec_id'], $row['warehouse_id']);
         return $row;
-    }
-
-    protected static function procurementInboundRows(array $rows, int $warehouseId): array
-    {
-        return array_map(function (array $row) use ($warehouseId) {
-            $row['warehouse_id'] = $warehouseId;
-            $row['spec_id'] = (int)($row['spec_id'] ?? 0);
-            return $row;
-        }, $rows);
     }
 
     protected static function resolveSingleSpecIdForSku(int $skuId): int

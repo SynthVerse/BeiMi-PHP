@@ -223,8 +223,6 @@ final class SalesReturnRollbackGuardTest extends TestCase
         self::setRequestTenant($tenantId);
 
         try {
-            self::ensureEmptyWorkTaskFixture($tenantId);
-
             $supplyParams = [
                 'supplier_id' => $fixture['vendor_id'],
                 'warehouse_id' => $fixture['warehouse_id'],
@@ -262,8 +260,6 @@ final class SalesReturnRollbackGuardTest extends TestCase
                 ->where('order_type', 'supply')->where('order_id', $supplyId)->count());
             self::assertSame(1, self::auditCount($tenantId, $supplyId, 'supply_order', 'create'));
             self::assertSame('1.00', bcsub(self::goodsStock($fixture['goods_id']), $stockBeforeSupply, 2));
-            self::assertSame(0, self::workTaskCount($tenantId));
-
             $salesParams = [
                 'customer_id' => $fixture['customer_id'],
                 'warehouse_id' => $fixture['warehouse_id'],
@@ -326,7 +322,6 @@ final class SalesReturnRollbackGuardTest extends TestCase
                 ->where('order_type', 'purchase-return')->where('order_id', $purchaseReturnId)->count());
             self::assertSame(1, self::auditCount($tenantId, $purchaseReturnId, 'purchase_return_order', 'create'));
             self::assertSame('-1.00', bcsub(self::goodsStock($fixture['goods_id']), $stockBeforePurchaseReturn, 2));
-            self::assertSame(0, self::workTaskCount($tenantId));
         } finally {
             self::cleanBehaviorFixture($tenantId);
         }
@@ -666,94 +661,6 @@ final class SalesReturnRollbackGuardTest extends TestCase
         }
     }
 
-    private static function ensureEmptyWorkTaskFixture(int $tenantId): void
-    {
-        $prefix = (string)config('database.connections.mysql.prefix');
-        $table = $prefix . 'work_task';
-        self::assertMatchesRegularExpression('/^[A-Za-z0-9_]+$/', $table);
-        Db::execute(
-            "CREATE TABLE IF NOT EXISTS `{$table}` ("
-            . '`id` int UNSIGNED NOT NULL AUTO_INCREMENT,'
-            . '`tenant_id` int UNSIGNED NOT NULL DEFAULT 0,'
-            . "`task_kind` varchar(32) NOT NULL DEFAULT '',"
-            . '`goods_id` int UNSIGNED NOT NULL DEFAULT 0,'
-            . "`status` varchar(32) NOT NULL DEFAULT 'pending',"
-            . 'PRIMARY KEY (`id`),'
-            . 'KEY `idx_tenant_goods_kind` (`tenant_id`,`goods_id`,`task_kind`,`status`)'
-            . ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
-        );
-        self::assertWorkTaskMetadata($table);
-        self::assertSame(0, self::workTaskCount($tenantId));
-        Db::name('work_task')->where('tenant_id', $tenantId)->delete();
-        self::assertSame(0, self::workTaskCount($tenantId));
-    }
-
-    private static function assertWorkTaskMetadata(string $table): void
-    {
-        $tables = Db::query(
-            'SELECT ENGINE,TABLE_COLLATION FROM information_schema.TABLES '
-            . 'WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table',
-            ['table' => $table]
-        );
-        self::assertCount(1, $tables);
-        self::assertSame('INNODB', strtoupper((string)$tables[0]['ENGINE']));
-        self::assertStringStartsWith('utf8mb4_', strtolower((string)$tables[0]['TABLE_COLLATION']));
-
-        $columns = Db::query(
-            'SELECT COLUMN_NAME,DATA_TYPE,COLUMN_TYPE,COLUMN_DEFAULT,IS_NULLABLE,EXTRA '
-            . 'FROM information_schema.COLUMNS '
-            . 'WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table',
-            ['table' => $table]
-        );
-        $byName = [];
-        foreach ($columns as $column) {
-            $byName[(string)$column['COLUMN_NAME']] = $column;
-        }
-        foreach ([
-            'id' => ['int', null],
-            'tenant_id' => ['int', '0'],
-            'task_kind' => ['varchar', ''],
-            'goods_id' => ['int', '0'],
-            'status' => ['varchar', 'pending'],
-        ] as $name => [$dataType, $default]) {
-            self::assertArrayHasKey($name, $byName);
-            self::assertSame($dataType, strtolower((string)$byName[$name]['DATA_TYPE']));
-            self::assertSame('NO', (string)$byName[$name]['IS_NULLABLE']);
-            if ($default !== null) {
-                $actualDefault = $byName[$name]['COLUMN_DEFAULT'];
-                self::assertNotNull($actualDefault);
-                $actualDefault = (string)$actualDefault;
-                $quotedDefault = "'" . str_replace("'", "''", $default) . "'";
-                if ($actualDefault === $quotedDefault) {
-                    $actualDefault = $default;
-                }
-                self::assertSame($default, $actualDefault);
-            }
-        }
-        self::assertStringContainsString('unsigned', strtolower((string)$byName['id']['COLUMN_TYPE']));
-        self::assertStringContainsString('auto_increment', strtolower((string)$byName['id']['EXTRA']));
-        self::assertStringContainsString('unsigned', strtolower((string)$byName['tenant_id']['COLUMN_TYPE']));
-        self::assertSame('varchar(32)', strtolower((string)$byName['task_kind']['COLUMN_TYPE']));
-        self::assertStringContainsString('unsigned', strtolower((string)$byName['goods_id']['COLUMN_TYPE']));
-        self::assertSame('varchar(32)', strtolower((string)$byName['status']['COLUMN_TYPE']));
-
-        $indexes = Db::query("SHOW INDEX FROM `{$table}`");
-        $primary = [];
-        $required = [];
-        foreach ($indexes as $index) {
-            if ((string)$index['Key_name'] === 'PRIMARY') {
-                $primary[(int)$index['Seq_in_index']] = (string)$index['Column_name'];
-            }
-            if ((string)$index['Key_name'] === 'idx_tenant_goods_kind') {
-                $required[(int)$index['Seq_in_index']] = (string)$index['Column_name'];
-            }
-        }
-        ksort($primary);
-        ksort($required);
-        self::assertSame(['id'], array_values($primary));
-        self::assertSame(['tenant_id', 'goods_id', 'task_kind', 'status'], array_values($required));
-    }
-
     private static function salesReturnParams(array $fixture, string $tag, int $quantity, int $price): array
     {
         return [
@@ -975,11 +882,6 @@ PHP;
             ->count();
     }
 
-    private static function workTaskCount(int $tenantId): int
-    {
-        return Db::name('work_task')->where('tenant_id', $tenantId)->count();
-    }
-
     private static function salesRollbackSnapshot(array $fixture, string $idempotentKey): array
     {
         $customer = Db::name('customer')
@@ -1068,10 +970,6 @@ PHP;
     {
         if ($tenantId <= 0) {
             return;
-        }
-        if (self::tableExists('la_work_task')) {
-            Db::name('work_task')->where('tenant_id', $tenantId)->delete();
-            self::assertSame(0, self::workTaskCount($tenantId));
         }
         foreach ([
             'audit_log',

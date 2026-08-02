@@ -11,10 +11,38 @@
 
 declare(strict_types=1);
 
+require_once __DIR__ . '/lib/MigrationSqlPreprocessor.php';
+
+use BeiMi\Migration\MigrationSqlPreprocessor;
+
+/**
+ * Executes exactly one migration statement and releases every result set it produces.
+ *
+ * Dynamic migration fallbacks can run `SELECT 1` through MySQL PREPARE/EXECUTE.
+ * PDO::exec() leaves that result set active, which blocks the following statement.
+ */
+function executeMigrationStatement(PDO $pdo, string $statement): void
+{
+    $statementHandle = $pdo->prepare($statement);
+    $statementHandle->execute();
+
+    try {
+        do {
+            $statementHandle->fetchAll();
+        } while ($statementHandle->nextRowset());
+    } finally {
+        $statementHandle->closeCursor();
+    }
+}
+
 // ── 解析命令行参数 ──
 $args = array_slice($argv, 1);
 $dryRun  = in_array('--dry-run', $args, true);
 $status  = in_array('--status', $args, true);
+$envArgument = array_values(array_filter(
+    $args,
+    static fn(string $argument): bool => str_starts_with($argument, '--env=')
+));
 
 if ($dryRun && $status) {
     fwrite(STDERR, "错误：--dry-run 和 --status 不能同时使用\n");
@@ -24,6 +52,17 @@ if ($dryRun && $status) {
 // ── 读取 .env 配置 ──
 $projectRoot = dirname(__DIR__);
 $envPath     = $projectRoot . '/.env';
+if (count($envArgument) > 1) {
+    fwrite(STDERR, "错误：--env 只能传入一次\n");
+    exit(1);
+}
+if ($envArgument !== []) {
+    $envPath = substr($envArgument[0], strlen('--env='));
+    if ($envPath === '') {
+        fwrite(STDERR, "错误：--env 不能为空\n");
+        exit(1);
+    }
+}
 
 $env = parse_ini_file($envPath, true, INI_SCANNER_TYPED);
 if ($env === false) {
@@ -39,6 +78,7 @@ $user   = (string)($db['USERNAME'] ?? '');
 $pass   = (string)($db['PASSWORD'] ?? '');
 $charset = (string)($db['CHARSET'] ?? 'utf8mb4');
 $prefix = (string)($db['PREFIX'] ?? 'la_');
+MigrationSqlPreprocessor::assertPrefixIsSafe($prefix);
 
 // ── 连接数据库 ──
 $dsn = sprintf('mysql:host=%s;port=%s;dbname=%s;charset=%s', $host, $port, $name, $charset);
@@ -47,6 +87,9 @@ try {
     $pdo = new PDO($dsn, $user, $pass, [
         PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
         PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+        // 部分迁移会通过 PREPARE/EXECUTE 执行回退 SELECT；必须缓冲其结果集，
+        // 否则下一条语句会在 MySQL 8 上触发 SQLSTATE[HY000] 2014。
+        PDO::MYSQL_ATTR_USE_BUFFERED_QUERY => true,
     ]);
 } catch (PDOException $e) {
     fwrite(STDERR, "错误：数据库连接失败 - " . $e->getMessage() . "\n");
@@ -148,6 +191,7 @@ foreach ($pending as $version => $path) {
         fwrite(STDERR, "\n    错误：无法读取文件 {$path}\n");
         exit(1);
     }
+    $sql = MigrationSqlPreprocessor::prepare($sql, $prefix);
 
     // 拆分 SQL 语句（与 jxc_phase1_db_init.php 相同的方式）
     $statements = array_filter(array_map('trim', preg_split('/;\s*[\r\n]+/', $sql) ?: []));
@@ -156,7 +200,7 @@ foreach ($pending as $version => $path) {
         foreach ($statements as $statement) {
             if ($statement !== '') {
                 try {
-                    $pdo->exec($statement);
+                    executeMigrationStatement($pdo, $statement);
                 } catch (PDOException $e) {
                     // MySQL 不支持 ADD COLUMN IF NOT EXISTS 语法
                     // 在此对重复列(1060)和重复索引(1061)错误进行容错处理

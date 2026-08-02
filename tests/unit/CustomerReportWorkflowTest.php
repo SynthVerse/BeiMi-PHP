@@ -6,6 +6,7 @@ namespace tests\unit;
 
 use app\api\jxc\logic\CustomerReportCandidateLogic;
 use app\api\jxc\logic\CustomerReportLogic;
+use app\api\jxc\logic\SalesOrderLogic;
 use app\api\jxc\logic\WarehouseGoodsBalanceService;
 use PHPUnit\Framework\TestCase;
 use think\facade\Db;
@@ -163,7 +164,7 @@ final class CustomerReportWorkflowTest extends TestCase
         self::assertSame('0.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
     }
 
-    public function test_ready_report_converts_to_an_independent_sale_snapshot_without_touching_legacy_orders(): void
+    public function test_unpriced_report_cannot_convert_to_a_sales_order(): void
     {
         $customerId = $this->createCustomer('转销售客户');
         $goodsId = $this->createCustomerReportGoods('转销售桂鱼', 'CR-CONVERT');
@@ -173,31 +174,205 @@ final class CustomerReportWorkflowTest extends TestCase
         self::assertNotFalse($report, CustomerReportLogic::getError());
         self::assertSame('submitted_ready', $report['status']);
 
-        $converted = CustomerReportLogic::convert(['id' => $report['id'], 'version' => $report['version']]);
-        self::assertNotFalse($converted, CustomerReportLogic::getError());
-        self::assertSame('submitted_ready', $converted['status']);
-        self::assertNotEmpty($converted['sale']);
-        self::assertSame((int)$report['id'], (int)$converted['sale']['report_id']);
-        self::assertSame('submitted_ready', $converted['sale']['status']);
-        self::assertSame('1.00', (string)$converted['sale']['reserved_base_qty']);
-        self::assertSame(1, count($converted['sale']['items']));
-        self::assertSame('1.00', (string)$converted['sale']['items'][0]['reserved_base_qty']);
+        self::assertFalse(CustomerReportLogic::convert(['id' => $report['id'], 'version' => $report['version']]));
+        self::assertSame('报货单存在未定价明细，不能转销售', CustomerReportLogic::getError());
+        self::assertSame(0, Db::name('sales_order')->where('tenant_id', self::TENANT_ID)->count());
         self::assertSame('1.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
-        $fulfilled = CustomerReportLogic::fulfill(['id' => $converted['id'], 'version' => $converted['version'], 'items' => [['id' => $converted['items'][0]['id'], 'actual_base_qty' => '1.00', 'fulfillment_key' => 'converted-fulfill']]]);
-        self::assertNotFalse($fulfilled, CustomerReportLogic::getError());
-        self::assertSame('completed', $fulfilled['status']);
-        self::assertSame('completed', $fulfilled['sale']['status']);
-        self::assertSame('0.00', (string)$fulfilled['sale']['items'][0]['reserved_base_qty']);
-        self::assertSame('1.00', (string)$fulfilled['sale']['items'][0]['fulfilled_base_qty']);
     }
 
-    public function test_edit_uses_new_version_then_partial_fulfillment_releases_the_delta(): void
+    public function test_ready_priced_report_converts_to_one_canonical_sales_order_exactly_once(): void
     {
-        $customerId = $this->createCustomer('履约客户');
-        $goodsId = $this->createCustomerReportGoods('海鲈鱼', 'CR-FULFILL');
-        $warehouseId = $this->createCustomerReportWarehouse('履约仓');
+        $customerId = $this->createCustomer('标准销售客户');
+        $goodsId = $this->createCustomerReportGoods('标准销售桂鱼', 'CR-CANONICAL');
+        Db::name('goods_units_binding')->insert([
+            'tenant_id' => self::TENANT_ID, 'goods_id' => $goodsId, 'unit_id' => 1,
+            'unit_name' => '件', 'is_base_unit' => 1, 'status' => 1,
+            'create_time' => time(), 'update_time' => time(),
+        ]);
+        $warehouseId = $this->createCustomerReportWarehouse('标准销售仓');
+        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, '2.0000'));
+        $payload = $this->submitPayload($customerId, $goodsId, $warehouseId, 'canonical-sale', '1', '1.00', '1.00');
+        $payload['items'][0]['unit_id'] = 1;
+        $payload['items'][0]['price_status'] = 'priced';
+        $payload['items'][0]['price'] = '12.50';
+        $payload['items'][0]['pricing_unit_id'] = 1;
+        $payload['items'][0]['pricing_unit_name'] = '件';
+        $report = CustomerReportLogic::submit($payload);
+        self::assertNotFalse($report, CustomerReportLogic::getError());
+
+        $converted = CustomerReportLogic::convert(['id' => $report['id'], 'version' => $report['version']]);
+        self::assertNotFalse($converted, CustomerReportLogic::getError());
+        self::assertSame('completed', $converted['status']);
+        self::assertCount(1, $converted['sales_orders']);
+        $salesOrder = $converted['sales_orders'][0];
+        self::assertSame('customer_report', (string)$salesOrder['source_type']);
+        self::assertSame((int)$report['id'], (int)$salesOrder['source_id']);
+        self::assertSame($warehouseId, (int)$salesOrder['warehouse_id']);
+        self::assertSame('12.50', (string)$salesOrder['order_money']);
+        self::assertSame(1, Db::name('sales_order')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame(1, Db::name('order_goods')->where('tenant_id', self::TENANT_ID)->where('order_type', 'sales')->count());
+        self::assertSame('1.0000', (string)Db::name('order_goods')->where('order_id', (int)$salesOrder['id'])->value('base_quantity'));
+        self::assertSame(1, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->where('order_type', 'sales')->count());
+        self::assertSame(1, Db::name('receivable_flow')->where('tenant_id', self::TENANT_ID)->where('order_type', 'sales')->count());
+        self::assertSame(1, Db::name('audit_log')->where('tenant_id', self::TENANT_ID)
+            ->where('module', 'sales_order')->where('action', 'create')
+            ->where('target_id', (int)$salesOrder['id'])->count());
+        self::assertSame('0.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
+        self::assertSame('1.0000', WarehouseGoodsBalanceService::onHand($warehouseId, $goodsId));
+
+        $again = CustomerReportLogic::convert(['id' => $report['id'], 'version' => $report['version']]);
+        self::assertNotFalse($again, CustomerReportLogic::getError());
+        self::assertCount(1, $again['sales_orders']);
+        self::assertSame((int)$salesOrder['id'], (int)$again['sales_orders'][0]['id']);
+        self::assertSame(1, Db::name('sales_order')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame(1, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->where('order_type', 'sales')->count());
+        self::assertSame(1, Db::name('receivable_flow')->where('tenant_id', self::TENANT_ID)->where('order_type', 'sales')->count());
+        self::assertSame(1, Db::name('audit_log')->where('tenant_id', self::TENANT_ID)
+            ->where('module', 'sales_order')->where('action', 'create')
+            ->where('target_id', (int)$salesOrder['id'])->count());
+
+        self::assertFalse(SalesOrderLogic::edit(['id' => (int)$salesOrder['id']]));
+        self::assertSame('客户报货生成的销售单不可直接编辑，请通过销售退货处理', SalesOrderLogic::getError());
+        self::assertFalse(SalesOrderLogic::remove(['id' => (int)$salesOrder['id']]));
+        self::assertSame('客户报货生成的销售单不可直接删除，请通过销售退货处理', SalesOrderLogic::getError());
+        self::assertSame(1, Db::name('sales_order')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame('completed', (string)Db::name('customer_report')->where('id', (int)$report['id'])->value('status'));
+        self::assertSame('0.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
+        self::assertSame('1.0000', WarehouseGoodsBalanceService::onHand($warehouseId, $goodsId));
+    }
+
+    public function test_priced_report_spanning_two_warehouses_creates_two_sales_orders(): void
+    {
+        $customerId = $this->createCustomer('多仓销售客户');
+        $goodsA = $this->createCustomerReportGoods('多仓商品甲', 'CR-MULTI-A');
+        $goodsB = $this->createCustomerReportGoods('多仓商品乙', 'CR-MULTI-B');
+        foreach ([$goodsA, $goodsB] as $goodsId) {
+            Db::name('goods_units_binding')->insert([
+                'tenant_id' => self::TENANT_ID, 'goods_id' => $goodsId, 'unit_id' => 1,
+                'unit_name' => '件', 'is_base_unit' => 1, 'status' => 1,
+                'create_time' => time(), 'update_time' => time(),
+            ]);
+        }
+        $warehouseA = $this->createCustomerReportWarehouse('多仓甲');
+        $warehouseB = $this->createCustomerReportWarehouse('多仓乙');
+        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseA, $goodsA, '2.0000'));
+        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseB, $goodsB, '3.0000'));
+        $priced = static fn(int $goodsId, int $warehouseId, string $price): array => [
+            'goods_id' => $goodsId, 'warehouse_id' => $warehouseId,
+            'unit_id' => 1, 'unit_name' => '件', 'order_qty' => '1',
+            'piece_weight_confirmed' => 1, 'piece_weight_min' => '1.00', 'piece_weight_max' => '1.00',
+            'price_status' => 'priced', 'price' => $price,
+            'pricing_unit_id' => 1, 'pricing_unit_name' => '件',
+        ];
+        $report = CustomerReportLogic::submit([
+            'main_customer_id' => $customerId,
+            'idempotency_key' => 'multi-warehouse-sale',
+            'items' => [
+                $priced($goodsA, $warehouseA, '10.00'),
+                $priced($goodsB, $warehouseB, '20.00'),
+            ],
+        ]);
+        self::assertNotFalse($report, CustomerReportLogic::getError());
+
+        $converted = CustomerReportLogic::convert(['id' => $report['id'], 'version' => $report['version']]);
+        self::assertNotFalse($converted, CustomerReportLogic::getError());
+        self::assertCount(2, $converted['sales_orders']);
+        self::assertSame([$warehouseA, $warehouseB], array_map(
+            static fn(array $order): int => (int)$order['warehouse_id'],
+            $converted['sales_orders']
+        ));
+        self::assertSame(2, Db::name('sales_order')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame(2, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->where('order_type', 'sales')->count());
+        self::assertSame(2, Db::name('receivable_flow')->where('tenant_id', self::TENANT_ID)->where('order_type', 'sales')->count());
+        self::assertSame(2, Db::name('audit_log')->where('tenant_id', self::TENANT_ID)
+            ->where('module', 'sales_order')->where('action', 'create')->count());
+        self::assertSame('30.00', (string)Db::name('customer')->where('id', $customerId)->value('order_receivable'));
+    }
+
+    public function test_pending_list_count_is_filtered_on_the_server_before_pagination(): void
+    {
+        $customerId = $this->createCustomer('待处理计数客户');
+        $goodsId = $this->createCustomerReportGoods('待处理计数商品', 'CR-PENDING-COUNT');
+        $warehouseId = $this->createCustomerReportWarehouse('待处理计数仓');
+        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, '2.0000'));
+
+        foreach (['pending-count-a', 'pending-count-b'] as $key) {
+            self::assertNotFalse(CustomerReportLogic::submit(
+                $this->submitPayload($customerId, $goodsId, $warehouseId, $key, '1', '1.00', '1.00')
+            ), CustomerReportLogic::getError());
+        }
+
+        $pending = CustomerReportLogic::lists([
+            'status_scope' => 'pending',
+            'page_no' => 1,
+            'page_size' => 1,
+        ]);
+
+        self::assertSame(2, $pending['count']);
+        self::assertCount(1, $pending['lists']);
+        self::assertContains($pending['lists'][0]['status'], ['submitted_ready', 'submitted_shortage']);
+    }
+
+    public function test_second_warehouse_pricing_failure_rolls_back_every_sales_side_effect(): void
+    {
+        $customerId = $this->createCustomer('多仓回滚客户');
+        $goodsA = $this->createCustomerReportGoods('多仓回滚商品甲', 'CR-ROLLBACK-A');
+        $goodsB = $this->createCustomerReportGoods('多仓回滚商品乙', 'CR-ROLLBACK-B');
+        foreach ([$goodsA, $goodsB] as $goodsId) {
+            Db::name('goods_units_binding')->insert([
+                'tenant_id' => self::TENANT_ID, 'goods_id' => $goodsId, 'unit_id' => 1,
+                'unit_name' => '件', 'is_base_unit' => 1, 'status' => 1,
+                'create_time' => time(), 'update_time' => time(),
+            ]);
+        }
+        $warehouseA = $this->createCustomerReportWarehouse('多仓回滚甲');
+        $warehouseB = $this->createCustomerReportWarehouse('多仓回滚乙');
+        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseA, $goodsA, '2.0000'));
+        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseB, $goodsB, '2.0000'));
+        $priced = static fn(int $goodsId, int $warehouseId): array => [
+            'goods_id' => $goodsId, 'warehouse_id' => $warehouseId,
+            'unit_id' => 1, 'unit_name' => '件', 'order_qty' => '1',
+            'piece_weight_confirmed' => 1, 'piece_weight_min' => '1.00', 'piece_weight_max' => '1.00',
+            'price_status' => 'priced', 'price' => '10.00',
+            'pricing_unit_id' => 1, 'pricing_unit_name' => '件',
+        ];
+        $report = CustomerReportLogic::submit([
+            'main_customer_id' => $customerId,
+            'idempotency_key' => 'multi-warehouse-rollback',
+            'items' => [
+                $priced($goodsA, $warehouseA),
+                $priced($goodsB, $warehouseB),
+            ],
+        ]);
+        self::assertNotFalse($report, CustomerReportLogic::getError());
+
+        Db::name('customer_report_item')
+            ->where('tenant_id', self::TENANT_ID)
+            ->where('report_id', (int)$report['id'])
+            ->where('warehouse_id', $warehouseB)
+            ->update(['pricing_unit_id' => 999, 'pricing_unit_name' => '箱']);
+
+        self::assertFalse(CustomerReportLogic::convert([
+            'id' => $report['id'],
+            'version' => $report['version'],
+        ]));
+        self::assertSame('计价单位暂不支持转换为标准销售单', CustomerReportLogic::getError());
+        self::assertSame(0, Db::name('sales_order')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame(0, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->where('order_type', 'sales')->count());
+        self::assertSame(0, Db::name('receivable_flow')->where('tenant_id', self::TENANT_ID)->where('order_type', 'sales')->count());
+        self::assertSame('1.0000', WarehouseGoodsBalanceService::reserved($warehouseA, $goodsA));
+        self::assertSame('1.0000', WarehouseGoodsBalanceService::reserved($warehouseB, $goodsB));
+        self::assertSame('0.00', (string)Db::name('customer')->where('id', $customerId)->value('order_receivable'));
+        self::assertSame('submitted_ready', (string)Db::name('customer_report')->where('id', (int)$report['id'])->value('status'));
+    }
+
+    public function test_edit_uses_new_version_and_releases_the_reservation_delta(): void
+    {
+        $customerId = $this->createCustomer('编辑客户');
+        $goodsId = $this->createCustomerReportGoods('海鲈鱼', 'CR-EDIT-DELTA');
+        $warehouseId = $this->createCustomerReportWarehouse('编辑仓');
         self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, '10.0000'));
-        $report = CustomerReportLogic::submit($this->submitPayload($customerId, $goodsId, $warehouseId, 'edit-fulfill', '2', '2.00', '2.00'));
+        $report = CustomerReportLogic::submit($this->submitPayload($customerId, $goodsId, $warehouseId, 'edit-delta', '2', '2.00', '2.00'));
         self::assertNotFalse($report, CustomerReportLogic::getError());
         self::assertSame('4.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
 
@@ -211,22 +386,7 @@ final class CustomerReportWorkflowTest extends TestCase
         ]);
         self::assertNotFalse($edited, CustomerReportLogic::getError());
         self::assertSame('2.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
-
-        $fulfilled = CustomerReportLogic::fulfill([
-            'id' => $edited['id'], 'version' => $edited['version'],
-            'items' => [['id' => $edited['items'][0]['id'], 'actual_base_qty' => '1.00', 'fulfillment_key' => 'fulfill-one']],
-        ]);
-        self::assertNotFalse($fulfilled, CustomerReportLogic::getError());
-        self::assertSame('completed', $fulfilled['status']);
-        self::assertSame('9.0000', WarehouseGoodsBalanceService::onHand($warehouseId, $goodsId));
-        self::assertSame('0.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
-
-        $again = CustomerReportLogic::fulfill([
-            'id' => $edited['id'], 'version' => $edited['version'],
-            'items' => [['id' => $edited['items'][0]['id'], 'actual_base_qty' => '1.00', 'fulfillment_key' => 'fulfill-one']],
-        ]);
-        self::assertNotFalse($again, CustomerReportLogic::getError());
-        self::assertSame('completed', $again['status']);
+        self::assertSame('10.0000', WarehouseGoodsBalanceService::onHand($warehouseId, $goodsId));
     }
 
     public function test_edit_can_move_a_line_to_another_warehouse_and_remove_a_line(): void
@@ -262,36 +422,12 @@ final class CustomerReportWorkflowTest extends TestCase
         self::assertSame('1.0000', WarehouseGoodsBalanceService::reserved($warehouseB, $goodsA));
     }
 
-    public function test_cannot_cancel_a_report_that_is_already_fulfilling(): void
-    {
-        $customerId = $this->createCustomer('履约中客户');
-        $goodsA = $this->createCustomerReportGoods('履约商品甲', 'CR-FULFILLING-A');
-        $goodsB = $this->createCustomerReportGoods('履约商品乙', 'CR-FULFILLING-B');
-        $warehouseId = $this->createCustomerReportWarehouse('履约中仓');
-        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsA, '2.0000'));
-        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsB, '2.0000'));
-        $report = CustomerReportLogic::submit([
-            'main_customer_id' => $customerId, 'idempotency_key' => 'fulfilling-cancel', 'items' => [
-                ['goods_id' => $goodsA, 'warehouse_id' => $warehouseId, 'unit_id' => 0, 'unit_name' => '件', 'order_qty' => '1', 'piece_weight_confirmed' => 1, 'piece_weight_min' => '1.00', 'piece_weight_max' => '1.00', 'price_status' => 'unpriced'],
-                ['goods_id' => $goodsB, 'warehouse_id' => $warehouseId, 'unit_id' => 0, 'unit_name' => '件', 'order_qty' => '1', 'piece_weight_confirmed' => 1, 'piece_weight_min' => '1.00', 'piece_weight_max' => '1.00', 'price_status' => 'unpriced'],
-            ],
-        ]);
-        self::assertNotFalse($report, CustomerReportLogic::getError());
-        $fulfilling = CustomerReportLogic::fulfill(['id' => $report['id'], 'version' => $report['version'], 'items' => [['id' => $report['items'][0]['id'], 'actual_base_qty' => '1.00', 'fulfillment_key' => 'fulfilling-first']]]);
-        self::assertNotFalse($fulfilling, CustomerReportLogic::getError());
-        self::assertSame('fulfilling', $fulfilling['status']);
-        self::assertFalse(CustomerReportLogic::cancel(['id' => $fulfilling['id'], 'version' => $fulfilling['version']]));
-        self::assertSame('报货单不存在、版本冲突或不可取消', CustomerReportLogic::getError());
-    }
-
     public function test_fresh_customer_report_migration_uses_two_decimal_business_fields(): void
     {
         $expected = [
             'la_customer_report' => ['total_base_qty', 'reserved_base_qty', 'shortage_base_qty'],
             'la_customer_report_item' => ['expected_base_qty', 'reserved_base_qty', 'shortage_base_qty', 'fulfilled_base_qty', 'piece_weight_min', 'piece_weight_max', 'price'],
             'la_customer_report_reservation' => ['reserved_base_qty', 'consumed_base_qty', 'released_base_qty'],
-            'la_customer_report_sale' => ['total_base_qty', 'reserved_base_qty', 'shortage_base_qty'],
-            'la_customer_report_sale_item' => ['order_qty', 'expected_base_qty', 'reserved_base_qty', 'shortage_base_qty', 'fulfilled_base_qty', 'price'],
         ];
         foreach ($expected as $table => $fields) {
             $types = array_column(Db::query("SHOW COLUMNS FROM `{$table}`"), 'Type', 'Field');
