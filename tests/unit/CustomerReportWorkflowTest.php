@@ -78,6 +78,36 @@ final class CustomerReportWorkflowTest extends TestCase
         self::assertSame(0, Db::name('customer_report_reservation')->where('tenant_id', self::TENANT_ID)->count());
     }
 
+    public function test_candidate_uses_an_exact_first_line_customer_as_the_report_header(): void
+    {
+        $customerId = $this->createCustomer('客户1');
+        $goodsId = $this->createCustomerReportGoods('桂鱼', 'CR-FIRST-LINE-CUSTOMER');
+
+        $candidate = CustomerReportCandidateLogic::recognize("客户1\n桂鱼20斤2斤1条");
+
+        self::assertCount(1, $candidate['lines']);
+        self::assertSame('桂鱼20斤2斤1条', $candidate['lines'][0]['source_text']);
+        self::assertSame('ready', $candidate['lines'][0]['status']);
+        self::assertSame($customerId, (int)$candidate['lines'][0]['customer']['selected']['id']);
+        self::assertSame($goodsId, (int)$candidate['lines'][0]['goods']['selected']['id']);
+        self::assertSame('20.00', $candidate['lines'][0]['quantity']['value']);
+        self::assertSame('斤', $candidate['lines'][0]['quantity']['unit']);
+    }
+
+    public function test_candidate_does_not_override_an_explicit_ambiguous_customer_with_the_header_customer(): void
+    {
+        $this->createCustomer('客户1');
+        $this->createCustomer('客户甲');
+        $this->createCustomer('客户乙');
+        $this->createCustomerReportGoods('桂鱼', 'CR-AMBIGUOUS-LINE-CUSTOMER');
+
+        $candidate = CustomerReportCandidateLogic::recognize("客户1\n客户：客户 桂鱼20斤");
+
+        self::assertCount(1, $candidate['lines']);
+        self::assertSame('ambiguous', $candidate['lines'][0]['customer']['status']);
+        self::assertNull($candidate['lines'][0]['customer']['selected']);
+    }
+
     public function test_only_direct_or_first_level_child_can_receive_the_report(): void
     {
         $main = $this->createCustomer('主客户');

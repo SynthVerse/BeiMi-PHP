@@ -19,7 +19,11 @@ class CustomerReportCandidateLogic extends BaseLogic
     public static function recognize(string $text): array
     {
         $sourceLines = self::sourceLines($text);
-        return ['lines' => array_map(static fn(string $line, int $index): array => self::line($line, $index), $sourceLines, array_keys($sourceLines))];
+        $headerCustomer = self::firstLineCustomer($sourceLines);
+        if ($headerCustomer !== null) {
+            array_shift($sourceLines);
+        }
+        return ['lines' => array_map(static fn(string $line, int $index): array => self::line($line, $index, $headerCustomer), $sourceLines, array_keys($sourceLines))];
     }
 
     /** @return array{goods_id:int,goods:array<string,mixed>}|false */
@@ -64,11 +68,14 @@ class CustomerReportCandidateLogic extends BaseLogic
     }
 
     /** @return array<string,mixed> */
-    private static function line(string $source, int $index): array
+    private static function line(string $source, int $index, ?array $headerCustomer = null): array
     {
         $quantity = self::quantity($source);
         $goods = self::goodsCandidates($source);
         $customers = self::customerCandidates($source, $goods['candidates']);
+        if (($customers['status'] ?? '') === 'missing' && $headerCustomer !== null) {
+            $customers = ['status' => 'unique', 'selected' => $headerCustomer, 'candidates' => [$headerCustomer]];
+        }
         $attributes = self::attributes($source);
         $selectedGoods = $goods['selected'];
         $preference = $selectedGoods && $customers['selected']
@@ -119,6 +126,26 @@ class CustomerReportCandidateLogic extends BaseLogic
             return '';
         }
         return trim((string)$match[1]);
+    }
+
+    /** @param array<int,string> $sourceLines
+     * @return ?array<string,mixed>
+     */
+    private static function firstLineCustomer(array $sourceLines): ?array
+    {
+        if (count($sourceLines) < 2) {
+            return null;
+        }
+        $source = trim((string)$sourceLines[0]);
+        if ($source === '' || (self::quantity($source)['status'] ?? '') !== 'missing') {
+            return null;
+        }
+        $customers = self::customerCandidatesForNeedle($source);
+        $selected = $customers['selected'] ?? null;
+        if ($selected === null || mb_strtolower((string)($selected['name'] ?? '')) !== mb_strtolower($source)) {
+            return null;
+        }
+        return $selected;
     }
 
     /** @return array{status:string,value:?string,unit:?string} */
@@ -188,6 +215,12 @@ class CustomerReportCandidateLogic extends BaseLogic
                 }
             }
         }
+        return self::customerCandidatesForNeedle($needle);
+    }
+
+    /** @return array{status:string,selected:?array<string,mixed>,candidates:array<int,array<string,mixed>>} */
+    private static function customerCandidatesForNeedle(string $needle): array
+    {
         if (self::tenantId() <= 0 || $needle === '') { return ['status' => 'missing', 'selected' => null, 'candidates' => []]; }
         $rows = Db::name('customer')->alias('delivery')
             ->leftJoin('customer main', 'main.id = delivery.parent_id AND main.tenant_id = delivery.tenant_id')
