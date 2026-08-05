@@ -8,6 +8,7 @@ use app\common\model\cloud\CloudGoods;
 use app\common\model\cloud\CloudGoodsImport;
 use app\common\model\goods\TenantGoodscat;
 use app\common\model\jxc\Goods;
+use app\common\service\goods\GoodsAliasService;
 use app\common\model\jxc\GoodsUnit;
 use think\facade\Db;
 
@@ -44,7 +45,7 @@ class CloudGoodsService extends BaseLogic
                 ->select()
                 ->toArray();
         });
-        return self::attachLoaded($rows, $tenantId);
+        return GoodsAliasService::attachCloudAliases(self::attachLoaded($rows, $tenantId));
     }
 
     public static function countVisible(array $params, int $tenantId): int
@@ -68,7 +69,7 @@ class CloudGoodsService extends BaseLogic
                 ->select()
                 ->toArray();
         });
-        return self::attachPublicMeta($rows);
+        return GoodsAliasService::attachCloudAliases(self::attachPublicMeta($rows));
     }
 
     public static function countPublic(array $params): int
@@ -92,7 +93,7 @@ class CloudGoodsService extends BaseLogic
                 ->select()
                 ->toArray();
         });
-        return self::attachPublicMeta($rows);
+        return GoodsAliasService::attachCloudAliases(self::attachPublicMeta($rows));
     }
 
     public static function countArchivedPublic(array $params): int
@@ -114,7 +115,9 @@ class CloudGoodsService extends BaseLogic
         if ($row === []) {
             return [];
         }
-        return self::attachLoaded([$row], $tenantId)[0] ?? $row;
+        $row = self::attachLoaded([$row], $tenantId)[0] ?? $row;
+        $row['aliases'] = GoodsAliasService::cloudAliases($id);
+        return $row;
     }
 
     public static function detailPublic(int $id): array
@@ -123,7 +126,12 @@ class CloudGoodsService extends BaseLogic
             ->where('tenant_id', 0)
             ->where('id', $id)
             ->findOrEmpty();
-        return $model->isEmpty() ? [] : $model->append(['scope_desc', 'status_desc'])->toArray();
+        if ($model->isEmpty()) {
+            return [];
+        }
+        $row = $model->append(['scope_desc', 'status_desc'])->toArray();
+        $row['aliases'] = GoodsAliasService::cloudAliases($id);
+        return $row;
     }
 
     public static function addPublic(array $params, int $adminId = 0): array|false
@@ -172,7 +180,13 @@ class CloudGoodsService extends BaseLogic
             }
         }
 
+        $alreadyImported = CloudGoodsImport::where('tenant_id', $tenantId)->where('cloud_goods_id', $cloudGoodsId)->findOrEmpty();
+        if (!$alreadyImported->isEmpty()) {
+            return ['loaded' => false, 'existing_goods_id' => (int)$alreadyImported->goods_id, 'reason' => '该云端商品已加载，首次下载快照不支持再次下载或同步'];
+        }
+
         $source = $cloudGoods->toArray();
+        $source['aliases'] = GoodsAliasService::cloudAliases($cloudGoodsId);
         $duplicate = self::findDuplicateGoods($source, $tenantId, $unitId);
         if ($duplicate !== null) {
             return [
@@ -180,6 +194,10 @@ class CloudGoodsService extends BaseLogic
                 'existing_goods_id' => (int)$duplicate['id'],
                 'reason' => $duplicate['reason'],
             ];
+        }
+        if (($aliasError = GoodsAliasService::validateTenant($tenantId, 0, (string)$source['name'], $source['aliases'])) !== null) {
+            self::setError('无法加载云端商品：' . $aliasError);
+            return false;
         }
 
         Db::startTrans();
@@ -198,6 +216,7 @@ class CloudGoodsService extends BaseLogic
                 'is_disabled' => (int)($source['is_disabled'] ?? 0),
                 'remark' => (string)($source['remark'] ?? ''),
             ]);
+            GoodsAliasService::replaceTenantAliases($tenantId, (int)$goods->id, $source['aliases'], 'cloud');
 
             CloudGoodsImport::create([
                 'tenant_id' => $tenantId,
@@ -239,12 +258,26 @@ class CloudGoodsService extends BaseLogic
         if (!self::assertCloudUnique($data)) {
             return false;
         }
+        try {
+            $aliases = GoodsAliasService::normalizeInput($params['aliases'] ?? []);
+        } catch (\InvalidArgumentException $e) {
+            self::setError($e->getMessage());
+            return false;
+        }
+        if (($aliasError = GoodsAliasService::validateCloud(0, (string)$data['name'], $aliases)) !== null) {
+            self::setError($aliasError);
+            return false;
+        }
 
+        Db::startTrans();
         try {
             $model = CloudGoods::create($data);
+            GoodsAliasService::replaceCloudAliases((int)$model->id, $aliases);
+            Db::commit();
             self::clearCache();
             return ['id' => (int)$model->id];
         } catch (\Throwable $e) {
+            Db::rollback();
             self::setError($e->getMessage());
             return false;
         }
@@ -271,12 +304,30 @@ class CloudGoodsService extends BaseLogic
         if (!self::assertCloudUnique($data, $id)) {
             return false;
         }
+        try {
+            $aliases = array_key_exists('aliases', $params)
+                ? GoodsAliasService::normalizeInput($params['aliases'])
+                : GoodsAliasService::cloudAliases($id);
+        } catch (\InvalidArgumentException $e) {
+            self::setError($e->getMessage());
+            return false;
+        }
+        if (($aliasError = GoodsAliasService::validateCloud($id, (string)$data['name'], $aliases)) !== null) {
+            self::setError($aliasError);
+            return false;
+        }
 
+        Db::startTrans();
         try {
             $model->save($data);
+            if (array_key_exists('aliases', $params)) {
+                GoodsAliasService::replaceCloudAliases($id, $aliases);
+            }
+            Db::commit();
             self::clearCache();
             return true;
         } catch (\Throwable $e) {
+            Db::rollback();
             self::setError($e->getMessage());
             return false;
         }
@@ -376,11 +427,15 @@ class CloudGoodsService extends BaseLogic
     {
         $keyword = trim((string)($params['keyword'] ?? $params['name'] ?? $params['product_name'] ?? ''));
         if ($keyword !== '') {
-            $query->where(function ($builder) use ($keyword) {
+            $aliasCloudGoodsIds = GoodsAliasService::matchingCloudGoodsIds($keyword);
+            $query->where(function ($builder) use ($keyword, $aliasCloudGoodsIds) {
                 $builder->whereLike('name', '%' . $keyword . '%')
                     ->whereOr('product_code', 'like', '%' . $keyword . '%')
                     ->whereOr('units', 'like', '%' . $keyword . '%')
                     ->whereOr('category_name', 'like', '%' . $keyword . '%');
+                if ($aliasCloudGoodsIds !== []) {
+                    $builder->whereOr('id', 'in', $aliasCloudGoodsIds);
+                }
             });
         }
 

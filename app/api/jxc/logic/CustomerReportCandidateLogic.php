@@ -7,6 +7,7 @@ namespace app\api\jxc\logic;
 use app\common\logic\BaseLogic;
 use app\common\model\jxc\Goods;
 use app\common\model\jxc\GoodsUnit;
+use app\common\service\goods\GoodsAliasService;
 use think\facade\Db;
 
 /** 仅把自然语言变为待确认候选；绝不建单、绝不预留。 */
@@ -17,7 +18,7 @@ class CustomerReportCandidateLogic extends BaseLogic
     /** @return array{lines:array<int,array<string,mixed>>} */
     public static function recognize(string $text): array
     {
-        $sourceLines = array_values(array_filter(array_map('trim', preg_split('/\r?\n/u', trim($text)) ?: [])));
+        $sourceLines = self::sourceLines($text);
         return ['lines' => array_map(static fn(string $line, int $index): array => self::line($line, $index), $sourceLines, array_keys($sourceLines))];
     }
 
@@ -78,12 +79,46 @@ class CustomerReportCandidateLogic extends BaseLogic
         }
         return [
             'index' => $index, 'source_text' => $source,
+            'goods_needle' => self::goodsNeedle($source),
             'status' => $missing === [] ? 'ready' : (($goods['status'] ?? '') === 'none' ? 'no_goods_candidate' : 'needs_confirmation'),
             'customer' => $customers, 'goods' => $goods, 'quantity' => $quantity,
             'attributes' => $attributes, 'preference' => $preference,
             'missing_fields' => $missing, 'can_submit' => $missing === [],
             'quick_create_allowed' => self::canManageGoods(),
         ];
+    }
+
+    /** @return array<int,string> */
+    private static function sourceLines(string $text): array
+    {
+        $lines = [];
+        foreach (preg_split('/\r?\n/u', trim($text)) ?: [] as $sourceLine) {
+            $sourceLine = trim($sourceLine);
+            if ($sourceLine === '') {
+                continue;
+            }
+            $items = array_values(array_filter(array_map('trim', preg_split('/[、；;]+/u', $sourceLine) ?: [])));
+            if (count($items) <= 1) {
+                $lines[] = $sourceLine;
+                continue;
+            }
+            $customerPrefix = self::customerPrefix($items[0]);
+            foreach ($items as $index => $item) {
+                if ($index > 0 && $customerPrefix !== '' && !preg_match('/^(?:客户|客戶|给|給)/u', $item)) {
+                    $item = $customerPrefix . ' ' . $item;
+                }
+                $lines[] = $item;
+            }
+        }
+        return $lines;
+    }
+
+    private static function customerPrefix(string $source): string
+    {
+        if (!preg_match('/^((?:客户|客戶|给|給)\s*[:：]?\s*[^\s，,、；;]+(?:\s*报货|\s*報貨)?)/u', $source, $match)) {
+            return '';
+        }
+        return trim((string)$match[1]);
     }
 
     /** @return array{status:string,value:?string,unit:?string} */
@@ -104,12 +139,35 @@ class CustomerReportCandidateLogic extends BaseLogic
     {
         $needle = self::goodsNeedle($text);
         if (self::tenantId() <= 0 || $needle === '') { return ['status' => 'none', 'selected' => null, 'candidates' => []]; }
-        $rows = Goods::where('tenant_id', self::tenantId())->where('is_disabled', 0)
-            ->where(function ($query) use ($needle) { $query->whereLike('name', '%' . $needle . '%')->whereOr('product_code', 'like', '%' . $needle . '%'); })
-            ->field(['id','name','product_code','unit_id','units','category_id'])->order('id asc')->limit(self::LIMIT)->select()->toArray();
+        $normalizedNeedle = GoodsAliasService::normalize($needle);
+        $rows = Db::name('goods')->alias('goods')
+            ->leftJoin('goods_alias alias', 'alias.tenant_id = goods.tenant_id AND alias.goods_id = goods.id')
+            ->where('goods.tenant_id', self::tenantId())->where('goods.is_disabled', 0)
+            ->where(function ($query) use ($needle, $normalizedNeedle) {
+                $query->whereLike('goods.name', '%' . $needle . '%')
+                    ->whereOr('goods.product_code', 'like', '%' . $needle . '%')
+                    ->whereOr('alias.alias', 'like', '%' . $needle . '%')
+                    ->whereOr('alias.normalized_alias', $normalizedNeedle);
+            })
+            ->field(['goods.id','goods.name','goods.product_code','goods.unit_id','goods.units','goods.category_id'])
+            ->group('goods.id')->order('goods.id asc')->limit(self::LIMIT)->select()->toArray();
         $candidates = array_map(static fn(array $row): array => self::goods($row), $rows);
-        $exact = array_values(array_filter($candidates, static fn(array $one): bool => mb_strtolower((string)$one['name']) === mb_strtolower($needle) || mb_strtolower((string)$one['product_code']) === mb_strtolower($needle)));
-        $selected = count($exact) === 1 ? $exact[0] : (count($candidates) === 1 ? $candidates[0] : null);
+        $exactIds = Db::name('goods_alias')->where('tenant_id', self::tenantId())->where('normalized_alias', $normalizedNeedle)->column('goods_id');
+        $exact = array_values(array_filter($candidates, static fn(array $one): bool => GoodsAliasService::normalize((string)$one['name']) === $normalizedNeedle
+            || GoodsAliasService::normalize((string)$one['product_code']) === $normalizedNeedle
+            || in_array((int)$one['id'], array_map('intval', $exactIds), true)));
+        // 别名识别只允许规范化后的完整匹配；模糊候选只用于校对页人工确认，绝不自动回填。
+        $selected = count($exact) === 1 ? $exact[0] : null;
+        if ($selected !== null) {
+            foreach ($candidates as &$candidate) {
+                if ((int)$candidate['id'] === (int)$selected['id']) {
+                    $candidate['matched_name'] = $needle;
+                    $selected = $candidate;
+                    break;
+                }
+            }
+            unset($candidate);
+        }
         return ['status' => $selected ? 'unique' : ($candidates === [] ? 'none' : 'ambiguous'), 'selected' => $selected, 'candidates' => $candidates];
     }
 
@@ -119,10 +177,16 @@ class CustomerReportCandidateLogic extends BaseLogic
     private static function customerCandidates(string $text, array $goods): array
     {
         $needle = '';
-        if (preg_match('/(?:客户|客戶|给|給)\s*[:：]?\s*([^\s，,、；;]+)/u', $text, $m)) { $needle = trim($m[1]); }
+        if (preg_match('/(?:客户|客戶|给|給)\s*[:：]?\s*([^\s，,、；;]+?)(?:报货|報貨)?(?=\s|$)/u', $text, $m)) { $needle = trim($m[1]); }
         if ($needle === '' && $goods !== []) {
-            $pos = mb_strpos($text, (string)$goods[0]['name']);
-            if ($pos !== false) { $needle = trim(mb_substr($text, 0, $pos), " \t，,、；;：:"); }
+            foreach ($goods as $goodsCandidate) {
+                $matchedName = (string)($goodsCandidate['matched_name'] ?? $goodsCandidate['name'] ?? '');
+                $pos = $matchedName === '' ? false : mb_strpos($text, $matchedName);
+                if ($pos !== false) {
+                    $needle = trim(mb_substr($text, 0, $pos), " \t，,、；;：:");
+                    break;
+                }
+            }
         }
         if (self::tenantId() <= 0 || $needle === '') { return ['status' => 'missing', 'selected' => null, 'candidates' => []]; }
         $rows = Db::name('customer')->alias('delivery')

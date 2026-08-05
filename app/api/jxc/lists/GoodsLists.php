@@ -6,6 +6,7 @@ use app\api\jxc\logic\GoodsLogic;
 use app\common\lists\BaseDataLists;
 use app\common\model\jxc\Goods;
 use app\common\model\jxc\GoodsSupplier;
+use app\common\service\goods\GoodsAliasService;
 
 class GoodsLists extends BaseDataLists
 {
@@ -30,10 +31,14 @@ class GoodsLists extends BaseDataLists
 
         $keyword = trim((string)($this->params['keyword'] ?? $this->params['name'] ?? $this->params['product_name'] ?? ''));
         if ($keyword !== '') {
-            $query->where(function ($builder) use ($keyword) {
+            $aliasGoodsIds = GoodsAliasService::matchingTenantGoodsIds((int)(request()->tenantId ?? 0), $keyword);
+            $query->where(function ($builder) use ($keyword, $aliasGoodsIds) {
                 $builder->whereLike('name', '%' . $keyword . '%')
                     ->whereOr('product_code', 'like', '%' . $keyword . '%')
                     ->whereOr('units', 'like', '%' . $keyword . '%');
+                if ($aliasGoodsIds !== []) {
+                    $builder->whereOr('id', 'in', $aliasGoodsIds);
+                }
             });
         }
 

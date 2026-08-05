@@ -14,6 +14,7 @@ use app\common\model\jxc\GoodsSkuSpecValue;
 use app\common\model\jxc\GoodsSpecValue;
 use app\common\model\jxc\OrderGoods;
 use app\common\model\jxc\Vendor;
+use app\common\service\goods\GoodsAliasService;
 use think\facade\Db;
 
 class GoodsLogic extends BaseLogic
@@ -21,6 +22,12 @@ class GoodsLogic extends BaseLogic
     public static function add(array $params): array|false
     {
         $saveData = self::buildSaveData($params);
+        try {
+            $aliases = GoodsAliasService::normalizeInput($params['aliases'] ?? []);
+        } catch (\InvalidArgumentException $e) {
+            self::setError($e->getMessage());
+            return false;
+        }
         $boundUnits = self::resolveBoundUnitsForSave($params, $saveData);
         if ($boundUnits === false) {
             return false;
@@ -33,6 +40,10 @@ class GoodsLogic extends BaseLogic
         if (!self::assertUnique($saveData)) {
             return false;
         }
+        if (($aliasError = GoodsAliasService::validateTenant((int)$saveData['tenant_id'], 0, (string)$saveData['name'], $aliases)) !== null) {
+            self::setError($aliasError);
+            return false;
+        }
         if ((int)$saveData['primary_supplier_id'] > 0 && !self::assertSupplierInTenant((int)$saveData['primary_supplier_id'])) {
             return false;
         }
@@ -40,6 +51,9 @@ class GoodsLogic extends BaseLogic
         Db::startTrans();
         try {
             $goods = Goods::create($saveData);
+            if ($aliases !== []) {
+                GoodsAliasService::replaceTenantAliases((int)$saveData['tenant_id'], (int)$goods->id, $aliases);
+            }
             self::syncBoundUnits((int)$goods->id, $boundUnits);
             if ((int)$saveData['primary_supplier_id'] > 0) {
                 self::ensurePrimarySupplierRelation((int)$goods->id, (int)$saveData['primary_supplier_id']);
@@ -66,6 +80,14 @@ class GoodsLogic extends BaseLogic
         }
 
         $saveData = self::buildSaveData($params, $model->toArray());
+        try {
+            $aliases = array_key_exists('aliases', $params)
+                ? GoodsAliasService::normalizeInput($params['aliases'])
+                : GoodsAliasService::tenantAliases(self::tenantId(), (int)$model->id);
+        } catch (\InvalidArgumentException $e) {
+            self::setError($e->getMessage());
+            return false;
+        }
         $oldBaseUnitId = (int)($model->unit_id ?? 0);
         $oldBaseUnitName = (string)($model->units ?? '');
         $boundUnits = self::resolveBoundUnitsForSave($params, $saveData, (int)$model->id);
@@ -85,6 +107,10 @@ class GoodsLogic extends BaseLogic
         if (!self::assertUnique($saveData, (int)$params['id'])) {
             return false;
         }
+        if (($aliasError = GoodsAliasService::validateTenant((int)$saveData['tenant_id'], (int)$model->id, (string)$saveData['name'], $aliases)) !== null) {
+            self::setError($aliasError);
+            return false;
+        }
         if ((int)$saveData['primary_supplier_id'] > 0 && !self::assertSupplierInTenant((int)$saveData['primary_supplier_id'])) {
             return false;
         }
@@ -92,6 +118,9 @@ class GoodsLogic extends BaseLogic
         Db::startTrans();
         try {
             $model->save($saveData);
+            if (array_key_exists('aliases', $params)) {
+                GoodsAliasService::replaceTenantAliases((int)$saveData['tenant_id'], (int)$model->id, $aliases);
+            }
             if ($boundUnits !== null) {
                 self::syncBoundUnits((int)$model->id, $boundUnits);
             }
@@ -145,6 +174,7 @@ class GoodsLogic extends BaseLogic
             CloudGoodsImport::where('goods_id', (int)$model->id)
                 ->where('tenant_id', self::tenantId())
                 ->delete();
+            Db::name('goods_alias')->where('tenant_id', self::tenantId())->where('goods_id', (int)$model->id)->delete();
             // 清理SKU规格值映射
             GoodsSkuSpecValue::where('goods_id', (int)$model->id)
                 ->where('tenant_id', self::tenantId())
@@ -217,6 +247,7 @@ class GoodsLogic extends BaseLogic
         }
 
         $item = self::formatItem($model->toArray());
+        $item['aliases'] = GoodsAliasService::tenantAliases(self::tenantId(), (int)$item['id']);
         $supplierData = self::supplierList(['id' => (int)$item['id']]);
         $item['primary_supplier'] = $supplierData['primary_supplier'] ?? null;
         $item['suppliers'] = $supplierData['suppliers'] ?? [];
@@ -417,7 +448,7 @@ class GoodsLogic extends BaseLogic
             unset($item);
         }
 
-        return $formatted;
+        return GoodsAliasService::attachTenantAliases($formatted);
     }
 
     public static function formatItem(array $item): array
