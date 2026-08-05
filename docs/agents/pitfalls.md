@@ -184,7 +184,8 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 - 2026-07-30 扩展：`CustomerReportTestSupport::prepareMigration()` 与 `WarehouseGoodsBalanceServiceTest` 的测试数据库建表路径也统一调用 `MigrationSqlPreprocessor`；禁止测试辅助器自行 `str_replace` 或直接执行带占位符 SQL。
 - 2026-07-30 扩展：`public/install/db/like.sql` 与 `database/sql/jxc_phase1_schema.sql` 也只保存 `{{prefix}}`；`scripts/rebuild-dev-database.ps1` 通过 `scripts/prepare-sql.php` 调用同一 PHP 预处理器后才导入基础结构，并把同一配置显式传给迁移执行器。使用临时 `-ConfigPath` 时强制 `-SkipSeed`，防止种子误写默认 `.env` 的数据库。
 - 开发库重建由 `scripts/lib/RebuildDatabaseSafety.ps1` 额外绑定 `.env` 库名、显式 `-ExpectedDatabase`、`APP_ENV=development` 与开发库白名单。
-- 自动化防线：`tests/unit/MigrationSqlPreprocessorTest.php` 验证非默认前缀、残留模板拒绝和危险前缀拒绝；`scripts/migrate_probe_metadata_contract.test.js` 比对 PHP 与 JavaScript 预处理输出并验证两端契约；全部 `scripts/*contract.test.js` 与静态迁移探针覆盖 24 份迁移、177 条语句和 98 张最终表；`scripts/rebuild_dev_database_contract.test.js` 验证开发库必须先备份再重建，并固定基础结构、JXC 结构和正式迁移的执行顺序；`scripts/nondefault_prefix_rebuild_integration.test.js` 在 3307 隔离测试库上以 `tenantx_` 实际重建、核验 98 张表与 24 条迁移历史，再恢复原测试库。
+- 自动化防线：`tests/unit/MigrationSqlPreprocessorTest.php` 验证非默认前缀、残留模板拒绝和危险前缀拒绝；`scripts/migrate_probe_metadata_contract.test.js` 比对 PHP 与 JavaScript 预处理输出并验证两端契约；全部 `scripts/*contract.test.js` 与静态迁移探针覆盖 26 份迁移、185 条语句和 99 张最终表；`scripts/rebuild_dev_database_contract.test.js` 验证开发库必须先备份再重建，并固定基础结构、JXC 结构和正式迁移的执行顺序；`scripts/nondefault_prefix_rebuild_integration.test.js` 在 3307 隔离测试库上以 `tenantx_` 实际重建、核验 99 张表与 26 条迁移历史，再恢复原测试库。
+- 2026-08-05 扩展：`scripts/migrate_probe_metadata_contract.test.js` 在调用静态探针前逐份验证迁移源的占位符和非默认前缀转换；`scripts/migrate_probe_core.js` 的静态与受控运行时清单同步为 26 份迁移、185 条语句和 99 张最终表，并固定商品别名迁移的预处理后校验值。
 - 架构防线：`scripts/lib/MigrationSqlPreprocessor.php` 是真实 PHP 迁移执行器进入拆分与 PDO 前的统一边界；`scripts/migrate_probe_core.js` 的静态与固定运行时路径共同调用其唯一 JavaScript 契约实现，不再按迁移文件名特判。前缀安全校验在数据库连接与迁移历史表名拼接前执行。
 - 决策与知识：本记录；数据库前缀当前以 `config/database.php` 和运行环境 `DATABASE.PREFIX` 为准。
 
@@ -195,6 +196,7 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 | 2026-07-29 | 非 `la_` 表归属与旧链路迁移调查 | phpMyAdmin 出现两个字面量 `{{prefix}}*` 表；只读数据库连接不可用，现场行数与迁移历史尚未核验 | 静态探针在测试内部硬编码替换，真实执行器没有同等预处理与残留占位符拒绝。 |
 | 2026-07-30 | 客户报货新链路全量回归 | 两条测试数据库建表路径仍各自读取迁移并替换固定前缀 | 原防线只覆盖正式执行器与静态探针，没有把测试数据库消费者纳入统一预处理边界。 |
 | 2026-07-30 | 最终双轴审查 | 基础结构 SQL 仍硬编码 `la_`，非默认前缀只有静态替换、不能实际从零重建 | 原防线只覆盖正式迁移和测试辅助器，遗漏重建脚本导入的 `like.sql`／JXC 基础结构。 |
+| 2026-08-05 | 三仓未提交改动审查 | 商品别名迁移被改为硬编码 `la_`，而静态探针因受控清单仍为 25 份迁移提前退出 | 新增商品别名迁移时未同步静态与受控运行时的数量、语句、表数及哈希清单，源文件前缀断言位于探针调用之后。 |
 
 旧链路代码和新建库结构已不再包含字面量占位符表。2026-07-30 已在受隔离的
 本地开发实例上实际执行 `scripts/rebuild-dev-database.ps1 -ConfirmRebuild

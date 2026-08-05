@@ -28,6 +28,15 @@ assert(/function metadataQuery\(operation, params\)/.test(core), 'missing_metada
 assert(/function runtimeMetadataScalar\(operation, params\)/.test(core), 'missing_metadata_executor');
 assert(/function runtimeSafeSql\(statement\) \{[\s\S]*?locked_sql_cross_schema/.test(core), 'cross_schema_guard_missing');
 assert(/function runFixedRuntimeProbe\(\) \{\s*if \(arguments\.length !== 0\) runtimeFail\('runtime_arguments_not_allowed'\);/.test(core), 'fixed_runtime_must_reject_arguments');
+for (const name of migrationNames) {
+  const raw = fs.readFileSync(path.join(migrationDirectory, name), 'utf8');
+  assert(raw.includes('{{prefix}}'), `migration_prefix_placeholder_missing:${name}`);
+  assert(!/\bla_[A-Za-z0-9_]+/.test(raw), `migration_hardcoded_default_prefix:${name}`);
+  const tenantSql = coreModule.prepareMigrationSql(raw, 'tenantx_');
+  assert(!tenantSql.includes('{{'), `migration_placeholder_leaked:${name}`);
+  assert(!/\bla_[A-Za-z0-9_]+/.test(tenantSql), `migration_default_prefix_leaked:${name}`);
+  assert(tenantSql.includes('tenantx_'), `migration_non_default_prefix_not_applied:${name}`);
+}
 function runWrapper(args) {
   return childProcess.spawnSync(process.execPath, [path.join(__dirname, 'migrate_probe.js')].concat(args), { encoding: 'utf8' });
 }
@@ -35,7 +44,7 @@ const fixed = runWrapper(['--mode', 'static', '--target', 'beimi_r4_probe_202607
 assert(fixed.status === 0 && fixed.stderr === '', 'fresh_fixed_cli_exit_contract_mismatch');
 const fixedResult = JSON.parse(fixed.stdout);
 assert(fixed.stdout === JSON.stringify(fixedResult) + '\n', 'fresh_fixed_cli_stdout_must_be_single_json');
-assert(fixedResult.status === 'static_passed' && fixedResult.code === 'static_passed' && fixedResult.migration_count === 25 && fixedResult.statement_count === 183 && fixedResult.baseline_tables === 74 && fixedResult.final_tables === 98, 'fresh_fixed_cli_result_contract_mismatch');
+assert(fixedResult.status === 'static_passed' && fixedResult.code === 'static_passed' && fixedResult.migration_count === 26 && fixedResult.statement_count === 185 && fixedResult.baseline_tables === 74 && fixedResult.final_tables === 99, 'fresh_fixed_cli_result_contract_mismatch');
 const contractSql = 'CREATE TABLE `{{prefix}}orders` (`id` int NOT NULL);';
 const phpPreprocessor = path.join(__dirname, 'lib', 'MigrationSqlPreprocessor.php').replace(/\\/g, '/');
 const phpContract = childProcess.spawnSync(
@@ -56,15 +65,6 @@ let unsafePrefixRejected = false;
 try { coreModule.prepareMigrationSql('{{prefix}}orders', 'tenant`; DROP TABLE users; --'); }
 catch (error) { unsafePrefixRejected = error && error.probeCode === 'invalid_database_prefix'; }
 assert(unsafePrefixRejected, 'js_preprocessor_must_reject_unsafe_prefix');
-for (const name of migrationNames) {
-  const raw = fs.readFileSync(path.join(migrationDirectory, name), 'utf8');
-  assert(raw.includes('{{prefix}}'), `migration_prefix_placeholder_missing:${name}`);
-  assert(!/\bla_[A-Za-z0-9_]+/.test(raw), `migration_hardcoded_default_prefix:${name}`);
-  const tenantSql = coreModule.prepareMigrationSql(raw, 'tenantx_');
-  assert(!tenantSql.includes('{{'), `migration_placeholder_leaked:${name}`);
-  assert(!/\bla_[A-Za-z0-9_]+/.test(tenantSql), `migration_default_prefix_leaked:${name}`);
-  assert(tenantSql.includes('tenantx_'), `migration_non_default_prefix_not_applied:${name}`);
-}
 const wrongTarget = runWrapper(['--mode', 'static', '--target', 'not_allowed']);
 assert(wrongTarget.status === 1 && wrongTarget.stdout === '{"status":"blocked","code":"target_not_allowed"}\n', 'target_gate_must_reject_before_core');
 const wrongMode = runWrapper(['--mode', 'runtime', '--target', 'beimi_r4_probe_20260726_plan020']);

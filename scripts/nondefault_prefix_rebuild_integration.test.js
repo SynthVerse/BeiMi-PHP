@@ -140,15 +140,15 @@ try {
   const required = [
     'tenantx_customer_report', 'tenantx_sales_order', 'tenantx_order_goods',
     'tenantx_stock_flow', 'tenantx_receivable_flow', 'tenantx_audit_log',
-    'tenantx_migration_history',
+    'tenantx_migration_history', 'tenantx_goods_alias',
   ];
 
-  assert(tables.length === 98, `nondefault_prefix_table_count_mismatch: ${tables.length}`);
+  assert(tables.length === 99, `nondefault_prefix_table_count_mismatch: ${tables.length}`);
   assert(tables.every(table => table.startsWith(prefix)), 'nondefault_prefix_table_leak');
   assert(required.every(table => tables.includes(table)), 'nondefault_prefix_required_table_missing');
   assert(!tables.some(table => table.startsWith('la_') || table.includes('{')), 'default_or_template_prefix_leak');
   assert(
-    mysqlExecute(`SELECT COUNT(*) FROM \`${prefix}migration_history\`;`, targetDatabase).trim() === '24',
+    mysqlExecute(`SELECT COUNT(*) FROM \`${prefix}migration_history\`;`, targetDatabase).trim() === '26',
     'nondefault_prefix_migration_history_mismatch'
   );
 
