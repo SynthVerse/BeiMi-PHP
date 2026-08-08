@@ -94,6 +94,55 @@ final class CustomerReportWorkflowTest extends TestCase
         self::assertSame('斤', $candidate['lines'][0]['quantity']['unit']);
     }
 
+    public function test_candidate_keeps_an_unmatched_leading_label_as_a_pending_customer_header_instead_of_a_goods_line(): void
+    {
+        $goodsId = $this->createCustomerReportGoods('桂鱼', 'CR-PENDING-FIRST-LINE-CUSTOMER');
+
+        $candidate = CustomerReportCandidateLogic::recognize("大学\n桂鱼20斤");
+
+        self::assertNotNull($candidate['header']);
+        self::assertSame('customer_header', $candidate['header']['type']);
+        self::assertSame('大学', $candidate['header']['source_text']);
+        self::assertSame('none', $candidate['header']['status']);
+        self::assertSame('none', $candidate['header']['customer']['status']);
+        self::assertNull($candidate['header']['customer']['selected']);
+        self::assertSame('needs_customer_confirmation', $candidate['header']['handling']);
+        self::assertCount(1, $candidate['lines']);
+        self::assertSame('桂鱼20斤', $candidate['lines'][0]['source_text']);
+        self::assertSame($goodsId, (int)$candidate['lines'][0]['goods']['selected']['id']);
+    }
+
+    public function test_candidate_applies_a_unique_partial_customer_match_from_the_first_line(): void
+    {
+        $customerId = $this->createCustomer('城南大学食堂');
+        $goodsId = $this->createCustomerReportGoods('桂鱼', 'CR-PARTIAL-FIRST-LINE-CUSTOMER');
+
+        $candidate = CustomerReportCandidateLogic::recognize("大学\n桂鱼20斤");
+
+        self::assertSame('unique', $candidate['header']['status']);
+        self::assertSame($customerId, (int)$candidate['header']['customer']['selected']['id']);
+        self::assertSame('applied_to_lines', $candidate['header']['handling']);
+        self::assertCount(1, $candidate['lines']);
+        self::assertSame('ready', $candidate['lines'][0]['status']);
+        self::assertSame($customerId, (int)$candidate['lines'][0]['customer']['selected']['id']);
+        self::assertSame($goodsId, (int)$candidate['lines'][0]['goods']['selected']['id']);
+    }
+
+    public function test_candidate_keeps_a_standalone_goods_name_as_a_goods_line(): void
+    {
+        $firstGoodsId = $this->createCustomerReportGoods('桂鱼', 'CR-FIRST-LINE-GOODS');
+        $this->createCustomerReportGoods('鲈鱼', 'CR-SECOND-LINE-GOODS');
+
+        $candidate = CustomerReportCandidateLogic::recognize("桂鱼\n鲈鱼20斤");
+
+        self::assertNull($candidate['header']);
+        self::assertCount(2, $candidate['lines']);
+        self::assertSame('桂鱼', $candidate['lines'][0]['source_text']);
+        self::assertSame($firstGoodsId, (int)$candidate['lines'][0]['goods']['selected']['id']);
+        self::assertSame('needs_confirmation', $candidate['lines'][0]['status']);
+        self::assertContains('quantity', $candidate['lines'][0]['missing_fields']);
+    }
+
     public function test_candidate_does_not_override_an_explicit_ambiguous_customer_with_the_header_customer(): void
     {
         $this->createCustomer('客户1');

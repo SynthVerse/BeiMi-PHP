@@ -75,8 +75,43 @@ final class GoodsAliasRecognitionTest extends TestCase
         self::assertSame('ready', $candidate['lines'][0]['status']);
         self::assertSame('needs_confirmation', $candidate['lines'][1]['status']);
         self::assertSame('ambiguous', $candidate['lines'][1]['goods']['status']);
-        self::assertSame('no_goods_candidate', $candidate['lines'][2]['status']);
+        self::assertSame('needs_confirmation', $candidate['lines'][2]['status']);
+        self::assertSame('ambiguous', $candidate['lines'][2]['goods']['status']);
+        self::assertNull($candidate['lines'][2]['goods']['selected']);
         self::assertSame('客户甲报货 桂花 20斤', $candidate['lines'][1]['source_text']);
+    }
+
+    public function test_customer_report_uses_the_standalone_customer_header_and_matches_an_alias_with_a_live_condition(): void
+    {
+        $customerId = $this->createCustomer('大学');
+        $goodsId = $this->createCustomerReportGoods('桂鱼', 'CR-GOODS-LIVE-ALIAS', '斤');
+        Db::name('goods_alias')->insert([
+            'tenant_id' => self::TENANT_ID,
+            'goods_id' => $goodsId,
+            'cloud_goods_id' => 0,
+            'alias' => '鳜鱼',
+            'normalized_alias' => '鳜鱼',
+            'source' => 'tenant',
+            'create_time' => time(),
+            'update_time' => time(),
+        ]);
+
+        $candidate = CustomerReportCandidateLogic::recognize("大学\n鳜鱼15条活的");
+
+        self::assertSame('customer_header', $candidate['header']['type']);
+        self::assertSame('大学', $candidate['header']['source_text']);
+        self::assertSame('unique', $candidate['header']['status']);
+        self::assertSame($customerId, (int)$candidate['header']['customer']['selected']['id']);
+        self::assertSame('applied_to_lines', $candidate['header']['handling']);
+        self::assertCount(1, $candidate['lines']);
+        self::assertSame('鳜鱼15条活的', $candidate['lines'][0]['source_text']);
+        self::assertSame('ready', $candidate['lines'][0]['status']);
+        self::assertSame($customerId, (int)$candidate['lines'][0]['customer']['selected']['id']);
+        self::assertSame($goodsId, (int)$candidate['lines'][0]['goods']['selected']['id']);
+        self::assertSame('桂鱼', $candidate['lines'][0]['goods']['selected']['name']);
+        self::assertSame('鳜鱼', $candidate['lines'][0]['goods_needle']);
+        self::assertSame('15.00', $candidate['lines'][0]['quantity']['value']);
+        self::assertSame('条', $candidate['lines'][0]['quantity']['unit']);
     }
 
     private function ensureGoodsAliasTable(): void

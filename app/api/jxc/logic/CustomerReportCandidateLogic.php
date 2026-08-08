@@ -15,15 +15,19 @@ class CustomerReportCandidateLogic extends BaseLogic
 {
     private const LIMIT = 20;
 
-    /** @return array{lines:array<int,array<string,mixed>>} */
+    /** @return array{header:?array<string,mixed>,lines:array<int,array<string,mixed>>} */
     public static function recognize(string $text): array
     {
         $sourceLines = self::sourceLines($text);
-        $headerCustomer = self::firstLineCustomer($sourceLines);
-        if ($headerCustomer !== null) {
+        $header = self::firstLineHeader($sourceLines);
+        $headerCustomer = $header['customer']['selected'] ?? null;
+        if ($header !== null) {
             array_shift($sourceLines);
         }
-        return ['lines' => array_map(static fn(string $line, int $index): array => self::line($line, $index, $headerCustomer), $sourceLines, array_keys($sourceLines))];
+        return [
+            'header' => $header,
+            'lines' => array_map(static fn(string $line, int $index): array => self::line($line, $index, $headerCustomer), $sourceLines, array_keys($sourceLines)),
+        ];
     }
 
     /** @return array{goods_id:int,goods:array<string,mixed>}|false */
@@ -128,10 +132,8 @@ class CustomerReportCandidateLogic extends BaseLogic
         return trim((string)$match[1]);
     }
 
-    /** @param array<int,string> $sourceLines
-     * @return ?array<string,mixed>
-     */
-    private static function firstLineCustomer(array $sourceLines): ?array
+    /** @param array<int,string> $sourceLines @return ?array<string,mixed> */
+    private static function firstLineHeader(array $sourceLines): ?array
     {
         if (count($sourceLines) < 2) {
             return null;
@@ -140,12 +142,25 @@ class CustomerReportCandidateLogic extends BaseLogic
         if ($source === '' || (self::quantity($source)['status'] ?? '') !== 'missing') {
             return null;
         }
-        $customers = self::customerCandidatesForNeedle($source);
-        $selected = $customers['selected'] ?? null;
-        if ($selected === null || mb_strtolower((string)($selected['name'] ?? '')) !== mb_strtolower($source)) {
+
+        $hasQuantityLine = false;
+        foreach (array_slice($sourceLines, 1) as $line) {
+            if ((self::quantity($line)['status'] ?? '') !== 'missing') {
+                $hasQuantityLine = true;
+                break;
+            }
+        }
+        if (!$hasQuantityLine || (self::goodsCandidates($source)['status'] ?? '') !== 'none') {
             return null;
         }
-        return $selected;
+
+        $customers = self::customerCandidatesForNeedle($source);
+        $status = (string)($customers['status'] ?? 'none');
+        return [
+            'type' => 'customer_header', 'index' => 0, 'source_text' => $source,
+            'status' => $status, 'customer' => $customers,
+            'handling' => $status === 'unique' ? 'applied_to_lines' : 'needs_customer_confirmation',
+        ];
     }
 
     /** @return array{status:string,value:?string,unit:?string} */
@@ -262,6 +277,7 @@ class CustomerReportCandidateLogic extends BaseLogic
         $text = preg_replace('/(?:客户|客戶|给|給)\s*[:：]?\s*[^\s，,、；;]+/u', '', $text) ?? $text;
         $text = preg_replace('/(?:每\s*)?(?:约|約)?\s*\d+(?:\.\d{1,2})?\s*(?:公斤|千克|kg|斤|两|条|个|只|盒|件|头)/iu', '', $text) ?? $text;
         $text = str_replace(['去鳞','开背','切段','切片','去内脏','约','約','左右'], '', $text);
+        $text = preg_replace('/(?:活的|鲜活|活鲜)\s*$/u', '', $text) ?? $text;
         return trim(preg_replace('/[^\p{Han}A-Za-z0-9_-]+/u', '', $text) ?? '');
     }
     /** @param array<string,mixed> $row @return array<string,mixed> */
