@@ -22,6 +22,8 @@ final class GoodsAliasRecognitionTest extends TestCase
         $this->ensureGoodsAliasTable();
         $this->cleanCustomerReportData();
         Db::name('goods_alias')->where('tenant_id', self::TENANT_ID)->delete();
+        $this->createCustomerReportUnit('斤');
+        $this->createCustomerReportUnit('条');
     }
 
     protected function tearDown(): void
@@ -48,10 +50,12 @@ final class GoodsAliasRecognitionTest extends TestCase
 
         $candidate = CustomerReportCandidateLogic::recognize('客户甲 桂花鱼 2斤');
 
-        self::assertSame('ready', $candidate['lines'][0]['status']);
+        self::assertSame('needs_confirmation', $candidate['lines'][0]['status']);
         self::assertSame($customerId, (int)$candidate['lines'][0]['customer']['selected']['id']);
         self::assertSame($goodsId, (int)$candidate['lines'][0]['goods']['selected']['id']);
         self::assertSame('桂鱼', $candidate['lines'][0]['goods']['selected']['name']);
+        self::assertSame('missing', $candidate['lines'][0]['quantity']['status']);
+        self::assertSame('2斤', $candidate['lines'][0]['line_remark']);
     }
 
     public function test_customer_report_splits_enumerated_items_and_keeps_the_customer_context(): void
@@ -72,11 +76,12 @@ final class GoodsAliasRecognitionTest extends TestCase
         $candidate = CustomerReportCandidateLogic::recognize('客户甲报货 桂花鱼 10斤、桂花 20斤、花鱼 200斤');
 
         self::assertCount(3, $candidate['lines']);
-        self::assertSame('ready', $candidate['lines'][0]['status']);
-        self::assertSame('needs_confirmation', $candidate['lines'][1]['status']);
-        self::assertSame('ambiguous', $candidate['lines'][1]['goods']['status']);
-        self::assertSame('needs_confirmation', $candidate['lines'][2]['status']);
-        self::assertSame('ambiguous', $candidate['lines'][2]['goods']['status']);
+        self::assertSame('needs_confirmation', $candidate['lines'][0]['status']);
+        self::assertSame('no_goods_candidate', $candidate['lines'][1]['status']);
+        self::assertSame('none', $candidate['lines'][1]['goods']['status']);
+        self::assertSame('桂花', $candidate['lines'][1]['suggested_goods_name']);
+        self::assertSame('no_goods_candidate', $candidate['lines'][2]['status']);
+        self::assertSame('none', $candidate['lines'][2]['goods']['status']);
         self::assertNull($candidate['lines'][2]['goods']['selected']);
         self::assertSame('客户甲报货 桂花 20斤', $candidate['lines'][1]['source_text']);
     }
@@ -105,13 +110,15 @@ final class GoodsAliasRecognitionTest extends TestCase
         self::assertSame('applied_to_lines', $candidate['header']['handling']);
         self::assertCount(1, $candidate['lines']);
         self::assertSame('鳜鱼15条活的', $candidate['lines'][0]['source_text']);
-        self::assertSame('ready', $candidate['lines'][0]['status']);
+        self::assertSame('needs_confirmation', $candidate['lines'][0]['status']);
         self::assertSame($customerId, (int)$candidate['lines'][0]['customer']['selected']['id']);
         self::assertSame($goodsId, (int)$candidate['lines'][0]['goods']['selected']['id']);
         self::assertSame('桂鱼', $candidate['lines'][0]['goods']['selected']['name']);
         self::assertSame('鳜鱼', $candidate['lines'][0]['goods_needle']);
-        self::assertSame('15.00', $candidate['lines'][0]['quantity']['value']);
-        self::assertSame('条', $candidate['lines'][0]['quantity']['unit']);
+        self::assertSame('missing', $candidate['lines'][0]['quantity']['status']);
+        self::assertNull($candidate['lines'][0]['quantity']['value']);
+        self::assertNull($candidate['lines'][0]['quantity']['unit']);
+        self::assertSame('15条活的', $candidate['lines'][0]['line_remark']);
     }
 
     private function ensureGoodsAliasTable(): void

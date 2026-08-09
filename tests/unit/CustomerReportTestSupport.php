@@ -39,6 +39,20 @@ CREATE TABLE IF NOT EXISTS `la_goods` (
   `is_disabled` tinyint unsigned NOT NULL DEFAULT 0, `create_time` int unsigned NOT NULL DEFAULT 0,
   `update_time` int unsigned NOT NULL DEFAULT 0, PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE IF NOT EXISTS `la_goods_unit` (
+  `id` int unsigned NOT NULL AUTO_INCREMENT, `tenant_id` int unsigned NOT NULL DEFAULT 0,
+  `name` varchar(50) NOT NULL DEFAULT '', `status` tinyint NOT NULL DEFAULT 1,
+  `sort` int NOT NULL DEFAULT 0, `create_time` int unsigned NOT NULL DEFAULT 0,
+  `update_time` int unsigned NOT NULL DEFAULT 0, PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE IF NOT EXISTS `la_goods_alias` (
+  `id` int unsigned NOT NULL AUTO_INCREMENT, `tenant_id` int unsigned NOT NULL DEFAULT 0,
+  `goods_id` int unsigned NOT NULL DEFAULT 0, `cloud_goods_id` int unsigned NOT NULL DEFAULT 0,
+  `alias` varchar(200) NOT NULL DEFAULT '', `normalized_alias` varchar(200) NOT NULL DEFAULT '',
+  `source` varchar(20) NOT NULL DEFAULT 'tenant', `create_time` int unsigned NOT NULL DEFAULT 0,
+  `update_time` int unsigned NOT NULL DEFAULT 0, PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_customer_report_normalized_alias` (`tenant_id`,`normalized_alias`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE TABLE IF NOT EXISTS `la_goods_units_binding` (
   `id` int unsigned NOT NULL AUTO_INCREMENT, `tenant_id` int unsigned NOT NULL DEFAULT 0,
   `goods_id` int unsigned NOT NULL DEFAULT 0, `unit_id` int unsigned NOT NULL DEFAULT 0,
@@ -178,7 +192,7 @@ SQL;
 
     protected function cleanCustomerReportData(): void
     {
-        foreach (['audit_log', 'receivable_flow', 'stock_flow', 'order_goods', 'sales_order', 'customer_report_reservation', 'customer_report_item', 'customer_report', 'customer_goods_report_preference', 'warehouse_goods_balance', 'goods_sku_spec_value', 'goods_spec_value', 'goods_sku', 'goods_spec', 'goods_spec_template', 'goods_units_binding', 'warehouse', 'goods', 'customer'] as $table) {
+        foreach (['audit_log', 'receivable_flow', 'stock_flow', 'order_goods', 'sales_order', 'customer_report_reservation', 'customer_report_item', 'customer_report', 'customer_goods_report_preference', 'warehouse_goods_balance', 'goods_sku_spec_value', 'goods_spec_value', 'goods_sku', 'goods_spec', 'goods_spec_template', 'goods_alias', 'goods_units_binding', 'goods_unit', 'warehouse', 'goods', 'customer'] as $table) {
             try {
                 Db::name($table)->where('tenant_id', self::TENANT_ID)->delete();
             } catch (\Throwable) {
@@ -216,6 +230,23 @@ SQL;
         foreach (array_filter(array_map('trim', explode(';', $sql))) as $statement) {
             Db::execute($statement);
         }
+    }
+
+    protected function createCustomerReportUnit(string $name, int $status = 1): int
+    {
+        return (int)Db::name('goods_unit')->insertGetId([
+            'tenant_id' => self::TENANT_ID, 'name' => $name, 'status' => $status, 'sort' => 0,
+            'create_time' => time(), 'update_time' => time(),
+        ]);
+    }
+
+    protected function createCustomerReportAlias(int $goodsId, string $alias): int
+    {
+        return (int)Db::name('goods_alias')->insertGetId([
+            'tenant_id' => self::TENANT_ID, 'goods_id' => $goodsId, 'cloud_goods_id' => 0,
+            'alias' => $alias, 'normalized_alias' => mb_strtolower(preg_replace('/\s+/u', '', $alias) ?? ''),
+            'source' => 'tenant', 'create_time' => time(), 'update_time' => time(),
+        ]);
     }
 
     protected function prepareMigration(string $sql): string

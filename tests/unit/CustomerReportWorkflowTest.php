@@ -23,6 +23,9 @@ final class CustomerReportWorkflowTest extends TestCase
         $this->prepareCustomerReportRequestContext();
         $this->ensureCustomerReportTables();
         $this->cleanCustomerReportData();
+        $this->createCustomerReportUnit('斤');
+        $this->createCustomerReportUnit('条');
+        $this->createCustomerReportUnit('件');
     }
 
     protected function tearDown(): void
@@ -67,15 +70,121 @@ final class CustomerReportWorkflowTest extends TestCase
         $goodsId = $this->createCustomerReportGoods('桂鱼', 'CR-CANDIDATE');
         $candidate = CustomerReportCandidateLogic::recognize('客户甲门店 桂鱼 2斤 8头 去鳞');
 
-        self::assertSame('ready', $candidate['lines'][0]['status']);
+        self::assertSame('needs_confirmation', $candidate['lines'][0]['status']);
         self::assertSame($childId, (int)$candidate['lines'][0]['customer']['selected']['id']);
         self::assertSame($customerId, (int)$candidate['lines'][0]['customer']['selected']['main_customer']['id']);
         self::assertSame('客户甲', $candidate['lines'][0]['customer']['selected']['main_customer']['name']);
         self::assertSame($childId, (int)$candidate['lines'][0]['customer']['selected']['delivery_customer']['id']);
         self::assertSame($goodsId, (int)$candidate['lines'][0]['goods']['selected']['id']);
-        self::assertSame('8头', $candidate['lines'][0]['attributes']['specification']);
+        self::assertNull($candidate['lines'][0]['attributes']['specification']);
+        self::assertSame([], $candidate['lines'][0]['attributes']['processing']);
+        self::assertSame('missing', $candidate['lines'][0]['quantity']['status']);
+        self::assertSame('2斤 8头 去鳞', $candidate['lines'][0]['line_remark']);
         self::assertSame(0, Db::name('customer_report')->where('tenant_id', self::TENANT_ID)->count());
         self::assertSame(0, Db::name('customer_report_reservation')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
+    public function test_recognition_uniquely_matches_canonical_name_and_alias_and_preserves_the_remainder(): void
+    {
+        $customerId = $this->createCustomer('客户甲');
+        $goodsId = $this->createCustomerReportGoods('桂鱼', 'CR-RECOGNITION');
+        $this->createCustomerReportAlias($goodsId, '鳜鱼');
+
+        foreach (['桂鱼', '鳜鱼'] as $recognizedName) {
+            $candidate = CustomerReportCandidateLogic::recognize(
+                '客户甲 ' . $recognizedName . '15斤一条打氧'
+            );
+            $line = $candidate['lines'][0];
+
+            self::assertSame('unique', $line['goods']['status']);
+            self::assertSame($goodsId, (int)$line['goods']['selected']['id']);
+            self::assertSame('桂鱼', $line['goods']['selected']['name']);
+            self::assertSame($recognizedName, $line['goods']['selected']['matched_name']);
+            self::assertSame('15斤一条打氧', $line['line_remark']);
+            self::assertSame('missing', $line['quantity']['status']);
+            self::assertSame('needs_confirmation', $line['status']);
+        }
+        self::assertSame($customerId, (int)$candidate['lines'][0]['customer']['selected']['id']);
+
+        $unicodeWhitespace = CustomerReportCandidateLogic::recognize('客户甲 鳜　鱼打氧')['lines'][0];
+        self::assertSame('unique', $unicodeWhitespace['goods']['status']);
+        self::assertSame($goodsId, (int)$unicodeWhitespace['goods']['selected']['id']);
+        self::assertSame('打氧', $unicodeWhitespace['line_remark']);
+    }
+
+    public function test_recognition_keeps_conflicting_name_and_alias_matches_ambiguous(): void
+    {
+        $canonicalGoodsId = $this->createCustomerReportGoods('桂鱼', 'CR-CANONICAL-MATCH');
+        $aliasGoodsId = $this->createCustomerReportGoods('鳜鱼', 'CR-ALIAS-MATCH');
+        $this->createCustomerReportAlias($aliasGoodsId, '桂鱼');
+
+        $line = CustomerReportCandidateLogic::recognize('桂鱼15斤')['lines'][0];
+
+        self::assertSame('ambiguous', $line['goods']['status']);
+        self::assertNull($line['goods']['selected']);
+        self::assertEqualsCanonicalizing(
+            [$canonicalGoodsId, $aliasGoodsId],
+            array_map(static fn(array $goods): int => (int)$goods['id'], $line['goods']['candidates'])
+        );
+        self::assertSame('needs_confirmation', $line['status']);
+        self::assertFalse($line['can_submit']);
+
+        $withoutQuantityBoundary = CustomerReportCandidateLogic::recognize('桂鱼打氧')['lines'][0];
+        self::assertSame('ambiguous', $withoutQuantityBoundary['goods']['status']);
+        self::assertSame('打氧', $withoutQuantityBoundary['line_remark']);
+    }
+
+    public function test_recognition_suggests_a_name_only_before_a_number_and_active_tenant_unit(): void
+    {
+        $this->createCustomerReportUnit('箱');
+        $this->createCustomerReportUnit('袋', 0);
+        $fuzzyGoodsId = $this->createCustomerReportGoods('石斑鱼干', 'CR-FUZZY-CANDIDATE');
+        $singleCharacterFuzzyGoodsId = $this->createCustomerReportGoods('草鱼', 'CR-SINGLE-FUZZY');
+
+        $activeUnit = CustomerReportCandidateLogic::recognize('石斑鱼12箱加冰')['lines'][0];
+        self::assertSame('none', $activeUnit['goods']['status']);
+        self::assertContains(
+            $fuzzyGoodsId,
+            array_map(static fn(array $goods): int => (int)$goods['id'], $activeUnit['goods']['candidates'])
+        );
+        self::assertSame('石斑鱼', $activeUnit['suggested_goods_name']);
+        self::assertSame('12箱加冰', $activeUnit['line_remark']);
+
+        $singleCharacter = CustomerReportCandidateLogic::recognize('鱼12箱')['lines'][0];
+        self::assertSame('none', $singleCharacter['goods']['status']);
+        self::assertContains(
+            $singleCharacterFuzzyGoodsId,
+            array_map(static fn(array $goods): int => (int)$goods['id'], $singleCharacter['goods']['candidates'])
+        );
+        self::assertSame('鱼', $singleCharacter['suggested_goods_name']);
+
+        $disabledUnit = CustomerReportCandidateLogic::recognize('青斑12袋加冰')['lines'][0];
+        self::assertSame('none', $disabledUnit['goods']['status']);
+        self::assertNull($disabledUnit['suggested_goods_name']);
+        self::assertSame('', $disabledUnit['line_remark']);
+    }
+
+    public function test_recognition_limits_the_number_of_lines_processed_per_request(): void
+    {
+        $this->createCustomerReportGoods('桂鱼', 'CR-LINE-LIMIT');
+
+        $candidate = CustomerReportCandidateLogic::recognize(
+            implode("\n", array_fill(0, 101, '桂鱼'))
+        );
+
+        self::assertCount(100, $candidate['lines']);
+        self::assertSame(101, $candidate['total_lines']);
+        self::assertSame(100, $candidate['processed_lines']);
+        self::assertSame(100, $candidate['line_limit']);
+        self::assertTrue($candidate['truncated']);
+
+        $withHeader = CustomerReportCandidateLogic::recognize(
+            "大学\n" . implode("\n", array_fill(0, 101, '桂鱼20斤'))
+        );
+        self::assertNotNull($withHeader['header']);
+        self::assertCount(100, $withHeader['lines']);
+        self::assertSame(101, $withHeader['total_lines']);
+        self::assertTrue($withHeader['truncated']);
     }
 
     public function test_candidate_uses_an_exact_first_line_customer_as_the_report_header(): void
@@ -87,11 +196,13 @@ final class CustomerReportWorkflowTest extends TestCase
 
         self::assertCount(1, $candidate['lines']);
         self::assertSame('桂鱼20斤2斤1条', $candidate['lines'][0]['source_text']);
-        self::assertSame('ready', $candidate['lines'][0]['status']);
+        self::assertSame('needs_confirmation', $candidate['lines'][0]['status']);
         self::assertSame($customerId, (int)$candidate['lines'][0]['customer']['selected']['id']);
         self::assertSame($goodsId, (int)$candidate['lines'][0]['goods']['selected']['id']);
-        self::assertSame('20.00', $candidate['lines'][0]['quantity']['value']);
-        self::assertSame('斤', $candidate['lines'][0]['quantity']['unit']);
+        self::assertSame('missing', $candidate['lines'][0]['quantity']['status']);
+        self::assertNull($candidate['lines'][0]['quantity']['value']);
+        self::assertNull($candidate['lines'][0]['quantity']['unit']);
+        self::assertSame('20斤2斤1条', $candidate['lines'][0]['line_remark']);
     }
 
     public function test_candidate_keeps_an_unmatched_leading_label_as_a_pending_customer_header_instead_of_a_goods_line(): void
@@ -123,7 +234,7 @@ final class CustomerReportWorkflowTest extends TestCase
         self::assertSame($customerId, (int)$candidate['header']['customer']['selected']['id']);
         self::assertSame('applied_to_lines', $candidate['header']['handling']);
         self::assertCount(1, $candidate['lines']);
-        self::assertSame('ready', $candidate['lines'][0]['status']);
+        self::assertSame('needs_confirmation', $candidate['lines'][0]['status']);
         self::assertSame($customerId, (int)$candidate['lines'][0]['customer']['selected']['id']);
         self::assertSame($goodsId, (int)$candidate['lines'][0]['goods']['selected']['id']);
     }

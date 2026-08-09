@@ -14,19 +14,31 @@ use think\facade\Db;
 class CustomerReportCandidateLogic extends BaseLogic
 {
     private const LIMIT = 20;
+    private const LINE_LIMIT = 100;
 
     /** @return array{header:?array<string,mixed>,lines:array<int,array<string,mixed>>} */
     public static function recognize(string $text): array
     {
         $sourceLines = self::sourceLines($text);
-        $header = self::firstLineHeader($sourceLines);
+        $context = self::recognitionContext();
+        $header = self::firstLineHeader($sourceLines, $context);
         $headerCustomer = $header['customer']['selected'] ?? null;
         if ($header !== null) {
             array_shift($sourceLines);
         }
+        $totalLines = count($sourceLines);
+        $sourceLines = array_slice($sourceLines, 0, self::LINE_LIMIT);
         return [
             'header' => $header,
-            'lines' => array_map(static fn(string $line, int $index): array => self::line($line, $index, $headerCustomer), $sourceLines, array_keys($sourceLines)),
+            'lines' => array_map(
+                static fn(string $line, int $index): array => self::line($line, $index, $headerCustomer, $context),
+                $sourceLines,
+                array_keys($sourceLines)
+            ),
+            'total_lines' => $totalLines,
+            'processed_lines' => count($sourceLines),
+            'line_limit' => self::LINE_LIMIT,
+            'truncated' => $totalLines > self::LINE_LIMIT,
         ];
     }
 
@@ -72,28 +84,38 @@ class CustomerReportCandidateLogic extends BaseLogic
     }
 
     /** @return array<string,mixed> */
-    private static function line(string $source, int $index, ?array $headerCustomer = null): array
+    private static function line(string $source, int $index, ?array $headerCustomer, array $context): array
     {
-        $quantity = self::quantity($source);
-        $goods = self::goodsCandidates($source);
+        $boundary = self::recognitionBoundary($source, $context['unit_pattern']);
+        $quantity = ['status' => 'missing', 'value' => null, 'unit' => null];
+        $goods = self::goodsCandidates($source, $boundary, $context);
         $customers = self::customerCandidates($source, $goods['candidates']);
         if (($customers['status'] ?? '') === 'missing' && $headerCustomer !== null) {
             $customers = ['status' => 'unique', 'selected' => $headerCustomer, 'candidates' => [$headerCustomer]];
         }
-        $attributes = self::attributes($source);
         $selectedGoods = $goods['selected'];
         $preference = $selectedGoods && $customers['selected']
             ? CustomerReportPreferenceService::suggestion((int)$customers['selected']['id'], (int)$selectedGoods['id']) : [];
+        $matchedName = trim((string)(
+            $selectedGoods['matched_name']
+            ?? self::commonMatchedName($goods['candidates'])
+        ));
+        $suggestedGoodsName = ($goods['status'] ?? '') === 'none'
+            ? $boundary['suggested_name']
+            : null;
+        $lineRemark = self::recognizedRemark($source, $matchedName, $boundary);
         $missing = [];
         foreach (['customer' => $customers, 'goods' => $goods, 'quantity' => $quantity] as $name => $value) {
             if (($value['status'] ?? '') !== 'unique') { $missing[] = $name; }
         }
         return [
             'index' => $index, 'source_text' => $source,
-            'goods_needle' => self::goodsNeedle($source),
+            'goods_needle' => $matchedName !== '' ? $matchedName : (string)($boundary['suggested_name'] ?? ''),
+            'suggested_goods_name' => $suggestedGoodsName,
+            'line_remark' => $lineRemark,
             'status' => $missing === [] ? 'ready' : (($goods['status'] ?? '') === 'none' ? 'no_goods_candidate' : 'needs_confirmation'),
             'customer' => $customers, 'goods' => $goods, 'quantity' => $quantity,
-            'attributes' => $attributes, 'preference' => $preference,
+            'attributes' => ['specification' => null, 'processing' => []], 'preference' => $preference,
             'missing_fields' => $missing, 'can_submit' => $missing === [],
             'quick_create_allowed' => self::canManageGoods(),
         ];
@@ -133,24 +155,27 @@ class CustomerReportCandidateLogic extends BaseLogic
     }
 
     /** @param array<int,string> $sourceLines @return ?array<string,mixed> */
-    private static function firstLineHeader(array $sourceLines): ?array
+    private static function firstLineHeader(array $sourceLines, array $context): ?array
     {
         if (count($sourceLines) < 2) {
             return null;
         }
         $source = trim((string)$sourceLines[0]);
-        if ($source === '' || (self::quantity($source)['status'] ?? '') !== 'missing') {
+        if ($source === '' || self::hasQuantityBoundary($source, $context['unit_pattern'])) {
             return null;
         }
 
         $hasQuantityLine = false;
         foreach (array_slice($sourceLines, 1) as $line) {
-            if ((self::quantity($line)['status'] ?? '') !== 'missing') {
+            if (self::hasQuantityBoundary($line, $context['unit_pattern'])) {
                 $hasQuantityLine = true;
                 break;
             }
         }
-        if (!$hasQuantityLine || (self::goodsCandidates($source)['status'] ?? '') !== 'none') {
+        $boundary = self::recognitionBoundary($source, $context['unit_pattern']);
+        if (!$hasQuantityLine
+            || (self::goodsCandidates($source, $boundary, $context)['status'] ?? '') !== 'none'
+        ) {
             return null;
         }
 
@@ -163,54 +188,58 @@ class CustomerReportCandidateLogic extends BaseLogic
         ];
     }
 
-    /** @return array{status:string,value:?string,unit:?string} */
-    private static function quantity(string $text): array
-    {
-        if (!preg_match('/(?<![\d.])(\d+(?:\.\d{1,2})?)\s*(公斤|千克|kg|斤|两|条|个|只|盒|件)/iu', $text, $m)) {
-            return ['status' => 'missing', 'value' => null, 'unit' => null];
-        }
-        $unit = self::unit((string)$m[2]);
-        if (bccomp(bcadd((string)$m[1], '0', 2), '0.00', 2) <= 0 || (in_array($unit, ['条','个','只','盒','件'], true) && str_contains((string)$m[1], '.'))) {
-            return ['status' => 'invalid', 'value' => null, 'unit' => $unit];
-        }
-        return ['status' => 'unique', 'value' => bcadd((string)$m[1], '0', 2), 'unit' => $unit];
-    }
-
     /** @return array{status:string,selected:?array<string,mixed>,candidates:array<int,array<string,mixed>>} */
-    private static function goodsCandidates(string $text): array
+    private static function goodsCandidates(string $text, array $boundary, array $context): array
     {
-        $needle = self::goodsNeedle($text);
-        if (self::tenantId() <= 0 || $needle === '') { return ['status' => 'none', 'selected' => null, 'candidates' => []]; }
+        $needle = (string)($boundary['suggested_name'] ?? self::goodsSourceText($text));
         $normalizedNeedle = GoodsAliasService::normalize($needle);
-        $rows = Db::name('goods')->alias('goods')
-            ->leftJoin('goods_alias alias', 'alias.tenant_id = goods.tenant_id AND alias.goods_id = goods.id')
-            ->where('goods.tenant_id', self::tenantId())->where('goods.is_disabled', 0)
-            ->where(function ($query) use ($needle, $normalizedNeedle) {
-                $query->whereLike('goods.name', '%' . $needle . '%')
-                    ->whereOr('goods.product_code', 'like', '%' . $needle . '%')
-                    ->whereOr('alias.alias', 'like', '%' . $needle . '%')
-                    ->whereOr('alias.normalized_alias', $normalizedNeedle);
-            })
-            ->field(['goods.id','goods.name','goods.product_code','goods.unit_id','goods.units','goods.category_id'])
-            ->group('goods.id')->order('goods.id asc')->limit(self::LIMIT)->select()->toArray();
-        $candidates = array_map(static fn(array $row): array => self::goods($row), $rows);
-        $exactIds = Db::name('goods_alias')->where('tenant_id', self::tenantId())->where('normalized_alias', $normalizedNeedle)->column('goods_id');
-        $exact = array_values(array_filter($candidates, static fn(array $one): bool => GoodsAliasService::normalize((string)$one['name']) === $normalizedNeedle
-            || GoodsAliasService::normalize((string)$one['product_code']) === $normalizedNeedle
-            || in_array((int)$one['id'], array_map('intval', $exactIds), true)));
-        // 别名识别只允许规范化后的完整匹配；模糊候选只用于校对页人工确认，绝不自动回填。
-        $selected = count($exact) === 1 ? $exact[0] : null;
-        if ($selected !== null) {
-            foreach ($candidates as &$candidate) {
-                if ((int)$candidate['id'] === (int)$selected['id']) {
-                    $candidate['matched_name'] = $needle;
-                    $selected = $candidate;
-                    break;
+        $exactBoundary = $boundary['suggested_name'] !== null;
+        if ($normalizedNeedle === '') {
+            return ['status' => 'none', 'selected' => null, 'candidates' => []];
+        }
+
+        $matchingTokens = $exactBoundary
+            ? [$normalizedNeedle]
+            : self::normalizedPrefixes($normalizedNeedle, $context['max_token_length']);
+        $matchedNames = [];
+        foreach ($matchingTokens as $normalizedToken) {
+            foreach ($context['token_index'][$normalizedToken] ?? [] as $goodsId => $displayName) {
+                if (!isset($matchedNames[$goodsId])
+                    || mb_strlen($displayName) > mb_strlen($matchedNames[$goodsId])
+                ) {
+                    $matchedNames[$goodsId] = $displayName;
                 }
             }
-            unset($candidate);
         }
-        return ['status' => $selected ? 'unique' : ($candidates === [] ? 'none' : 'ambiguous'), 'selected' => $selected, 'candidates' => $candidates];
+        ksort($matchedNames, SORT_NUMERIC);
+
+        $candidates = [];
+        foreach ($matchedNames as $goodsId => $matchedName) {
+            $candidate = $context['goods_catalog'][$goodsId]['goods'];
+            $candidate['matched_name'] = $matchedName;
+            $candidates[] = $candidate;
+            if (count($candidates) >= self::LIMIT) {
+                break;
+            }
+        }
+
+        if ($candidates !== []) {
+            $selected = count($candidates) === 1 ? $candidates[0] : null;
+            return [
+                'status' => $selected !== null ? 'unique' : 'ambiguous',
+                'selected' => $selected,
+                'candidates' => $candidates,
+            ];
+        }
+
+        return [
+            'status' => 'none',
+            'selected' => null,
+            'candidates' => self::fuzzyGoodsCandidates(
+                (string)($boundary['suggested_name'] ?? ''),
+                $context
+            ),
+        ];
     }
 
     /** @param array<int,array<string,mixed>> $goods
@@ -264,25 +293,263 @@ class CustomerReportCandidateLogic extends BaseLogic
         return ['status' => $selected ? 'unique' : ($candidates === [] ? 'none' : 'ambiguous'), 'selected' => $selected, 'candidates' => $candidates];
     }
 
-    /** @return array<string,mixed> */
-    private static function attributes(string $text): array
+    /** @return array<int,array<string,mixed>> */
+    private static function fuzzyGoodsCandidates(string $needle, array $context): array
     {
-        preg_match('/(?<!\d)(\d+\s*头)/u', $text, $head);
-        $processing = array_values(array_filter(['去鳞','开背','切段','切片','去内脏'], static fn(string $word): bool => mb_strpos($text, $word) !== false));
-        return ['specification' => isset($head[1]) ? preg_replace('/\s+/u', '', $head[1]) : null, 'processing' => $processing];
+        $normalizedNeedle = GoodsAliasService::normalize($needle);
+        $needleCharacters = preg_split('//u', $normalizedNeedle, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+        if ($needleCharacters === []) {
+            return [];
+        }
+
+        $firstGram = count($needleCharacters) === 1
+            ? $needleCharacters[0]
+            : $needleCharacters[0] . $needleCharacters[1];
+        $goodsIds = [];
+        foreach (array_keys($context['fuzzy_index'][$firstGram] ?? []) as $normalizedToken) {
+            if (!str_contains($normalizedToken, $normalizedNeedle)) {
+                continue;
+            }
+            foreach ($context['token_index'][$normalizedToken] ?? [] as $goodsId => $_displayName) {
+                $goodsIds[(int)$goodsId] = true;
+                if (count($goodsIds) >= self::LIMIT) {
+                    break 2;
+                }
+            }
+        }
+        ksort($goodsIds, SORT_NUMERIC);
+
+        $candidates = [];
+        foreach (array_keys($goodsIds) as $goodsId) {
+            $candidates[] = $context['goods_catalog'][$goodsId]['goods'];
+            if (count($candidates) >= self::LIMIT) {
+                break;
+            }
+        }
+        return $candidates;
     }
 
-    private static function goodsNeedle(string $text): string
+    /** @return array{suggested_name:?string,remark:string} */
+    private static function recognitionBoundary(string $text, ?string $unitPattern): array
     {
-        $text = preg_replace('/(?:客户|客戶|给|給)\s*[:：]?\s*[^\s，,、；;]+/u', '', $text) ?? $text;
-        $text = preg_replace('/(?:每\s*)?(?:约|約)?\s*\d+(?:\.\d{1,2})?\s*(?:公斤|千克|kg|斤|两|条|个|只|盒|件|头)/iu', '', $text) ?? $text;
-        $text = str_replace(['去鳞','开背','切段','切片','去内脏','约','約','左右'], '', $text);
-        $text = preg_replace('/(?:活的|鲜活|活鲜)\s*$/u', '', $text) ?? $text;
-        return trim(preg_replace('/[^\p{Han}A-Za-z0-9_-]+/u', '', $text) ?? '');
+        $goodsText = self::goodsSourceText($text);
+        if ($goodsText === '' || $unitPattern === null
+            || !preg_match('/(?<![\d.])\d+(?:\.\d{1,2})?\s*(?:' . $unitPattern . ')/iu', $goodsText, $match, PREG_OFFSET_CAPTURE)
+        ) {
+            return ['suggested_name' => null, 'remark' => ''];
+        }
+        $offset = (int)$match[0][1];
+        $suggestedName = trim(substr($goodsText, 0, $offset), " \t\n\r\0\x0B，,、；;：:");
+        if ($suggestedName === '') {
+            return ['suggested_name' => null, 'remark' => ''];
+        }
+        return [
+            'suggested_name' => $suggestedName,
+            'remark' => trim(substr($goodsText, $offset), " \t\n\r\0\x0B，,、；;：:"),
+        ];
+    }
+
+    private static function goodsSourceText(string $text): string
+    {
+        $withoutCustomer = preg_replace(
+            '/^(?:客户|客戶|给|給)\s*[:：]?\s*[^\s，,、；;]+(?:\s*(?:报货|報貨))?\s*/u',
+            '',
+            trim($text)
+        );
+        return trim((string)$withoutCustomer, " \t\n\r\0\x0B，,、；;：:");
+    }
+
+    /** @param array{suggested_name:?string,remark:string} $boundary */
+    private static function recognizedRemark(string $source, string $matchedName, array $boundary): string
+    {
+        if ($boundary['suggested_name'] !== null) {
+            return $boundary['remark'];
+        }
+        if ($matchedName === '') {
+            return '';
+        }
+        $goodsText = self::goodsSourceText($source);
+        $matchedCharacters = preg_split(
+            '//u',
+            GoodsAliasService::normalize($matchedName),
+            -1,
+            PREG_SPLIT_NO_EMPTY
+        ) ?: [];
+        if ($matchedCharacters === []) {
+            return '';
+        }
+        $pattern = '/^' . implode(
+            '\s*',
+            array_map(static fn(string $character): string => preg_quote($character, '/'), $matchedCharacters)
+        ) . '\s*/iu';
+        if (preg_match($pattern, $goodsText, $match) !== 1) {
+            return '';
+        }
+        return trim(
+            substr($goodsText, strlen((string)$match[0])),
+            " \t\n\r\0\x0B，,、；;：:"
+        );
+    }
+
+    /**
+     * @return array{
+     *   unit_pattern:?string,
+     *   goods_catalog:array<int,array{goods:array<string,mixed>,tokens:array<string,string>}>,
+     *   token_index:array<string,array<int,string>>,
+     *   fuzzy_index:array<string,array<string,true>>,
+     *   max_token_length:int
+     * }
+     */
+    private static function recognitionContext(): array
+    {
+        $tenantId = self::tenantId();
+        if ($tenantId <= 0) {
+            return [
+                'unit_pattern' => null,
+                'goods_catalog' => [],
+                'token_index' => [],
+                'fuzzy_index' => [],
+                'max_token_length' => 0,
+            ];
+        }
+
+        $unitNames = array_map(
+            'strval',
+            Db::name('goods_unit')
+                ->where('tenant_id', $tenantId)
+                ->where('status', 1)
+                ->column('name')
+        );
+        $rows = Db::name('goods')
+            ->where('tenant_id', $tenantId)
+            ->where('is_disabled', 0)
+            ->field(['id', 'name', 'product_code', 'unit_id', 'units', 'category_id'])
+            ->order('id asc')
+            ->select()
+            ->toArray();
+
+        $catalog = [];
+        foreach ($rows as $row) {
+            $goods = self::goods($row);
+            $tokens = [];
+            foreach ([(string)$goods['name'], (string)$goods['product_code']] as $displayName) {
+                $normalized = GoodsAliasService::normalize($displayName);
+                if ($normalized !== '') {
+                    $tokens[$normalized] = $displayName;
+                }
+            }
+            $catalog[(int)$goods['id']] = ['goods' => $goods, 'tokens' => $tokens];
+        }
+
+        if ($catalog !== []) {
+            $aliases = Db::name('goods_alias')
+                ->where('tenant_id', $tenantId)
+                ->whereIn('goods_id', array_keys($catalog))
+                ->field(['goods_id', 'alias'])
+                ->order('id asc')
+                ->select()
+                ->toArray();
+            foreach ($aliases as $alias) {
+                $goodsId = (int)($alias['goods_id'] ?? 0);
+                $displayName = trim((string)($alias['alias'] ?? ''));
+                $normalized = GoodsAliasService::normalize($displayName);
+                if ($normalized !== '' && isset($catalog[$goodsId])) {
+                    $catalog[$goodsId]['tokens'][$normalized] = $displayName;
+                }
+            }
+        }
+
+        $tokenIndex = [];
+        $fuzzyIndex = [];
+        $maxTokenLength = 0;
+        foreach ($catalog as $goodsId => $entry) {
+            foreach ($entry['tokens'] as $normalizedToken => $displayName) {
+                $tokenIndex[$normalizedToken][$goodsId] = $displayName;
+                $characters = preg_split('//u', $normalizedToken, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+                $maxTokenLength = max($maxTokenLength, count($characters));
+                foreach (array_unique($characters) as $character) {
+                    $fuzzyIndex[$character][$normalizedToken] = true;
+                }
+                for ($index = 0, $last = count($characters) - 1; $index < $last; $index++) {
+                    $gram = $characters[$index] . $characters[$index + 1];
+                    $fuzzyIndex[$gram][$normalizedToken] = true;
+                }
+            }
+        }
+
+        return [
+            'unit_pattern' => self::unitPattern($unitNames),
+            'goods_catalog' => $catalog,
+            'token_index' => $tokenIndex,
+            'fuzzy_index' => $fuzzyIndex,
+            'max_token_length' => $maxTokenLength,
+        ];
+    }
+
+    /** @return array<int,string> */
+    private static function normalizedPrefixes(string $normalized, int $maximumLength): array
+    {
+        $characters = preg_split('//u', $normalized, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+        $prefixes = [];
+        $prefix = '';
+        foreach (array_slice($characters, 0, $maximumLength) as $character) {
+            $prefix .= $character;
+            $prefixes[] = $prefix;
+        }
+        return $prefixes;
+    }
+
+    /** @param array<int,string> $units */
+    private static function unitPattern(array $units): ?string
+    {
+        $deduplicated = [];
+        foreach ($units as $unit) {
+            $unit = trim($unit);
+            if ($unit !== '') {
+                $deduplicated[mb_strtolower($unit)] = $unit;
+            }
+        }
+        $units = array_values($deduplicated);
+        if ($units === []) {
+            return null;
+        }
+        usort($units, static fn(string $left, string $right): int => mb_strlen($right) <=> mb_strlen($left));
+        return implode('|', array_map(static fn(string $unit): string => preg_quote($unit, '/'), $units));
+    }
+
+    private static function hasQuantityBoundary(string $text, ?string $unitPattern): bool
+    {
+        return $unitPattern !== null
+            && preg_match(
+                '/(?<![\d.])\d+(?:\.\d{1,2})?\s*(?:' . $unitPattern . ')/iu',
+                self::goodsSourceText($text)
+            ) === 1;
+    }
+
+    /** @param array<int,array<string,mixed>> $candidates */
+    private static function commonMatchedName(array $candidates): string
+    {
+        $normalizedName = null;
+        $displayName = '';
+        foreach ($candidates as $candidate) {
+            $matchedName = trim((string)($candidate['matched_name'] ?? ''));
+            $normalized = GoodsAliasService::normalize($matchedName);
+            if ($normalized === '') {
+                return '';
+            }
+            if ($normalizedName === null) {
+                $normalizedName = $normalized;
+                $displayName = $matchedName;
+                continue;
+            }
+            if ($normalized !== $normalizedName) {
+                return '';
+            }
+        }
+        return $displayName;
     }
     /** @param array<string,mixed> $row @return array<string,mixed> */
     private static function goods(array $row): array { return ['id'=>(int)($row['id']??0),'name'=>(string)($row['name']??''),'product_code'=>(string)($row['product_code']??''),'unit_id'=>(int)($row['unit_id']??0),'units'=>(string)($row['units']??''),'category_id'=>(int)($row['category_id']??0)]; }
-    private static function unit(string $name): string { return match (mb_strtolower(trim($name))) { 'kg','公斤','千克' => '公斤', default => trim($name) }; }
     private static function tenantId(): int { return (int)(request()->tenantId ?? 0); }
     private static function canManageGoods(): bool { return (int)(request()->adminId ?? 0) > 0; }
 }
