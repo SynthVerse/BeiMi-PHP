@@ -72,8 +72,11 @@ class TenantGoodscatController extends BaseAdminController
     public function delete()
     {
         $params = (new TenantGoodscatValidate())->post()->goCheck('delete');
-        TenantGoodscatLogic::delete($params);
-        return $this->success('删除成功', [], 1, 1);
+        $result = TenantGoodscatLogic::delete($params);
+        if (true === $result) {
+            return $this->success('删除成功', [], 1, 1);
+        }
+        return $this->fail(TenantGoodscatLogic::getError());
     }
 
 

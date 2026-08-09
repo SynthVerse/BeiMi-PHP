@@ -20,8 +20,8 @@ class GoodsCategoryLists extends BaseDataLists implements ListsSearchInterface
         return TenantGoodscat::where($this->searchWhere)
             ->where('tenant_id', (int)(request()->tenantId ?? 0))
             ->where('is_show', 0)
-            ->field(['id', 'name'])
-            ->order(['sort' => 'desc', 'id' => 'desc']);
+            ->field(['id', 'name', 'is_default'])
+            ->order(['is_default' => 'desc', 'sort' => 'desc', 'id' => 'desc']);
     }
 
     public function lists(): array

@@ -14,6 +14,7 @@ use think\facade\Log;
  *  - 1 条默认仓库
  *  - 1 条默认客户
  *  - 1 条默认供应商
+ *  - 1 条默认商品分类
  *  - 若干条默认计量单位
  *
  * 幂等：基于 tenant_id + 业务唯一列 查询，存在则跳过，可重复执行。
@@ -30,6 +31,9 @@ class DefaultDataInitService
 
     /** @var string 默认供应商名称 */
     public const DEFAULT_VENDOR_NAME = '默认供应商';
+
+    /** @var string 默认商品分类名称 */
+    public const DEFAULT_GOODS_CATEGORY_NAME = '默认分类';
 
     /** @var string[] 默认计量单位 */
     public const DEFAULT_GOODS_UNITS = ['个', '件', '箱', '千克', '升'];
@@ -58,6 +62,9 @@ class DefaultDataInitService
             if (self::ensureVendor($tenantId)) {
                 $created[] = 'vendor';
             }
+            if (self::ensureGoodsCategory($tenantId)) {
+                $created[] = 'goods_category';
+            }
             $addedUnits = self::ensureGoodsUnits($tenantId);
             if ($addedUnits > 0) {
                 $created[] = 'goods_unit(' . $addedUnits . ')';
@@ -73,7 +80,7 @@ class DefaultDataInitService
     }
 
     /**
-     * 判断租户是否已经完成默认数据初始化（四张表均已存在默认记录）
+     * 判断租户是否已经完成默认数据初始化（默认主数据均已存在）
      * @param int $tenantId
      * @return bool
      */
@@ -98,7 +105,15 @@ class DefaultDataInitService
             ->where('supplier_name', self::DEFAULT_VENDOR_NAME)
             ->count() > 0;
 
-        return $hasWarehouse && $hasCustomer && $hasVendor;
+        $hasGoodsCategory = Db::name('tenant_goodscat')
+            ->where('tenant_id', $tenantId)
+            ->where('name', self::DEFAULT_GOODS_CATEGORY_NAME)
+            ->where('is_default', 1)
+            ->where('is_show', 0)
+            ->whereNull('delete_time')
+            ->count() === 1;
+
+        return $hasWarehouse && $hasCustomer && $hasVendor && $hasGoodsCategory;
     }
 
     /**
@@ -200,6 +215,67 @@ class DefaultDataInitService
             'update_time'       => $time,
         ]);
         return true;
+    }
+
+    /**
+     * 写入或认定默认商品分类（若尚未存在系统默认分类）
+     * @return bool 是否实际新增或认定
+     */
+    private static function ensureGoodsCategory(int $tenantId): bool
+    {
+        $category = Db::name('tenant_goodscat')
+            ->where('tenant_id', $tenantId)
+            ->where('is_default', 1)
+            ->whereNull('delete_time')
+            ->order('id', 'asc')
+            ->lock(true)
+            ->find();
+
+        if ($category) {
+            $updates = [];
+            if ((string)$category['name'] !== self::DEFAULT_GOODS_CATEGORY_NAME) {
+                $updates['name'] = self::DEFAULT_GOODS_CATEGORY_NAME;
+            }
+            if ((int)$category['is_show'] !== 0) {
+                $updates['is_show'] = 0;
+            }
+            if ($updates !== []) {
+                $updates['update_time'] = time();
+                Db::name('tenant_goodscat')->where('id', (int)$category['id'])->update($updates);
+            }
+            return false;
+        }
+
+        $sameName = Db::name('tenant_goodscat')
+            ->where('tenant_id', $tenantId)
+            ->where('name', self::DEFAULT_GOODS_CATEGORY_NAME)
+            ->whereNull('delete_time')
+            ->order('id', 'asc')
+            ->lock(true)
+            ->find();
+
+        if ($sameName) {
+            Db::name('tenant_goodscat')
+                ->where('id', (int)$sameName['id'])
+                ->update([
+                    'is_default' => 1,
+                    'is_show' => 0,
+                    'update_time' => time(),
+                ]);
+            return true;
+        }
+
+        $time = time();
+        $inserted = Db::name('tenant_goodscat')->extra('IGNORE')->insert([
+            'tenant_id' => $tenantId,
+            'name' => self::DEFAULT_GOODS_CATEGORY_NAME,
+            'sort' => 0,
+            'is_show' => 0,
+            'is_default' => 1,
+            'create_time' => $time,
+            'update_time' => $time,
+        ]);
+        return $inserted > 0;
     }
 
     /**

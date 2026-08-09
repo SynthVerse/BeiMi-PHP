@@ -12,7 +12,7 @@ use think\facade\Db;
  * DefaultDataInitService 单元测试
  *
  * 覆盖场景：
- *  - initForTenant() 正确初始化四类默认数据
+ *  - initForTenant() 正确初始化默认主数据
  *  - 重复调用幂等不重复创建
  *  - tenant_id <= 0 时返回 false
  *  - hasInitialized() 在初始化前后的返回值
@@ -79,6 +79,22 @@ final class DefaultDataInitServiceTest extends TestCase
         self::assertCount(5, $units, '应创建5个默认计量单位');
     }
 
+    public function testInitForTenantCreatesDefaultGoodsCategory(): void
+    {
+        self::assertTrue(DefaultDataInitService::initForTenant($this->testTenantId));
+
+        $categories = Db::name('tenant_goodscat')
+            ->where('tenant_id', $this->testTenantId)
+            ->where('is_default', 1)
+            ->whereNull('delete_time')
+            ->select()
+            ->toArray();
+
+        self::assertCount(1, $categories, '每个租户应且仅应有一个默认商品分类');
+        self::assertSame(DefaultDataInitService::DEFAULT_GOODS_CATEGORY_NAME, $categories[0]['name']);
+        self::assertSame(0, (int)$categories[0]['is_show'], '默认商品分类必须保持可用');
+    }
+
     /**
      * 重复调用 initForTenant() 不重复创建
      */
@@ -92,6 +108,7 @@ final class DefaultDataInitServiceTest extends TestCase
         $customerCount1 = Db::name('customer')->where('tenant_id', $this->testTenantId)->count();
         $vendorCount1 = Db::name('vendor')->where('tenant_id', $this->testTenantId)->count();
         $unitCount1 = Db::name('goods_unit')->where('tenant_id', $this->testTenantId)->count();
+        $categoryCount1 = Db::name('tenant_goodscat')->where('tenant_id', $this->testTenantId)->count();
 
         // 第二次调用（幂等）
         $result = DefaultDataInitService::initForTenant($this->testTenantId);
@@ -102,11 +119,40 @@ final class DefaultDataInitServiceTest extends TestCase
         $customerCount2 = Db::name('customer')->where('tenant_id', $this->testTenantId)->count();
         $vendorCount2 = Db::name('vendor')->where('tenant_id', $this->testTenantId)->count();
         $unitCount2 = Db::name('goods_unit')->where('tenant_id', $this->testTenantId)->count();
+        $categoryCount2 = Db::name('tenant_goodscat')->where('tenant_id', $this->testTenantId)->count();
 
         self::assertSame($warehouseCount1, $warehouseCount2, '仓库不应重复创建');
         self::assertSame($customerCount1, $customerCount2, '客户不应重复创建');
         self::assertSame($vendorCount1, $vendorCount2, '供应商不应重复创建');
         self::assertSame($unitCount1, $unitCount2, '计量单位不应重复创建');
+        self::assertSame($categoryCount1, $categoryCount2, '默认商品分类不应重复创建');
+    }
+
+    public function testInitForTenantReusesExistingDefaultNamedCategory(): void
+    {
+        $existingId = (int)Db::name('tenant_goodscat')->insertGetId([
+            'tenant_id' => $this->testTenantId,
+            'name' => DefaultDataInitService::DEFAULT_GOODS_CATEGORY_NAME,
+            'sort' => 99,
+            'is_show' => 1,
+            'is_default' => null,
+            'create_time' => time(),
+            'update_time' => time(),
+        ]);
+
+        self::assertTrue(DefaultDataInitService::initForTenant($this->testTenantId));
+        self::assertTrue(DefaultDataInitService::initForTenant($this->testTenantId));
+
+        $categories = Db::name('tenant_goodscat')
+            ->where('tenant_id', $this->testTenantId)
+            ->where('is_default', 1)
+            ->whereNull('delete_time')
+            ->select()
+            ->toArray();
+
+        self::assertCount(1, $categories);
+        self::assertSame($existingId, (int)$categories[0]['id'], '应直接认定已有同名分类');
+        self::assertSame(0, (int)$categories[0]['is_show'], '认定后默认分类必须可用');
     }
 
     /**

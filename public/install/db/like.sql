@@ -1467,10 +1467,12 @@ CREATE TABLE `{{prefix}}tenant_goodscat`
     `name`        varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT '' COMMENT '分类名称',
     `sort`        int(11)                                                      NOT NULL DEFAULT 0 COMMENT '排序',
     `is_show`     tinyint(1)                                                   NOT NULL DEFAULT 0 COMMENT '是否隐藏：0-显示；1-隐藏',
+    `is_default`  tinyint(1) UNSIGNED                                          NULL     DEFAULT NULL COMMENT '系统默认分类：1=是，NULL=否',
     `create_time` int(10)                                                      NULL     DEFAULT NULL COMMENT '创建时间',
     `update_time` int(10)                                                      NULL     DEFAULT NULL COMMENT '更新时间',
     `delete_time` int(10)                                                      NULL     DEFAULT NULL COMMENT '删除时间',
     PRIMARY KEY (`id`) USING BTREE,
+    UNIQUE INDEX `uk_tenant_default_goodscat` (`tenant_id`, `is_default`) USING BTREE,
     INDEX `idx_tenant_show_sort` (`tenant_id`, `is_show`, `sort`, `id`) USING BTREE
 ) ENGINE = InnoDB
   CHARACTER SET = utf8mb4

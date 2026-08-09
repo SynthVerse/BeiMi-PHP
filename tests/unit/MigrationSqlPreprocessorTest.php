@@ -84,4 +84,22 @@ SQL,
             );
         }
     }
+
+    public function test_default_goods_category_schema_is_present_in_migration_and_fresh_install(): void
+    {
+        $root = dirname(__DIR__, 2);
+        $migration = (string)file_get_contents(
+            $root . '/database/migrations/20260809_000001_add_default_goods_category.sql'
+        );
+        $prepared = \BeiMi\Migration\MigrationSqlPreprocessor::prepare($migration, 'tenantx_');
+        $freshInstall = (string)file_get_contents($root . '/public/install/db/like.sql');
+
+        self::assertStringContainsString('ALTER TABLE `tenantx_tenant_goodscat`', $prepared);
+        self::assertStringContainsString('ADD UNIQUE KEY `uk_tenant_default_goodscat`', $prepared);
+        self::assertStringContainsString("SELECT tenant.id, '默认分类'", $prepared);
+        self::assertStringContainsString('information_schema.COLUMNS', $prepared);
+        self::assertStringContainsString('information_schema.STATISTICS', $prepared);
+        self::assertStringContainsString('`is_default`  tinyint(1) UNSIGNED', $freshInstall);
+        self::assertStringContainsString('`uk_tenant_default_goodscat`', $freshInstall);
+    }
 }

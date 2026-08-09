@@ -42,9 +42,9 @@ class TenantGoodscatLists extends BaseAdminDataLists implements ListsSearchInter
     public function lists(): array
     {
         return TenantGoodscat::where($this->searchWhere)
-            ->field(['id', 'name', 'sort', 'is_show'])
+            ->field(['id', 'name', 'sort', 'is_show', 'is_default'])
             ->limit($this->limitOffset, $this->limitLength)
-            ->order(['id' => 'desc'])
+            ->order(['is_default' => 'desc', 'id' => 'desc'])
             ->select()
             ->toArray();
     }

@@ -23,7 +23,7 @@ class JxcInitDefaults extends Command
     protected function configure(): void
     {
         $this->setName('jxc:init-defaults')
-            ->setDescription('Initialize JXC default data (warehouse/customer/vendor/goods_unit) for tenants')
+            ->setDescription('Initialize JXC default data (warehouse/customer/vendor/goods category/goods unit) for tenants')
             ->addOption('dry-run', null, Option::VALUE_NONE, '预演模式，仅打印操作对象，不写入数据库');
     }
 
