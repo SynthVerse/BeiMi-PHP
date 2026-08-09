@@ -18,7 +18,9 @@ class CustomerReportController extends BaseJxcController
     {
         $params = (new CustomerReportValidate())->post()->goCheck('quickCreateGoods');
         $result = CustomerReportCandidateLogic::quickCreateGoods($params);
-        return $result === false ? $this->fail(CustomerReportCandidateLogic::getError()) : $this->success('商品创建成功', $result, 1, 1);
+        return $result === false
+            ? $this->fail(CustomerReportCandidateLogic::getError(), CustomerReportCandidateLogic::getReturnData() ?: [])
+            : $this->success(($result['existing'] ?? false) ? '商品已存在' : '商品创建成功', $result, 1, 1);
     }
 
     public function submit() { return $this->respond('submit'); }

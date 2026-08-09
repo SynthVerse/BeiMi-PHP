@@ -15,6 +15,7 @@ use app\common\model\jxc\GoodsSpecValue;
 use app\common\model\jxc\OrderGoods;
 use app\common\model\jxc\Vendor;
 use app\common\service\goods\GoodsAliasService;
+use app\common\service\goods\GoodsMaintenancePermissionService;
 use think\facade\Db;
 
 class GoodsLogic extends BaseLogic
@@ -28,40 +29,74 @@ class GoodsLogic extends BaseLogic
             self::setError($e->getMessage());
             return false;
         }
-        $boundUnits = self::resolveBoundUnitsForSave($params, $saveData);
-        if ($boundUnits === false) {
-            return false;
-        }
-        self::applyBaseUnitToSaveData($saveData, $boundUnits);
         if ((int)$saveData['tenant_id'] <= 0) {
             self::setError('商品租户上下文缺失，请重新登录');
             return false;
         }
-        if (!self::assertUnique($saveData)) {
-            return false;
-        }
-        if (($aliasError = GoodsAliasService::validateTenant((int)$saveData['tenant_id'], 0, (string)$saveData['name'], $aliases)) !== null) {
-            self::setError($aliasError);
-            return false;
-        }
-        if ((int)$saveData['primary_supplier_id'] > 0 && !self::assertSupplierInTenant((int)$saveData['primary_supplier_id'])) {
+        if (!GoodsMaintenancePermissionService::canMaintain()) {
+            self::setError('当前账号没有商品维护权限');
             return false;
         }
 
         Db::startTrans();
         try {
+            $tenantId = (int)$saveData['tenant_id'];
+            $lockedTenantId = (int)Db::name('tenant')
+                ->where('id', $tenantId)
+                ->lock(true)
+                ->value('id');
+            if ($lockedTenantId !== $tenantId) {
+                Db::rollback();
+                self::setError('商品租户不存在');
+                return false;
+            }
+
+            $conflict = GoodsAliasService::resolveTenantCreateConflict(
+                $tenantId,
+                (string)$saveData['name'],
+                $aliases
+            );
+            if ($conflict['status'] === 'ambiguous') {
+                Db::rollback();
+                self::setError('商品名称或别名同时命中多个既有商品，请选择已有商品');
+                return false;
+            }
+            if ($conflict['status'] === 'unique' && $conflict['goods'] !== null) {
+                $result = self::creationResult($conflict['goods'], $aliases, true);
+                Db::commit();
+                return $result;
+            }
+
+            $boundUnits = self::resolveBoundUnitsForSave($params, $saveData);
+            if ($boundUnits === false) {
+                Db::rollback();
+                return false;
+            }
+            self::applyBaseUnitToSaveData($saveData, $boundUnits);
+            if (!self::assertMasterDataInTenant($saveData)) {
+                Db::rollback();
+                return false;
+            }
+            if (!self::assertUnique($saveData)) {
+                Db::rollback();
+                return false;
+            }
+            if ((int)$saveData['primary_supplier_id'] > 0 && !self::assertSupplierInTenant((int)$saveData['primary_supplier_id'])) {
+                Db::rollback();
+                return false;
+            }
+
             $goods = Goods::create($saveData);
             if ($aliases !== []) {
-                GoodsAliasService::replaceTenantAliases((int)$saveData['tenant_id'], (int)$goods->id, $aliases);
+                GoodsAliasService::replaceTenantAliases($tenantId, (int)$goods->id, $aliases);
             }
             self::syncBoundUnits((int)$goods->id, $boundUnits);
             if ((int)$saveData['primary_supplier_id'] > 0) {
                 self::ensurePrimarySupplierRelation((int)$goods->id, (int)$saveData['primary_supplier_id']);
             }
+            $result = self::creationResult($goods->toArray(), $aliases, false);
             Db::commit();
-            return [
-                'id' => (int)$goods->id,
-            ];
+            return $result;
         } catch (\Throwable $e) {
             Db::rollback();
             self::setError($e->getMessage());
@@ -71,55 +106,87 @@ class GoodsLogic extends BaseLogic
 
     public static function edit(array $params): bool
     {
-        $model = Goods::where('id', (int)$params['id'])
-            ->where('tenant_id', self::tenantId())
-            ->findOrEmpty();
-        if ($model->isEmpty()) {
-            self::setError('商品不存在');
-            return false;
-        }
-
-        $saveData = self::buildSaveData($params, $model->toArray());
-        try {
-            $aliases = array_key_exists('aliases', $params)
-                ? GoodsAliasService::normalizeInput($params['aliases'])
-                : GoodsAliasService::tenantAliases(self::tenantId(), (int)$model->id);
-        } catch (\InvalidArgumentException $e) {
-            self::setError($e->getMessage());
-            return false;
-        }
-        $oldBaseUnitId = (int)($model->unit_id ?? 0);
-        $oldBaseUnitName = (string)($model->units ?? '');
-        $boundUnits = self::resolveBoundUnitsForSave($params, $saveData, (int)$model->id);
-        if ($boundUnits === false) {
-            return false;
-        }
-        self::applyBaseUnitToSaveData($saveData, $boundUnits);
-        if (self::hasWarehouseBalance((int)$model->id)
-            && ($oldBaseUnitId !== (int)$saveData['unit_id'] || $oldBaseUnitName !== (string)$saveData['units'])) {
-            self::setError('商品已有仓库库存余额，不能修改基础单位');
-            return false;
-        }
-        if ((int)$saveData['tenant_id'] <= 0) {
+        $tenantId = self::tenantId();
+        if ($tenantId <= 0) {
             self::setError('商品租户上下文缺失，请重新登录');
             return false;
         }
-        if (!self::assertUnique($saveData, (int)$params['id'])) {
-            return false;
-        }
-        if (($aliasError = GoodsAliasService::validateTenant((int)$saveData['tenant_id'], (int)$model->id, (string)$saveData['name'], $aliases)) !== null) {
-            self::setError($aliasError);
-            return false;
-        }
-        if ((int)$saveData['primary_supplier_id'] > 0 && !self::assertSupplierInTenant((int)$saveData['primary_supplier_id'])) {
+        if (!GoodsMaintenancePermissionService::canMaintain()) {
+            self::setError('当前账号没有商品维护权限');
             return false;
         }
 
         Db::startTrans();
         try {
+            $lockedTenantId = (int)Db::name('tenant')
+                ->where('id', $tenantId)
+                ->lock(true)
+                ->value('id');
+            if ($lockedTenantId !== $tenantId) {
+                Db::rollback();
+                self::setError('商品租户不存在');
+                return false;
+            }
+
+            $model = Goods::where('id', (int)$params['id'])
+                ->where('tenant_id', $tenantId)
+                ->findOrEmpty();
+            if ($model->isEmpty()) {
+                Db::rollback();
+                self::setError('商品不存在');
+                return false;
+            }
+
+            $saveData = self::buildSaveData($params, $model->toArray());
+            $aliases = array_key_exists('aliases', $params)
+                ? GoodsAliasService::normalizeInput($params['aliases'])
+                : GoodsAliasService::tenantAliases($tenantId, (int)$model->id);
+            $oldBaseUnitId = (int)($model->unit_id ?? 0);
+            $oldBaseUnitName = (string)($model->units ?? '');
+            $boundUnits = self::resolveBoundUnitsForSave($params, $saveData, (int)$model->id);
+            if ($boundUnits === false) {
+                Db::rollback();
+                return false;
+            }
+            self::applyBaseUnitToSaveData($saveData, $boundUnits);
+            if (self::hasWarehouseBalance((int)$model->id)
+                && ($oldBaseUnitId !== (int)$saveData['unit_id'] || $oldBaseUnitName !== (string)$saveData['units'])
+            ) {
+                Db::rollback();
+                self::setError('商品已有仓库库存余额，不能修改基础单位');
+                return false;
+            }
+            if (!self::assertMasterDataInTenant($saveData)) {
+                Db::rollback();
+                return false;
+            }
+            if (!self::assertUnique($saveData, (int)$model->id)) {
+                Db::rollback();
+                return false;
+            }
+            $conflict = GoodsAliasService::resolveTenantCreateConflict(
+                $tenantId,
+                (string)$saveData['name'],
+                $aliases,
+                (int)$model->id
+            );
+            if ($conflict['status'] !== 'none') {
+                Db::rollback();
+                self::setError($conflict['status'] === 'ambiguous'
+                    ? '商品名称或别名同时命中多个既有商品，请选择已有商品'
+                    : '商品名称或别名与既有商品冲突');
+                return false;
+            }
+            if ((int)$saveData['primary_supplier_id'] > 0
+                && !self::assertSupplierInTenant((int)$saveData['primary_supplier_id'])
+            ) {
+                Db::rollback();
+                return false;
+            }
+
             $model->save($saveData);
             if (array_key_exists('aliases', $params)) {
-                GoodsAliasService::replaceTenantAliases((int)$saveData['tenant_id'], (int)$model->id, $aliases);
+                GoodsAliasService::replaceTenantAliases($tenantId, (int)$model->id, $aliases);
             }
             if ($boundUnits !== null) {
                 self::syncBoundUnits((int)$model->id, $boundUnits);
@@ -469,6 +536,7 @@ class GoodsLogic extends BaseLogic
         $item['category_id'] = (int)($item['category_id'] ?? 0);
         $item['primary_supplier_id'] = (int)($item['primary_supplier_id'] ?? 0);
         $item['is_disabled'] = (int)($item['is_disabled'] ?? 0);
+        $item['is_archived'] = (int)($item['is_archived'] ?? 0);
         $item['status'] = $item['is_disabled'] === 1 ? 0 : 1;
         $item['remark'] = $item['remark'] ?? '';
         $item['supplier_count'] = (int)($item['supplier_count'] ?? 0);
@@ -496,9 +564,10 @@ class GoodsLogic extends BaseLogic
         $name = trim((string)($params['name'] ?? $params['product_name'] ?? ($current['name'] ?? '')));
         $unitId = (int)($params['unit_id'] ?? $params['units_id'] ?? ($current['unit_id'] ?? 0));
         $units = trim((string)($params['units'] ?? $params['unit'] ?? ($current['units'] ?? '')));
+        $tenantId = (int)(request()->tenantId ?? ($current['tenant_id'] ?? 0));
 
         if ($unitId > 0 && $units === '') {
-            $unit = GoodsUnit::findOrEmpty($unitId);
+            $unit = GoodsUnit::where('tenant_id', $tenantId)->where('id', $unitId)->findOrEmpty();
             if (!$unit->isEmpty()) {
                 $units = (string)$unit->name;
             }
@@ -510,8 +579,9 @@ class GoodsLogic extends BaseLogic
         }
 
         return [
-            'tenant_id' => (int)(request()->tenantId ?? ($current['tenant_id'] ?? 0)),
+            'tenant_id' => $tenantId,
             'name' => $name,
+            'normalized_name' => GoodsAliasService::normalize($name),
             'product_code' => trim((string)($params['product_code'] ?? ($current['product_code'] ?? ''))),
             'units' => $units,
             'unit_id' => $unitId,
@@ -523,6 +593,31 @@ class GoodsLogic extends BaseLogic
             'primary_supplier_id' => (int)($params['primary_supplier_id'] ?? $params['supplier_id'] ?? ($current['primary_supplier_id'] ?? 0)),
             'is_disabled' => (int)($isDisabled ?? ($current['is_disabled'] ?? 0)),
             'remark' => trim((string)($params['remark'] ?? ($current['remark'] ?? ''))),
+        ];
+    }
+
+    /**
+     * @param array<string,mixed> $goods
+     * @param array<int,string> $requestedAliases
+     * @return array<string,mixed>
+     */
+    protected static function creationResult(array $goods, array $requestedAliases, bool $existing): array
+    {
+        $formatted = self::formatItem($goods);
+        $formatted['aliases'] = $existing
+            ? GoodsAliasService::tenantAliases((int)$formatted['tenant_id'], (int)$formatted['id'])
+            : $requestedAliases;
+        $state = (int)$formatted['is_archived'] === 1
+            ? 'archived'
+            : ((int)$formatted['is_disabled'] === 1 ? 'disabled' : 'active');
+        $reusable = $state === 'active';
+        return [
+            'id' => (int)$formatted['id'],
+            'existing' => $existing,
+            'reusable' => $reusable,
+            'requires_activation' => !$reusable,
+            'existing_state' => $state,
+            'goods' => $formatted,
         ];
     }
 
@@ -551,6 +646,43 @@ class GoodsLogic extends BaseLogic
             }
         }
 
+        return true;
+    }
+
+    protected static function assertMasterDataInTenant(array $data): bool
+    {
+        $tenantId = (int)($data['tenant_id'] ?? 0);
+        $categoryId = (int)($data['category_id'] ?? 0);
+        if ($categoryId > 0) {
+            $category = Db::name('tenant_goodscat')
+                ->where('tenant_id', $tenantId)
+                ->where('id', $categoryId)
+                ->whereNull('delete_time')
+                ->find();
+            if ($category === null) {
+                self::setError('商品分类不存在');
+                return false;
+            }
+            if ((int)($category['is_show'] ?? 1) !== 0) {
+                self::setError('商品分类不可用');
+                return false;
+            }
+        }
+
+        $unitId = (int)($data['unit_id'] ?? 0);
+        if ($unitId > 0) {
+            $unit = GoodsUnit::where('tenant_id', $tenantId)
+                ->where('id', $unitId)
+                ->findOrEmpty();
+            if ($unit->isEmpty()) {
+                self::setError('基础单位不存在');
+                return false;
+            }
+            if ((int)$unit->status !== 1) {
+                self::setError('基础单位不可用');
+                return false;
+            }
+        }
         return true;
     }
 
@@ -616,6 +748,10 @@ class GoodsLogic extends BaseLogic
                 ->findOrEmpty();
             if ($unit->isEmpty()) {
                 self::setError('绑定单位不存在');
+                return false;
+            }
+            if ((int)$unit->status !== 1) {
+                self::setError('绑定单位不可用');
                 return false;
             }
 

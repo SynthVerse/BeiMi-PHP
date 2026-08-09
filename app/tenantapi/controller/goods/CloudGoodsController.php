@@ -62,6 +62,11 @@ class CloudGoodsController extends BaseAdminController
         if ($result === false) {
             return $this->fail(CloudGoodsLogic::getError());
         }
-        return $this->success($result['loaded'] ? '加载成功' : '商品已存在', $result, 1, 1);
+        return $this->success(
+            $result['loaded'] ? '加载成功' : (string)($result['message'] ?? '商品已存在'),
+            $result,
+            1,
+            1
+        );
     }
 }

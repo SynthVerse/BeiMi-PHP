@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace tests\unit;
 
 use BeiMi\Migration\MigrationSqlPreprocessor;
+use app\common\service\goods\GoodsAliasService;
 use think\facade\Db;
 
 require_once dirname(__DIR__, 2) . '/scripts/lib/MigrationSqlPreprocessor.php';
@@ -22,6 +23,12 @@ trait CustomerReportTestSupport
         request()->tenantId = $tenantId;
         request()->adminId = self::ADMIN_ID;
         request()->userId = self::ADMIN_ID;
+        request()->jxcFromUserToken = false;
+        request()->adminInfo = [
+            'admin_id' => self::ADMIN_ID,
+            'tenant_id' => $tenantId,
+            'root' => 1,
+        ];
     }
 
     protected function ensureCustomerReportTables(): void
@@ -32,12 +39,16 @@ trait CustomerReportTestSupport
         $sql = <<<SQL
 CREATE TABLE IF NOT EXISTS `la_goods` (
   `id` int unsigned NOT NULL AUTO_INCREMENT, `tenant_id` int unsigned NOT NULL DEFAULT 0,
-  `name` varchar(200) NOT NULL DEFAULT '', `product_code` varchar(100) NOT NULL DEFAULT '',
+  `name` varchar(200) NOT NULL DEFAULT '', `normalized_name` varchar(200) NOT NULL DEFAULT '',
+  `product_code` varchar(100) NOT NULL DEFAULT '',
   `units` varchar(50) NOT NULL DEFAULT '', `unit_id` int unsigned NOT NULL DEFAULT 0,
   `price` decimal(18,2) NOT NULL DEFAULT 0.00, `cost` decimal(18,2) NOT NULL DEFAULT 0.00,
   `stock` decimal(18,4) NOT NULL DEFAULT 0.0000, `category_id` int unsigned NOT NULL DEFAULT 0,
-  `is_disabled` tinyint unsigned NOT NULL DEFAULT 0, `create_time` int unsigned NOT NULL DEFAULT 0,
-  `update_time` int unsigned NOT NULL DEFAULT 0, PRIMARY KEY (`id`)
+  `primary_supplier_id` int unsigned NOT NULL DEFAULT 0, `is_disabled` tinyint unsigned NOT NULL DEFAULT 0,
+  `is_archived` tinyint unsigned NOT NULL DEFAULT 0, `remark` varchar(500) NOT NULL DEFAULT '',
+  `create_time` int unsigned NOT NULL DEFAULT 0,
+  `update_time` int unsigned NOT NULL DEFAULT 0, PRIMARY KEY (`id`),
+  KEY `idx_customer_report_tenant_normalized_name` (`tenant_id`,`normalized_name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE TABLE IF NOT EXISTS `la_goods_unit` (
   `id` int unsigned NOT NULL AUTO_INCREMENT, `tenant_id` int unsigned NOT NULL DEFAULT 0,
@@ -57,7 +68,8 @@ CREATE TABLE IF NOT EXISTS `la_goods_units_binding` (
   `id` int unsigned NOT NULL AUTO_INCREMENT, `tenant_id` int unsigned NOT NULL DEFAULT 0,
   `goods_id` int unsigned NOT NULL DEFAULT 0, `unit_id` int unsigned NOT NULL DEFAULT 0,
   `unit_name` varchar(50) NOT NULL DEFAULT '', `is_base_unit` tinyint NOT NULL DEFAULT 0,
-  `status` tinyint NOT NULL DEFAULT 1, `create_time` int unsigned NOT NULL DEFAULT 0,
+  `sort` int NOT NULL DEFAULT 0, `status` tinyint NOT NULL DEFAULT 1,
+  `create_time` int unsigned NOT NULL DEFAULT 0,
   `update_time` int unsigned NOT NULL DEFAULT 0, PRIMARY KEY (`id`),
   UNIQUE KEY `uk_customer_report_goods_unit` (`tenant_id`,`goods_id`,`unit_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -71,7 +83,8 @@ CREATE TABLE IF NOT EXISTS `la_customer` (
   `id` int unsigned NOT NULL AUTO_INCREMENT, `tenant_id` int unsigned NOT NULL DEFAULT 0,
   `customer_name` varchar(100) NOT NULL DEFAULT '', `parent_id` int unsigned NOT NULL DEFAULT 0,
   `order_receivable` decimal(18,2) NOT NULL DEFAULT 0.00, `order_money` decimal(18,2) NOT NULL DEFAULT 0.00,
-  `is_disabled` tinyint unsigned NOT NULL DEFAULT 0, `create_time` int unsigned NOT NULL DEFAULT 0,
+  `is_disabled` tinyint unsigned NOT NULL DEFAULT 0, `is_archived` tinyint unsigned NOT NULL DEFAULT 0,
+  `create_time` int unsigned NOT NULL DEFAULT 0,
   `update_time` int unsigned NOT NULL DEFAULT 0, PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE TABLE IF NOT EXISTS `la_tenant` (
@@ -132,6 +145,12 @@ SQL;
         foreach ([
             'ALTER TABLE `la_customer` ADD COLUMN `order_receivable` decimal(18,2) NOT NULL DEFAULT 0.00',
             'ALTER TABLE `la_customer` ADD COLUMN `order_money` decimal(18,2) NOT NULL DEFAULT 0.00',
+            'ALTER TABLE `la_goods` ADD COLUMN `is_archived` tinyint unsigned NOT NULL DEFAULT 0',
+            'ALTER TABLE `la_goods` ADD COLUMN `primary_supplier_id` int unsigned NOT NULL DEFAULT 0',
+            "ALTER TABLE `la_goods` ADD COLUMN `remark` varchar(500) NOT NULL DEFAULT ''",
+            "ALTER TABLE `la_goods` ADD COLUMN `normalized_name` varchar(200) NOT NULL DEFAULT ''",
+            'ALTER TABLE `la_goods` ADD KEY `idx_customer_report_tenant_normalized_name` (`tenant_id`,`normalized_name`)',
+            'ALTER TABLE `la_goods_units_binding` ADD COLUMN `sort` int NOT NULL DEFAULT 0',
             "ALTER TABLE `la_sales_order` ADD COLUMN `source_type` varchar(32) NOT NULL DEFAULT ''",
             'ALTER TABLE `la_sales_order` ADD COLUMN `source_id` int unsigned NOT NULL DEFAULT 0',
             'ALTER TABLE `la_sales_order` ADD COLUMN `source_version` int unsigned NOT NULL DEFAULT 0',
@@ -211,9 +230,12 @@ SQL;
     protected function createCustomerReportGoods(string $name, string $code, string $unit = '件'): int
     {
         return (int)Db::name('goods')->insertGetId([
-            'tenant_id' => self::TENANT_ID, 'name' => $name, 'product_code' => $code . '-' . uniqid(),
+            'tenant_id' => self::TENANT_ID, 'name' => $name,
+            'normalized_name' => GoodsAliasService::normalize($name),
+            'product_code' => $code . '-' . uniqid(),
             'units' => $unit, 'unit_id' => 0, 'price' => '1.00', 'cost' => '1.00', 'stock' => '0.0000',
-            'category_id' => 0, 'is_disabled' => 0, 'create_time' => time(), 'update_time' => time(),
+            'category_id' => 0, 'is_disabled' => 0, 'is_archived' => 0,
+            'create_time' => time(), 'update_time' => time(),
         ]);
     }
 

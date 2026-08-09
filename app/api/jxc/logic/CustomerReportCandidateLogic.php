@@ -8,6 +8,7 @@ use app\common\logic\BaseLogic;
 use app\common\model\jxc\Goods;
 use app\common\model\jxc\GoodsUnit;
 use app\common\service\goods\GoodsAliasService;
+use app\common\service\goods\GoodsMaintenancePermissionService;
 use think\facade\Db;
 
 /** 仅把自然语言变为待确认候选；绝不建单、绝不预留。 */
@@ -42,9 +43,10 @@ class CustomerReportCandidateLogic extends BaseLogic
         ];
     }
 
-    /** @return array{goods_id:int,goods:array<string,mixed>}|false */
+    /** @return array{goods_id:int,existing:bool,reusable:bool,goods:array<string,mixed>}|false */
     public static function quickCreateGoods(array $params): array|false
     {
+        self::setReturnData(null);
         $tenantId = self::tenantId();
         $name = trim((string)($params['name'] ?? ''));
         $categoryId = (int)($params['category_id'] ?? 0);
@@ -75,12 +77,30 @@ class CustomerReportCandidateLogic extends BaseLogic
             self::setError(GoodsLogic::getError());
             return false;
         }
+        if (($created['reusable'] ?? true) !== true) {
+            $state = (string)($created['existing_state'] ?? '');
+            self::setError($state === 'archived' ? '同名商品已归档，请先恢复' : '同名商品已停用，请先启用');
+            self::setReturnData([
+                'goods_id' => (int)$created['id'],
+                'existing' => (bool)($created['existing'] ?? true),
+                'reusable' => false,
+                'requires_activation' => true,
+                'existing_state' => $state,
+                'goods' => (array)($created['goods'] ?? []),
+            ]);
+            return false;
+        }
         $goods = Goods::where('tenant_id', $tenantId)->where('id', (int)$created['id'])->findOrEmpty();
         if ($goods->isEmpty()) {
             self::setError('商品创建后无法读取');
             return false;
         }
-        return ['goods_id' => (int)$goods->id, 'goods' => self::goods($goods->toArray())];
+        return [
+            'goods_id' => (int)$goods->id,
+            'existing' => (bool)($created['existing'] ?? false),
+            'reusable' => true,
+            'goods' => self::goods($goods->toArray()),
+        ];
     }
 
     /** @return array<string,mixed> */
@@ -117,7 +137,7 @@ class CustomerReportCandidateLogic extends BaseLogic
             'customer' => $customers, 'goods' => $goods, 'quantity' => $quantity,
             'attributes' => ['specification' => null, 'processing' => []], 'preference' => $preference,
             'missing_fields' => $missing, 'can_submit' => $missing === [],
-            'quick_create_allowed' => self::canManageGoods(),
+            'quick_create_allowed' => (bool)($context['can_manage_goods'] ?? false),
         ];
     }
 
@@ -397,7 +417,8 @@ class CustomerReportCandidateLogic extends BaseLogic
      *   goods_catalog:array<int,array{goods:array<string,mixed>,tokens:array<string,string>}>,
      *   token_index:array<string,array<int,string>>,
      *   fuzzy_index:array<string,array<string,true>>,
-     *   max_token_length:int
+     *   max_token_length:int,
+     *   can_manage_goods:bool
      * }
      */
     private static function recognitionContext(): array
@@ -410,6 +431,7 @@ class CustomerReportCandidateLogic extends BaseLogic
                 'token_index' => [],
                 'fuzzy_index' => [],
                 'max_token_length' => 0,
+                'can_manage_goods' => false,
             ];
         }
 
@@ -423,6 +445,7 @@ class CustomerReportCandidateLogic extends BaseLogic
         $rows = Db::name('goods')
             ->where('tenant_id', $tenantId)
             ->where('is_disabled', 0)
+            ->where('is_archived', 0)
             ->field(['id', 'name', 'product_code', 'unit_id', 'units', 'category_id'])
             ->order('id asc')
             ->select()
@@ -483,6 +506,7 @@ class CustomerReportCandidateLogic extends BaseLogic
             'token_index' => $tokenIndex,
             'fuzzy_index' => $fuzzyIndex,
             'max_token_length' => $maxTokenLength,
+            'can_manage_goods' => self::canManageGoods(),
         ];
     }
 
@@ -551,5 +575,5 @@ class CustomerReportCandidateLogic extends BaseLogic
     /** @param array<string,mixed> $row @return array<string,mixed> */
     private static function goods(array $row): array { return ['id'=>(int)($row['id']??0),'name'=>(string)($row['name']??''),'product_code'=>(string)($row['product_code']??''),'unit_id'=>(int)($row['unit_id']??0),'units'=>(string)($row['units']??''),'category_id'=>(int)($row['category_id']??0)]; }
     private static function tenantId(): int { return (int)(request()->tenantId ?? 0); }
-    private static function canManageGoods(): bool { return (int)(request()->adminId ?? 0) > 0; }
+    private static function canManageGoods(): bool { return GoodsMaintenancePermissionService::canMaintain(); }
 }

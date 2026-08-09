@@ -13,6 +13,14 @@ use think\facade\Db;
  */
 class GoodsAliasService
 {
+    private const NORMALIZED_WHITESPACE = [
+        "\u{0009}", "\u{000A}", "\u{000B}", "\u{000C}", "\u{000D}", "\u{0020}",
+        "\u{0085}", "\u{00A0}", "\u{1680}",
+        "\u{2000}", "\u{2001}", "\u{2002}", "\u{2003}", "\u{2004}", "\u{2005}",
+        "\u{2006}", "\u{2007}", "\u{2008}", "\u{2009}", "\u{200A}",
+        "\u{2028}", "\u{2029}", "\u{202F}", "\u{205F}", "\u{3000}",
+    ];
+
     /** @return array<int,string> */
     public static function normalizeInput(mixed $value): array
     {
@@ -34,7 +42,7 @@ class GoodsAliasService
 
     public static function normalize(string $value): string
     {
-        $value = trim(preg_replace('/\s+/u', '', $value) ?? '');
+        $value = str_replace(self::NORMALIZED_WHITESPACE, '', $value);
         return $value === '' ? '' : mb_strtolower($value);
     }
 
@@ -94,37 +102,6 @@ class GoodsAliasService
         return $rows;
     }
 
-    /**
-     * 校验租户名称与别名在规范化后只有一个商品可以占用。
-     *
-     * @param array<int,string> $aliases
-     */
-    public static function validateTenant(int $tenantId, int $goodsId, string $canonicalName, array $aliases): ?string
-    {
-        if ($tenantId <= 0) {
-            return '商品租户上下文缺失，请重新登录';
-        }
-        $tokens = self::tokens($canonicalName, $aliases);
-        if ($tokens === []) {
-            return '商品名称不能为空';
-        }
-        foreach (Goods::where('tenant_id', $tenantId)->field(['id', 'name'])->select()->toArray() as $goods) {
-            if ((int)$goods['id'] !== $goodsId && isset($tokens[self::normalize((string)$goods['name'])])) {
-                return '商品名称或别名与现有商品“' . (string)$goods['name'] . '”冲突';
-            }
-        }
-        $normalized = array_keys($tokens);
-        $query = Db::name('goods_alias')->where('tenant_id', $tenantId)->whereIn('normalized_alias', $normalized);
-        if ($goodsId > 0) {
-            $query->where('goods_id', '<>', $goodsId);
-        }
-        $conflict = $query->find();
-        if ($conflict !== null) {
-            return '商品名称或别名与现有别名“' . (string)$conflict['alias'] . '”冲突';
-        }
-        return null;
-    }
-
     /** @param array<int,string> $aliases */
     public static function validateCloud(int $cloudGoodsId, string $canonicalName, array $aliases): ?string
     {
@@ -171,6 +148,68 @@ class GoodsAliasService
         }
         return array_map('intval', Db::name('goods_alias')->where('tenant_id', $tenantId)
             ->whereLike('alias', '%' . trim($keyword) . '%')->column('goods_id'));
+    }
+
+    /**
+     * @param array<int,string> $aliases
+     * @return array{status:string,goods:?array<string,mixed>,goods_ids:array<int,int>}
+     */
+    public static function resolveTenantCreateConflict(
+        int $tenantId,
+        string $canonicalName,
+        array $aliases,
+        int $ignoreGoodsId = 0
+    ): array {
+        $tokens = self::tokens($canonicalName, $aliases);
+        if ($tenantId <= 0 || $tokens === []) {
+            return ['status' => 'none', 'goods' => null, 'goods_ids' => []];
+        }
+
+        $goodsIds = [];
+        foreach (Goods::where('tenant_id', $tenantId)
+            ->whereIn('normalized_name', array_keys($tokens))
+            ->field(['id'])
+            ->select()
+            ->toArray() as $goods
+        ) {
+            $goodsId = (int)($goods['id'] ?? 0);
+            if ($goodsId > 0 && $goodsId !== $ignoreGoodsId) {
+                $goodsIds[$goodsId] = true;
+            }
+        }
+        $aliasQuery = Db::name('goods_alias')
+            ->where('tenant_id', $tenantId)
+            ->whereIn('normalized_alias', array_keys($tokens));
+        if ($ignoreGoodsId > 0) {
+            $aliasQuery->where('goods_id', '<>', $ignoreGoodsId);
+        }
+        foreach ($aliasQuery->column('goods_id') as $goodsId) {
+            if ((int)$goodsId > 0) {
+                $goodsIds[(int)$goodsId] = true;
+            }
+        }
+
+        $ids = array_keys($goodsIds);
+        sort($ids, SORT_NUMERIC);
+        if (count($ids) !== 1) {
+            return [
+                'status' => $ids === [] ? 'none' : 'ambiguous',
+                'goods' => null,
+                'goods_ids' => $ids,
+            ];
+        }
+
+        $goods = Goods::where('tenant_id', $tenantId)
+            ->where('id', $ids[0])
+            ->findOrEmpty();
+        if ($goods->isEmpty()) {
+            return ['status' => 'none', 'goods' => null, 'goods_ids' => []];
+        }
+        return [
+            'status' => 'unique',
+            'goods' => $goods->toArray(),
+            'goods_ids' => $ids,
+        ];
     }
 
     /** @return array<int,int> */

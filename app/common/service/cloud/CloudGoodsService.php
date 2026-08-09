@@ -9,6 +9,7 @@ use app\common\model\cloud\CloudGoodsImport;
 use app\common\model\goods\TenantGoodscat;
 use app\common\model\jxc\Goods;
 use app\common\service\goods\GoodsAliasService;
+use app\common\service\goods\GoodsMaintenancePermissionService;
 use app\common\model\jxc\GoodsUnit;
 use think\facade\Db;
 
@@ -155,6 +156,10 @@ class CloudGoodsService extends BaseLogic
             self::setError('商品租户上下文缺失，请重新登录');
             return false;
         }
+        if (!GoodsMaintenancePermissionService::canMaintain()) {
+            self::setError('当前账号没有商品维护权限');
+            return false;
+        }
 
         $cloudGoodsId = (int)($params['cloud_goods_id'] ?? $params['id'] ?? 0);
         $unitId = (int)($params['unit_id'] ?? $params['units_id'] ?? 0);
@@ -166,45 +171,92 @@ class CloudGoodsService extends BaseLogic
             return false;
         }
 
-        $unit = GoodsUnit::where('id', $unitId)->where('tenant_id', $tenantId)->findOrEmpty();
-        if ($unit->isEmpty()) {
-            self::setError('请选择有效的本地单位');
-            return false;
-        }
-
-        if ($categoryId > 0) {
-            $category = TenantGoodscat::where('id', $categoryId)->where('tenant_id', $tenantId)->findOrEmpty();
-            if ($category->isEmpty()) {
-                self::setError('商品分类不存在');
-                return false;
-            }
-        }
-
-        $alreadyImported = CloudGoodsImport::where('tenant_id', $tenantId)->where('cloud_goods_id', $cloudGoodsId)->findOrEmpty();
-        if (!$alreadyImported->isEmpty()) {
-            return ['loaded' => false, 'existing_goods_id' => (int)$alreadyImported->goods_id, 'reason' => '该云端商品已加载，首次下载快照不支持再次下载或同步'];
-        }
-
-        $source = $cloudGoods->toArray();
-        $source['aliases'] = GoodsAliasService::cloudAliases($cloudGoodsId);
-        $duplicate = self::findDuplicateGoods($source, $tenantId, $unitId);
-        if ($duplicate !== null) {
-            return [
-                'loaded' => false,
-                'existing_goods_id' => (int)$duplicate['id'],
-                'reason' => $duplicate['reason'],
-            ];
-        }
-        if (($aliasError = GoodsAliasService::validateTenant($tenantId, 0, (string)$source['name'], $source['aliases'])) !== null) {
-            self::setError('无法加载云端商品：' . $aliasError);
-            return false;
-        }
-
         Db::startTrans();
         try {
+            $lockedTenantId = (int)Db::name('tenant')
+                ->where('id', $tenantId)
+                ->lock(true)
+                ->value('id');
+            if ($lockedTenantId !== $tenantId) {
+                Db::rollback();
+                self::setError('商品租户不存在');
+                return false;
+            }
+
+            $unit = GoodsUnit::where('id', $unitId)->where('tenant_id', $tenantId)->findOrEmpty();
+            if ($unit->isEmpty()) {
+                Db::rollback();
+                self::setError('请选择有效的本地单位');
+                return false;
+            }
+            if ((int)$unit->status !== 1) {
+                Db::rollback();
+                self::setError('基础单位不可用');
+                return false;
+            }
+            if ($categoryId > 0) {
+                $category = TenantGoodscat::where('id', $categoryId)
+                    ->where('tenant_id', $tenantId)
+                    ->whereNull('delete_time')
+                    ->findOrEmpty();
+                if ($category->isEmpty()) {
+                    Db::rollback();
+                    self::setError('商品分类不存在');
+                    return false;
+                }
+                if ((int)$category->is_show !== 0) {
+                    Db::rollback();
+                    self::setError('商品分类不可用');
+                    return false;
+                }
+            }
+
+            $alreadyImported = CloudGoodsImport::where('tenant_id', $tenantId)
+                ->where('cloud_goods_id', $cloudGoodsId)
+                ->findOrEmpty();
+            if (!$alreadyImported->isEmpty()) {
+                $existing = Goods::where('tenant_id', $tenantId)
+                    ->where('id', (int)$alreadyImported->goods_id)
+                    ->findOrEmpty();
+                $result = $existing->isEmpty()
+                    ? [
+                        'loaded' => false,
+                        'existing_goods_id' => (int)$alreadyImported->goods_id,
+                        'message' => '商品已存在',
+                        'reason' => '该云端商品已加载，首次下载快照不支持再次下载或同步',
+                    ]
+                    : self::existingTenantGoodsResult(
+                        $existing->toArray(),
+                        '该云端商品已加载，首次下载快照不支持再次下载或同步'
+                    );
+                Db::commit();
+                return $result;
+            }
+
+            $source = $cloudGoods->toArray();
+            $source['aliases'] = GoodsAliasService::cloudAliases($cloudGoodsId);
+            $conflict = GoodsAliasService::resolveTenantCreateConflict(
+                $tenantId,
+                (string)$source['name'],
+                $source['aliases']
+            );
+            if ($conflict['status'] === 'ambiguous') {
+                Db::rollback();
+                self::setError('云端商品名称或别名同时命中多个既有商品，请选择已有商品');
+                return false;
+            }
+            if ($conflict['status'] === 'unique' && $conflict['goods'] !== null) {
+                $result = self::existingTenantGoodsResult(
+                    $conflict['goods'],
+                    '云端商品名称或别名在当前店铺已存在，不得自动覆盖或改绑'
+                );
+                Db::commit();
+                return $result;
+            }
             $goods = Goods::create([
                 'tenant_id' => $tenantId,
                 'name' => (string)$source['name'],
+                'normalized_name' => GoodsAliasService::normalize((string)$source['name']),
                 'product_code' => (string)($source['product_code'] ?? ''),
                 'units' => (string)$unit->name,
                 'unit_id' => $unitId,
@@ -502,16 +554,29 @@ class CloudGoodsService extends BaseLogic
         return $rows;
     }
 
-    protected static function findDuplicateGoods(array $source, int $tenantId, int $unitId): ?array
+    /** @param array<string,mixed> $goods @return array<string,mixed> */
+    protected static function existingTenantGoodsResult(array $goods, string $reason): array
     {
-        // 仅基于商品名称检测重复
-        $existing = Goods::where('tenant_id', $tenantId)
-            ->where('name', (string)$source['name'])
-            ->findOrEmpty();
-        if (!$existing->isEmpty()) {
-            return ['id' => (int)$existing->id, 'reason' => '该商品名称在当前店铺已存在，无需重复加载'];
-        }
-        return null;
+        $state = (int)($goods['is_archived'] ?? 0) === 1
+            ? 'archived'
+            : ((int)($goods['is_disabled'] ?? 0) === 1 ? 'disabled' : 'active');
+        $reusable = $state === 'active';
+        $message = match ($state) {
+            'archived' => '商品已归档，请先恢复',
+            'disabled' => '商品已停用，请先启用',
+            default => '商品已存在',
+        };
+        return [
+            'loaded' => false,
+            'existing' => true,
+            'existing_goods_id' => (int)($goods['id'] ?? 0),
+            'reusable' => $reusable,
+            'requires_activation' => !$reusable,
+            'existing_state' => $state,
+            'message' => $message,
+            'reason' => $reason,
+            'goods' => $goods,
+        ];
     }
 
     protected static function assertCloudUnique(array $data, int $ignoreId = 0): bool

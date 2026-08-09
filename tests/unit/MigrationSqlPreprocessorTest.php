@@ -102,4 +102,32 @@ SQL,
         self::assertStringContainsString('`is_default`  tinyint(1) UNSIGNED', $freshInstall);
         self::assertStringContainsString('`uk_tenant_default_goodscat`', $freshInstall);
     }
+
+    public function test_goods_maintenance_permission_migration_covers_template_and_existing_tenants(): void
+    {
+        $root = dirname(__DIR__, 2);
+        $migration = (string)file_get_contents(
+            $root . '/database/migrations/20260809_000002_add_goods_maintenance_permission.sql'
+        );
+        $prepared = \BeiMi\Migration\MigrationSqlPreprocessor::prepare($migration, 'tenantx_');
+
+        self::assertStringNotContainsString('{{prefix}}', $prepared);
+        self::assertStringContainsString('INSERT INTO `tenantx_tenant_system_menu`', $prepared);
+        self::assertStringContainsString(
+            "WHERE `tenant_id` = 0 AND `perms` = 'goods.tenant_goods/add'",
+            $prepared
+        );
+        self::assertStringContainsString('FROM `tenantx_tenant` tenant', $prepared);
+        self::assertStringContainsString(
+            "permission.`perms` = 'goods.tenant_goods/add'",
+            $prepared
+        );
+        self::assertStringContainsString('ADD COLUMN `normalized_name`', $prepared);
+        self::assertStringContainsString('KEY `idx_tenant_normalized_name`', $prepared);
+        self::assertStringContainsString('UPDATE `tenantx_goods`', $prepared);
+        self::assertStringContainsString('information_schema.COLUMNS', $prepared);
+        self::assertStringContainsString('information_schema.STATISTICS', $prepared);
+        self::assertStringContainsString('@goods_normalized_name_column_sql', $prepared);
+        self::assertStringContainsString('@goods_normalized_name_index_sql', $prepared);
+    }
 }

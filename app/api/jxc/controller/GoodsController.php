@@ -25,7 +25,15 @@ class GoodsController extends BaseJxcController
         if ($result === false) {
             return $this->fail(GoodsLogic::getError());
         }
-        return $this->success('添加成功', $result, 1, 1);
+        $message = '添加成功';
+        if (($result['existing'] ?? false) === true) {
+            $message = match ($result['existing_state'] ?? 'active') {
+                'archived' => '商品已归档，请先恢复',
+                'disabled' => '商品已停用，请先启用',
+                default => '商品已存在',
+            };
+        }
+        return $this->success($message, $result, 1, 1);
     }
 
     public function edit()
