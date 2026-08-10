@@ -17,6 +17,7 @@ const TARGET = 'beimi_r4_probe_20260726_plan020';
 const LIKE = 'public/install/db/like.sql';
 const JXC = 'database/sql/jxc_phase1_schema.sql';
 const DEFAULT_GOODS_CATEGORY_MIGRATION = '20260809_000001_add_default_goods_category.sql';
+const PLATFORM_DEFAULT_GOODS_CATEGORY_MIGRATION = '20260810_000001_add_platform_default_goods_category.sql';
 const EXPECTED = {
   [LIKE]: '420393F1A9DF5B9CEBC9C7A5BE6815C737B46D9D9B2044F04470895776620A57',
   [JXC]: '55240B8B94175FEFD9748E1B8F81A3FBCB873B9B0700B4342B865ADC621D9934',
@@ -50,6 +51,7 @@ const EXPECTED_MIGRATION_HASHES = {
   '20260805_000001_create_goods_alias.sql':'DD414987D1AC70BE93F200C8902B914E9452D47555ED5C30B5FC47B686FD305B',
   '20260809_000001_add_default_goods_category.sql':'C14DBC9F6E4981D67E413D9ED540CD9294CE7B9F8234EDA2B37E9601593DF289',
   '20260809_000002_add_goods_maintenance_permission.sql':'67BE8670307550EC14B4A3B0B0C0A57146C3724DC0F894264F2FE22FD5F25B8B',
+  '20260810_000001_add_platform_default_goods_category.sql':'46CB10B05038FB1AA0BFF79D664677F802337C6437DF2FAE070791AC9C22C414',
 };
 const POSITIVE = [
   'la_warehouse_goods_balance', 'la_customer_report',
@@ -135,7 +137,7 @@ function runStaticProbe() {
   if (sha(like) !== EXPECTED[LIKE] || sha(jxc) !== EXPECTED[JXC]) fail('baseline_hash_mismatch');
   const deps = nodeDeps();
   const names = deps.fs.readdirSync(deps.path.join(deps.root, 'database/migrations')).filter(x => x.endsWith('.sql')).sort();
-  if (names.length !== 28) fail('migration_count_mismatch');
+  if (names.length !== 29) fail('migration_count_mismatch');
   const migrationHashes = {}; let statements = 0; const finalTables = new Set();
   for (const source of [like, jxc]) for (const match of source.matchAll(/CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+`?([A-Za-z0-9_]+)/gi)) finalTables.add(match[1]);
   for (const name of names) {
@@ -160,7 +162,7 @@ function runStaticProbe() {
     }
     statements += splitSql(text).length;
   }
-  if (statements !== 211) fail('statement_count_mismatch');
+  if (statements !== 215) fail('statement_count_mismatch');
   if (finalTables.size !== 99) fail('final_table_count_mismatch');
   if (Object.keys(EXPECTED_MIGRATION_HASHES).length !== names.length) fail('migration_manifest_mismatch');
   for (const table of POSITIVE) if (!finalTables.has(table)) fail('positive_assertion_missing');
@@ -307,12 +309,13 @@ function runFixedRuntimeProbe() {
     executeLocked(like, false); executeLocked(jxc, false);
     if (Number(runtimeMetadataScalar('target_table_count', [])) !== 74) runtimeFail('baseline_table_count_mismatch');
     const names = Object.keys(EXPECTED_MIGRATION_HASHES).sort();
-  if (names.length !== 28) runtimeFail('migration_manifest_mismatch');
+  if (names.length !== 29) runtimeFail('migration_manifest_mismatch');
     let migrationStatements = 0;
     for (let index = 0; index < names.length; index++) {
       const text = prepareMigrationSql(runtimeRead('database/migrations/' + names[index]), 'la_');
       if (runtimeSha256(text) !== EXPECTED_MIGRATION_HASHES[names[index]]) runtimeFail('migration_hash_mismatch');
       let existingDefaultNamedCategoryId = 0;
+      let existingPlatformDefaultNamedCategoryId = 0;
       if (names[index] === DEFAULT_GOODS_CATEGORY_MIGRATION) {
         session.runSql('ALTER TABLE la_tenant_goodscat DROP INDEX uk_tenant_default_goodscat');
         session.runSql('ALTER TABLE la_tenant_goodscat DROP COLUMN is_default');
@@ -323,6 +326,11 @@ function runFixedRuntimeProbe() {
         session.runSql("INSERT INTO la_tenant_goodscat (tenant_id, name, sort, is_show, create_time, update_time) VALUES (900001, '默认分类', 99, 1, UNIX_TIMESTAMP(), UNIX_TIMESTAMP())");
         const existingRow = session.runSql("SELECT id FROM la_tenant_goodscat WHERE tenant_id = 900001 AND name = '默认分类'").fetchOne();
         existingDefaultNamedCategoryId = existingRow ? Number(existingRow[0]) : 0;
+      }
+      if (names[index] === PLATFORM_DEFAULT_GOODS_CATEGORY_MIGRATION) {
+        session.runSql("INSERT INTO la_tenant_goodscat (tenant_id, name, sort, is_show, is_default, create_time, update_time, delete_time) VALUES (0, '默认分类', 91, 1, 1, UNIX_TIMESTAMP(), UNIX_TIMESTAMP(), UNIX_TIMESTAMP())");
+        const existingPlatformRow = session.runSql("SELECT id FROM la_tenant_goodscat WHERE tenant_id = 0 AND name = '默认分类' ORDER BY id ASC LIMIT 1").fetchOne();
+        existingPlatformDefaultNamedCategoryId = existingPlatformRow ? Number(existingPlatformRow[0]) : 0;
       }
       migrationStatements += executeLocked(text, true);
       if (names[index] === DEFAULT_GOODS_CATEGORY_MIGRATION) {
@@ -343,9 +351,19 @@ function runFixedRuntimeProbe() {
           || Number(categoryRows[1][4]) !== 1
         ) runtimeFail('default_goods_category_idempotency_failed');
       }
+      if (names[index] === PLATFORM_DEFAULT_GOODS_CATEGORY_MIGRATION) {
+        executeLocked(text, true);
+        const platformCategoryRow = session.runSql("SELECT MIN(id), COUNT(*), SUM(is_default = 1), SUM(name = '默认分类' AND is_show = 0) FROM la_tenant_goodscat WHERE tenant_id = 0 AND delete_time IS NULL").fetchOne();
+        if (!platformCategoryRow
+          || Number(platformCategoryRow[0]) !== existingPlatformDefaultNamedCategoryId
+          || Number(platformCategoryRow[1]) !== 1
+          || Number(platformCategoryRow[2]) !== 1
+          || Number(platformCategoryRow[3]) !== 1
+        ) runtimeFail('platform_default_goods_category_idempotency_failed');
+      }
       if (index >= 2) { const first = index === 2 ? 0 : index; const last = index === 2 ? 2 : index; for (let history = first; history <= last; history++) session.runSql('INSERT INTO la_migration_history (version) VALUES (?)', [names[history]]); }
     }
-  if (migrationStatements !== 211) runtimeFail('statement_count_mismatch');
+  if (migrationStatements !== 215) runtimeFail('statement_count_mismatch');
     return runtimeAssert(names, createdByThisRun);
   } finally {
     if (createdByThisRun) {

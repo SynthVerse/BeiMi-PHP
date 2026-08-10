@@ -65,6 +65,7 @@ Route::group('', function () {
 
     Route::get('goods/index', 'jxc.Goods/lists');
     Route::get('goods/categories', 'jxc.Goods/categories');
+    Route::post('goods/categories/add', 'jxc.Goods/categoryAdd');
     Route::get('goods/recommendations', 'jxc.Goods/recommendations');
     Route::get('goods/cloud/index', 'jxc.CloudGoods/lists');
     Route::get('goods/cloud/detail', 'jxc.CloudGoods/detail');

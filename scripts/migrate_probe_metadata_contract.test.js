@@ -80,7 +80,7 @@ const fixed = runWrapper(['--mode', 'static', '--target', 'beimi_r4_probe_202607
 assert(fixed.status === 0 && fixed.stderr === '', 'fresh_fixed_cli_exit_contract_mismatch');
 const fixedResult = JSON.parse(fixed.stdout);
 assert(fixed.stdout === JSON.stringify(fixedResult) + '\n', 'fresh_fixed_cli_stdout_must_be_single_json');
-assert(fixedResult.status === 'static_passed' && fixedResult.code === 'static_passed' && fixedResult.migration_count === 28 && fixedResult.statement_count === 211 && fixedResult.baseline_tables === 74 && fixedResult.final_tables === 99, 'fresh_fixed_cli_result_contract_mismatch');
+assert(fixedResult.status === 'static_passed' && fixedResult.code === 'static_passed' && fixedResult.migration_count === 29 && fixedResult.statement_count === 215 && fixedResult.baseline_tables === 74 && fixedResult.final_tables === 99, 'fresh_fixed_cli_result_contract_mismatch');
 const contractSql = 'CREATE TABLE `{{prefix}}orders` (`id` int NOT NULL);';
 const phpPreprocessor = path.join(__dirname, 'lib', 'MigrationSqlPreprocessor.php').replace(/\\/g, '/');
 const phpContract = childProcess.spawnSync(

@@ -5,10 +5,12 @@ namespace app\api\jxc\controller;
 use app\api\jxc\lists\GoodsArchivedLists;
 use app\api\jxc\lists\GoodsCategoryLists;
 use app\api\jxc\lists\GoodsLists;
+use app\api\jxc\logic\GoodsCategoryLogic;
 use app\api\jxc\logic\GoodsLogic;
 use app\api\jxc\logic\GoodsSkuLogic;
 use app\api\jxc\logic\GoodsSpecificationLogic;
 use app\api\jxc\logic\GoodsSupplierMatrixLogic;
+use app\api\jxc\validate\GoodsCategoryValidate;
 use app\api\jxc\validate\GoodsValidate;
 
 class GoodsController extends BaseJxcController
@@ -70,6 +72,16 @@ class GoodsController extends BaseJxcController
     public function categories()
     {
         return $this->dataLists(GoodsCategoryLists::class);
+    }
+
+    public function categoryAdd()
+    {
+        $params = (new GoodsCategoryValidate())->post()->goCheck('add');
+        $result = GoodsCategoryLogic::add($params);
+        if ($result === false) {
+            return $this->fail(GoodsCategoryLogic::getError());
+        }
+        return $this->success('添加成功', $result, 1, 1);
     }
 
     public function recommendations()
