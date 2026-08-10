@@ -141,14 +141,16 @@ try {
     'tenantx_customer_report', 'tenantx_sales_order', 'tenantx_order_goods',
     'tenantx_stock_flow', 'tenantx_receivable_flow', 'tenantx_audit_log',
     'tenantx_migration_history', 'tenantx_goods_alias',
+    'tenantx_work_process', 'tenantx_employee', 'tenantx_employee_process', 'tenantx_employee_permission',
+    'tenantx_fulfillment_task_group', 'tenantx_fulfillment_task', 'tenantx_fulfillment_print_log',
   ];
 
-  assert(tables.length === 99, `nondefault_prefix_table_count_mismatch: ${tables.length}`);
+  assert(tables.length === 106, `nondefault_prefix_table_count_mismatch: ${tables.length}`);
   assert(tables.every(table => table.startsWith(prefix)), 'nondefault_prefix_table_leak');
   assert(required.every(table => tables.includes(table)), 'nondefault_prefix_required_table_missing');
   assert(!tables.some(table => table.startsWith('la_') || table.includes('{')), 'default_or_template_prefix_leak');
   assert(
-    mysqlExecute(`SELECT COUNT(*) FROM \`${prefix}migration_history\`;`, targetDatabase).trim() === '26',
+    mysqlExecute(`SELECT COUNT(*) FROM \`${prefix}migration_history\`;`, targetDatabase).trim() === '27',
     'nondefault_prefix_migration_history_mismatch'
   );
 

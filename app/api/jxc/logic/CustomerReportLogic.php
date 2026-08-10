@@ -20,6 +20,9 @@ class CustomerReportLogic extends BaseLogic
     public static function submit(array $params): array|false
     {
         self::clearError();
+        if (!WorkforceLogic::requirePermission('report.create')) {
+            return false;
+        }
         $tenantId = self::tenantId();
         $key = trim((string)($params['idempotency_key'] ?? ''));
         if ($tenantId <= 0 || $key === '' || strlen($key) > 96) {
@@ -49,11 +52,15 @@ class CustomerReportLogic extends BaseLogic
                     'tenant_id' => $tenantId, 'sn' => self::sn(),
                     'main_customer_id' => (int)$items[0]['main_customer_id'], 'main_customer_name' => (string)$items[0]['main_customer_name'],
                     'status' => 'submitted_ready', 'idempotency_key' => $key, 'request_fingerprint' => $fingerprint,
-                    'version' => 1, 'submitted_time' => $now, 'remark' => trim((string)($params['remark'] ?? '')),
+                    'version' => 1, 'submitted_time' => $now,
+                    'delivery_date' => self::deliveryDate((string)($params['delivery_date'] ?? '')),
+                    'is_supplement' => (int)($params['is_supplement'] ?? 0) === 1 ? 1 : 0,
+                    'remark' => trim((string)($params['remark'] ?? '')),
                     'create_time' => $now, 'update_time' => $now,
                 ]);
                 $summary = self::writeNewItems($reportId, $items, $now);
                 Db::name('customer_report')->where('id', $reportId)->where('tenant_id', $tenantId)->update($summary + ['update_time' => $now]);
+                FulfillmentTaskLogic::syncForReport($reportId);
                 return self::detailById($reportId);
                 });
             } catch (\Throwable $caught) {
@@ -77,12 +84,19 @@ class CustomerReportLogic extends BaseLogic
     public static function detail(array $params): array|false
     {
         self::clearError();
+        if (!WorkforceLogic::requirePermission('report.view')) {
+            return false;
+        }
         return self::detailById((int)($params['id'] ?? 0));
     }
 
     /** @return array{lists:array<int,array<string,mixed>>,count:int,page_no:int,page_size:int} */
-    public static function lists(array $params): array
+    public static function lists(array $params): array|false
     {
+        self::clearError();
+        if (!WorkforceLogic::requirePermission('report.view')) {
+            return false;
+        }
         $pageNo = max(1, (int)($params['page_no'] ?? 1));
         $pageSize = min(100, max(1, (int)($params['page_size'] ?? 20)));
         $statusScope = (string)($params['status_scope'] ?? '');
@@ -107,8 +121,12 @@ class CustomerReportLogic extends BaseLogic
     }
 
     /** @return array{warehouse_id:int,goods_id:int,available_base_qty:string} */
-    public static function availability(array $params): array
+    public static function availability(array $params): array|false
     {
+        self::clearError();
+        if (!WorkforceLogic::requirePermission('report.view')) {
+            return false;
+        }
         $warehouseId = (int)($params['warehouse_id'] ?? 0);
         $goodsId = (int)($params['goods_id'] ?? 0);
         return [
@@ -122,6 +140,9 @@ class CustomerReportLogic extends BaseLogic
     public static function convert(array $params): array|false
     {
         self::clearError();
+        if (!WorkforceLogic::requirePermission('settlement.bill')) {
+            return false;
+        }
         $reportId = (int)($params['id'] ?? 0);
         $version = (int)($params['version'] ?? 0);
         try {
@@ -143,6 +164,73 @@ class CustomerReportLogic extends BaseLogic
                     ->whereNull('delete_time')->order(['goods_id' => 'asc', 'warehouse_id' => 'asc', 'id' => 'asc'])
                     ->lock(true)->select()->toArray();
                 if ($items === []) { self::setError('报货单没有可转销售的明细'); return false; }
+
+                $hasTaskGroup = Db::name('fulfillment_task_group')->where('tenant_id', self::tenantId())->where('report_id', $reportId)->count() > 0;
+                if ($hasTaskGroup) {
+                    $bookkeeping = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())
+                        ->where('report_id', $reportId)->where('source_key', 'report:' . $reportId . ':bookkeeping')->lock(true)->find();
+                    if (!$bookkeeping || (string)$bookkeeping['status'] !== 'ready_to_bill') {
+                        self::setError('送货与记账工票尚未完成，不能提前开单');
+                        return false;
+                    }
+                    $settlements = FulfillmentTaskLogic::settlementValuesForReport($reportId);
+                    foreach ($items as $item) {
+                        if (!isset($settlements[(int)$item['id']])) {
+                            self::setError('每条加工明细的最终工序票都必须先回收并录入大于 0 的最终实重、实价');
+                            return false;
+                        }
+                    }
+                    $now = time();
+                    foreach ($items as &$item) {
+                        $itemId = (int)$item['id'];
+                        $target = self::decimal($settlements[$itemId]['actual_weight']);
+                        $oldReserved = self::decimal((string)$item['reserved_base_qty']);
+                        $delta = bcsub($target, $oldReserved, self::SCALE);
+                        if (bccomp($delta, '0.00', self::SCALE) > 0) {
+                            $added = WarehouseGoodsBalanceService::reserveUpToWithinTransaction((int)$item['warehouse_id'], (int)$item['goods_id'], $delta);
+                            if ($added === false || bccomp($added, $delta, self::SCALE) !== 0) {
+                                self::setError('最终实重超过当前可用库存，无法确认开单');
+                                throw new \RuntimeException('final_weight_stock_shortage');
+                            }
+                        } elseif (bccomp($delta, '0.00', self::SCALE) < 0
+                            && WarehouseGoodsBalanceService::releaseWithinTransaction((int)$item['warehouse_id'], (int)$item['goods_id'], ltrim($delta, '-')) === false) {
+                            throw new \RuntimeException('release_failed');
+                        }
+                        $price = self::decimal($settlements[$itemId]['actual_price']);
+                        if (bccomp($price, '0.00', self::SCALE) <= 0) {
+                            self::setError('未定价明细不能开单，请先录入大于 0 的已确认单价');
+                            return false;
+                        }
+                        $pricingUnitId = (int)$item['pricing_unit_id'] > 0 ? (int)$item['pricing_unit_id'] : (int)$item['base_unit_id'];
+                        $pricingUnitName = trim((string)$item['pricing_unit_name']) !== ''
+                            ? trim((string)$item['pricing_unit_name'])
+                            : trim((string)$item['base_unit_name']);
+                        if ($pricingUnitName === '') {
+                            self::setError('结算明细缺少基础计价单位，不能开单');
+                            return false;
+                        }
+                        CustomerReportItem::where('tenant_id', self::tenantId())->where('id', $itemId)->update([
+                            'expected_base_qty' => $target, 'reserved_base_qty' => $target, 'shortage_base_qty' => '0.00',
+                            'price' => $price, 'price_status' => 'priced',
+                            'pricing_unit_id' => $pricingUnitId, 'pricing_unit_name' => $pricingUnitName,
+                            'status' => 'submitted_ready', 'update_time' => $now,
+                        ]);
+                        Db::name('customer_report_reservation')->where('tenant_id', self::tenantId())->where('report_item_id', $itemId)->update([
+                            'reserved_base_qty' => $target, 'status' => 'reserved', 'update_time' => $now,
+                        ]);
+                        $item['expected_base_qty'] = $target;
+                        $item['reserved_base_qty'] = $target;
+                        $item['shortage_base_qty'] = '0.00';
+                        $item['price'] = $price;
+                        $item['price_status'] = 'priced';
+                        $item['pricing_unit_id'] = $pricingUnitId;
+                        $item['pricing_unit_name'] = $pricingUnitName;
+                        $item['status'] = 'submitted_ready';
+                    }
+                    unset($item);
+                    Db::name('customer_report')->where('tenant_id', self::tenantId())->where('id', $reportId)
+                        ->update(self::summary($items) + ['update_time' => $now]);
+                }
 
                 $itemsByWarehouse = [];
                 foreach ($items as $item) {
@@ -241,6 +329,9 @@ class CustomerReportLogic extends BaseLogic
     public static function edit(array $params): array|false
     {
         self::clearError();
+        if (!WorkforceLogic::requirePermission('report.edit')) {
+            return false;
+        }
         $reportId = (int)($params['id'] ?? 0);
         $version = (int)($params['version'] ?? 0);
         $items = CustomerReportLineService::normalizeItems((array)($params['items'] ?? []), (int)($params['main_customer_id'] ?? 0));
@@ -249,6 +340,21 @@ class CustomerReportLogic extends BaseLogic
             return self::transactionWithRetry(static function () use ($reportId, $version, $params, $items) {
                 $report = self::editableReport($reportId, $version);
                 if ($report === false) { return false; }
+                $reportTasks = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('report_id', $reportId)
+                    ->order('id asc')->lock(true)->field('id,status')->select()->toArray();
+                $startedTaskIds = [];
+                foreach ($reportTasks as $reportTask) {
+                    if (in_array((string)$reportTask['status'], ['printed', 'in_progress', 'recovered', 'ready_to_bill', 'completed'], true)) {
+                        $startedTaskIds[] = (int)$reportTask['id'];
+                    }
+                }
+                $taskIds = array_map('intval', array_column($reportTasks, 'id'));
+                $pendingPrints = $taskIds === [] ? [] : Db::name('fulfillment_print_log')->where('tenant_id', self::tenantId())
+                    ->whereIn('task_id', $taskIds)->where('status', 'pending')->order('id asc')->lock(true)->field('id')->select()->toArray();
+                if ($startedTaskIds !== [] || $pendingPrints !== []) {
+                    self::setError('已有工票进入执行或回收，不能再编辑报货内容');
+                    return false;
+                }
                 $oldItems = CustomerReportItem::where('tenant_id', self::tenantId())->where('report_id', $reportId)->lock(true)->select()->toArray();
                 $oldById = [];
                 foreach ($oldItems as $old) { $oldById[(int)$old['id']] = $old; }
@@ -275,9 +381,12 @@ class CustomerReportLogic extends BaseLogic
                 $summary = self::summary($summaryRows);
                 $updated = CustomerReport::where('tenant_id', self::tenantId())->where('id', $reportId)->where('version', $version)->update($summary + [
                     'main_customer_id' => (int)$items[0]['main_customer_id'], 'main_customer_name' => (string)$items[0]['main_customer_name'],
+                    'delivery_date' => self::deliveryDate((string)($params['delivery_date'] ?? $report->delivery_date ?? '')),
+                    'is_supplement' => (int)($params['is_supplement'] ?? $report->is_supplement ?? 0) === 1 ? 1 : 0,
                     'remark' => trim((string)($params['remark'] ?? '')), 'version' => $version + 1, 'update_time' => $now,
                 ]);
                 if ($updated !== 1) { throw new \RuntimeException('version_conflict'); }
+                FulfillmentTaskLogic::syncForReport($reportId);
                 return self::detailById($reportId);
             });
         } catch (\Throwable $exception) {
@@ -291,6 +400,9 @@ class CustomerReportLogic extends BaseLogic
     public static function retry(array $params): array|false
     {
         self::clearError();
+        if (!WorkforceLogic::requirePermission('report.edit')) {
+            return false;
+        }
         $reportId = (int)($params['id'] ?? 0); $version = (int)($params['version'] ?? 0);
         try {
             return self::transactionWithRetry(static function () use ($reportId, $version) {
@@ -311,6 +423,7 @@ class CustomerReportLogic extends BaseLogic
                 }
                 $summary = self::summary($summaryRows);
                 CustomerReport::where('tenant_id', self::tenantId())->where('id', $reportId)->where('version', $version)->update($summary + ['version'=>$version+1,'update_time'=>$now]);
+                FulfillmentTaskLogic::syncForReport($reportId);
                 return self::detailById($reportId);
             });
         } catch (\Throwable $exception) {
@@ -322,7 +435,11 @@ class CustomerReportLogic extends BaseLogic
     /** @return array<string,mixed>|false */
     public static function cancel(array $params): array|false
     {
-        self::clearError(); $reportId = (int)($params['id'] ?? 0); $version = (int)($params['version'] ?? 0);
+        self::clearError();
+        if (!WorkforceLogic::requirePermission('report.edit')) {
+            return false;
+        }
+        $reportId = (int)($params['id'] ?? 0); $version = (int)($params['version'] ?? 0);
         try {
             return self::transactionWithRetry(static function () use ($reportId, $version) {
                 $report = CustomerReport::where('tenant_id', self::tenantId())->where('id', $reportId)->lock(true)->find();
@@ -337,6 +454,7 @@ class CustomerReportLogic extends BaseLogic
                     CustomerReportReservation::where('tenant_id', self::tenantId())->where('report_item_id',(int)$item['id'])->update(['reserved_base_qty'=>'0.00','released_base_qty'=>self::decimal((string)$item['reserved_base_qty']),'status'=>'released','update_time'=>$now]);
                 }
                 CustomerReport::where('tenant_id', self::tenantId())->where('id',$reportId)->where('version',$version)->update(['status'=>'cancelled','reserved_base_qty'=>'0.00','shortage_base_qty'=>'0.00','version'=>$version+1,'update_time'=>$now]);
+                FulfillmentTaskLogic::cancelReport($reportId);
                 return self::detailById($reportId);
             });
         } catch (\Throwable) { if (!self::hasError()) { self::setError('取消客户报货失败'); } return false; }
@@ -398,6 +516,51 @@ class CustomerReportLogic extends BaseLogic
         usort($items, [self::class, 'compareBalanceKey']);
         return $items;
     }
+
+    public static function completePurchaseForItem(int $itemId): bool
+    {
+        self::clearError();
+        try {
+            return Db::transaction(static function () use ($itemId): bool {
+                $item = CustomerReportItem::where('tenant_id', self::tenantId())->where('id', $itemId)->whereNull('delete_time')->lock(true)->find();
+                if (!$item) {
+                    self::setError('采购任务关联的报货明细不存在');
+                    return false;
+                }
+                $shortage = self::decimal((string)$item->shortage_base_qty);
+                if (bccomp($shortage, '0.00', self::SCALE) <= 0) {
+                    return true;
+                }
+                $added = WarehouseGoodsBalanceService::reserveUpToWithinTransaction((int)$item->warehouse_id, (int)$item->goods_id, $shortage);
+                if ($added === false || bccomp($added, $shortage, self::SCALE) !== 0) {
+                    self::setError('采购库存尚未入库或数量不足，不能完成采购工票');
+                    throw new \RuntimeException('purchase_stock_shortage');
+                }
+                $now = time();
+                $reserved = bcadd(self::decimal((string)$item->reserved_base_qty), $added, self::SCALE);
+                CustomerReportItem::where('tenant_id', self::tenantId())->where('id', $itemId)->update([
+                    'reserved_base_qty' => $reserved, 'shortage_base_qty' => '0.00', 'status' => 'submitted_ready', 'update_time' => $now,
+                ]);
+                CustomerReportReservation::where('tenant_id', self::tenantId())->where('report_item_id', $itemId)->update([
+                    'reserved_base_qty' => $reserved, 'status' => 'reserved', 'update_time' => $now,
+                ]);
+                $rows = CustomerReportItem::where('tenant_id', self::tenantId())->where('report_id', (int)$item->report_id)
+                    ->whereNull('delete_time')->select()->toArray();
+                $report = CustomerReport::where('tenant_id', self::tenantId())->where('id', (int)$item->report_id)->lock(true)->find();
+                if ($report) {
+                    CustomerReport::where('tenant_id', self::tenantId())->where('id', (int)$report->id)->update(
+                        self::summary($rows) + ['version' => (int)$report->version + 1, 'update_time' => $now]
+                    );
+                }
+                return true;
+            });
+        } catch (\Throwable) {
+            if (!self::hasError()) {
+                self::setError('采购库存确认失败');
+            }
+            return false;
+        }
+    }
     /** @param array<int,array<string,mixed>> $items */
     private static function lockGoodsForConversion(array $items): void
     {
@@ -434,6 +597,7 @@ class CustomerReportLogic extends BaseLogic
         $data=$report->toArray();
         $data['items']=CustomerReportItem::where('tenant_id',self::tenantId())->where('report_id',$id)->whereNull('delete_time')->order('sort asc,id asc')->select()->toArray();
         $data['sales_orders'] = self::salesOrdersByReport($id);
+        $data['task_group'] = Db::name('fulfillment_task_group')->where('tenant_id', self::tenantId())->where('report_id', $id)->find() ?: null;
         return $data;
     }
 
@@ -499,6 +663,18 @@ class CustomerReportLogic extends BaseLogic
     private static function sort(array $value): array { foreach($value as $key=>$item){if(is_array($item)){$value[$key]=self::sort($item);}} if(array_keys($value)!==range(0,count($value)-1)){ksort($value);} return $value; }
     private static function quantity(mixed $value,bool $allowZero=false): string|false { $value=trim((string)$value); if($value===''||preg_match('/^\d+(?:\.\d{1,2})?$/',$value)!==1){return false;} $value=self::decimal($value); return bccomp($value,'0.00',self::SCALE)>0||($allowZero&&bccomp($value,'0.00',self::SCALE)===0)?$value:false; }
     private static function decimal(string $value): string { return bcadd($value,'0',self::SCALE); }
+    private static function deliveryDate(string $value): string
+    {
+        $value = trim($value);
+        if ($value === '') {
+            return date('Y-m-d');
+        }
+        $date = \DateTimeImmutable::createFromFormat('!Y-m-d', $value);
+        if (!$date || $date->format('Y-m-d') !== $value) {
+            throw new \InvalidArgumentException('invalid_delivery_date');
+        }
+        return $value;
+    }
     private static function tenantId(): int { return (int)(request()->tenantId??0); }
     private static function sn(): string { return 'CR'.date('YmdHis').random_int(1000,9999); }
     private static function isRetryableTransactionError(\Throwable $exception): bool

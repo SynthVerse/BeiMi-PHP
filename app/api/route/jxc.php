@@ -158,6 +158,30 @@ Route::group('', function () {
     Route::post('jxc/customer_report/convert', 'jxc.CustomerReport/convert');
     Route::post('jxc/customer_report/cancel', 'jxc.CustomerReport/cancel');
 
+    // === 任务调度、纸质工票与员工系统 ===
+    Route::get('jxc/tasks/dashboard', 'jxc.FulfillmentTask/dashboard');
+    Route::get('jxc/tasks/lists', 'jxc.FulfillmentTask/lists');
+    Route::get('jxc/tasks/detail', 'jxc.FulfillmentTask/detail');
+    Route::get('jxc/tasks/candidates', 'jxc.FulfillmentTask/candidates');
+    Route::post('jxc/tasks/assign', 'jxc.FulfillmentTask/assign');
+    Route::post('jxc/tasks/resolve', 'jxc.FulfillmentTask/resolve');
+    Route::post('jxc/tasks/print_data', 'jxc.FulfillmentTask/printData');
+    Route::post('jxc/tasks/print_result', 'jxc.FulfillmentTask/printResult');
+    Route::post('jxc/tasks/recover', 'jxc.FulfillmentTask/recover');
+    Route::post('jxc/tasks/bill', 'jxc.FulfillmentTask/bill');
+
+    Route::get('jxc/workforce/permissions', 'jxc.Workforce/permissionCatalog');
+    Route::get('jxc/workforce/me/permissions', 'jxc.Workforce/currentPermissions');
+    Route::get('jxc/workforce/employees', 'jxc.Workforce/employees');
+    Route::get('jxc/workforce/employee', 'jxc.Workforce/employee');
+    Route::post('jxc/workforce/employee/save', 'jxc.Workforce/saveEmployee');
+    Route::post('jxc/workforce/employee/status', 'jxc.Workforce/statusEmployee');
+    Route::get('jxc/workforce/processes', 'jxc.Workforce/processes');
+    Route::post('jxc/workforce/process/save', 'jxc.Workforce/saveProcess');
+    Route::post('jxc/workforce/process/status', 'jxc.Workforce/statusProcess');
+    Route::post('jxc/workforce/process/reorder', 'jxc.Workforce/reorderProcesses');
+    Route::post('jxc/workforce/process/delete', 'jxc.Workforce/deleteProcess');
+
     // === 审计日志 ===
     Route::get('audit/lists', 'jxc.Audit/lists');
 

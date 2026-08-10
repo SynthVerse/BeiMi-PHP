@@ -10,12 +10,18 @@ class CustomerReportController extends BaseJxcController
 {
     public function recognize()
     {
+        if (!\app\api\jxc\logic\WorkforceLogic::requirePermission('report.create')) {
+            return $this->fail(\app\api\jxc\logic\WorkforceLogic::getError());
+        }
         $params = (new CustomerReportValidate())->post()->goCheck('recognize');
         return $this->data(CustomerReportCandidateLogic::recognize((string)$params['text']));
     }
 
     public function quickCreateGoods()
     {
+        if (!\app\api\jxc\logic\WorkforceLogic::requirePermission('report.create')) {
+            return $this->fail(\app\api\jxc\logic\WorkforceLogic::getError());
+        }
         $params = (new CustomerReportValidate())->post()->goCheck('quickCreateGoods');
         $result = CustomerReportCandidateLogic::quickCreateGoods($params);
         return $result === false
@@ -32,13 +38,15 @@ class CustomerReportController extends BaseJxcController
     public function lists()
     {
         $params = (new CustomerReportValidate())->get()->goCheck('lists');
-        return $this->data(CustomerReportLogic::lists($params));
+        $result = CustomerReportLogic::lists($params);
+        return $result === false ? $this->fail(CustomerReportLogic::getError()) : $this->data($result);
     }
 
     public function availability()
     {
         $params = (new CustomerReportValidate())->get()->goCheck('availability');
-        return $this->data(CustomerReportLogic::availability($params));
+        $result = CustomerReportLogic::availability($params);
+        return $result === false ? $this->fail(CustomerReportLogic::getError()) : $this->data($result);
     }
 
     public function detail()

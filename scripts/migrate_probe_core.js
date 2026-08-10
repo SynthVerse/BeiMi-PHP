@@ -50,12 +50,15 @@ const EXPECTED_MIGRATION_HASHES = {
   '20260731_000001_add_user_session_create_time.sql':'E1017FAE04C72FD2216AA1512EFCE0C3B82DB90CF0C402248C136F206992B67A',
   '20260805_000001_create_goods_alias.sql':'DD414987D1AC70BE93F200C8902B914E9452D47555ED5C30B5FC47B686FD305B',
   '20260809_000001_add_default_goods_category.sql':'C14DBC9F6E4981D67E413D9ED540CD9294CE7B9F8234EDA2B37E9601593DF289',
+  '20260810_000001_create_fulfillment_workflow.sql':'2C3AF6D60DE4561A6D327D78F63221A5884D2FA40262C096923257CBF961DB74',
   '20260809_000002_add_goods_maintenance_permission.sql':'67BE8670307550EC14B4A3B0B0C0A57146C3724DC0F894264F2FE22FD5F25B8B',
   '20260810_000001_add_platform_default_goods_category.sql':'46CB10B05038FB1AA0BFF79D664677F802337C6437DF2FAE070791AC9C22C414',
 };
 const POSITIVE = [
   'la_warehouse_goods_balance', 'la_customer_report',
   'la_customer_report_item', 'la_customer_report_reservation',
+  'la_work_process', 'la_employee', 'la_employee_process', 'la_employee_permission',
+  'la_fulfillment_task_group', 'la_fulfillment_task', 'la_fulfillment_print_log',
   'la_customer_goods_report_preference', 'la_sales_order',
   'la_order_goods', 'la_stock_flow', 'la_receivable_flow',
   'la_supply_order', 'la_purchase_return_order',
@@ -137,7 +140,7 @@ function runStaticProbe() {
   if (sha(like) !== EXPECTED[LIKE] || sha(jxc) !== EXPECTED[JXC]) fail('baseline_hash_mismatch');
   const deps = nodeDeps();
   const names = deps.fs.readdirSync(deps.path.join(deps.root, 'database/migrations')).filter(x => x.endsWith('.sql')).sort();
-  if (names.length !== 29) fail('migration_count_mismatch');
+  if (names.length !== 30) fail('migration_count_mismatch');
   const migrationHashes = {}; let statements = 0; const finalTables = new Set();
   for (const source of [like, jxc]) for (const match of source.matchAll(/CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+`?([A-Za-z0-9_]+)/gi)) finalTables.add(match[1]);
   for (const name of names) {
@@ -162,8 +165,8 @@ function runStaticProbe() {
     }
     statements += splitSql(text).length;
   }
-  if (statements !== 215) fail('statement_count_mismatch');
-  if (finalTables.size !== 99) fail('final_table_count_mismatch');
+  if (statements !== 223) fail('statement_count_mismatch');
+  if (finalTables.size !== 106) fail('final_table_count_mismatch');
   if (Object.keys(EXPECTED_MIGRATION_HASHES).length !== names.length) fail('migration_manifest_mismatch');
   for (const table of POSITIVE) if (!finalTables.has(table)) fail('positive_assertion_missing');
   for (const table of NEGATIVE) if (finalTables.has(table)) fail('negative_assertion_failed');
@@ -288,12 +291,12 @@ function executeLocked(text, migration) {
   return statements.length;
 }
 function runtimeAssert(names, createdByThisRun) {
-  if (Number(runtimeMetadataScalar('target_table_count', [])) !== 99) runtimeFail('final_table_count_mismatch');
+  if (Number(runtimeMetadataScalar('target_table_count', [])) !== 106) runtimeFail('final_table_count_mismatch');
   for (const table of POSITIVE) if (!runtimeExists(table)) runtimeFail('positive_assertion_missing');
   for (const table of NEGATIVE) if (runtimeExists(table)) runtimeFail('negative_assertion_failed');
   const rows = session.runSql('SELECT version FROM la_migration_history ORDER BY version').fetchAll();
   if (!rows || rows.length !== names.length || rows.some((row, index) => row[0] !== names[index])) runtimeFail('history_mismatch');
-  return { status: 'runtime_passed', code: 'runtime_passed', stage: 'complete', migration_count: names.length, baseline_tables: 74, final_tables: 99, createdByThisRun: createdByThisRun };
+  return { status: 'runtime_passed', code: 'runtime_passed', stage: 'complete', migration_count: names.length, baseline_tables: 74, final_tables: 106, createdByThisRun: createdByThisRun };
 }
 function runFixedRuntimeProbe() {
   if (arguments.length !== 0) runtimeFail('runtime_arguments_not_allowed');
@@ -309,7 +312,7 @@ function runFixedRuntimeProbe() {
     executeLocked(like, false); executeLocked(jxc, false);
     if (Number(runtimeMetadataScalar('target_table_count', [])) !== 74) runtimeFail('baseline_table_count_mismatch');
     const names = Object.keys(EXPECTED_MIGRATION_HASHES).sort();
-  if (names.length !== 29) runtimeFail('migration_manifest_mismatch');
+  if (names.length !== 30) runtimeFail('migration_manifest_mismatch');
     let migrationStatements = 0;
     for (let index = 0; index < names.length; index++) {
       const text = prepareMigrationSql(runtimeRead('database/migrations/' + names[index]), 'la_');
@@ -363,7 +366,7 @@ function runFixedRuntimeProbe() {
       }
       if (index >= 2) { const first = index === 2 ? 0 : index; const last = index === 2 ? 2 : index; for (let history = first; history <= last; history++) session.runSql('INSERT INTO la_migration_history (version) VALUES (?)', [names[history]]); }
     }
-  if (migrationStatements !== 215) runtimeFail('statement_count_mismatch');
+  if (migrationStatements !== 223) runtimeFail('statement_count_mismatch');
     return runtimeAssert(names, createdByThisRun);
   } finally {
     if (createdByThisRun) {
