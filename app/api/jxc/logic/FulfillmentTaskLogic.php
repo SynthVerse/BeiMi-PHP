@@ -641,7 +641,7 @@ final class FulfillmentTaskLogic extends BaseLogic
             'depends_on_task_id' => 0,
             'status' => 'unassigned',
             'customer_name' => (string)($item['delivery_customer_name'] ?? $report['main_customer_name'] ?? ''),
-            'goods_name' => (string)($item['goods_name'] ?? ''),
+            'goods_name' => (string)((($item['sku_name'] ?? '') ?: ($item['goods_name'] ?? ''))),
             'planned_qty' => self::decimal((string)($item['expected_base_qty'] ?? '0')),
             'unit_name' => (string)($item['base_unit_name'] ?? $item['unit_name'] ?? ''),
             'requirement' => (string)($item['processing_requirement'] ?? ''),

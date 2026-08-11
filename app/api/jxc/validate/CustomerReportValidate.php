@@ -24,10 +24,12 @@ class CustomerReportValidate extends BaseValidate
         'status_scope' => 'in:pending,completed,cancelled',
         'delivery_date' => 'dateFormat:Y-m-d',
         'is_supplement' => 'in:0,1',
+        'dimensions' => 'array',
+        'combinations' => 'array',
     ];
 
     public function sceneRecognize() { return $this->only(['text']); }
-    public function sceneQuickCreateGoods() { return $this->only(['name','category_id','unit_id']); }
+    public function sceneQuickCreateGoods() { return $this->only(['name','category_id','unit_id','dimensions','combinations']); }
     public function sceneSubmit() { return $this->only(['main_customer_id','items','remark','idempotency_key','delivery_date','is_supplement']); }
     public function sceneDetail() { return $this->only(['id']); }
     public function sceneLists() { return $this->only(['page_no','page_size','status_scope']); }

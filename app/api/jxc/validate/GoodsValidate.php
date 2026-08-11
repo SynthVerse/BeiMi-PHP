@@ -41,6 +41,12 @@ class GoodsValidate extends BaseValidate
         'specifications' => 'array',
         'quality_ids' => 'array',
         'specification_ids' => 'array',
+        'code' => 'max:50',
+        'dimension_id' => 'integer|gt:0',
+        'dimension_type' => 'in:sku,descriptive',
+        'sort' => 'integer|egt:0',
+        'dimensions' => 'require|array',
+        'combinations' => 'array',
     ];
 
     protected $field = [
@@ -78,6 +84,12 @@ class GoodsValidate extends BaseValidate
         'specifications' => '规格列表',
         'quality_ids' => '品质ID列表',
         'specification_ids' => '规格ID列表',
+        'code' => '维度编码',
+        'dimension_id' => '维度ID',
+        'dimension_type' => '维度类型',
+        'sort' => '排序',
+        'dimensions' => '商品维度',
+        'combinations' => 'SKU组合',
     ];
 
     public function sceneAdd()
@@ -100,6 +112,8 @@ class GoodsValidate extends BaseValidate
             'aliases',
             'is_disabled',
             'remark',
+            'dimensions',
+            'combinations',
         ]);
     }
 
@@ -227,5 +241,31 @@ class GoodsValidate extends BaseValidate
     {
         return $this->only(['id', 'goods_id', 'quality_ids', 'specification_ids'])
             ->remove('id', 'require');
+    }
+
+    public function sceneDimensions()
+    {
+        return $this->only(['status']);
+    }
+
+    public function sceneSaveDimension()
+    {
+        return $this->only(['id', 'name', 'code', 'dimension_type', 'status', 'sort'])
+            ->remove('id', 'require');
+    }
+
+    public function sceneDeleteDimension()
+    {
+        return $this->only(['id']);
+    }
+
+    public function sceneProductDimensions()
+    {
+        return $this->only(['id', 'goods_id'])->remove('id', 'require');
+    }
+
+    public function sceneSaveProductDimensions()
+    {
+        return $this->only(['id', 'goods_id', 'dimensions', 'combinations'])->remove('id', 'require');
     }
 }

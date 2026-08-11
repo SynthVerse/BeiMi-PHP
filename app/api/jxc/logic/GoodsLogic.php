@@ -91,6 +91,14 @@ class GoodsLogic extends BaseLogic
                 GoodsAliasService::replaceTenantAliases($tenantId, (int)$goods->id, $aliases);
             }
             self::syncBoundUnits((int)$goods->id, $boundUnits);
+            $dimensionResult = GoodsDimensionLogic::saveProductDimensions([
+                'goods_id' => (int)$goods->id,
+                'dimensions' => $params['dimensions'] ?? [],
+                'combinations' => $params['combinations'] ?? null,
+            ]);
+            if ($dimensionResult === false) {
+                throw new \RuntimeException(GoodsDimensionLogic::getError());
+            }
             if ((int)$saveData['primary_supplier_id'] > 0) {
                 self::ensurePrimarySupplierRelation((int)$goods->id, (int)$saveData['primary_supplier_id']);
             }
@@ -198,6 +206,7 @@ class GoodsLogic extends BaseLogic
                 (int)$saveData['unit_id'],
                 (string)$saveData['units']
             );
+            GoodsDimensionLogic::refreshGeneratedSkuNames((int)$model->id, (string)$saveData['name']);
             self::syncPrimarySupplierFlag((int)$model->id, (int)$saveData['primary_supplier_id']);
             Db::commit();
             return true;

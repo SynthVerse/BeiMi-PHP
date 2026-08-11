@@ -7,6 +7,7 @@ use app\api\jxc\lists\GoodsCategoryLists;
 use app\api\jxc\lists\GoodsLists;
 use app\api\jxc\logic\GoodsCategoryLogic;
 use app\api\jxc\logic\GoodsLogic;
+use app\api\jxc\logic\GoodsDimensionLogic;
 use app\api\jxc\logic\GoodsSkuLogic;
 use app\api\jxc\logic\GoodsSpecificationLogic;
 use app\api\jxc\logic\GoodsSupplierMatrixLogic;
@@ -219,5 +220,46 @@ class GoodsController extends BaseJxcController
             return $this->fail(GoodsSkuLogic::getError());
         }
         return $this->success('生成成功', $result, 1, 1);
+    }
+
+    public function dimensions()
+    {
+        $params = (new GoodsValidate())->goCheck('dimensions');
+        return $this->data(GoodsDimensionLogic::definitions($params));
+    }
+
+    public function saveDimension()
+    {
+        $params = (new GoodsValidate())->post()->goCheck('saveDimension');
+        $result = GoodsDimensionLogic::saveDefinition($params);
+        if ($result === false) {
+            return $this->fail(GoodsDimensionLogic::getError());
+        }
+        return $this->success('保存成功', $result, 1, 1);
+    }
+
+    public function deleteDimension()
+    {
+        $params = (new GoodsValidate())->post()->goCheck('deleteDimension');
+        if (!GoodsDimensionLogic::deleteDefinition($params)) {
+            return $this->fail(GoodsDimensionLogic::getError());
+        }
+        return $this->success('删除成功', [], 1, 1);
+    }
+
+    public function productDimensions()
+    {
+        $params = (new GoodsValidate())->goCheck('productDimensions');
+        return $this->data(GoodsDimensionLogic::productDimensions($params));
+    }
+
+    public function saveProductDimensions()
+    {
+        $params = (new GoodsValidate())->post()->goCheck('saveProductDimensions');
+        $result = GoodsDimensionLogic::saveProductDimensions($params);
+        if ($result === false) {
+            return $this->fail(GoodsDimensionLogic::getError());
+        }
+        return $this->success('保存成功', $result, 1, 1);
     }
 }

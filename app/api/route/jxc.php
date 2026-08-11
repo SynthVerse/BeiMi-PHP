@@ -93,6 +93,11 @@ Route::group('', function () {
     Route::get('goods/specifications', 'jxc.Goods/specifications');
     Route::post('goods/specifications/save', 'jxc.Goods/saveSpecifications');
     Route::post('goods/skus/generate', 'jxc.Goods/generateSkus');
+    Route::get('goods/dimensions', 'jxc.Goods/dimensions');
+    Route::post('goods/dimensions/save', 'jxc.Goods/saveDimension');
+    Route::post('goods/dimensions/delete', 'jxc.Goods/deleteDimension');
+    Route::get('goods/product-dimensions', 'jxc.Goods/productDimensions');
+    Route::post('goods/product-dimensions/save', 'jxc.Goods/saveProductDimensions');
 
     Route::get('customer/detail', 'jxc.Customer/detail');
     Route::get('customer/children', 'jxc.Customer/children');

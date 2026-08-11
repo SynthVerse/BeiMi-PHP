@@ -5,6 +5,7 @@ namespace app\api\jxc\logic;
 use app\common\logic\BaseLogic;
 use app\common\model\jxc\Customer;
 use app\common\model\jxc\Goods;
+use app\common\model\jxc\GoodsSku;
 use app\common\model\jxc\OrderGoods;
 use app\common\model\jxc\ReceivableFlow;
 use app\common\model\jxc\SalesOrder;
@@ -567,6 +568,21 @@ class SalesOrderLogic extends BaseLogic
                 self::setError('停用商品不可开销售单');
                 return false;
             }
+            $skuId = (int)($item['sku_id'] ?? 0);
+            $skuName = trim((string)($item['sku_name'] ?? ''));
+            if ($skuId > 0) {
+                $sku = GoodsSku::where('tenant_id', (int)(request()->tenantId ?? 0))
+                    ->where('goods_id', $goodsId)
+                    ->where('id', $skuId)
+                    ->findOrEmpty();
+                if ($sku->isEmpty()) {
+                    self::setError('SKU不属于当前商品');
+                    return false;
+                }
+                $skuName = (string)$sku->sku_name;
+            } else {
+                $skuName = '';
+            }
 
             $number = round(max(0, (float)($item['number'] ?? 0)), 4);
             if ($number <= 0) {
@@ -585,6 +601,8 @@ class SalesOrderLogic extends BaseLogic
                 'tenant_id' => (int)(request()->tenantId ?? 0),
                 'order_type' => self::ORDER_TYPE,
                 'goods_id' => $goodsId,
+                'sku_id' => $skuId,
+                'sku_name' => $skuName,
                 'name' => trim((string)($item['name'] ?? $item['product_name'] ?? $goodsModel->name)),
                 'units' => trim((string)($item['units'] ?? $item['unit'] ?? $goodsModel->units)),
                 'number' => number_format($number, 4, '.', ''),
@@ -684,6 +702,7 @@ class SalesOrderLogic extends BaseLogic
                 'order_goods_id' => (int)($row['id'] ?? 0),
                 'goods_id' => (int)($row['goods_id'] ?? 0),
                 'sku_id' => (int)($row['sku_id'] ?? 0),
+                'sku_name' => (string)($row['sku_name'] ?? ''),
                 'name' => (string)($row['name'] ?? ''),
                 'product_name' => (string)($row['name'] ?? ''),
                 'units' => (string)($row['units'] ?? ''),

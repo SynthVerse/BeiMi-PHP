@@ -72,9 +72,14 @@ class CustomerReportCandidateLogic extends BaseLogic
             'product_code' => 'CR' . date('YmdHis') . random_int(100, 999),
             'price' => '0.00', 'cost' => '0.00', 'is_disabled' => 0,
             'bound_units' => [['unit_id' => $unitId, 'unit_name' => (string)$unit->name, 'is_base_unit' => 1, 'status' => 1]],
+            'dimensions' => $params['dimensions'] ?? [],
+            'combinations' => $params['combinations'] ?? null,
         ]);
         if ($created === false || (int)($created['id'] ?? 0) <= 0) {
-            self::setError(GoodsLogic::getError());
+            $error = GoodsLogic::getError();
+            self::setError(str_contains($error, 'SKU维度')
+                ? '请前往完整新建商品页配置至少一个SKU维度'
+                : $error);
             return false;
         }
         if (($created['reusable'] ?? true) !== true) {
@@ -219,16 +224,21 @@ class CustomerReportCandidateLogic extends BaseLogic
         }
 
         $matchingTokens = $exactBoundary
-            ? [$normalizedNeedle]
+            ? self::normalizedSuffixes($normalizedNeedle, $context['max_token_length'])
             : self::normalizedPrefixes($normalizedNeedle, $context['max_token_length']);
         $matchedNames = [];
         foreach ($matchingTokens as $normalizedToken) {
+            $matchedThisToken = false;
             foreach ($context['token_index'][$normalizedToken] ?? [] as $goodsId => $displayName) {
+                $matchedThisToken = true;
                 if (!isset($matchedNames[$goodsId])
                     || mb_strlen($displayName) > mb_strlen($matchedNames[$goodsId])
                 ) {
                     $matchedNames[$goodsId] = $displayName;
                 }
+            }
+            if ($exactBoundary && $matchedThisToken) {
+                break;
             }
         }
         ksort($matchedNames, SORT_NUMERIC);
@@ -274,7 +284,7 @@ class CustomerReportCandidateLogic extends BaseLogic
                 $matchedName = (string)($goodsCandidate['matched_name'] ?? $goodsCandidate['name'] ?? '');
                 $pos = $matchedName === '' ? false : mb_strpos($text, $matchedName);
                 if ($pos !== false) {
-                    $needle = trim(mb_substr($text, 0, $pos), " \t，,、；;：:");
+                    $needle = self::trimBusinessSeparators(mb_substr($text, 0, $pos));
                     break;
                 }
             }
@@ -304,6 +314,9 @@ class CustomerReportCandidateLogic extends BaseLogic
             }
             return [
                 'id' => $deliveryId, 'name' => (string)$row['customer_name'], 'parent_id' => $parentId,
+                'display_name' => $parentId > 0
+                    ? $mainName . ' / ' . (string)$row['customer_name']
+                    : (string)$row['customer_name'],
                 'main_customer' => ['id' => $mainId, 'name' => $mainName],
                 'delivery_customer' => ['id' => $deliveryId, 'name' => (string)$row['customer_name']],
             ];
@@ -354,18 +367,21 @@ class CustomerReportCandidateLogic extends BaseLogic
     {
         $goodsText = self::goodsSourceText($text);
         if ($goodsText === '' || $unitPattern === null
-            || !preg_match('/(?<![\d.])\d+(?:\.\d{1,2})?\s*(?:' . $unitPattern . ')/iu', $goodsText, $match, PREG_OFFSET_CAPTURE)
+            || !preg_match(
+                '/^(.*?)(\d+(?:\.\d{1,2})?\s*(?:' . $unitPattern . '))(.*)$/iu',
+                $goodsText,
+                $match
+            )
         ) {
             return ['suggested_name' => null, 'remark' => ''];
         }
-        $offset = (int)$match[0][1];
-        $suggestedName = trim(substr($goodsText, 0, $offset), " \t\n\r\0\x0B，,、；;：:");
+        $suggestedName = self::trimBusinessSeparators((string)$match[1]);
         if ($suggestedName === '') {
             return ['suggested_name' => null, 'remark' => ''];
         }
         return [
             'suggested_name' => $suggestedName,
-            'remark' => trim(substr($goodsText, $offset), " \t\n\r\0\x0B，,、；;：:"),
+            'remark' => self::trimBusinessSeparators((string)$match[2] . (string)$match[3]),
         ];
     }
 
@@ -376,7 +392,7 @@ class CustomerReportCandidateLogic extends BaseLogic
             '',
             trim($text)
         );
-        return trim((string)$withoutCustomer, " \t\n\r\0\x0B，,、；;：:");
+        return self::trimBusinessSeparators((string)$withoutCustomer);
     }
 
     /** @param array{suggested_name:?string,remark:string} $boundary */
@@ -405,10 +421,7 @@ class CustomerReportCandidateLogic extends BaseLogic
         if (preg_match($pattern, $goodsText, $match) !== 1) {
             return '';
         }
-        return trim(
-            substr($goodsText, strlen((string)$match[0])),
-            " \t\n\r\0\x0B，,、；;：:"
-        );
+        return self::trimBusinessSeparators(substr($goodsText, strlen((string)$match[0])));
     }
 
     /**
@@ -521,6 +534,23 @@ class CustomerReportCandidateLogic extends BaseLogic
             $prefixes[] = $prefix;
         }
         return $prefixes;
+    }
+
+    /** @return array<int,string> */
+    private static function normalizedSuffixes(string $normalized, int $maximumLength): array
+    {
+        $characters = preg_split('//u', $normalized, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+        $maximumLength = min(count($characters), max(0, $maximumLength));
+        $suffixes = [];
+        for ($length = $maximumLength; $length >= 1; $length--) {
+            $suffixes[] = implode('', array_slice($characters, -$length));
+        }
+        return $suffixes;
+    }
+
+    private static function trimBusinessSeparators(string $value): string
+    {
+        return preg_replace('/^[\s，,、；;：:]+|[\s，,、；;：:]+$/u', '', $value) ?? trim($value);
     }
 
     /** @param array<int,string> $units */

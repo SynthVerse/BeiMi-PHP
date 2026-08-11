@@ -11,7 +11,7 @@ use app\common\model\jxc\GoodsSpecTemplate;
 use app\common\model\jxc\GoodsSpecValue;
 use app\common\model\jxc\GoodsSupplier;
 use app\common\model\jxc\GoodsUnit;
-use app\common\model\jxc\OrderGoods;
+use app\common\service\goods\GoodsSkuReferenceService;
 use think\facade\Db;
 
 class GoodsSkuLogic extends BaseLogic
@@ -42,6 +42,10 @@ class GoodsSkuLogic extends BaseLogic
             self::setError('商品不存在');
             return false;
         }
+        if ((string)($goods->dimension_mode ?? 'legacy') === 'generic') {
+            self::setError('通用维度商品请通过商品维度维护SKU组合');
+            return false;
+        }
 
         $skus = $params['skus'] ?? [];
         if (!is_array($skus)) {
@@ -65,6 +69,11 @@ class GoodsSkuLogic extends BaseLogic
                         ->findOrEmpty();
                     if ($model->isEmpty()) {
                         self::setError('SKU不存在');
+                        Db::rollback();
+                        return false;
+                    }
+                    if ((int)($model->is_auto_generated ?? 0) === 1) {
+                        self::setError('自动生成的SKU请通过商品维度维护');
                         Db::rollback();
                         return false;
                     }
@@ -110,12 +119,19 @@ class GoodsSkuLogic extends BaseLogic
             self::setError('SKU不存在');
             return false;
         }
-        $model->save([
+        $status = [
             'status' => (int)($params['status'] ?? 1) === 0 ? 0 : 1,
             'purchase_status' => (int)($params['purchase_status'] ?? $params['status'] ?? 1) === 0 ? 0 : 1,
             'sale_status' => (int)($params['sale_status'] ?? $params['status'] ?? 1) === 0 ? 0 : 1,
             'update_time' => time(),
-        ]);
+        ];
+        if ((int)($model->dimension_disabled_snapshot ?? 0) >= 8
+            && ($status['status'] === 1 || $status['purchase_status'] === 1 || $status['sale_status'] === 1)
+        ) {
+            self::setError('该SKU组合已从商品维度中移除，请先恢复组合');
+            return false;
+        }
+        $model->save($status);
         return true;
     }
 
@@ -140,6 +156,7 @@ class GoodsSkuLogic extends BaseLogic
             'sort' => (int)($item['sort'] ?? 0),
             'remark' => (string)($item['remark'] ?? ''),
             'is_auto_generated' => (int)($item['is_auto_generated'] ?? 0),
+            'dimension_disabled_snapshot' => (int)($item['dimension_disabled_snapshot'] ?? 0),
         ];
     }
 
@@ -201,14 +218,15 @@ class GoodsSkuLogic extends BaseLogic
             'status' => (int)($sku['status'] ?? 1) === 0 ? 0 : 1,
             'sort' => (int)($sku['sort'] ?? $index),
             'remark' => trim((string)($sku['remark'] ?? '')),
-            'is_auto_generated' => (int)($sku['is_auto_generated'] ?? 0),
+            'is_auto_generated' => 0,
         ];
     }
 
     protected static function deleteMissingSkus(int $goodsId, array $keptIds): void
     {
         $query = GoodsSku::where('tenant_id', self::tenantId())
-            ->where('goods_id', $goodsId);
+            ->where('goods_id', $goodsId)
+            ->where('is_auto_generated', 0);
         if ($keptIds !== []) {
             $query->whereNotIn('id', $keptIds);
         }
@@ -218,24 +236,18 @@ class GoodsSkuLogic extends BaseLogic
             return;
         }
 
-        $usedSkuIds = OrderGoods::where('tenant_id', self::tenantId())
-            ->where('goods_id', $goodsId)
-            ->whereIn('sku_id', $deleteIds)
-            ->column('sku_id');
-        if ($usedSkuIds !== []) {
-            throw new \RuntimeException('SKU已被采购/销售明细使用，请停用后保留');
-        }
-
-        $deleteRelationIds = GoodsSupplier::where('tenant_id', self::tenantId())
-            ->where('goods_id', $goodsId)
-            ->whereIn('sku_id', $deleteIds)
-            ->column('id');
-        if ($deleteRelationIds !== []) {
-            $usedRelationIds = OrderGoods::where('tenant_id', self::tenantId())
+        foreach ($deleteIds as $deleteId) {
+            if (GoodsSkuReferenceService::skuHasBusinessReferences(self::tenantId(), (int)$deleteId)) {
+                throw new \RuntimeException('SKU已被业务单据使用，请停用后保留');
+            }
+            $deleteRelationIds = GoodsSupplier::where('tenant_id', self::tenantId())
                 ->where('goods_id', $goodsId)
-                ->whereIn('supplier_relation_id', $deleteRelationIds)
-                ->column('supplier_relation_id');
-            if ($usedRelationIds !== []) {
+                ->where('sku_id', (int)$deleteId)
+                ->column('id');
+            if (GoodsSkuReferenceService::supplierRelationsHaveBusinessReferences(
+                self::tenantId(),
+                $deleteRelationIds
+            )) {
                 throw new \RuntimeException('SKU供应商关系已被订单明细使用，请停用后保留');
             }
         }
@@ -272,7 +284,6 @@ class GoodsSkuLogic extends BaseLogic
 
         // 同步品质维度
         $spec = GoodsSpec::where('tenant_id', self::tenantId())
-            ->where('template_id', (int)$template->id)
             ->where('code', 'quality_status')
             ->findOrEmpty();
         if ($spec->isEmpty()) {
@@ -281,6 +292,7 @@ class GoodsSkuLogic extends BaseLogic
                 'template_id' => (int)$template->id,
                 'name' => '品质状态',
                 'code' => 'quality_status',
+                'dimension_type' => GoodsDimensionLogic::TYPE_SKU,
                 'status' => 1,
                 'sort' => 0,
                 'create_time' => time(),
@@ -290,12 +302,14 @@ class GoodsSkuLogic extends BaseLogic
 
         $valueCode = $data['quality_status'] !== '' ? $data['quality_status'] : 'default';
         $value = GoodsSpecValue::where('tenant_id', self::tenantId())
+            ->where('goods_id', $goodsId)
             ->where('spec_id', (int)$spec->id)
             ->where('code', $valueCode)
             ->findOrEmpty();
         if ($value->isEmpty()) {
             $value = GoodsSpecValue::create([
                 'tenant_id' => self::tenantId(),
+                'goods_id' => $goodsId,
                 'spec_id' => (int)$spec->id,
                 'name' => $data['quality_label'],
                 'code' => $valueCode,
@@ -330,7 +344,6 @@ class GoodsSkuLogic extends BaseLogic
         $specificationStatus = $data['specification_status'] ?? '';
         if ($specificationStatus !== '') {
             $weightSpec = GoodsSpec::where('tenant_id', self::tenantId())
-                ->where('template_id', (int)$template->id)
                 ->where('code', 'weight_grade')
                 ->findOrEmpty();
             if ($weightSpec->isEmpty()) {
@@ -339,6 +352,7 @@ class GoodsSkuLogic extends BaseLogic
                     'template_id' => (int)$template->id,
                     'name' => '重量规格',
                     'code' => 'weight_grade',
+                    'dimension_type' => GoodsDimensionLogic::TYPE_SKU,
                     'status' => 1,
                     'sort' => 1,
                     'create_time' => time(),
@@ -347,12 +361,14 @@ class GoodsSkuLogic extends BaseLogic
             }
 
             $specValue = GoodsSpecValue::where('tenant_id', self::tenantId())
+                ->where('goods_id', $goodsId)
                 ->where('spec_id', (int)$weightSpec->id)
                 ->where('code', $specificationStatus)
                 ->findOrEmpty();
             if ($specValue->isEmpty()) {
                 $specValue = GoodsSpecValue::create([
                     'tenant_id' => self::tenantId(),
+                    'goods_id' => $goodsId,
                     'spec_id' => (int)$weightSpec->id,
                     'name' => $data['specification_label'] ?? $specificationStatus,
                     'code' => $specificationStatus,
@@ -421,10 +437,13 @@ class GoodsSkuLogic extends BaseLogic
             self::setError('商品不存在');
             return false;
         }
+        if ((string)($goods->dimension_mode ?? 'legacy') === 'generic') {
+            self::setError('通用维度商品请通过商品维度维护SKU组合');
+            return false;
+        }
 
         $qualityIds = $params['quality_ids'] ?? [];
         $specificationIds = $params['specification_ids'] ?? [];
-
         if (!is_array($qualityIds) || empty($qualityIds)) {
             self::setError('请选择至少一个品质');
             return false;
@@ -433,24 +452,38 @@ class GoodsSkuLogic extends BaseLogic
             self::setError('请选择至少一个规格');
             return false;
         }
+        $qualityIds = array_values(array_unique(array_map('intval', $qualityIds)));
+        $specificationIds = array_values(array_unique(array_map('intval', $specificationIds)));
 
         // 获取品质值列表
-        $qualityValues = GoodsSpecValue::where('tenant_id', self::tenantId())
-            ->whereIn('id', $qualityIds)
+        $qualityValues = Db::name('goods_spec_value')->alias('value')
+            ->join('goods_spec spec', 'spec.id=value.spec_id AND spec.tenant_id=value.tenant_id')
+            ->where('value.tenant_id', self::tenantId())
+            ->where('value.goods_id', $goodsId)
+            ->where('value.status', 1)
+            ->where('spec.code', 'quality_status')
+            ->whereIn('value.id', $qualityIds)
+            ->field('value.*')
             ->select()
             ->toArray();
-        if (empty($qualityValues)) {
-            self::setError('品质值不存在');
+        if (count($qualityValues) !== count($qualityIds)) {
+            self::setError('品质值不存在或不属于当前商品');
             return false;
         }
 
         // 获取规格值列表
-        $specValues = GoodsSpecValue::where('tenant_id', self::tenantId())
-            ->whereIn('id', $specificationIds)
+        $specValues = Db::name('goods_spec_value')->alias('value')
+            ->join('goods_spec spec', 'spec.id=value.spec_id AND spec.tenant_id=value.tenant_id')
+            ->where('value.tenant_id', self::tenantId())
+            ->where('value.goods_id', $goodsId)
+            ->where('value.status', 1)
+            ->where('spec.code', 'weight_grade')
+            ->whereIn('value.id', $specificationIds)
+            ->field('value.*')
             ->select()
             ->toArray();
-        if (empty($specValues)) {
-            self::setError('规格值不存在');
+        if (count($specValues) !== count($specificationIds)) {
+            self::setError('规格值不存在或不属于当前商品');
             return false;
         }
 
@@ -517,6 +550,7 @@ class GoodsSkuLogic extends BaseLogic
                         'sort' => $index,
                         'remark' => '',
                         'is_auto_generated' => 1,
+                        'dimension_disabled_snapshot' => 0,
                         'create_time' => time(),
                         'update_time' => time(),
                     ];
@@ -536,6 +570,21 @@ class GoodsSkuLogic extends BaseLogic
                 }
             }
             if (!empty($deleteIds)) {
+                foreach ($deleteIds as $deleteId) {
+                    $relationIds = GoodsSupplier::where('tenant_id', self::tenantId())
+                        ->where('goods_id', $goodsId)
+                        ->where('sku_id', $deleteId)
+                        ->column('id');
+                    if (GoodsSkuReferenceService::skuHasBusinessReferences(self::tenantId(), $deleteId)
+                        || GoodsSkuReferenceService::supplierRelationsHaveBusinessReferences(self::tenantId(), $relationIds)
+                    ) {
+                        throw new \RuntimeException('SKU已被业务单据使用，请停用后保留');
+                    }
+                    GoodsSupplier::where('tenant_id', self::tenantId())
+                        ->where('goods_id', $goodsId)
+                        ->where('sku_id', $deleteId)
+                        ->delete();
+                }
                 GoodsSkuSpecValue::where('tenant_id', self::tenantId())
                     ->whereIn('sku_id', $deleteIds)
                     ->delete();

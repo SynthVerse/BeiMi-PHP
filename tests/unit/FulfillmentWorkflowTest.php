@@ -6,6 +6,8 @@ namespace tests\unit;
 
 use app\api\jxc\logic\CustomerReportLogic;
 use app\api\jxc\logic\FulfillmentTaskLogic;
+use app\api\jxc\logic\GoodsDimensionLogic;
+use app\api\jxc\logic\SalesOrderLogic;
 use app\api\jxc\logic\WorkforceLogic;
 use app\api\jxc\logic\WarehouseGoodsBalanceService;
 use PHPUnit\Framework\TestCase;
@@ -204,8 +206,19 @@ final class FulfillmentWorkflowTest extends TestCase
         $customerId = $this->createCustomer('记账门禁客户');
         $goodsId = $this->createCustomerReportGoods('东星斑', 'TASK-BILL-GATE');
         $warehouseId = $this->createCustomerReportWarehouse('记账门禁仓');
+        $origin = GoodsDimensionLogic::saveDefinition(['name' => '产地', 'code' => 'origin', 'dimension_type' => 'sku']);
+        $dimensionConfig = GoodsDimensionLogic::saveProductDimensions([
+            'goods_id' => $goodsId,
+            'dimensions' => [[
+                'dimension_id' => $origin['id'],
+                'values' => [['name' => '大连', 'code' => 'dalian']],
+            ]],
+        ]);
+        $sku = $dimensionConfig['skus'][0];
         self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, '2.00'));
-        $report = CustomerReportLogic::submit($this->fulfillmentPayload($customerId, $goodsId, $warehouseId, 'task-bill-gate', '1', '杀好'));
+        $payload = $this->fulfillmentPayload($customerId, $goodsId, $warehouseId, 'task-bill-gate', '1', '杀好');
+        $payload['items'][0]['sku_id'] = (int)$sku['id'];
+        $report = CustomerReportLogic::submit($payload);
         self::assertNotFalse($report, CustomerReportLogic::getError());
         self::assertFalse(CustomerReportLogic::convert(['id' => $report['id'], 'version' => $report['version']]));
 
@@ -224,6 +237,13 @@ final class FulfillmentWorkflowTest extends TestCase
         self::assertSame((int)$line['base_unit_id'], (int)$line['pricing_unit_id']);
         self::assertSame((string)$line['base_unit_name'], (string)$line['pricing_unit_name']);
         self::assertSame('28.00', (string)$line['price']);
+        $orderGoods = Db::name('order_goods')->where('source_line_type', 'customer_report_item')
+            ->where('source_line_id', (int)$line['id'])->find();
+        self::assertNotEmpty($orderGoods);
+        self::assertSame((int)$sku['id'], (int)$orderGoods['sku_id']);
+        self::assertSame((string)$sku['sku_name'], (string)$orderGoods['sku_name']);
+        $salesDetail = SalesOrderLogic::detail(['id' => (int)$orderGoods['order_id']]);
+        self::assertSame((string)$sku['sku_name'], (string)$salesDetail['goods'][0]['sku_name']);
     }
 
     public function test_report_edit_cannot_change_settlement_owner_after_any_ticket_started(): void

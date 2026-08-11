@@ -258,6 +258,8 @@ class CustomerReportLogic extends BaseLogic
                         }
                         $goods[] = [
                             'goods_id' => (int)$item['goods_id'],
+                            'sku_id' => (int)($item['sku_id'] ?? 0),
+                            'sku_name' => (string)($item['sku_name'] ?? ''),
                             'name' => (string)$item['goods_name'],
                             'units' => (string)$item['pricing_unit_name'],
                             'number' => $pricingQuantity,

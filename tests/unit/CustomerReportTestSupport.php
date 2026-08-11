@@ -111,14 +111,17 @@ CREATE TABLE IF NOT EXISTS `la_sales_order` (
 CREATE TABLE IF NOT EXISTS `la_order_goods` (
   `id` int unsigned NOT NULL AUTO_INCREMENT, `tenant_id` int unsigned NOT NULL DEFAULT 0,
   `order_id` int unsigned NOT NULL DEFAULT 0, `order_type` varchar(30) NOT NULL DEFAULT '',
-  `goods_id` int unsigned NOT NULL DEFAULT 0, `name` varchar(200) NOT NULL DEFAULT '',
+  `goods_id` int unsigned NOT NULL DEFAULT 0, `sku_id` int unsigned NOT NULL DEFAULT 0,
+  `sku_name` varchar(200) NOT NULL DEFAULT '', `supplier_relation_id` int unsigned NOT NULL DEFAULT 0,
+  `name` varchar(200) NOT NULL DEFAULT '',
   `units` varchar(50) NOT NULL DEFAULT '', `number` decimal(18,4) NOT NULL DEFAULT 0.0000,
   `base_quantity` decimal(18,4) NOT NULL DEFAULT 0.0000, `price` decimal(18,2) NOT NULL DEFAULT 0.00,
   `amount` decimal(18,2) NOT NULL DEFAULT 0.00, `pricing_unit_id` int unsigned NOT NULL DEFAULT 0,
   `source_line_type` varchar(32) NOT NULL DEFAULT '', `source_line_id` int unsigned NOT NULL DEFAULT 0,
   `remark` varchar(500) NOT NULL DEFAULT '', `sort` int NOT NULL DEFAULT 0,
   `create_time` int unsigned NOT NULL DEFAULT 0, `update_time` int unsigned NOT NULL DEFAULT 0,
-  PRIMARY KEY (`id`)
+  PRIMARY KEY (`id`), KEY `idx_customer_report_order_goods_sku` (`tenant_id`,`sku_id`),
+  KEY `idx_customer_report_order_goods_supplier_relation` (`tenant_id`,`supplier_relation_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE TABLE IF NOT EXISTS `la_stock_flow` (
   `id` int unsigned NOT NULL AUTO_INCREMENT, `tenant_id` int unsigned NOT NULL DEFAULT 0,
@@ -130,6 +133,15 @@ CREATE TABLE IF NOT EXISTS `la_stock_flow` (
   `after_stock` decimal(18,4) NOT NULL DEFAULT 0.0000, `admin_id` int unsigned NOT NULL DEFAULT 0,
   `remark` varchar(255) NOT NULL DEFAULT '', `create_time` int unsigned NOT NULL DEFAULT 0,
   PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE IF NOT EXISTS `la_goods_supplier_price_history` (
+  `id` int unsigned NOT NULL AUTO_INCREMENT, `tenant_id` int unsigned NOT NULL DEFAULT 0,
+  `goods_supplier_id` int unsigned NOT NULL DEFAULT 0, `goods_id` int unsigned NOT NULL DEFAULT 0,
+  `sku_id` int unsigned NOT NULL DEFAULT 0, `supplier_id` int unsigned NOT NULL DEFAULT 0,
+  `purchase_price` decimal(12,2) NOT NULL DEFAULT 0.00, `effective_date` date DEFAULT NULL,
+  `remark` varchar(500) NOT NULL DEFAULT '', `create_time` int unsigned NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`), KEY `idx_customer_report_price_relation` (`tenant_id`,`goods_supplier_id`),
+  KEY `idx_customer_report_price_sku` (`tenant_id`,`sku_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE TABLE IF NOT EXISTS `la_receivable_flow` (
   `id` int unsigned NOT NULL AUTO_INCREMENT, `tenant_id` int unsigned NOT NULL DEFAULT 0,
@@ -158,6 +170,11 @@ SQL;
             'ALTER TABLE `la_order_goods` ADD COLUMN `pricing_unit_id` int unsigned NOT NULL DEFAULT 0',
             "ALTER TABLE `la_order_goods` ADD COLUMN `source_line_type` varchar(32) NOT NULL DEFAULT ''",
             'ALTER TABLE `la_order_goods` ADD COLUMN `source_line_id` int unsigned NOT NULL DEFAULT 0',
+            'ALTER TABLE `la_order_goods` ADD COLUMN `sku_id` int unsigned NOT NULL DEFAULT 0',
+            "ALTER TABLE `la_order_goods` ADD COLUMN `sku_name` varchar(200) NOT NULL DEFAULT ''",
+            'ALTER TABLE `la_order_goods` ADD COLUMN `supplier_relation_id` int unsigned NOT NULL DEFAULT 0',
+            'ALTER TABLE `la_order_goods` ADD KEY `idx_customer_report_order_goods_sku` (`tenant_id`,`sku_id`)',
+            'ALTER TABLE `la_order_goods` ADD KEY `idx_customer_report_order_goods_supplier_relation` (`tenant_id`,`supplier_relation_id`)',
             'ALTER TABLE `la_stock_flow` ADD COLUMN `sku_id` int unsigned NOT NULL DEFAULT 0',
             'ALTER TABLE `la_stock_flow` ADD COLUMN `batch_id` int unsigned NOT NULL DEFAULT 0',
             'ALTER TABLE `la_sales_order` MODIFY COLUMN `source_type` varchar(32) NULL DEFAULT NULL',
@@ -193,12 +210,18 @@ SQL;
         Db::execute('DROP TABLE IF EXISTS `la_goods_sku`');
         Db::execute('DROP TABLE IF EXISTS `la_goods_spec`');
         Db::execute('DROP TABLE IF EXISTS `la_goods_spec_template`');
+        try {
+            Db::execute('ALTER TABLE `la_goods` DROP COLUMN `dimension_mode`');
+        } catch (\Throwable) {
+        }
         $goodsSpecStatements = array_values(array_filter(array_map('trim', explode(
             ';',
             $this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260603_000002_aquatic_goods_v1.sql'))
         ))));
         $this->runStatements(implode(";\n", array_slice($goodsSpecStatements, 0, 5)) . ';');
+        $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260614_000001_quality_spec_separation.sql')));
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260614_000002_spec_value_goods_id.sql')));
+        $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260811_000001_create_goods_dimensions.sql')));
         Db::execute('DROP TABLE IF EXISTS `la_warehouse_goods_balance`');
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260729_000001_create_warehouse_goods_balance.sql')));
         Db::execute('DROP TABLE IF EXISTS `la_customer_report_reservation`');
@@ -206,13 +229,14 @@ SQL;
         Db::execute('DROP TABLE IF EXISTS `la_customer_report`');
         Db::execute('DROP TABLE IF EXISTS `la_customer_goods_report_preference`');
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260729_000002_create_customer_report_workflow.sql')));
+        $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260811_000002_add_customer_report_sku_snapshot.sql')));
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260810_000001_create_fulfillment_workflow.sql')));
         self::$customerReportSchemaReady = true;
     }
 
     protected function cleanCustomerReportData(): void
     {
-        foreach (['fulfillment_print_log', 'fulfillment_task', 'fulfillment_task_group', 'employee_permission', 'employee_process', 'employee', 'work_process', 'audit_log', 'receivable_flow', 'stock_flow', 'order_goods', 'sales_order', 'customer_report_reservation', 'customer_report_item', 'customer_report', 'customer_goods_report_preference', 'warehouse_goods_balance', 'goods_sku_spec_value', 'goods_spec_value', 'goods_sku', 'goods_spec', 'goods_spec_template', 'goods_alias', 'goods_units_binding', 'goods_unit', 'warehouse', 'goods', 'customer'] as $table) {
+        foreach (['fulfillment_print_log', 'fulfillment_task', 'fulfillment_task_group', 'employee_permission', 'employee_process', 'employee', 'work_process', 'audit_log', 'receivable_flow', 'stock_flow', 'order_goods', 'sales_order', 'customer_report_reservation', 'customer_report_item', 'customer_report', 'customer_goods_report_preference', 'warehouse_goods_balance', 'goods_supplier_price_history', 'goods_supplier', 'goods_sku_spec_value', 'goods_spec_value', 'goods_sku', 'goods_spec', 'goods_spec_template', 'goods_alias', 'goods_units_binding', 'goods_unit', 'warehouse', 'goods', 'customer'] as $table) {
             try {
                 Db::name($table)->where('tenant_id', self::TENANT_ID)->delete();
             } catch (\Throwable) {

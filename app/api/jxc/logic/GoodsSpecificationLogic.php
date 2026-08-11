@@ -83,6 +83,9 @@ class GoodsSpecificationLogic extends BaseLogic
             self::setError('商品ID不能为空');
             return false;
         }
+        if (!self::assertLegacyWritableGoods($goodsId)) {
+            return false;
+        }
 
         $spec = self::ensureSpec('quality_status', '品质状态');
         if (!$spec) {
@@ -181,6 +184,9 @@ class GoodsSpecificationLogic extends BaseLogic
             self::setError('商品ID不能为空');
             return false;
         }
+        if (!self::assertLegacyWritableGoods($goodsId)) {
+            return false;
+        }
 
         $spec = self::ensureSpec('weight_grade', '重量规格');
         if (!$spec) {
@@ -271,15 +277,7 @@ class GoodsSpecificationLogic extends BaseLogic
      */
     protected static function getSpec(string $specCode): ?array
     {
-        $template = GoodsSpecTemplate::where('tenant_id', self::tenantId())
-            ->where('code', 'aquatic_quality')
-            ->findOrEmpty();
-        if ($template->isEmpty()) {
-            return null;
-        }
-
         $spec = GoodsSpec::where('tenant_id', self::tenantId())
-            ->where('template_id', (int)$template->id)
             ->where('code', $specCode)
             ->findOrEmpty();
         if ($spec->isEmpty()) {
@@ -294,6 +292,13 @@ class GoodsSpecificationLogic extends BaseLogic
      */
     protected static function ensureSpec(string $specCode, string $specName): ?array
     {
+        $existing = GoodsSpec::where('tenant_id', self::tenantId())
+            ->where('code', $specCode)
+            ->findOrEmpty();
+        if (!$existing->isEmpty()) {
+            return $existing->toArray();
+        }
+
         $template = GoodsSpecTemplate::where('tenant_id', self::tenantId())
             ->where('code', 'aquatic_quality')
             ->findOrEmpty();
@@ -319,6 +324,7 @@ class GoodsSpecificationLogic extends BaseLogic
                 'template_id' => (int)$template->id,
                 'name' => $specName,
                 'code' => $specCode,
+                'dimension_type' => GoodsDimensionLogic::TYPE_SKU,
                 'status' => 1,
                 'sort' => $specCode === 'weight_grade' ? 1 : 0,
                 'create_time' => time(),
@@ -332,5 +338,23 @@ class GoodsSpecificationLogic extends BaseLogic
     protected static function tenantId(): int
     {
         return (int)(request()->tenantId ?? 0);
+    }
+
+    private static function assertLegacyWritableGoods(int $goodsId): bool
+    {
+        $goods = Db::name('goods')
+            ->where('tenant_id', self::tenantId())
+            ->where('id', $goodsId)
+            ->field('id,dimension_mode')
+            ->find();
+        if (!$goods) {
+            self::setError('商品不存在');
+            return false;
+        }
+        if ((string)($goods['dimension_mode'] ?? 'legacy') === 'generic') {
+            self::setError('通用维度商品请通过商品维度维护品质和规格');
+            return false;
+        }
+        return true;
     }
 }

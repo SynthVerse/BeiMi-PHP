@@ -67,6 +67,7 @@ final class CustomerReportWorkflowTest extends TestCase
     {
         $customerId = $this->createCustomer('客户甲');
         $childId = $this->createCustomer('客户甲门店', $customerId);
+        $this->createCustomerReportUnit('斤');
         $goodsId = $this->createCustomerReportGoods('桂鱼', 'CR-CANDIDATE');
         $candidate = CustomerReportCandidateLogic::recognize('客户甲门店 桂鱼 2斤 8头 去鳞');
 
@@ -82,6 +83,27 @@ final class CustomerReportWorkflowTest extends TestCase
         self::assertSame('2斤 8头 去鳞', $candidate['lines'][0]['line_remark']);
         self::assertSame(0, Db::name('customer_report')->where('tenant_id', self::TENANT_ID)->count());
         self::assertSame(0, Db::name('customer_report_reservation')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
+    public function test_duplicate_child_customer_names_require_parent_aware_confirmation(): void
+    {
+        $firstMainId = $this->createCustomer('大学城总店');
+        $firstChildId = $this->createCustomer('采购部', $firstMainId);
+        $secondMainId = $this->createCustomer('海鲜城总店');
+        $secondChildId = $this->createCustomer('采购部', $secondMainId);
+        $this->createCustomerReportUnit('斤');
+        $this->createCustomerReportGoods('桂鱼', 'CR-DUPLICATE-CHILD');
+
+        $candidate = CustomerReportCandidateLogic::recognize('采购部 桂鱼 2斤');
+        $customer = $candidate['lines'][0]['customer'];
+
+        self::assertSame('ambiguous', $customer['status']);
+        self::assertNull($customer['selected']);
+        self::assertSame([$firstChildId, $secondChildId], array_column($customer['candidates'], 'id'));
+        self::assertSame(
+            ['大学城总店 / 采购部', '海鲜城总店 / 采购部'],
+            array_column($customer['candidates'], 'display_name')
+        );
     }
 
     public function test_recognition_uniquely_matches_canonical_name_and_alias_and_preserves_the_remainder(): void

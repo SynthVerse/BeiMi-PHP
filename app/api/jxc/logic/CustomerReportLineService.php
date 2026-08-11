@@ -8,6 +8,7 @@ use app\common\logic\BaseLogic;
 use app\common\model\jxc\Customer;
 use app\common\model\jxc\Goods;
 use app\common\model\jxc\GoodsSku;
+use app\common\model\jxc\GoodsSkuSpecValue;
 use app\common\model\jxc\GoodsSpecValue;
 use app\common\model\jxc\GoodsUnitsBinding;
 use think\facade\Db;
@@ -92,7 +93,8 @@ class CustomerReportLineService extends BaseLogic
             'goods_id' => (int)$goods->id,
             'goods_name' => (string)$goods->name,
             'goods_code' => (string)($goods->product_code ?? ''),
-            'sku_id' => (int)($item['sku_id'] ?? 0),
+            'sku_id' => $attributes['sku_id'],
+            'sku_name' => $attributes['sku_name'],
             'quality_id' => $attributes['quality_id'],
             'spec_id' => $attributes['spec_id'],
             'main_customer_id' => $main['id'],
@@ -252,32 +254,69 @@ class CustomerReportLineService extends BaseLogic
     }
 
     /** @param array<string, mixed> $item
-     * @return array{quality_id:int,spec_id:int,quality_snapshot:string,specification_snapshot:string}|false
+     * @return array{sku_id:int,sku_name:string,quality_id:int,spec_id:int,quality_snapshot:string,specification_snapshot:string}|false
      */
     private static function attributes(Goods $goods, array $item): array|false
     {
         $tenantId = self::tenantId();
         $skuId = (int)($item['sku_id'] ?? 0);
-        if ($skuId > 0 && GoodsSku::where('tenant_id', $tenantId)->where('goods_id', (int)$goods->id)->where('id', $skuId)->findOrEmpty()->isEmpty()) {
-            self::setError('SKU不属于当前商品');
+        $skuName = '';
+        $qualityId = (int)($item['quality_id'] ?? 0);
+        $qualitySnapshot = trim((string)($item['quality'] ?? $item['quality_snapshot'] ?? ''));
+        $specificationId = (int)($item['spec_id'] ?? $item['specification_id'] ?? 0);
+        $specificationSnapshot = trim((string)($item['specification'] ?? $item['specification_snapshot'] ?? ''));
+        $requiresSku = Db::name('goods_spec_value')->alias('value')
+            ->join('goods_spec spec', 'spec.id=value.spec_id AND spec.tenant_id=value.tenant_id')
+            ->where('value.tenant_id', $tenantId)
+            ->where('value.goods_id', (int)$goods->id)
+            ->where('value.status', 1)
+            ->where('spec.dimension_type', GoodsDimensionLogic::TYPE_SKU)
+            ->count() > 0;
+        if ($requiresSku && $skuId <= 0) {
+            self::setError('该商品必须选择可销售的SKU组合');
             return false;
         }
-        $quality = self::attributeValue($goods, (int)($item['quality_id'] ?? 0), trim((string)($item['quality'] ?? $item['quality_snapshot'] ?? '')), '品质', 'quality_status');
+        if ($skuId > 0) {
+            $sku = GoodsSku::where('tenant_id', $tenantId)
+                ->where('goods_id', (int)$goods->id)
+                ->where('id', $skuId)
+                ->where('status', 1)
+                ->where('sale_status', 1)
+                ->where('dimension_disabled_snapshot', 0)
+                ->findOrEmpty();
+            if ($sku->isEmpty()) {
+                self::setError('SKU不属于当前商品或不可销售');
+                return false;
+            }
+            $skuName = (string)$sku->sku_name;
+            $qualityRelation = self::skuAttribute($skuId, 'quality_status');
+            if ($qualityId <= 0 && $qualitySnapshot === '' && $qualityRelation !== null) {
+                $qualityId = $qualityRelation['id'];
+                $qualitySnapshot = $qualityRelation['name'];
+            }
+            $specificationRelation = self::skuAttribute($skuId, 'weight_grade');
+            if ($specificationId <= 0 && $specificationSnapshot === '' && $specificationRelation !== null) {
+                $specificationId = $specificationRelation['id'];
+                $specificationSnapshot = $specificationRelation['name'];
+            }
+        }
+        $quality = self::attributeValue($goods, $qualityId, $qualitySnapshot, '品质', 'quality_status', $skuId);
         if ($quality === false) {
             return false;
         }
-        $specification = self::attributeValue($goods, (int)($item['spec_id'] ?? $item['specification_id'] ?? 0), trim((string)($item['specification'] ?? $item['specification_snapshot'] ?? '')), '规格', 'weight_grade');
+        $specification = self::attributeValue($goods, $specificationId, $specificationSnapshot, '规格', 'weight_grade', $skuId);
         if ($specification === false) {
             return false;
         }
         return [
+            'sku_id' => $skuId, 'sku_name' => $skuName,
             'quality_id' => $quality['id'], 'spec_id' => $specification['id'],
             'quality_snapshot' => $quality['name'], 'specification_snapshot' => $specification['name'],
         ];
     }
 
     /** @return array{id:int,name:string}|false */
-    private static function attributeValue(Goods $goods, int $valueId, string $snapshot, string $label, string $dimensionCode): array|false
+    private static function attributeValue(Goods $goods, int $valueId, string $snapshot, string $label, string $dimensionCode, int $skuId = 0): array|false
     {
         if ($valueId <= 0 && $snapshot === '') {
             return ['id' => 0, 'name' => ''];
@@ -286,13 +325,26 @@ class CustomerReportLineService extends BaseLogic
             self::setError($label . '必须从当前商品已维护的属性中选择');
             return false;
         }
-        $dimensionId = (int)Db::name('goods_spec')->alias('spec')
-            ->join('goods_spec_template template', 'template.id = spec.template_id AND template.tenant_id = spec.tenant_id')
-            ->where('spec.tenant_id', self::tenantId())->where('template.code', 'aquatic_quality')->where('template.status', 1)
-            ->where('spec.code', $dimensionCode)->where('spec.status', 1)->value('spec.id');
+        $dimension = Db::name('goods_spec')
+            ->where('tenant_id', self::tenantId())
+            ->where('code', $dimensionCode)
+            ->field('id,status')
+            ->find();
+        $dimensionId = (int)($dimension['id'] ?? 0);
         if ($dimensionId <= 0) {
             self::setError($label . '维度未维护，不能使用该属性');
             return false;
+        }
+        if ((int)($dimension['status'] ?? 0) === 0) {
+            $belongsToSelectedSku = $skuId > 0 && GoodsSkuSpecValue::where('tenant_id', self::tenantId())
+                ->where('sku_id', $skuId)
+                ->where('spec_id', $dimensionId)
+                ->where('spec_value_id', $valueId)
+                ->count() > 0;
+            if (!$belongsToSelectedSku) {
+                self::setError($label . '维度已停用，只能沿用既有SKU快照');
+                return false;
+            }
         }
         $value = GoodsSpecValue::where('tenant_id', self::tenantId())->where('goods_id', (int)$goods->id)
             ->where('spec_id', $dimensionId)->where('id', $valueId)->where('status', 1)->findOrEmpty();
@@ -301,6 +353,19 @@ class CustomerReportLineService extends BaseLogic
             return false;
         }
         return ['id' => (int)$value->id, 'name' => (string)$value->name];
+    }
+
+    /** @return array{id:int,name:string}|null */
+    private static function skuAttribute(int $skuId, string $dimensionCode): ?array
+    {
+        $row = Db::name('goods_sku_spec_value')->alias('relation')
+            ->join('goods_spec spec', 'spec.id=relation.spec_id AND spec.tenant_id=relation.tenant_id')
+            ->where('relation.tenant_id', self::tenantId())
+            ->where('relation.sku_id', $skuId)
+            ->where('spec.code', $dimensionCode)
+            ->field('relation.spec_value_id,relation.spec_value_name')
+            ->find();
+        return $row ? ['id' => (int)$row['spec_value_id'], 'name' => (string)$row['spec_value_name']] : null;
     }
 
     private static function positive(mixed $value, int $scale, bool $allowZero = false): string|false

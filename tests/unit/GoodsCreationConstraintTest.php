@@ -495,6 +495,7 @@ final class GoodsCreationConstraintTest extends TestCase
         int $unitId,
         array $aliases = []
     ): array {
+        $dimensionId = $this->defaultSkuDimensionId();
         return [
             'tenant_id' => self::OTHER_TENANT_ID,
             'name' => $name,
@@ -506,7 +507,34 @@ final class GoodsCreationConstraintTest extends TestCase
             'price' => '0.00',
             'cost' => '0.00',
             'is_disabled' => 0,
+            'dimensions' => [[
+                'dimension_id' => $dimensionId,
+                'values' => [['name' => '默认', 'code' => 'default']],
+            ]],
+            'combinations' => [['values' => ['test_default_sku' => 'default']]],
         ];
+    }
+
+    private function defaultSkuDimensionId(): int
+    {
+        $id = (int)Db::name('goods_spec')
+            ->where('tenant_id', self::TENANT_ID)
+            ->where('code', 'test_default_sku')
+            ->value('id');
+        if ($id > 0) {
+            return $id;
+        }
+        return (int)Db::name('goods_spec')->insertGetId([
+            'tenant_id' => self::TENANT_ID,
+            'template_id' => 0,
+            'name' => '测试默认SKU',
+            'code' => 'test_default_sku',
+            'dimension_type' => 'sku',
+            'status' => 1,
+            'sort' => 0,
+            'create_time' => time(),
+            'update_time' => time(),
+        ]);
     }
 
     private function setAdminIdentity(int $root): void
@@ -593,7 +621,7 @@ final class GoodsCreationConstraintTest extends TestCase
             'CREATE TABLE IF NOT EXISTS `la_tenant_goodscat` (
                 `id` int unsigned NOT NULL AUTO_INCREMENT,
                 `tenant_id` int unsigned NOT NULL DEFAULT 0,
-                `name` varchar(200) NOT NULL DEFAULT ``,
+                `name` varchar(200) NOT NULL DEFAULT "",
                 `is_default` tinyint unsigned NULL DEFAULT NULL,
                 `is_show` tinyint unsigned NOT NULL DEFAULT 0,
                 `create_time` int unsigned NOT NULL DEFAULT 0,
@@ -605,12 +633,12 @@ final class GoodsCreationConstraintTest extends TestCase
                 `id` int unsigned NOT NULL,
                 `tenant_id` int unsigned NOT NULL DEFAULT 0,
                 `root` tinyint unsigned NOT NULL DEFAULT 0,
-                `name` varchar(32) NOT NULL DEFAULT ``,
-                `avatar` varchar(255) NOT NULL DEFAULT ``,
-                `account` varchar(32) NOT NULL DEFAULT ``,
-                `password` varchar(32) NOT NULL DEFAULT ``,
+                `name` varchar(32) NOT NULL DEFAULT "",
+                `avatar` varchar(255) NOT NULL DEFAULT "",
+                `account` varchar(32) NOT NULL DEFAULT "",
+                `password` varchar(32) NOT NULL DEFAULT "",
                 `login_time` int NULL DEFAULT NULL,
-                `login_ip` varchar(39) NOT NULL DEFAULT ``,
+                `login_ip` varchar(39) NOT NULL DEFAULT "",
                 `multipoint_login` tinyint unsigned NOT NULL DEFAULT 1,
                 `disable` tinyint unsigned NOT NULL DEFAULT 0,
                 `create_time` int NOT NULL DEFAULT 0,
@@ -621,8 +649,8 @@ final class GoodsCreationConstraintTest extends TestCase
             'CREATE TABLE IF NOT EXISTS `la_tenant_system_role` (
                 `id` int unsigned NOT NULL AUTO_INCREMENT,
                 `tenant_id` int unsigned NOT NULL DEFAULT 0,
-                `name` varchar(100) NOT NULL DEFAULT ``,
-                `desc` varchar(128) NOT NULL DEFAULT ``,
+                `name` varchar(100) NOT NULL DEFAULT "",
+                `desc` varchar(128) NOT NULL DEFAULT "",
                 `sort` int NOT NULL DEFAULT 0,
                 `create_time` int NULL DEFAULT NULL,
                 `update_time` int NULL DEFAULT NULL,
@@ -633,16 +661,16 @@ final class GoodsCreationConstraintTest extends TestCase
                 `id` int unsigned NOT NULL AUTO_INCREMENT,
                 `tenant_id` int unsigned NOT NULL DEFAULT 0,
                 `pid` int unsigned NOT NULL DEFAULT 0,
-                `type` char(2) NOT NULL DEFAULT ``,
-                `name` varchar(100) NOT NULL DEFAULT ``,
-                `icon` varchar(100) NOT NULL DEFAULT ``,
+                `type` char(2) NOT NULL DEFAULT "",
+                `name` varchar(100) NOT NULL DEFAULT "",
+                `icon` varchar(100) NOT NULL DEFAULT "",
                 `sort` smallint unsigned NOT NULL DEFAULT 0,
                 `is_disable` tinyint unsigned NOT NULL DEFAULT 0,
-                `perms` varchar(200) NOT NULL DEFAULT ``,
-                `paths` varchar(100) NOT NULL DEFAULT ``,
-                `component` varchar(200) NOT NULL DEFAULT ``,
-                `selected` varchar(200) NOT NULL DEFAULT ``,
-                `params` varchar(200) NOT NULL DEFAULT ``,
+                `perms` varchar(200) NOT NULL DEFAULT "",
+                `paths` varchar(100) NOT NULL DEFAULT "",
+                `component` varchar(200) NOT NULL DEFAULT "",
+                `selected` varchar(200) NOT NULL DEFAULT "",
+                `params` varchar(200) NOT NULL DEFAULT "",
                 `is_cache` tinyint unsigned NOT NULL DEFAULT 0,
                 `is_show` tinyint unsigned NOT NULL DEFAULT 1,
                 `create_time` int unsigned NOT NULL DEFAULT 0,
