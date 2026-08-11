@@ -132,7 +132,9 @@ function Invoke-RouteCheck {
     Write-Info "Checking jxc.php routes..."
 
     $routeFile       = Join-Path $projectRoot 'app\api\route\jxc.php'
-    $controllerDir   = Join-Path $projectRoot 'app\api\jxc\controller'
+    # jxc.Name 路由由 ThinkPHP 解析到 app\api\controller\jxc\NameController。
+    # app\api\jxc\controller 是内部实现层，不能替代公开路由适配器。
+    $controllerDir   = Join-Path $projectRoot 'app\api\controller\jxc'
 
     if (-not (Test-Path $routeFile)) {
         Write-Fail "路由文件不存在: $routeFile"
@@ -157,12 +159,23 @@ function Invoke-RouteCheck {
         $fileName = "${name}Controller.php"
         $filePath = Join-Path $controllerDir $fileName
 
-        if (Test-Path $filePath) {
-            $verified++
-        } else {
+        if (-not (Test-Path $filePath)) {
             Write-Fail "Controller 文件不存在: $fileName (路由引用: jxc.$name)"
             $errors++
+            continue
         }
+
+        $controllerSource = Get-Content $filePath -Raw -Encoding UTF8
+        $expectedNamespace = 'namespace app\api\controller\jxc;'
+        $expectedClass = "class ${name}Controller"
+        if (-not $controllerSource.Contains($expectedNamespace) -or
+            -not $controllerSource.Contains($expectedClass)) {
+            Write-Fail "Controller 命名空间或类名不匹配路由: $fileName (路由引用: jxc.$name)"
+            $errors++
+            continue
+        }
+
+        $verified++
     }
 
     if ($errors -eq 0) {

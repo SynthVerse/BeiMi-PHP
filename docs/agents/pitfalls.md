@@ -616,40 +616,40 @@ JXC 路由与既有小程序个人信息路由使用了相同的 HTTP 方法和�
 |---|---|---|---|
 | 2026-08-08 | 客户报货首行识别复发修复 | 生产截图中“大学”仍显示为无商品候选行 | PIT-0014 只覆盖了精确客户标题与商品别名尾词，没有覆盖客户未匹配或仅模糊匹配时的首行业务角色。 |
 
-## PIT-0016：迁移中断后未验证新增 API 路由是否真正上线
+## PIT-0016：JXC 路由检查把内部控制器误当作公开适配器
 
-- 状态：防护中
+- 状态：已防护
 - 首次发生：2026-08-11
 - 最近发生：2026-08-11
 - 复发次数：0
-- 适用范围：宝塔 `server-next` 发布、`scripts/migrate.php` 与新增 JXC 路由
+- 适用范围：`app/api/route/jxc.php`、JXC 控制器适配器与路由完整性检查
 - 相关问题：PIT-0009
 
 ### 触发场景
 
-宝塔终端使用系统默认 PHP CLI 执行迁移，因该解释器不支持 `str_starts_with()` 而中断；随后小程序访问新加入的 `/api/jxc/tasks/dashboard` 与 `/api/jxc/workforce/me/permissions`，两个接口均返回 nginx HTML 404，而同域名既有 API 能进入 ThinkPHP 并返回 JSON。
+新增 `/api/jxc/tasks/*` 与 `/api/jxc/workforce/*` 路由及内部控制器后，静态检查全部通过；生产请求却返回 404。绕过 Nginx 后，ThinkPHP 明确报告不存在 `\app\api\controller\jxc\FulfillmentTaskController` 与 `\app\api\controller\jxc\WorkforceController`。
 
 ### 根因
 
-发布流程把“执行迁移、上传应用文件、刷新 ThinkPHP/OPcache、探测新增路由”当作可人工中断的松散步骤。迁移失败后没有一个发布验收入口强制证明当前站点实际加载了本次新增路由，因此部分发布也能被误认为已经上线。
+`jxc.Name/method` 路由由 ThinkPHP 解析到公开入口 `app/api/controller/jxc/NameController.php`。新功能只创建了 `app/api/jxc/controller` 下的内部控制器，没有像既有 JXC 模块一样增加公开薄适配器；`scripts/ci-check.ps1` 又错误检查内部目录，因此把不可达路由误报为完整。
 
 ### 错误做法
 
-迁移失败后继续假定路由已经生效，或仅检查域名首页和既有 API；看到 404 时只修改前端错误提示，而不区分 nginx HTML 404 与 ThinkPHP JSON 业务响应。
+只要 `app/api/jxc/controller/NameController.php` 存在就认为 `jxc.Name/method` 可路由，或只检查路由字符串和内部实现文件而不验证框架实际解析的类名。
 
 ### 正确做法
 
-在宝塔中显式使用站点对应的 PHP CLI 完成迁移；上传本次发布的路由、控制器、逻辑与验证器后，用同一 PHP 清理缓存并按需重载 PHP-FPM。最后逐个探测新增路由：未携带 token 时也必须进入 ThinkPHP 并返回 JSON 认证错误，不能返回 nginx HTML 404。
+内部控制器继续放在 `app/api/jxc/controller`；每个被 `jxc.Name/method` 公开引用的控制器必须在 `app/api/controller/jxc` 提供同名适配器，并使用 `app\api\controller\jxc` 命名空间。路由完整性检查必须按这一公开解析目录验证文件、命名空间和类名。
 
 ### 防线
 
-- 自动化防线：待为宝塔发布补充可配置基址的新增路由探针；探针必须校验响应不是 nginx HTML 404，且能解析为应用 JSON。该防线涉及生产发布入口，本次页面修复未获授权扩展实现。
-- 架构防线：迁移、应用文件同步、缓存刷新和路由探测作为同一发布单元；任一步失败均不声明发布完成。
-- 决策与知识：本记录；现场可用 `grep` 检查 `app/api/route/jxc.php`，再以站点 PHP CLI 执行 `think clear`。
-- 验证结果：2026-08-11 已确认两个新增接口返回 nginx `text/html` 404；同域名既有 `/api/units/index` 与 `/api/jxc/customer_report/lists` 能返回 ThinkPHP JSON，证明站点入口和通用重写正常。尚未取得服务器文件读取或发布权限，新增路由上线结果未验证。
+- 自动化防线：`scripts/route_controller_contract.test.js` 解析全部 `jxc.Name/method` 路由并验证对应公开适配器文件、命名空间和类名；`scripts/ci-check.ps1` 的既有路由检查同步改为公开适配器目录。
+- 架构防线：`app/api/controller/jxc` 只承担 ThinkPHP 路由适配，业务实现仍复用 `app/api/jxc/controller`，不复制控制器逻辑。
+- 决策与知识：本记录；生产路由是否可达以未携带 token 时返回应用 JSON 为最小验收信号。
+- 验证结果：修复前路由控制器契约稳定报告缺少两个适配器；修复后通过并覆盖 17 个 JXC 控制器，迁移核心契约同时通过。生产环境尚需上传适配器并重新执行 HTTP 探针。
 
 ### 发生记录
 
 | 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
 |---|---|---|---|
-| 2026-08-11 | 任务看板与员工系统宝塔发布 | 迁移使用不兼容 PHP CLI 失败后，新任务和员工接口仍为 nginx 404 | 发布过程没有把新增路由可达性作为完成条件，也没有在迁移失败时阻止部分发布。 |
+| 2026-08-11 | 任务看板与员工系统宝塔发布 | 路由与内部控制器已上传，但任务和员工接口返回“控制器不存在” | 既有 CI 路由检查使用了错误的内部目录，未验证 ThinkPHP 实际解析的公开适配器。 |

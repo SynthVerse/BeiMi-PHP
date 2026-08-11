@@ -5,7 +5,7 @@ namespace app\api\jxc\controller;
 use app\api\jxc\logic\WorkforceLogic;
 use app\api\jxc\validate\WorkforceValidate;
 
-final class WorkforceController extends BaseJxcController
+class WorkforceController extends BaseJxcController
 {
     public function permissionCatalog()
     {

@@ -5,7 +5,7 @@ namespace app\api\jxc\controller;
 use app\api\jxc\logic\FulfillmentTaskLogic;
 use app\api\jxc\validate\FulfillmentTaskValidate;
 
-final class FulfillmentTaskController extends BaseJxcController
+class FulfillmentTaskController extends BaseJxcController
 {
     public function dashboard() { return $this->read('dashboard'); }
     public function lists() { return $this->read('lists'); }
