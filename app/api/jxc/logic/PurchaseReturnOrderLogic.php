@@ -76,7 +76,9 @@ class PurchaseReturnOrderLogic extends BaseLogic
             $order = PurchaseReturnOrder::create($built['order']);
             self::replaceDetails((int)$order->id, $built['goods']);
 
-            usort($built['goods'], static fn(array $left, array $right): int => (int)$left['goods_id'] <=> (int)$right['goods_id']);
+            usort($built['goods'], static fn(array $left, array $right): int =>
+                [(int)$left['sku_id'], (int)$left['goods_id']] <=> [(int)$right['sku_id'], (int)$right['goods_id']]
+            );
             foreach ($built['goods'] as $row) {
                 $stockOk = StockService::outbound(
                     (int)$built['order']['warehouse_id'],
@@ -204,7 +206,9 @@ class PurchaseReturnOrderLogic extends BaseLogic
             $order->save($built['order']);
             self::replaceDetails((int)$order->id, $built['goods']);
 
-            usort($built['goods'], static fn(array $left, array $right): int => (int)$left['goods_id'] <=> (int)$right['goods_id']);
+            usort($built['goods'], static fn(array $left, array $right): int =>
+                [(int)$left['sku_id'], (int)$left['goods_id']] <=> [(int)$right['sku_id'], (int)$right['goods_id']]
+            );
             foreach ($built['goods'] as $row) {
                 $stockOk = StockService::outbound(
                     (int)$built['order']['warehouse_id'],

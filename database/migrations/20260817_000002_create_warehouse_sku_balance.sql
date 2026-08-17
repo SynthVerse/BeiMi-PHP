@@ -1,0 +1,22 @@
+CREATE TABLE IF NOT EXISTS `{{prefix}}warehouse_sku_balance` (
+  `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '仓库SKU库存余额ID',
+  `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
+  `warehouse_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '仓库ID',
+  `goods_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '商品ID快照，用于汇总展示',
+  `sku_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT 'SKU ID，权威库存主体',
+  `base_unit_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建余额时的基础单位ID快照',
+  `base_unit_name` varchar(50) NOT NULL DEFAULT '' COMMENT '创建余额时的基础单位名称快照',
+  `on_hand_qty` decimal(18,4) NOT NULL DEFAULT 0.0000 COMMENT '现存量',
+  `reserved_qty` decimal(18,4) NOT NULL DEFAULT 0.0000 COMMENT '已预留量',
+  `available_qty` decimal(18,4) NOT NULL DEFAULT 0.0000 COMMENT '可用量',
+  `version` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '并发版本',
+  `create_time` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建时间',
+  `update_time` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_tenant_warehouse_sku_unit` (`tenant_id`, `warehouse_id`, `sku_id`, `base_unit_id`),
+  KEY `idx_tenant_goods` (`tenant_id`, `goods_id`),
+  KEY `idx_tenant_sku` (`tenant_id`, `sku_id`),
+  CONSTRAINT `chk_warehouse_sku_on_hand_non_negative` CHECK (`on_hand_qty` >= 0),
+  CONSTRAINT `chk_warehouse_sku_reserved_non_negative` CHECK (`reserved_qty` >= 0),
+  CONSTRAINT `chk_warehouse_sku_available_consistent` CHECK (`available_qty` = (`on_hand_qty` - `reserved_qty`))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='仓库SKU库存权威余额表';

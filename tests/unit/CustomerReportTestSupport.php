@@ -5,10 +5,47 @@ declare(strict_types=1);
 namespace tests\unit;
 
 use BeiMi\Migration\MigrationSqlPreprocessor;
+use app\api\jxc\logic\WarehouseSkuBalanceService;
 use app\common\service\goods\GoodsAliasService;
+use app\common\service\goods\GoodsBaseSkuService;
 use think\facade\Db;
 
 require_once dirname(__DIR__, 2) . '/scripts/lib/MigrationSqlPreprocessor.php';
+
+/** 让旧工作流测试用商品 ID 简洁地定位该商品的唯一/首个有效 SKU。 */
+final class WarehouseSkuBalanceForGoodsTestAdapter
+{
+    public static function inbound(int $warehouseId, int $goodsId, string $quantity)
+    {
+        return WarehouseSkuBalanceService::inbound($warehouseId, self::skuId($goodsId), $quantity);
+    }
+
+    public static function available(int $warehouseId, int $goodsId): string
+    {
+        return WarehouseSkuBalanceService::available($warehouseId, self::skuId($goodsId));
+    }
+
+    public static function onHand(int $warehouseId, int $goodsId): string
+    {
+        return WarehouseSkuBalanceService::onHand($warehouseId, self::skuId($goodsId));
+    }
+
+    public static function reserved(int $warehouseId, int $goodsId): string
+    {
+        return WarehouseSkuBalanceService::reserved($warehouseId, self::skuId($goodsId));
+    }
+
+    private static function skuId(int $goodsId): int
+    {
+        return (int)Db::name('goods_sku')
+            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->where('goods_id', $goodsId)
+            ->where('status', 1)
+            ->where('dimension_disabled_snapshot', 0)
+            ->order(['sort' => 'asc', 'id' => 'asc'])
+            ->value('id');
+    }
+}
 
 /** 为客户报货到标准销售单的新工作流准备和清理测试数据。 */
 trait CustomerReportTestSupport
@@ -196,7 +233,9 @@ SQL;
         $root = dirname(__DIR__, 2);
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260419_000002_create_audit_log.sql')));
         foreach ([
+            '{{prefix}}warehouse_sku_balance',
             '{{prefix}}warehouse_goods_balance',
+            '{{prefix}}goods_dimension_setting',
             '{{prefix}}goods_sku_spec_value',
             '{{prefix}}goods_spec_value',
             '{{prefix}}goods_sku',
@@ -206,6 +245,7 @@ SQL;
             Db::execute('DROP TABLE IF EXISTS `' . $literalPlaceholderTable . '`');
         }
         Db::execute('DROP TABLE IF EXISTS `la_goods_sku_spec_value`');
+        Db::execute('DROP TABLE IF EXISTS `la_goods_dimension_setting`');
         Db::execute('DROP TABLE IF EXISTS `la_goods_spec_value`');
         Db::execute('DROP TABLE IF EXISTS `la_goods_sku`');
         Db::execute('DROP TABLE IF EXISTS `la_goods_spec`');
@@ -222,21 +262,24 @@ SQL;
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260614_000001_quality_spec_separation.sql')));
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260614_000002_spec_value_goods_id.sql')));
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260811_000001_create_goods_dimensions.sql')));
+        $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260817_000001_create_goods_dimension_setting.sql')));
         Db::execute('DROP TABLE IF EXISTS `la_warehouse_goods_balance`');
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260729_000001_create_warehouse_goods_balance.sql')));
+        $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260817_000002_create_warehouse_sku_balance.sql')));
         Db::execute('DROP TABLE IF EXISTS `la_customer_report_reservation`');
         Db::execute('DROP TABLE IF EXISTS `la_customer_report_item`');
         Db::execute('DROP TABLE IF EXISTS `la_customer_report`');
         Db::execute('DROP TABLE IF EXISTS `la_customer_goods_report_preference`');
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260729_000002_create_customer_report_workflow.sql')));
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260811_000002_add_customer_report_sku_snapshot.sql')));
+        $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260817_000003_add_customer_report_reservation_sku.sql')));
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260810_000001_create_fulfillment_workflow.sql')));
         self::$customerReportSchemaReady = true;
     }
 
     protected function cleanCustomerReportData(): void
     {
-        foreach (['fulfillment_print_log', 'fulfillment_task', 'fulfillment_task_group', 'employee_permission', 'employee_process', 'employee', 'work_process', 'audit_log', 'receivable_flow', 'stock_flow', 'order_goods', 'sales_order', 'customer_report_reservation', 'customer_report_item', 'customer_report', 'customer_goods_report_preference', 'warehouse_goods_balance', 'goods_supplier_price_history', 'goods_supplier', 'goods_sku_spec_value', 'goods_spec_value', 'goods_sku', 'goods_spec', 'goods_spec_template', 'goods_alias', 'goods_units_binding', 'goods_unit', 'warehouse', 'goods', 'customer'] as $table) {
+        foreach (['fulfillment_print_log', 'fulfillment_task', 'fulfillment_task_group', 'employee_permission', 'employee_process', 'employee', 'work_process', 'audit_log', 'receivable_flow', 'stock_flow', 'order_goods', 'sales_order', 'customer_report_reservation', 'customer_report_item', 'customer_report', 'customer_goods_report_preference', 'warehouse_sku_balance', 'warehouse_goods_balance', 'goods_supplier_price_history', 'goods_supplier', 'goods_sku_spec_value', 'goods_dimension_setting', 'goods_spec_value', 'goods_sku', 'goods_spec', 'goods_spec_template', 'goods_alias', 'goods_units_binding', 'goods_unit', 'warehouse', 'goods', 'customer'] as $table) {
             try {
                 Db::name($table)->where('tenant_id', self::TENANT_ID)->delete();
             } catch (\Throwable) {
@@ -254,7 +297,7 @@ SQL;
 
     protected function createCustomerReportGoods(string $name, string $code, string $unit = '件'): int
     {
-        return (int)Db::name('goods')->insertGetId([
+        $goodsId = (int)Db::name('goods')->insertGetId([
             'tenant_id' => self::TENANT_ID, 'name' => $name,
             'normalized_name' => GoodsAliasService::normalize($name),
             'product_code' => $code . '-' . uniqid(),
@@ -262,6 +305,8 @@ SQL;
             'category_id' => 0, 'is_disabled' => 0, 'is_archived' => 0,
             'create_time' => time(), 'update_time' => time(),
         ]);
+        GoodsBaseSkuService::ensure(self::TENANT_ID, $goodsId, $name, 0, $unit);
+        return $goodsId;
     }
 
     protected function createCustomerReportWarehouse(string $name): int
@@ -270,6 +315,17 @@ SQL;
             'tenant_id' => self::TENANT_ID, 'name' => $name, 'is_enabled' => 1,
             'create_time' => time(), 'update_time' => time(),
         ]);
+    }
+
+    protected function customerReportSkuId(int $goodsId): int
+    {
+        return (int)Db::name('goods_sku')
+            ->where('tenant_id', self::TENANT_ID)
+            ->where('goods_id', $goodsId)
+            ->where('status', 1)
+            ->where('dimension_disabled_snapshot', 0)
+            ->order(['sort' => 'asc', 'id' => 'asc'])
+            ->value('id');
     }
 
     private function runStatements(string $sql): void

@@ -5,12 +5,12 @@ namespace app\api\jxc\logic;
 use app\common\logic\BaseLogic;
 use app\common\model\jxc\Customer;
 use app\common\model\jxc\Goods;
-use app\common\model\jxc\GoodsSku;
 use app\common\model\jxc\OrderGoods;
 use app\common\model\jxc\ReceivableFlow;
 use app\common\model\jxc\SalesOrder;
 use app\common\model\jxc\SalesReturnOrder;
 use app\common\model\jxc\Warehouse;
+use app\common\service\goods\GoodsSkuSelectionService;
 use think\facade\Db;
 use think\facade\Log;
 use app\api\jxc\logic\StockService;
@@ -96,7 +96,9 @@ class SalesOrderLogic extends BaseLogic
             self::replaceGoods($orderId, $built['goods']);
 
             // === 库存出库 ===
-            usort($built['goods'], static fn(array $left, array $right): int => (int)$left['goods_id'] <=> (int)$right['goods_id']);
+            usort($built['goods'], static fn(array $left, array $right): int =>
+                [(int)$left['sku_id'], (int)$left['goods_id']] <=> [(int)$right['sku_id'], (int)$right['goods_id']]
+            );
             foreach ($built['goods'] as $row) {
                 $quantity = (string)($row['base_quantity'] ?? $row['number']);
                 $issued = $consumeReserved
@@ -106,7 +108,10 @@ class SalesOrderLogic extends BaseLogic
                         $quantity,
                         $orderId,
                         'sales',
-                        $built['order']['order_sn']
+                        $built['order']['order_sn'],
+                        '',
+                        (int)($row['sku_id'] ?? 0),
+                        (int)($row['batch_id'] ?? 0)
                     )
                     : StockService::outbound(
                         (int)$built['order']['warehouse_id'],
@@ -114,7 +119,10 @@ class SalesOrderLogic extends BaseLogic
                         $quantity,
                         $orderId,
                         'sales',
-                        $built['order']['order_sn']
+                        $built['order']['order_sn'],
+                        '',
+                        (int)($row['sku_id'] ?? 0),
+                        (int)($row['batch_id'] ?? 0)
                     );
                 if (!$issued) { throw new BusinessException('库存处理失败'); }
             }
@@ -228,7 +236,9 @@ class SalesOrderLogic extends BaseLogic
             self::replaceGoods((int)$order->id, $built['goods']);
 
             // === 重新出库 ===
-            usort($built['goods'], static fn(array $left, array $right): int => (int)$left['goods_id'] <=> (int)$right['goods_id']);
+            usort($built['goods'], static fn(array $left, array $right): int =>
+                [(int)$left['sku_id'], (int)$left['goods_id']] <=> [(int)$right['sku_id'], (int)$right['goods_id']]
+            );
             foreach ($built['goods'] as $row) {
                 if (!StockService::outbound(
                     (int)$built['order']['warehouse_id'],
@@ -236,7 +246,10 @@ class SalesOrderLogic extends BaseLogic
                     (string)($row['base_quantity'] ?? $row['number']),
                     (int)$order->id,
                     'sales',
-                    $order->order_sn
+                    $order->order_sn,
+                    '',
+                    (int)($row['sku_id'] ?? 0),
+                    (int)($row['batch_id'] ?? 0)
                 )) { throw new BusinessException('库存处理失败'); }
             }
 
@@ -569,20 +582,18 @@ class SalesOrderLogic extends BaseLogic
                 return false;
             }
             $skuId = (int)($item['sku_id'] ?? 0);
-            $skuName = trim((string)($item['sku_name'] ?? ''));
-            if ($skuId > 0) {
-                $sku = GoodsSku::where('tenant_id', (int)(request()->tenantId ?? 0))
-                    ->where('goods_id', $goodsId)
-                    ->where('id', $skuId)
-                    ->findOrEmpty();
-                if ($sku->isEmpty()) {
-                    self::setError('SKU不属于当前商品');
-                    return false;
-                }
-                $skuName = (string)$sku->sku_name;
-            } else {
-                $skuName = '';
+            try {
+                $sku = GoodsSkuSelectionService::forSale(
+                    (int)(request()->tenantId ?? 0),
+                    $goodsId,
+                    $skuId
+                );
+            } catch (\InvalidArgumentException $exception) {
+                self::setError($exception->getMessage());
+                return false;
             }
+            $skuId = (int)$sku->id;
+            $skuName = (string)$sku->sku_name;
 
             $number = round(max(0, (float)($item['number'] ?? 0)), 4);
             if ($number <= 0) {

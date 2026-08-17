@@ -78,7 +78,9 @@ class SalesReturnOrderLogic extends BaseLogic
             self::replaceGoods((int)$order->id, $built['goods']);
 
             // === 库存入库（退货收回商品）===
-            usort($built['goods'], static fn(array $left, array $right): int => (int)$left['goods_id'] <=> (int)$right['goods_id']);
+            usort($built['goods'], static fn(array $left, array $right): int =>
+                [(int)$left['sku_id'], (int)$left['goods_id']] <=> [(int)$right['sku_id'], (int)$right['goods_id']]
+            );
             foreach ($built['goods'] as $row) {
                 $stockOk = StockService::inbound(
                     (int)$built['order']['warehouse_id'],
@@ -213,7 +215,9 @@ class SalesReturnOrderLogic extends BaseLogic
             self::replaceGoods((int)$order->id, $built['goods']);
 
             // === 重新入库 ===
-            usort($built['goods'], static fn(array $left, array $right): int => (int)$left['goods_id'] <=> (int)$right['goods_id']);
+            usort($built['goods'], static fn(array $left, array $right): int =>
+                [(int)$left['sku_id'], (int)$left['goods_id']] <=> [(int)$right['sku_id'], (int)$right['goods_id']]
+            );
             foreach ($built['goods'] as $row) {
                 $stockOk = StockService::inbound(
                     (int)$built['order']['warehouse_id'],

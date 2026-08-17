@@ -6,6 +6,7 @@ namespace tests\unit;
 
 use app\api\jxc\logic\StockService;
 use app\api\jxc\logic\WarehouseGoodsBalanceService;
+use app\api\jxc\logic\WarehouseSkuBalanceService;
 use app\api\jxc\logic\GoodsLogic;
 use app\common\model\jxc\Goods;
 use PHPUnit\Framework\TestCase;
@@ -95,12 +96,13 @@ final class WarehouseGoodsBalanceServiceTest extends TestCase
     {
         $goodsId = $this->createCustomerReportGoods('统一入口商品', 'WH-STOCK-SERVICE');
         $warehouseId = $this->createCustomerReportWarehouse('统一入口仓');
+        $skuId = $this->customerReportSkuId($goodsId);
 
-        self::assertTrue(StockService::inbound($warehouseId, $goodsId, '3.0000', 1001, 'supply', 'SUP1001'));
-        self::assertTrue(StockService::outbound($warehouseId, $goodsId, '1.0000', 1002, 'sales', 'SAL1002'));
-        self::assertFalse(StockService::outbound($warehouseId, $goodsId, '3.0000', 1003, 'sales', 'SAL1003'));
+        self::assertTrue(StockService::inbound($warehouseId, $goodsId, '3.0000', 1001, 'supply', 'SUP1001', '', $skuId));
+        self::assertTrue(StockService::outbound($warehouseId, $goodsId, '1.0000', 1002, 'sales', 'SAL1002', '', $skuId));
+        self::assertFalse(StockService::outbound($warehouseId, $goodsId, '3.0000', 1003, 'sales', 'SAL1003', '', $skuId));
 
-        self::assertSame('2.0000', WarehouseGoodsBalanceService::available($warehouseId, $goodsId));
+        self::assertSame('2.0000', WarehouseSkuBalanceService::available($warehouseId, $skuId));
         self::assertSame('2.0000', (string)Goods::where('id', $goodsId)->value('stock'));
         self::assertSame(2, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->where('goods_id', $goodsId)->count());
     }
@@ -109,12 +111,13 @@ final class WarehouseGoodsBalanceServiceTest extends TestCase
     {
         $goodsId = $this->createCustomerReportGoods('流水原子性商品', 'WH-FLOW-ATOMIC');
         $warehouseId = $this->createCustomerReportWarehouse('流水原子性仓');
+        $skuId = $this->customerReportSkuId($goodsId);
         Db::execute('ALTER TABLE `la_stock_flow` ADD UNIQUE KEY `uk_test_stock_flow_order` (`tenant_id`, `order_sn`)');
 
         try {
-            self::assertTrue(StockService::inbound($warehouseId, $goodsId, '3.0000', 2001, 'supply', 'FLOW-ATOMIC'));
-            self::assertFalse(StockService::inbound($warehouseId, $goodsId, '1.0000', 2002, 'supply', 'FLOW-ATOMIC'));
-            self::assertSame('3.0000', WarehouseGoodsBalanceService::onHand($warehouseId, $goodsId));
+            self::assertTrue(StockService::inbound($warehouseId, $goodsId, '3.0000', 2001, 'supply', 'FLOW-ATOMIC', '', $skuId));
+            self::assertFalse(StockService::inbound($warehouseId, $goodsId, '1.0000', 2002, 'supply', 'FLOW-ATOMIC', '', $skuId));
+            self::assertSame('3.0000', WarehouseSkuBalanceService::onHand($warehouseId, $skuId));
             self::assertSame('3.0000', (string)Goods::where('id', $goodsId)->value('stock'));
         } finally {
             Db::execute('ALTER TABLE `la_stock_flow` DROP INDEX `uk_test_stock_flow_order`');
@@ -204,6 +207,7 @@ final class WarehouseGoodsBalanceServiceTest extends TestCase
     private function cleanWarehouseGoodsBalanceTenantData(int $tenantId = self::TENANT_ID): void
     {
         Db::name('warehouse_goods_balance')->where('tenant_id', $tenantId)->delete();
+        Db::name('warehouse_sku_balance')->where('tenant_id', $tenantId)->delete();
     }
 
     private function createGoodsForTenant(int $tenantId, string $name, string $code): int

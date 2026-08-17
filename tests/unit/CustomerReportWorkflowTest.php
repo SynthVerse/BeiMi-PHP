@@ -7,7 +7,7 @@ namespace tests\unit;
 use app\api\jxc\logic\CustomerReportCandidateLogic;
 use app\api\jxc\logic\CustomerReportLogic;
 use app\api\jxc\logic\SalesOrderLogic;
-use app\api\jxc\logic\WarehouseGoodsBalanceService;
+use tests\unit\WarehouseSkuBalanceForGoodsTestAdapter as WarehouseGoodsBalanceService;
 use PHPUnit\Framework\TestCase;
 use think\facade\Db;
 
@@ -56,7 +56,7 @@ final class CustomerReportWorkflowTest extends TestCase
         self::assertSame('2.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
         self::assertSame('2.0000', WarehouseGoodsBalanceService::onHand($warehouseId, $goodsId));
         self::assertSame(1, CustomerReportLogic::lists([])['count']);
-        self::assertSame('0.0000', CustomerReportLogic::availability(['warehouse_id' => $warehouseId, 'goods_id' => $goodsId])['available_base_qty']);
+        self::assertSame('0.0000', CustomerReportLogic::availability(['warehouse_id' => $warehouseId, 'sku_id' => $this->customerReportSkuId($goodsId)])['available_base_qty']);
 
         $different = $payload; $different['items'][0]['piece_weight_max'] = '1.60';
         self::assertFalse(CustomerReportLogic::submit($different));

@@ -697,10 +697,18 @@ class GoodsLogic extends BaseLogic
 
     protected static function hasWarehouseBalance(int $goodsId): bool
     {
-        return $goodsId > 0 && Db::name('warehouse_goods_balance')
-            ->where('tenant_id', self::tenantId())
-            ->where('goods_id', $goodsId)
-            ->count() > 0;
+        if ($goodsId <= 0) {
+            return false;
+        }
+        $tenantId = self::tenantId();
+        return Db::name('warehouse_sku_balance')
+                ->where('tenant_id', $tenantId)
+                ->where('goods_id', $goodsId)
+                ->count() > 0
+            || Db::name('warehouse_goods_balance')
+                ->where('tenant_id', $tenantId)
+                ->where('goods_id', $goodsId)
+                ->count() > 0;
     }
 
     protected static function resolveBoundUnitsForSave(array $params, array $saveData, int $goodsId = 0): array|null|false

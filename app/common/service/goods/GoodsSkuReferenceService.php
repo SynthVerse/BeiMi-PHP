@@ -18,6 +18,8 @@ class GoodsSkuReferenceService
             'goods_loss_record',
             'purchase_return_order_lists',
             'customer_report_item',
+            'customer_report_reservation',
+            'warehouse_sku_balance',
         ] as $table) {
             try {
                 if (Db::name($table)->where('tenant_id', $tenantId)->where('sku_id', $skuId)->count() > 0) {

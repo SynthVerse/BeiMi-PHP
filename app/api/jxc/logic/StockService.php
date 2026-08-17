@@ -3,6 +3,7 @@
 namespace app\api\jxc\logic;
 
 use app\common\model\jxc\Goods;
+use app\common\model\jxc\GoodsSku;
 use app\common\model\jxc\StockFlow;
 use think\facade\Db;
 
@@ -11,7 +12,7 @@ class StockService
     /**
      * 入库操作。
      *
-     * 库存余额由 WarehouseGoodsBalanceService 维护；Goods.stock 仅由该服务
+     * 库存余额由 WarehouseSkuBalanceService 维护；Goods.stock 仅由该模块
      * 汇总更新，库存流水中的前后值记录指定仓库的现存量。
      */
     public static function inbound(
@@ -27,7 +28,7 @@ class StockService
     ): bool {
         try {
             return Db::transaction(static function () use ($warehouseId, $goodsId, $quantity, $orderId, $orderType, $orderSn, $remark, $skuId, $batchId) {
-                $movement = WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, $quantity);
+                $movement = WarehouseSkuBalanceService::inbound($warehouseId, $skuId, $quantity);
                 if ($movement === false) {
                     throw new \RuntimeException('Unable to receive warehouse stock.');
                 }
@@ -68,7 +69,7 @@ class StockService
     ): bool {
         try {
             return Db::transaction(static function () use ($warehouseId, $goodsId, $quantity, $orderId, $orderType, $orderSn, $remark, $skuId, $batchId) {
-                $movement = WarehouseGoodsBalanceService::outbound($warehouseId, $goodsId, $quantity);
+                $movement = WarehouseSkuBalanceService::outbound($warehouseId, $skuId, $quantity);
                 if ($movement === false) {
                     throw new \RuntimeException('Unable to issue warehouse stock.');
                 }
@@ -112,9 +113,9 @@ class StockService
         int $batchId = 0
     ): bool {
         try {
-            $movement = WarehouseGoodsBalanceService::consumeReservedWithinTransaction(
+            $movement = WarehouseSkuBalanceService::consumeReservedWithinTransaction(
                 $warehouseId,
-                $goodsId,
+                $skuId,
                 $quantity
             );
             if ($movement === false) {
@@ -135,6 +136,50 @@ class StockService
             ], $movement);
 
             return true;
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
+    public static function transfer(
+        int $fromWarehouseId,
+        int $toWarehouseId,
+        int $goodsId,
+        string $quantity,
+        int $orderId,
+        string $orderType,
+        string $orderSn,
+        string $remark = '',
+        int $skuId = 0,
+        int $batchId = 0
+    ): bool {
+        try {
+            return Db::transaction(static function () use ($fromWarehouseId, $toWarehouseId, $goodsId, $quantity, $orderId, $orderType, $orderSn, $remark, $skuId, $batchId) {
+                $movements = WarehouseSkuBalanceService::transfer($fromWarehouseId, $toWarehouseId, $skuId, $quantity);
+                if ($movements === false) {
+                    throw new \RuntimeException('Unable to transfer warehouse SKU stock.');
+                }
+                $common = [
+                    'goods_id' => $goodsId,
+                    'sku_id' => $skuId,
+                    'batch_id' => $batchId,
+                    'order_id' => $orderId,
+                    'order_type' => $orderType,
+                    'order_sn' => $orderSn,
+                    'quantity' => $quantity,
+                ];
+                self::writeFlow($common + [
+                    'warehouse_id' => $fromWarehouseId,
+                    'flow_type' => StockFlow::FLOW_OUT,
+                    'remark' => $remark ?: '调拨出库-' . $orderType,
+                ], $movements['outbound']);
+                self::writeFlow($common + [
+                    'warehouse_id' => $toWarehouseId,
+                    'flow_type' => StockFlow::FLOW_IN,
+                    'remark' => $remark ?: '调拨入库-' . $orderType,
+                ], $movements['inbound']);
+                return true;
+            });
         } catch (\Throwable) {
             return false;
         }
@@ -184,11 +229,26 @@ class StockService
                 }
 
                 uasort($netByDimension, static function (array $left, array $right): int {
-                    return [$left['goods_id'], $left['warehouse_id'], $left['sku_id'], $left['batch_id']]
-                        <=> [$right['goods_id'], $right['warehouse_id'], $right['sku_id'], $right['batch_id']];
+                    return [$left['sku_id'], $left['goods_id'], $left['warehouse_id'], $left['batch_id']]
+                        <=> [$right['sku_id'], $right['goods_id'], $right['warehouse_id'], $right['batch_id']];
                 });
 
-                // 先按商品 ID 固定加锁顺序，再由余额原语继续锁定仓库余额，避免多商品回滚互相等待。
+                // 新余额原语的固定加锁顺序是 SKU -> 商品 -> 仓库余额；批量回滚先按同一顺序锁住主体。
+                $skuIds = array_values(array_unique(array_map(
+                    static fn(array $item): int => (int)$item['sku_id'],
+                    $netByDimension
+                )));
+                sort($skuIds, SORT_NUMERIC);
+                foreach ($skuIds as $skuId) {
+                    $sku = GoodsSku::where('id', $skuId)
+                        ->where('tenant_id', $tenantId)
+                        ->lock(true)
+                        ->find();
+                    if (!$sku) {
+                        throw new \RuntimeException('Unable to find SKU while rolling back warehouse stock.');
+                    }
+                }
+
                 $goodsIds = array_values(array_unique(array_map(
                     static fn(array $item): int => (int)$item['goods_id'],
                     $netByDimension
@@ -213,8 +273,8 @@ class StockService
                     $quantity = ltrim($net, '-');
                     $flowType = bccomp($net, '0.0000', 4) > 0 ? StockFlow::FLOW_OUT : StockFlow::FLOW_IN;
                     $movement = $flowType === StockFlow::FLOW_OUT
-                        ? WarehouseGoodsBalanceService::outbound((int)$item['warehouse_id'], (int)$item['goods_id'], $quantity)
-                        : WarehouseGoodsBalanceService::inbound((int)$item['warehouse_id'], (int)$item['goods_id'], $quantity);
+                        ? WarehouseSkuBalanceService::outbound((int)$item['warehouse_id'], (int)$item['sku_id'], $quantity)
+                        : WarehouseSkuBalanceService::inbound((int)$item['warehouse_id'], (int)$item['sku_id'], $quantity);
                     if ($movement === false) {
                         throw new \RuntimeException('Unable to roll back warehouse stock.');
                     }
@@ -242,6 +302,11 @@ class StockService
 
     private static function writeFlow(array $attributes, array $movement): void
     {
+        if ((int)($attributes['goods_id'] ?? 0) !== (int)($movement['goods_id'] ?? 0)
+            || (int)($attributes['sku_id'] ?? 0) !== (int)($movement['sku_id'] ?? 0)
+        ) {
+            throw new \RuntimeException('Stock flow goods and SKU do not match the authoritative balance.');
+        }
         $inserted = Db::name('stock_flow')->insert(array_merge([
             'tenant_id' => (int)(request()->tenantId ?? 0),
             'before_stock' => $movement['before_on_hand_qty'],

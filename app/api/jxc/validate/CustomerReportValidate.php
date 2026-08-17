@@ -19,6 +19,7 @@ class CustomerReportValidate extends BaseValidate
         'unit_id' => 'require|integer|gt:0',
         'warehouse_id' => 'require|integer|gt:0',
         'goods_id' => 'require|integer|gt:0',
+        'sku_id' => 'require|integer|gt:0',
         'page_no' => 'integer|egt:1',
         'page_size' => 'integer|between:1,100',
         'status_scope' => 'in:pending,completed,cancelled',
@@ -33,7 +34,7 @@ class CustomerReportValidate extends BaseValidate
     public function sceneSubmit() { return $this->only(['main_customer_id','items','remark','idempotency_key','delivery_date','is_supplement']); }
     public function sceneDetail() { return $this->only(['id']); }
     public function sceneLists() { return $this->only(['page_no','page_size','status_scope']); }
-    public function sceneAvailability() { return $this->only(['warehouse_id','goods_id']); }
+    public function sceneAvailability() { return $this->only(['warehouse_id','sku_id']); }
     public function sceneEdit() { return $this->only(['id','version','main_customer_id','items','remark','delivery_date','is_supplement']); }
     public function sceneRetry() { return $this->only(['id','version']); }
     public function sceneConvert() { return $this->only(['id','version']); }

@@ -5,12 +5,12 @@ namespace app\api\jxc\logic;
 use app\common\logic\BaseLogic;
 use app\common\model\jxc\Vendor;
 use app\common\model\jxc\Goods;
-use app\common\model\jxc\GoodsSku;
 use app\common\model\jxc\GoodsSkuSpecValue;
 use app\common\model\jxc\OrderGoods;
 use app\common\model\jxc\PurchaseReturnOrderDetail;
 use app\common\model\jxc\SupplyOrder;
 use app\common\model\jxc\Warehouse;
+use app\common\service\goods\GoodsSkuSelectionService;
 use think\facade\Db;
 use think\facade\Log;
 use app\api\jxc\logic\StockService;
@@ -68,7 +68,9 @@ class SupplyOrderLogic extends BaseLogic
             ]), $createdGoods);
 
             // === 库存入库 ===
-            usort($createdGoods, static fn(array $left, array $right): int => (int)$left['goods_id'] <=> (int)$right['goods_id']);
+            usort($createdGoods, static fn(array $left, array $right): int =>
+                [(int)$left['sku_id'], (int)$left['goods_id']] <=> [(int)$right['sku_id'], (int)$right['goods_id']]
+            );
             foreach ($createdGoods as $row) {
                 if (!StockService::inbound(
                     (int)$built['order']['warehouse_id'],
@@ -177,7 +179,9 @@ class SupplyOrderLogic extends BaseLogic
             ]), $createdGoods);
 
             // === 重新入库 ===
-            usort($createdGoods, static fn(array $left, array $right): int => (int)$left['goods_id'] <=> (int)$right['goods_id']);
+            usort($createdGoods, static fn(array $left, array $right): int =>
+                [(int)$left['sku_id'], (int)$left['goods_id']] <=> [(int)$right['sku_id'], (int)$right['goods_id']]
+            );
             foreach ($createdGoods as $row) {
                 if (!StockService::inbound(
                     (int)$built['order']['warehouse_id'],
@@ -524,7 +528,8 @@ class SupplyOrderLogic extends BaseLogic
                 return false;
             }
 
-            $skuId = (int)($item['sku_id'] ?? 0);
+            $requestedSkuId = (int)($item['sku_id'] ?? 0);
+            $skuId = $requestedSkuId;
             $specId = (int)($item['spec_id'] ?? 0);
             $skuName = '';
             $supplierRelationId = 0;
@@ -543,67 +548,66 @@ class SupplyOrderLogic extends BaseLogic
             $conversionEffectiveDate = null;
             $defaultPrice = $goodsModel->cost ?: $goodsModel->price;
 
-            if ($skuId > 0) {
-                $sku = GoodsSku::where('id', $skuId)
-                    ->where('goods_id', $goodsId)
-                    ->where('tenant_id', (int)(request()->tenantId ?? 0))
-                    ->findOrEmpty();
-                if ($sku->isEmpty()) {
-                    self::setError('SKU不存在');
-                    return false;
-                }
-                if ((int)$sku->status !== 1 || (int)$sku->purchase_status !== 1) {
-                    self::setError('该SKU不可采购');
-                    return false;
-                }
+            try {
+                $sku = GoodsSkuSelectionService::forPurchase(
+                    (int)(request()->tenantId ?? 0),
+                    $goodsId,
+                    $requestedSkuId
+                );
+            } catch (\InvalidArgumentException $exception) {
+                self::setError($exception->getMessage());
+                return false;
+            }
+            $skuId = (int)$sku->id;
+            $skuName = (string)$sku->sku_name;
+            $specId = $specId > 0 ? $specId : self::resolveSingleSpecIdForSku($skuId);
+            $baseUnitId = (int)$sku->base_unit_id > 0 ? (int)$sku->base_unit_id : $baseUnitId;
+            $baseUnitName = (string)($sku->base_unit_name ?: $baseUnitName);
 
-                $relation = GoodsSupplierMatrixLogic::assertCanSupply($supplierId, $goodsId, $skuId);
-                if ($relation === false) {
-                    self::setError(GoodsSupplierMatrixLogic::getError());
-                    return false;
-                }
-
-                $skuName = (string)$sku->sku_name;
-                $specId = $specId > 0 ? $specId : self::resolveSingleSpecIdForSku($skuId);
+            $relation = GoodsSupplierMatrixLogic::assertCanSupply($supplierId, $goodsId, $skuId);
+            if ($relation === false && $requestedSkuId > 0) {
+                self::setError(GoodsSupplierMatrixLogic::getError());
+                return false;
+            }
+            if ($relation !== false) {
                 $supplierRelationId = (int)$relation->id;
-                $baseUnitId = (int)($sku->base_unit_id ?? $baseUnitId);
-                $baseUnitName = (string)($sku->base_unit_name ?: $baseUnitName);
                 $orderUnitId = $orderUnitId ?: (int)($relation->purchase_unit_id ?? 0);
                 $orderUnitName = $orderUnitName !== '' ? $orderUnitName : (string)($relation->purchase_unit_name ?? '');
                 $defaultPrice = $relation->purchase_price ?: $defaultPrice;
+            }
+            if ($orderUnitName === '') {
+                $orderUnitName = $baseUnitName;
+            }
 
-                $sameUnit = ($orderUnitId > 0 && $baseUnitId > 0 && $orderUnitId === $baseUnitId)
-                    || ($orderUnitName !== '' && $baseUnitName !== '' && $orderUnitName === $baseUnitName);
-                if (!$sameUnit) {
-                    if ($orderUnitId <= 0 || $baseUnitId <= 0) {
-                        self::setError('SKU采购缺少单位ID，无法解析换算');
-                        return false;
-                    }
-                    $conversion = UnitConversionLogic::resolveData(
-                        $goodsId,
-                        $skuId,
-                        $supplierId,
-                        $orderUnitId,
-                        $baseUnitId,
-                        date('Y-m-d', $datetimesingle)
-                    );
-                    if ($conversion === false) {
-                        self::setError(UnitConversionLogic::getError());
-                        return false;
-                    }
-                    $conversionRate = (string)$conversion['ratio'];
-                    $conversionSourceType = (string)$conversion['source_type'];
-                    $conversionEffectiveDate = $conversion['effective_date'] ?? null;
+            $sameUnit = ($orderUnitId > 0 && $baseUnitId > 0 && $orderUnitId === $baseUnitId)
+                || ($orderUnitName !== '' && $baseUnitName !== '' && $orderUnitName === $baseUnitName);
+            if (!$sameUnit) {
+                if ($orderUnitId <= 0 || $baseUnitId <= 0) {
+                    self::setError('SKU采购缺少单位ID，无法解析换算');
+                    return false;
                 }
-            } elseif ($orderUnitName === '') {
-                $orderUnitName = (string)($goodsModel->units ?? '');
+                $conversion = UnitConversionLogic::resolveData(
+                    $goodsId,
+                    $skuId,
+                    $supplierId,
+                    $orderUnitId,
+                    $baseUnitId,
+                    date('Y-m-d', $datetimesingle)
+                );
+                if ($conversion === false) {
+                    self::setError(UnitConversionLogic::getError());
+                    return false;
+                }
+                $conversionRate = (string)$conversion['ratio'];
+                $conversionSourceType = (string)$conversion['source_type'];
+                $conversionEffectiveDate = $conversion['effective_date'] ?? null;
             }
 
             $expectedBaseQty = self::decimal4($orderQty * (float)$conversionRate);
             $actualBaseQty = self::decimal4($item['actual_base_qty'] ?? $item['actual_qty'] ?? $expectedBaseQty);
             $lossBaseQty = self::decimal4(max(0, (float)$expectedBaseQty - (float)$actualBaseQty));
             $lossRate = (float)$expectedBaseQty > 0 ? number_format((float)$lossBaseQty / (float)$expectedBaseQty, 6, '.', '') : '0.000000';
-            $stockNumber = $skuId > 0 ? $actualBaseQty : self::decimal4($orderQty);
+            $stockNumber = $actualBaseQty;
 
             $price = self::money($item['price'] ?? $item['units_money'] ?? $defaultPrice);
             $amount = self::money((float)$stockNumber * (float)$price);

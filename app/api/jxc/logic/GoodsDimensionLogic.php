@@ -11,6 +11,7 @@ use app\common\model\jxc\GoodsSpecValue;
 use app\common\model\jxc\GoodsSupplier;
 use app\common\model\jxc\OrderGoods;
 use app\common\service\goods\GoodsMaintenancePermissionService;
+use app\common\service\goods\GoodsBaseSkuService;
 use app\common\service\goods\GoodsSkuReferenceService;
 use think\facade\Db;
 
@@ -23,9 +24,11 @@ use think\facade\Db;
 class GoodsDimensionLogic extends BaseLogic
 {
     private const DIMENSION_DISABLED_MARKER = 8;
+    private const BASE_SKU_CODE_SUFFIX = 'BASE';
 
     public const TYPE_SKU = 'sku';
     public const TYPE_DESCRIPTIVE = 'descriptive';
+    public const TYPE_UNUSED = 'unused';
     public const MAX_PRODUCT_DIMENSIONS = 10;
     public const MAX_VALUES_PER_DIMENSION = 100;
     public const MAX_SKU_COMBINATIONS = 500;
@@ -43,10 +46,7 @@ class GoodsDimensionLogic extends BaseLogic
 
         return array_map(static function (array $row): array {
             $id = (int)$row['id'];
-            $referenceCount = GoodsSpecValue::where('tenant_id', self::tenantId())
-                ->where('spec_id', $id)
-                ->where('goods_id', '>', 0)
-                ->count();
+            $referenceCount = self::definitionReferenceCount($id);
             return self::formatDefinition($row, $referenceCount);
         }, $rows);
     }
@@ -161,20 +161,36 @@ class GoodsDimensionLogic extends BaseLogic
         $definitionIds = array_values(array_unique(array_map(static fn(array $row): int => (int)$row['spec_id'], $values)));
         $definitions = [];
         if ($definitionIds !== []) {
+            $settings = Db::name('goods_dimension_setting')
+                ->where('tenant_id', self::tenantId())
+                ->where('goods_id', $goodsId)
+                ->whereIn('spec_id', $definitionIds)
+                ->select()
+                ->toArray();
+            $settingsBySpecId = [];
+            foreach ($settings as $setting) {
+                $settingsBySpecId[(int)$setting['spec_id']] = $setting;
+            }
             $definitionRows = GoodsSpec::where('tenant_id', self::tenantId())
                 ->whereIn('id', $definitionIds)
                 ->order(['sort' => 'asc', 'id' => 'asc'])
                 ->select()
                 ->toArray();
             foreach ($definitionRows as $definition) {
+                $setting = $settingsBySpecId[(int)$definition['id']] ?? [];
+                $usageMode = self::usageModeOf($setting, $definition);
+                $definition['dimension_type'] = $usageMode;
+                $definition['sort'] = (int)($setting['sort'] ?? $definition['sort'] ?? 0);
                 $definition['values'] = array_values(array_map(
                     [self::class, 'formatValue'],
                     array_filter($values, static fn(array $value): bool => (int)$value['spec_id'] === (int)$definition['id'])
                 ));
                 $definitions[] = self::formatDefinition($definition, self::definitionReferenceCount((int)$definition['id'])) + [
+                    'usage_mode' => $usageMode,
                     'values' => $definition['values'],
                 ];
             }
+            usort($definitions, [self::class, 'compareDimensions']);
         }
 
         return [
@@ -202,10 +218,6 @@ class GoodsDimensionLogic extends BaseLogic
             $normalized,
             static fn(array $dimension): bool => $dimension['dimension_type'] === self::TYPE_SKU
         ));
-        if ($skuDimensions === []) {
-            self::setError('新建商品必须至少配置一个有效的SKU维度及其选项');
-            return false;
-        }
         usort($skuDimensions, [self::class, 'compareDimensions']);
         if (!self::assertCombinationCapacity($skuDimensions)) {
             return false;
@@ -213,6 +225,7 @@ class GoodsDimensionLogic extends BaseLogic
 
         Db::startTrans();
         try {
+            self::saveDimensionSettings($goodsId, $normalized);
             $savedDimensions = self::saveDimensionValues($goodsId, $normalized);
             $savedSkuDimensions = array_values(array_filter(
                 $savedDimensions,
@@ -253,7 +266,8 @@ class GoodsDimensionLogic extends BaseLogic
                 ->where('sku_id', (int)$sku['id'])
                 ->order('id', 'asc')
                 ->column('spec_value_name');
-            if ($labels !== []) {
+            $isBaseSku = (string)($sku['sku_code'] ?? '') === self::baseSkuCode($goodsId);
+            if ($labels !== [] || $isBaseSku) {
                 $skuName = self::buildSkuName($goodsName, $labels);
                 GoodsSku::where('tenant_id', self::tenantId())
                     ->where('id', (int)$sku['id'])
@@ -292,6 +306,16 @@ class GoodsDimensionLogic extends BaseLogic
             if ($definition->isEmpty()) {
                 self::setError('商品维度不存在');
                 return false;
+            }
+            $usageMode = self::normalizeUsageMode(
+                (string)($row['usage_mode'] ?? $row['dimension_type'] ?? self::typeOf($definition->toArray()))
+            );
+            if ($usageMode === false) {
+                return false;
+            }
+            $seen[$dimensionId] = true;
+            if ($usageMode === self::TYPE_UNUSED) {
+                continue;
             }
             $assignedValues = GoodsSpecValue::where('tenant_id', self::tenantId())
                 ->where('goods_id', $goodsId)
@@ -343,7 +367,7 @@ class GoodsDimensionLogic extends BaseLogic
                     'sort' => (int)($value['sort'] ?? $valueIndex),
                 ];
             }
-            if (self::typeOf($definition->toArray()) === self::TYPE_SKU && $normalizedValues === []) {
+            if ($usageMode === self::TYPE_SKU && $normalizedValues === []) {
                 self::setError('SKU维度必须至少包含一个有效选项');
                 return false;
             }
@@ -378,17 +402,55 @@ class GoodsDimensionLogic extends BaseLogic
                     'sort' => (int)$value['sort'],
                 ], $assignedValues);
             }
-            $seen[$dimensionId] = true;
             $normalized[] = [
                 'id' => $dimensionId,
                 'name' => (string)$definition->name,
                 'code' => (string)$definition->code,
-                'dimension_type' => self::typeOf($definition->toArray()),
-                'sort' => (int)($definition->sort ?? $dimensionIndex),
+                'dimension_type' => $usageMode,
+                'usage_mode' => $usageMode,
+                'sort' => (int)($row['sort'] ?? $definition->sort ?? $dimensionIndex),
                 'values' => $normalizedValues,
             ];
         }
         return $normalized;
+    }
+
+    private static function saveDimensionSettings(int $goodsId, array $dimensions): void
+    {
+        $keptSpecIds = [];
+        $now = time();
+        foreach ($dimensions as $dimension) {
+            $specId = (int)$dimension['id'];
+            $keptSpecIds[] = $specId;
+            $data = [
+                'usage_mode' => (string)$dimension['usage_mode'],
+                'sort' => (int)$dimension['sort'],
+                'update_time' => $now,
+            ];
+            $setting = Db::name('goods_dimension_setting')
+                ->where('tenant_id', self::tenantId())
+                ->where('goods_id', $goodsId)
+                ->where('spec_id', $specId)
+                ->find();
+            if ($setting) {
+                Db::name('goods_dimension_setting')->where('id', (int)$setting['id'])->update($data);
+                continue;
+            }
+            Db::name('goods_dimension_setting')->insert($data + [
+                'tenant_id' => self::tenantId(),
+                'goods_id' => $goodsId,
+                'spec_id' => $specId,
+                'create_time' => $now,
+            ]);
+        }
+
+        $stale = Db::name('goods_dimension_setting')
+            ->where('tenant_id', self::tenantId())
+            ->where('goods_id', $goodsId);
+        if ($keptSpecIds !== []) {
+            $stale->whereNotIn('spec_id', $keptSpecIds);
+        }
+        $stale->delete();
     }
 
     private static function saveDimensionValues(int $goodsId, array $dimensions): array
@@ -442,6 +504,9 @@ class GoodsDimensionLogic extends BaseLogic
 
     private static function resolveCombinations(array $dimensions, mixed $requested): array|false
     {
+        if ($dimensions === []) {
+            return [[]];
+        }
         $valueMaps = [];
         foreach ($dimensions as $dimension) {
             $valueMaps[$dimension['code']] = [];
@@ -514,8 +579,21 @@ class GoodsDimensionLogic extends BaseLogic
         $goodsId = (int)$goods['id'];
         $keptIds = [];
         foreach ($combinations as $index => $combination) {
+            if ($combination === []) {
+                $sku = GoodsBaseSkuService::ensure(
+                    self::tenantId(),
+                    $goodsId,
+                    (string)$goods['name'],
+                    (int)($goods['unit_id'] ?? 0),
+                    (string)($goods['units'] ?? '')
+                );
+                $skuId = (int)$sku->id;
+                $keptIds[] = $skuId;
+                GoodsSkuSpecValue::where('tenant_id', self::tenantId())->where('sku_id', $skuId)->delete();
+                continue;
+            }
             $labels = array_map(static fn(array $item): string => $item['value']['name'], $combination);
-            $identity = implode('|', array_map(static fn(array $item): string => $item['dimension']['code'] . '=' . $item['value']['code'], $combination));
+            $identity = self::skuIdentity($combination);
             $skuCode = 'SKU-' . $goodsId . '-' . substr(sha1($identity), 0, 20);
             $legacy = self::legacyFields($combination);
             $data = [
@@ -664,7 +742,7 @@ class GoodsDimensionLogic extends BaseLogic
     /** @param array<int,string> $labels */
     private static function buildSkuName(string $goodsName, array $labels): string
     {
-        $skuName = $goodsName . '-' . implode('-', $labels);
+        $skuName = $labels === [] ? $goodsName : $goodsName . '-' . implode('-', $labels);
         if (mb_strlen($skuName) > self::MAX_SKU_NAME_LENGTH) {
             throw new \RuntimeException(
                 'SKU名称不能超过' . self::MAX_SKU_NAME_LENGTH . '个字符，请缩短商品名或维度选项'
@@ -753,7 +831,11 @@ class GoodsDimensionLogic extends BaseLogic
         $skuReferences = (int)GoodsSkuSpecValue::where('tenant_id', self::tenantId())
             ->where('spec_id', $id)
             ->count();
-        return max($valueReferences, $skuReferences);
+        $settingReferences = (int)Db::name('goods_dimension_setting')
+            ->where('tenant_id', self::tenantId())
+            ->where('spec_id', $id)
+            ->count();
+        return max($valueReferences, $skuReferences, $settingReferences);
     }
 
     private static function normalizeCode(string $code, string $name, string $prefix): string
@@ -771,6 +853,44 @@ class GoodsDimensionLogic extends BaseLogic
         return ($row['dimension_type'] ?? self::TYPE_SKU) === self::TYPE_DESCRIPTIVE
             ? self::TYPE_DESCRIPTIVE
             : self::TYPE_SKU;
+    }
+
+    private static function usageModeOf(array $setting, array $definition): string
+    {
+        $usageMode = (string)($setting['usage_mode'] ?? '');
+        return in_array($usageMode, [self::TYPE_SKU, self::TYPE_DESCRIPTIVE], true)
+            ? $usageMode
+            : self::typeOf($definition);
+    }
+
+    private static function normalizeUsageMode(string $usageMode): string|false
+    {
+        $usageMode = strtolower(trim($usageMode));
+        if (in_array($usageMode, [self::TYPE_SKU, self::TYPE_DESCRIPTIVE, self::TYPE_UNUSED], true)) {
+            return $usageMode;
+        }
+        self::setError('商品维度用途无效');
+        return false;
+    }
+
+    private static function baseSkuCode(int $goodsId): string
+    {
+        return 'SKU-' . $goodsId . '-' . self::BASE_SKU_CODE_SUFFIX;
+    }
+
+    private static function skuIdentity(array $combination): string
+    {
+        $parts = array_map(static fn(array $item): array => [
+            'dimension_id' => (int)$item['dimension']['id'],
+            'value_id' => (int)$item['value']['id'],
+        ], $combination);
+        usort($parts, static fn(array $left, array $right): int =>
+            [$left['dimension_id'], $left['value_id']] <=> [$right['dimension_id'], $right['value_id']]
+        );
+        return implode('|', array_map(
+            static fn(array $part): string => $part['dimension_id'] . '=' . $part['value_id'],
+            $parts
+        ));
     }
 
     private static function compareDimensions(array $left, array $right): int

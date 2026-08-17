@@ -9,7 +9,7 @@ use app\api\jxc\logic\FulfillmentTaskLogic;
 use app\api\jxc\logic\GoodsDimensionLogic;
 use app\api\jxc\logic\SalesOrderLogic;
 use app\api\jxc\logic\WorkforceLogic;
-use app\api\jxc\logic\WarehouseGoodsBalanceService;
+use tests\unit\WarehouseSkuBalanceForGoodsTestAdapter as WarehouseGoodsBalanceService;
 use PHPUnit\Framework\TestCase;
 use think\facade\Db;
 

@@ -8,6 +8,7 @@ use app\common\logic\BaseLogic;
 use app\common\model\jxc\CustomerReport;
 use app\common\model\jxc\CustomerReportItem;
 use app\common\model\jxc\CustomerReportReservation;
+use app\common\model\jxc\GoodsSku;
 use think\facade\Db;
 
 /** 独立客户报货状态机：提交、补预留、版本编辑、取消和实际履约。 */
@@ -120,7 +121,7 @@ class CustomerReportLogic extends BaseLogic
         };
     }
 
-    /** @return array{warehouse_id:int,goods_id:int,available_base_qty:string} */
+    /** @return array{warehouse_id:int,goods_id:int,sku_id:int,available_base_qty:string} */
     public static function availability(array $params): array|false
     {
         self::clearError();
@@ -128,11 +129,26 @@ class CustomerReportLogic extends BaseLogic
             return false;
         }
         $warehouseId = (int)($params['warehouse_id'] ?? 0);
-        $goodsId = (int)($params['goods_id'] ?? 0);
+        $skuId = (int)($params['sku_id'] ?? 0);
+        $sku = GoodsSku::where('tenant_id', self::tenantId())->where('id', $skuId)->findOrEmpty();
+        if ($sku->isEmpty()) {
+            self::setError('SKU不存在');
+            return false;
+        }
+        $warehouseExists = Db::name('warehouse')
+            ->where('tenant_id', self::tenantId())
+            ->where('id', $warehouseId)
+            ->count() > 0;
+        if (!$warehouseExists) {
+            self::setError('仓库不存在');
+            return false;
+        }
+        $goodsId = (int)$sku->goods_id;
         return [
             'warehouse_id' => $warehouseId,
             'goods_id' => $goodsId,
-            'available_base_qty' => WarehouseGoodsBalanceService::available($warehouseId, $goodsId),
+            'sku_id' => $skuId,
+            'available_base_qty' => WarehouseSkuBalanceService::available($warehouseId, $skuId),
         ];
     }
 
@@ -187,13 +203,13 @@ class CustomerReportLogic extends BaseLogic
                         $oldReserved = self::decimal((string)$item['reserved_base_qty']);
                         $delta = bcsub($target, $oldReserved, self::SCALE);
                         if (bccomp($delta, '0.00', self::SCALE) > 0) {
-                            $added = WarehouseGoodsBalanceService::reserveUpToWithinTransaction((int)$item['warehouse_id'], (int)$item['goods_id'], $delta);
+                            $added = WarehouseSkuBalanceService::reserveUpToWithinTransaction((int)$item['warehouse_id'], (int)$item['sku_id'], $delta);
                             if ($added === false || bccomp($added, $delta, self::SCALE) !== 0) {
                                 self::setError('最终实重超过当前可用库存，无法确认开单');
                                 throw new \RuntimeException('final_weight_stock_shortage');
                             }
                         } elseif (bccomp($delta, '0.00', self::SCALE) < 0
-                            && WarehouseGoodsBalanceService::releaseWithinTransaction((int)$item['warehouse_id'], (int)$item['goods_id'], ltrim($delta, '-')) === false) {
+                            && WarehouseSkuBalanceService::releaseWithinTransaction((int)$item['warehouse_id'], (int)$item['sku_id'], ltrim($delta, '-')) === false) {
                             throw new \RuntimeException('release_failed');
                         }
                         $price = self::decimal($settlements[$itemId]['actual_price']);
@@ -410,11 +426,11 @@ class CustomerReportLogic extends BaseLogic
             return self::transactionWithRetry(static function () use ($reportId, $version) {
                 $report = self::editableReport($reportId, $version);
                 if ($report === false) { return false; }
-                $rows = CustomerReportItem::where('tenant_id', self::tenantId())->where('report_id', $reportId)->order(['goods_id' => 'asc', 'warehouse_id' => 'asc', 'id' => 'asc'])->lock(true)->select()->toArray();
+                $rows = CustomerReportItem::where('tenant_id', self::tenantId())->where('report_id', $reportId)->order(['sku_id' => 'asc', 'goods_id' => 'asc', 'warehouse_id' => 'asc', 'id' => 'asc'])->lock(true)->select()->toArray();
                 $now = time(); $summaryRows = [];
                 foreach ($rows as $row) {
                     $needed = bcsub(self::decimal((string)$row['expected_base_qty']), self::decimal((string)$row['reserved_base_qty']), self::SCALE);
-                    $added = bccomp($needed, '0.00', self::SCALE) > 0 ? WarehouseGoodsBalanceService::reserveUpToWithinTransaction((int)$row['warehouse_id'], (int)$row['goods_id'], $needed) : '0.00';
+                    $added = bccomp($needed, '0.00', self::SCALE) > 0 ? WarehouseSkuBalanceService::reserveUpToWithinTransaction((int)$row['warehouse_id'], (int)$row['sku_id'], $needed) : '0.00';
                     if ($added === false) { throw new \RuntimeException('reserve_failed'); }
                     $reserved = bcadd(self::decimal((string)$row['reserved_base_qty']), $added, self::SCALE);
                     $shortage = bcsub(self::decimal((string)$row['expected_base_qty']), $reserved, self::SCALE);
@@ -472,12 +488,12 @@ class CustomerReportLogic extends BaseLogic
     /** @param array<string,mixed> $line @return array<string,mixed> */
     private static function createItem(int $reportId, array $line, int $now): array
     {
-        $reserved=WarehouseGoodsBalanceService::reserveUpToWithinTransaction((int)$line['warehouse_id'],(int)$line['goods_id'],(string)$line['expected_base_qty']);
+        $reserved=WarehouseSkuBalanceService::reserveUpToWithinTransaction((int)$line['warehouse_id'],(int)$line['sku_id'],(string)$line['expected_base_qty']);
         if ($reserved===false) { throw new \RuntimeException('reserve_failed'); }
         $shortage=bcsub((string)$line['expected_base_qty'],$reserved,self::SCALE); $status=bccomp($shortage,'0.00',self::SCALE)===0?'submitted_ready':'submitted_shortage';
         $data=$line; unset($data['client_line_id']);
         $itemId = (int)Db::name('customer_report_item')->insertGetId($data+['tenant_id'=>self::tenantId(),'report_id'=>$reportId,'reserved_base_qty'=>$reserved,'shortage_base_qty'=>$shortage,'fulfilled_base_qty'=>'0.00','status'=>$status,'create_time'=>$now,'update_time'=>$now]);
-        Db::name('customer_report_reservation')->insert(['tenant_id'=>self::tenantId(),'report_id'=>$reportId,'report_item_id'=>$itemId,'warehouse_id'=>(int)$line['warehouse_id'],'goods_id'=>(int)$line['goods_id'],'reserved_base_qty'=>$reserved,'consumed_base_qty'=>'0.00','released_base_qty'=>'0.00','status'=>'reserved','create_time'=>$now,'update_time'=>$now]);
+        Db::name('customer_report_reservation')->insert(['tenant_id'=>self::tenantId(),'report_id'=>$reportId,'report_item_id'=>$itemId,'warehouse_id'=>(int)$line['warehouse_id'],'goods_id'=>(int)$line['goods_id'],'sku_id'=>(int)$line['sku_id'],'reserved_base_qty'=>$reserved,'consumed_base_qty'=>'0.00','released_base_qty'=>'0.00','status'=>'reserved','create_time'=>$now,'update_time'=>$now]);
         CustomerReportPreferenceService::remember($line);
         return $line+['reserved_base_qty'=>$reserved,'shortage_base_qty'=>$shortage,'status'=>$status];
     }
@@ -485,17 +501,17 @@ class CustomerReportLogic extends BaseLogic
     private static function updateItem(int $itemId, array $old, array $line, int $now): array
     {
         $oldReserved=self::decimal((string)$old['reserved_base_qty']); $target=(string)$line['expected_base_qty'];
-        if ((int)$old['warehouse_id']===(int)$line['warehouse_id'] && (int)$old['goods_id']===(int)$line['goods_id']) {
+        if ((int)$old['warehouse_id']===(int)$line['warehouse_id'] && (int)$old['sku_id']===(int)$line['sku_id']) {
             $delta=bcsub($target,$oldReserved,self::SCALE);
-            if (bccomp($delta,'0.00',self::SCALE)<0) { if (WarehouseGoodsBalanceService::releaseWithinTransaction((int)$old['warehouse_id'],(int)$old['goods_id'],ltrim($delta,'-'))===false) { throw new \RuntimeException('release_failed'); } $reserved=$target; }
-            else { $added=bccomp($delta,'0.00',self::SCALE)>0?WarehouseGoodsBalanceService::reserveUpToWithinTransaction((int)$old['warehouse_id'],(int)$old['goods_id'],$delta):'0.00'; if ($added===false) { throw new \RuntimeException('reserve_failed'); } $reserved=bcadd($oldReserved,$added,self::SCALE); }
+            if (bccomp($delta,'0.00',self::SCALE)<0) { if (WarehouseSkuBalanceService::releaseWithinTransaction((int)$old['warehouse_id'],(int)$old['sku_id'],ltrim($delta,'-'))===false) { throw new \RuntimeException('release_failed'); } $reserved=$target; }
+            else { $added=bccomp($delta,'0.00',self::SCALE)>0?WarehouseSkuBalanceService::reserveUpToWithinTransaction((int)$old['warehouse_id'],(int)$old['sku_id'],$delta):'0.00'; if ($added===false) { throw new \RuntimeException('reserve_failed'); } $reserved=bcadd($oldReserved,$added,self::SCALE); }
         } else {
-            self::releaseLine($old); $reserved=WarehouseGoodsBalanceService::reserveUpToWithinTransaction((int)$line['warehouse_id'],(int)$line['goods_id'],$target); if ($reserved===false) { throw new \RuntimeException('reserve_failed'); }
+            self::releaseLine($old); $reserved=WarehouseSkuBalanceService::reserveUpToWithinTransaction((int)$line['warehouse_id'],(int)$line['sku_id'],$target); if ($reserved===false) { throw new \RuntimeException('reserve_failed'); }
         }
         $shortage=bcsub($target,$reserved,self::SCALE); $status=bccomp($shortage,'0.00',self::SCALE)===0?'submitted_ready':'submitted_shortage';
         $data=$line; unset($data['client_line_id']);
         CustomerReportItem::where('tenant_id',self::tenantId())->where('id',$itemId)->update($data+['reserved_base_qty'=>$reserved,'shortage_base_qty'=>$shortage,'status'=>$status,'update_time'=>$now]);
-        CustomerReportReservation::where('tenant_id',self::tenantId())->where('report_item_id',$itemId)->update(['warehouse_id'=>(int)$line['warehouse_id'],'goods_id'=>(int)$line['goods_id'],'reserved_base_qty'=>$reserved,'status'=>'reserved','update_time'=>$now]);
+        CustomerReportReservation::where('tenant_id',self::tenantId())->where('report_item_id',$itemId)->update(['warehouse_id'=>(int)$line['warehouse_id'],'goods_id'=>(int)$line['goods_id'],'sku_id'=>(int)$line['sku_id'],'reserved_base_qty'=>$reserved,'status'=>'reserved','update_time'=>$now]);
         CustomerReportPreferenceService::remember($line);
         return $line+['reserved_base_qty'=>$reserved,'shortage_base_qty'=>$shortage,'status'=>$status];
     }
@@ -503,7 +519,7 @@ class CustomerReportLogic extends BaseLogic
     private static function releaseLine(array $item): void
     {
         $reserved=self::decimal((string)($item['reserved_base_qty']??0));
-        if (bccomp($reserved,'0.00',self::SCALE)>0 && WarehouseGoodsBalanceService::releaseWithinTransaction((int)$item['warehouse_id'],(int)$item['goods_id'],$reserved)===false) { throw new \RuntimeException('release_failed'); }
+        if (bccomp($reserved,'0.00',self::SCALE)>0 && WarehouseSkuBalanceService::releaseWithinTransaction((int)$item['warehouse_id'],(int)$item['sku_id'],$reserved)===false) { throw new \RuntimeException('release_failed'); }
     }
     /** @param array<int,array<string,mixed>> $rows @return array<string,string> */
     private static function summary(array $rows): array
@@ -533,7 +549,7 @@ class CustomerReportLogic extends BaseLogic
                 if (bccomp($shortage, '0.00', self::SCALE) <= 0) {
                     return true;
                 }
-                $added = WarehouseGoodsBalanceService::reserveUpToWithinTransaction((int)$item->warehouse_id, (int)$item->goods_id, $shortage);
+                $added = WarehouseSkuBalanceService::reserveUpToWithinTransaction((int)$item->warehouse_id, (int)$item->sku_id, $shortage);
                 if ($added === false || bccomp($added, $shortage, self::SCALE) !== 0) {
                     self::setError('采购库存尚未入库或数量不足，不能完成采购工票');
                     throw new \RuntimeException('purchase_stock_shortage');
@@ -582,7 +598,7 @@ class CustomerReportLogic extends BaseLogic
     /** @param array<string,mixed> $left @param array<string,mixed> $right */
     private static function compareBalanceKey(array $left, array $right): int
     {
-        return [(int)$left['goods_id'], (int)$left['warehouse_id'], (int)($left['sort'] ?? $left['id'] ?? 0)] <=> [(int)$right['goods_id'], (int)$right['warehouse_id'], (int)($right['sort'] ?? $right['id'] ?? 0)];
+        return [(int)$left['sku_id'], (int)$left['goods_id'], (int)$left['warehouse_id'], (int)($left['sort'] ?? $left['id'] ?? 0)] <=> [(int)$right['sku_id'], (int)$right['goods_id'], (int)$right['warehouse_id'], (int)($right['sort'] ?? $right['id'] ?? 0)];
     }
     /** @return CustomerReport|false */
     private static function editableReport(int $id,int $version): CustomerReport|false

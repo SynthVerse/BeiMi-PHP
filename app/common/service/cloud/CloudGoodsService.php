@@ -9,6 +9,7 @@ use app\common\model\cloud\CloudGoodsImport;
 use app\common\model\goods\TenantGoodscat;
 use app\common\model\jxc\Goods;
 use app\common\service\goods\GoodsAliasService;
+use app\common\service\goods\GoodsBaseSkuService;
 use app\common\service\goods\GoodsMaintenancePermissionService;
 use app\common\model\jxc\GoodsUnit;
 use think\facade\Db;
@@ -269,6 +270,13 @@ class CloudGoodsService extends BaseLogic
                 'remark' => (string)($source['remark'] ?? ''),
             ]);
             GoodsAliasService::replaceTenantAliases($tenantId, (int)$goods->id, $source['aliases'], 'cloud');
+            GoodsBaseSkuService::ensure(
+                $tenantId,
+                (int)$goods->id,
+                (string)$goods->name,
+                (int)$goods->unit_id,
+                (string)$goods->units
+            );
 
             CloudGoodsImport::create([
                 'tenant_id' => $tenantId,

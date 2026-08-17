@@ -10,6 +10,7 @@ use app\api\jxc\logic\GoodsSkuLogic;
 use app\api\jxc\logic\GoodsSpecificationLogic;
 use app\api\jxc\logic\CustomerReportLineService;
 use app\api\jxc\logic\SalesOrderLogic;
+use app\api\jxc\logic\WarehouseSkuBalanceService;
 use PHPUnit\Framework\TestCase;
 use think\facade\Db;
 
@@ -82,6 +83,137 @@ final class GoodsDimensionLogicTest extends TestCase
         ]);
         self::assertSame(0, $disabled['status']);
         self::assertSame(9, $disabled['sort']);
+    }
+
+    public function test_each_product_can_choose_whether_the_same_dimension_participates_in_sku(): void
+    {
+        $origin = GoodsDimensionLogic::saveDefinition([
+            'name' => 'Origin',
+            'code' => 'origin',
+            'dimension_type' => 'sku',
+        ]);
+        self::assertIsArray($origin);
+
+        $skuGoodsId = $this->createCustomerReportGoods('Role SKU Goods', 'ROLE-SKU');
+        $skuConfig = GoodsDimensionLogic::saveProductDimensions([
+            'goods_id' => $skuGoodsId,
+            'dimensions' => [[
+                'dimension_id' => $origin['id'],
+                'usage_mode' => 'sku',
+                'values' => [
+                    ['name' => 'Dalian', 'code' => 'dalian'],
+                    ['name' => 'Shandong', 'code' => 'shandong'],
+                ],
+            ]],
+        ]);
+        self::assertIsArray($skuConfig, GoodsDimensionLogic::getError());
+        self::assertSame('sku', $skuConfig['dimensions'][0]['usage_mode']);
+        self::assertCount(2, $skuConfig['skus']);
+
+        $descriptiveGoodsId = $this->createCustomerReportGoods('Role Description Goods', 'ROLE-DESCRIPTION');
+        $descriptiveConfig = GoodsDimensionLogic::saveProductDimensions([
+            'goods_id' => $descriptiveGoodsId,
+            'dimensions' => [[
+                'dimension_id' => $origin['id'],
+                'usage_mode' => 'descriptive',
+                'values' => [['name' => 'Dalian', 'code' => 'dalian']],
+            ]],
+        ]);
+        self::assertIsArray($descriptiveConfig, GoodsDimensionLogic::getError());
+        self::assertSame('descriptive', $descriptiveConfig['dimensions'][0]['usage_mode']);
+        self::assertCount(1, $descriptiveConfig['skus']);
+        self::assertSame('Role Description Goods', $descriptiveConfig['skus'][0]['sku_name']);
+        self::assertSame([], $descriptiveConfig['skus'][0]['dimensions']);
+    }
+
+    public function test_goods_without_dimensions_are_created_with_one_base_sku(): void
+    {
+        $unitId = $this->createCustomerReportUnit('kg');
+
+        $created = GoodsLogic::add([
+            'name' => 'Single SKU Goods',
+            'category_id' => 0,
+            'units' => 'kg',
+            'units_id' => $unitId,
+            'dimensions' => [],
+        ]);
+
+        self::assertIsArray($created, GoodsLogic::getError());
+        $config = GoodsDimensionLogic::productDimensions(['goods_id' => (int)$created['id']]);
+        self::assertSame([], $config['dimensions']);
+        self::assertCount(1, $config['skus']);
+        self::assertSame('Single SKU Goods', $config['skus'][0]['sku_name']);
+        self::assertSame('SKU-' . (int)$created['id'] . '-BASE', $config['skus'][0]['sku_code']);
+        self::assertSame(1, $config['skus'][0]['is_auto_generated']);
+    }
+
+    public function test_reordering_product_dimensions_does_not_change_sku_identity(): void
+    {
+        $origin = GoodsDimensionLogic::saveDefinition([
+            'name' => 'Stable Origin', 'code' => 'stable_origin', 'dimension_type' => 'sku', 'sort' => 0,
+        ]);
+        $quality = GoodsDimensionLogic::saveDefinition([
+            'name' => 'Stable Quality', 'code' => 'stable_quality', 'dimension_type' => 'sku', 'sort' => 1,
+        ]);
+        $goodsId = $this->createCustomerReportGoods('Stable Identity Goods', 'STABLE-IDENTITY', 'kg');
+        $first = GoodsDimensionLogic::saveProductDimensions([
+            'goods_id' => $goodsId,
+            'dimensions' => [
+                ['dimension_id' => $origin['id'], 'sort' => 0, 'values' => [['name' => 'Dalian', 'code' => 'dalian']]],
+                ['dimension_id' => $quality['id'], 'sort' => 1, 'values' => [['name' => 'Live', 'code' => 'live']]],
+            ],
+        ]);
+        self::assertIsArray($first, GoodsDimensionLogic::getError());
+        $skuId = (int)$first['skus'][0]['id'];
+
+        $second = GoodsDimensionLogic::saveProductDimensions([
+            'goods_id' => $goodsId,
+            'dimensions' => [
+                ['dimension_id' => $quality['id'], 'sort' => 0, 'values' => [['id' => $first['dimensions'][1]['values'][0]['id'], 'name' => 'Live', 'code' => 'live']]],
+                ['dimension_id' => $origin['id'], 'sort' => 1, 'values' => [['id' => $first['dimensions'][0]['values'][0]['id'], 'name' => 'Dalian', 'code' => 'dalian']]],
+            ],
+        ]);
+        self::assertIsArray($second, GoodsDimensionLogic::getError());
+        self::assertCount(1, $second['skus']);
+        self::assertSame($skuId, (int)$second['skus'][0]['id']);
+        self::assertSame('stable_quality', $second['dimensions'][0]['code']);
+        self::assertSame('stable_origin', $second['dimensions'][1]['code']);
+    }
+
+    public function test_referenced_base_sku_is_restored_when_product_returns_to_single_sku(): void
+    {
+        $goodsId = $this->createCustomerReportGoods('Restored Base SKU Goods', 'RESTORE-BASE', 'kg');
+        $baseSkuId = $this->customerReportSkuId($goodsId);
+        $warehouseId = $this->createCustomerReportWarehouse('Restore Base SKU Warehouse');
+        self::assertNotFalse(WarehouseSkuBalanceService::inbound($warehouseId, $baseSkuId, '2.0000'));
+
+        $origin = GoodsDimensionLogic::saveDefinition([
+            'name' => 'Restore Origin',
+            'code' => 'restore_origin',
+            'dimension_type' => 'sku',
+        ]);
+        self::assertIsArray($origin);
+        self::assertIsArray(GoodsDimensionLogic::saveProductDimensions([
+            'goods_id' => $goodsId,
+            'dimensions' => [[
+                'dimension_id' => $origin['id'],
+                'usage_mode' => 'sku',
+                'values' => [['name' => 'Dalian', 'code' => 'dalian']],
+            ]],
+        ]));
+        self::assertSame(0, (int)Db::name('goods_sku')->where('id', $baseSkuId)->value('status'));
+        self::assertGreaterThanOrEqual(8, (int)Db::name('goods_sku')->where('id', $baseSkuId)->value('dimension_disabled_snapshot'));
+
+        $single = GoodsDimensionLogic::saveProductDimensions([
+            'goods_id' => $goodsId,
+            'dimensions' => [],
+        ]);
+        self::assertIsArray($single, GoodsDimensionLogic::getError());
+        self::assertCount(1, $single['skus']);
+        self::assertSame($baseSkuId, (int)$single['skus'][0]['id']);
+        self::assertSame(1, (int)$single['skus'][0]['status']);
+        self::assertSame(0, (int)$single['skus'][0]['dimension_disabled_snapshot']);
+        self::assertSame('2.0000', WarehouseSkuBalanceService::onHand($warehouseId, $baseSkuId));
     }
 
     public function test_only_enabled_sku_combinations_create_skus_and_descriptive_dimensions_do_not_expand_them(): void

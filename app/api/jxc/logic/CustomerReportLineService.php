@@ -7,10 +7,10 @@ namespace app\api\jxc\logic;
 use app\common\logic\BaseLogic;
 use app\common\model\jxc\Customer;
 use app\common\model\jxc\Goods;
-use app\common\model\jxc\GoodsSku;
 use app\common\model\jxc\GoodsSkuSpecValue;
 use app\common\model\jxc\GoodsSpecValue;
 use app\common\model\jxc\GoodsUnitsBinding;
+use app\common\service\goods\GoodsSkuSelectionService;
 use think\facade\Db;
 
 /** 将客户端确认后的报货行重新校验、标准化并换算为库存基础单位。 */
@@ -103,8 +103,8 @@ class CustomerReportLineService extends BaseLogic
             'delivery_customer_name' => $delivery['name'],
             'unit_id' => $unit['id'],
             'unit_name' => $unit['name'],
-            'base_unit_id' => (int)($goods->unit_id ?? 0),
-            'base_unit_name' => (string)($goods->units ?? ''),
+            'base_unit_id' => $attributes['base_unit_id'],
+            'base_unit_name' => $attributes['base_unit_name'],
             'order_qty' => $orderQuantity,
             'expected_base_qty' => $expected['base_qty'],
             'piece_weight_min' => $expected['min'],
@@ -254,7 +254,7 @@ class CustomerReportLineService extends BaseLogic
     }
 
     /** @param array<string, mixed> $item
-     * @return array{sku_id:int,sku_name:string,quality_id:int,spec_id:int,quality_snapshot:string,specification_snapshot:string}|false
+     * @return array{sku_id:int,sku_name:string,base_unit_id:int,base_unit_name:string,quality_id:int,spec_id:int,quality_snapshot:string,specification_snapshot:string}|false
      */
     private static function attributes(Goods $goods, array $item): array|false
     {
@@ -265,40 +265,23 @@ class CustomerReportLineService extends BaseLogic
         $qualitySnapshot = trim((string)($item['quality'] ?? $item['quality_snapshot'] ?? ''));
         $specificationId = (int)($item['spec_id'] ?? $item['specification_id'] ?? 0);
         $specificationSnapshot = trim((string)($item['specification'] ?? $item['specification_snapshot'] ?? ''));
-        $requiresSku = Db::name('goods_spec_value')->alias('value')
-            ->join('goods_spec spec', 'spec.id=value.spec_id AND spec.tenant_id=value.tenant_id')
-            ->where('value.tenant_id', $tenantId)
-            ->where('value.goods_id', (int)$goods->id)
-            ->where('value.status', 1)
-            ->where('spec.dimension_type', GoodsDimensionLogic::TYPE_SKU)
-            ->count() > 0;
-        if ($requiresSku && $skuId <= 0) {
-            self::setError('该商品必须选择可销售的SKU组合');
+        try {
+            $sku = GoodsSkuSelectionService::forSale($tenantId, (int)$goods->id, $skuId);
+        } catch (\InvalidArgumentException $exception) {
+            self::setError($exception->getMessage());
             return false;
         }
-        if ($skuId > 0) {
-            $sku = GoodsSku::where('tenant_id', $tenantId)
-                ->where('goods_id', (int)$goods->id)
-                ->where('id', $skuId)
-                ->where('status', 1)
-                ->where('sale_status', 1)
-                ->where('dimension_disabled_snapshot', 0)
-                ->findOrEmpty();
-            if ($sku->isEmpty()) {
-                self::setError('SKU不属于当前商品或不可销售');
-                return false;
-            }
-            $skuName = (string)$sku->sku_name;
-            $qualityRelation = self::skuAttribute($skuId, 'quality_status');
-            if ($qualityId <= 0 && $qualitySnapshot === '' && $qualityRelation !== null) {
-                $qualityId = $qualityRelation['id'];
-                $qualitySnapshot = $qualityRelation['name'];
-            }
-            $specificationRelation = self::skuAttribute($skuId, 'weight_grade');
-            if ($specificationId <= 0 && $specificationSnapshot === '' && $specificationRelation !== null) {
-                $specificationId = $specificationRelation['id'];
-                $specificationSnapshot = $specificationRelation['name'];
-            }
+        $skuId = (int)$sku->id;
+        $skuName = (string)$sku->sku_name;
+        $qualityRelation = self::skuAttribute($skuId, 'quality_status');
+        if ($qualityId <= 0 && $qualitySnapshot === '' && $qualityRelation !== null) {
+            $qualityId = $qualityRelation['id'];
+            $qualitySnapshot = $qualityRelation['name'];
+        }
+        $specificationRelation = self::skuAttribute($skuId, 'weight_grade');
+        if ($specificationId <= 0 && $specificationSnapshot === '' && $specificationRelation !== null) {
+            $specificationId = $specificationRelation['id'];
+            $specificationSnapshot = $specificationRelation['name'];
         }
         $quality = self::attributeValue($goods, $qualityId, $qualitySnapshot, '品质', 'quality_status', $skuId);
         if ($quality === false) {
@@ -310,6 +293,10 @@ class CustomerReportLineService extends BaseLogic
         }
         return [
             'sku_id' => $skuId, 'sku_name' => $skuName,
+            'base_unit_id' => (int)$sku->base_unit_id > 0 ? (int)$sku->base_unit_id : (int)($goods->unit_id ?? 0),
+            'base_unit_name' => trim((string)($sku->base_unit_name ?? '')) !== ''
+                ? (string)$sku->base_unit_name
+                : (string)($goods->units ?? ''),
             'quality_id' => $quality['id'], 'spec_id' => $specification['id'],
             'quality_snapshot' => $quality['name'], 'specification_snapshot' => $specification['name'],
         ];
