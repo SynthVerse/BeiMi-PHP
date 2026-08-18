@@ -7,7 +7,7 @@ namespace app\api\jxc\logic;
 use app\common\logic\BaseLogic;
 use think\facade\Db;
 
-/** 自配送真实交付事件与受控库存出库。 */
+/** 三种配送共用的真实交付事件与受控库存出库。 */
 final class DeliveryInventoryLogic extends BaseLogic
 {
     private const SCALE = 4;
@@ -15,33 +15,89 @@ final class DeliveryInventoryLogic extends BaseLogic
     /** @return array<string,mixed>|false */
     public static function confirmSelfDelivery(array $params): array|false
     {
+        return self::confirmDelivery($params, 'self_delivery', 'customer_handoff');
+    }
+
+    /** @return array<string,mixed>|false */
+    public static function confirmFixedLineHandoff(array $params): array|false
+    {
+        $params['event_type'] = 'line_vehicle_handoff';
+        return self::confirmDelivery($params, 'fixed_line_vehicle', 'line_vehicle_handoff');
+    }
+
+    /** @return array<string,mixed>|false */
+    private static function confirmDelivery(
+        array $params,
+        string $deliveryMethod,
+        string $requiredEventType
+    ): array|false
+    {
         self::clearError();
         if (!WorkforceLogic::requirePermission('delivery.confirm')) {
             self::setError(WorkforceLogic::getError());
             return false;
         }
+        $tripReportId = $deliveryMethod === 'fixed_line_vehicle' ? (int)($params['trip_report_id'] ?? 0) : 0;
         $taskId = (int)($params['task_id'] ?? 0);
         $eventType = trim((string)($params['event_type'] ?? ''));
         $idempotencyKey = trim((string)($params['idempotency_key'] ?? ''));
-        $handoffNote = mb_substr(trim((string)($params['handoff_note'] ?? '')), 0, 500);
+        $handoffNote = mb_substr(trim((string)($params[
+            $deliveryMethod === 'fixed_line_vehicle' ? 'exception_note' : 'handoff_note'
+        ] ?? '')), 0, 500);
         $exceptionReason = mb_substr(trim((string)($params['exception_reason'] ?? '')), 0, 500);
         $secondConfirmed = (int)($params['second_confirmed'] ?? 0) === 1 ? 1 : 0;
+        $actualHandoffPackages = $deliveryMethod === 'fixed_line_vehicle'
+            ? (int)($params['actual_handoff_packages'] ?? 0)
+            : 0;
+        $actualHandoffTime = $deliveryMethod === 'fixed_line_vehicle'
+            ? self::timestamp((string)($params['actual_handoff_time'] ?? ''))
+            : 0;
+        if ($deliveryMethod === 'fixed_line_vehicle') {
+            $tripReference = Db::name('line_vehicle_trip_report')->where('tenant_id', self::tenantId())
+                ->where('id', $tripReportId)->field('id,delivery_task_id')->find();
+            if (!$tripReference) {
+                self::setError('送站报货单不存在');
+                return false;
+            }
+            $taskId = (int)$tripReference['delivery_task_id'];
+            if ($actualHandoffPackages <= 0 || $actualHandoffTime === false) {
+                self::setError('实际交接包数和时间不能为空');
+                return false;
+            }
+            if ($actualHandoffTime > FulfillmentClock::now()) {
+                self::setError('实际线车交接时间不能晚于当前时间');
+                return false;
+            }
+        }
         if ($taskId <= 0 || $idempotencyKey === '' || mb_strlen($idempotencyKey) > 96) {
             self::setError('送货任务和交付幂等键不能为空');
             return false;
         }
-        if ($eventType !== 'customer_handoff') {
-            self::setError('自配送只有实际交给客户才是交付事件，车辆离店不能出库');
+        if ($eventType !== $requiredEventType) {
+            self::setError($deliveryMethod === 'self_delivery'
+                ? '自配送只有实际交给客户才是交付事件，车辆离店不能出库'
+                : '固定线车只有实际交给指定线车才是交付事件，门店出车不能出库');
             return false;
         }
-        $fingerprint = hash('sha256', json_encode([
+        $fingerprintValues = [
             'task_id' => $taskId,
-            'delivery_method' => 'self_delivery',
+            'delivery_method' => $deliveryMethod,
             'event_type' => $eventType,
             'handoff_note' => $handoffNote,
             'exception_reason' => $exceptionReason,
             'second_confirmed' => $secondConfirmed,
-        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        ];
+        if ($deliveryMethod === 'fixed_line_vehicle') {
+            $fingerprintValues += [
+                'trip_report_id' => $tripReportId,
+                'actual_handoff_packages' => $actualHandoffPackages,
+                'actual_handoff_time' => $actualHandoffTime,
+            ];
+        }
+        $fingerprint = hash('sha256', json_encode(
+            $fingerprintValues,
+            JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+        ));
 
         for ($attempt = 0; $attempt < 3; $attempt++) {
             try {
@@ -52,7 +108,11 @@ final class DeliveryInventoryLogic extends BaseLogic
                     $fingerprint,
                     $handoffNote,
                     $exceptionReason,
-                    $secondConfirmed
+                    $secondConfirmed,
+                    $deliveryMethod,
+                    $tripReportId,
+                    $actualHandoffPackages,
+                    $actualHandoffTime
                 ) {
                     $existing = Db::name('fulfillment_delivery_event')->where('tenant_id', self::tenantId())
                         ->where('idempotency_key', $idempotencyKey)->find();
@@ -62,6 +122,58 @@ final class DeliveryInventoryLogic extends BaseLogic
                             return false;
                         }
                         return self::detailWithinTransaction((int)$existing['id']);
+                    }
+
+                    $trip = null;
+                    $tripReport = null;
+                    if ($deliveryMethod === 'fixed_line_vehicle') {
+                        $tripReference = Db::name('line_vehicle_trip_report')->where('tenant_id', self::tenantId())
+                            ->where('id', $tripReportId)->field('id,trip_id')->find();
+                        if (!$tripReference) {
+                            self::setError('送站报货单不存在');
+                            return false;
+                        }
+                        $trip = Db::name('line_vehicle_trip')->where('tenant_id', self::tenantId())
+                            ->where('id', (int)$tripReference['trip_id'])->lock(true)->find();
+                        $tripReport = Db::name('line_vehicle_trip_report')->where('tenant_id', self::tenantId())
+                            ->where('id', $tripReportId)->lock(true)->find();
+                        if (!$trip || !$tripReport) {
+                            self::setError('门店送站趟次不存在');
+                            return false;
+                        }
+                        if ((int)$trip['actual_store_departure_time'] <= 0 || (string)$trip['status'] !== 'departed') {
+                            self::setError('必须先回录门店实际出车时间');
+                            return false;
+                        }
+                        if ((string)$tripReport['status'] === 'handed_over') {
+                            self::setError('该客户货物已经完成线车交接');
+                            return false;
+                        }
+                        if ((string)$tripReport['status'] !== 'loading'
+                            || $tripReport['active_report_id'] === null
+                            || (int)$tripReport['active_report_id'] !== (int)$tripReport['report_id']) {
+                            self::setError('已改派或不再活动的旧趟次货物不能交接');
+                            return false;
+                        }
+                        if ((int)$tripReport['loaded_checked'] !== 1) {
+                            self::setError('必须先完成装车包数核对');
+                            return false;
+                        }
+                        if (($actualHandoffPackages !== (int)$tripReport['expected_package_count']
+                            || $actualHandoffPackages !== (int)$tripReport['actual_loaded_package_count'])
+                            && $handoffNote === '') {
+                            self::setError('交接包数与应装或实际装车包数不一致时必须填写异常原因');
+                            return false;
+                        }
+                        if ($actualHandoffTime < (int)$trip['actual_store_departure_time']) {
+                            self::setError('实际线车交接时间不能早于门店出车时间');
+                            return false;
+                        }
+                        if ($actualHandoffTime > (int)$tripReport['handoff_deadline']) {
+                            self::setError('已错过线车交接截止时间，不能标记交接完成，必须改派');
+                            return false;
+                        }
+                        $taskId = (int)$tripReport['delivery_task_id'];
                     }
 
                     $taskRef = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())
@@ -132,12 +244,16 @@ final class DeliveryInventoryLogic extends BaseLogic
                         }
                     }
 
-                    $now = time();
+                    $now = FulfillmentClock::now();
+                    $deliveredTime = $deliveryMethod === 'fixed_line_vehicle' ? (int)$actualHandoffTime : $now;
                     $eventId = (int)Db::name('fulfillment_delivery_event')->insertGetId([
                         'tenant_id' => self::tenantId(),
                         'report_id' => (int)$report['id'],
                         'task_id' => $taskId,
-                        'delivery_method' => 'self_delivery',
+                        'trip_id' => $trip ? (int)$trip['id'] : 0,
+                        'trip_report_id' => $tripReport ? (int)$tripReport['id'] : 0,
+                        'line_schedule_id' => $tripReport ? (int)$tripReport['schedule_id'] : 0,
+                        'delivery_method' => $deliveryMethod,
                         'event_type' => $eventType,
                         'status' => 'completed',
                         'idempotency_key' => $idempotencyKey,
@@ -146,7 +262,7 @@ final class DeliveryInventoryLogic extends BaseLogic
                         'exception_reason' => $exceptionReason,
                         'second_confirmed' => $secondConfirmed,
                         'operator_id' => self::operatorId(),
-                        'delivered_time' => $now,
+                        'delivered_time' => $deliveredTime,
                         'create_time' => $now,
                         'update_time' => $now,
                     ]);
@@ -326,9 +442,43 @@ final class DeliveryInventoryLogic extends BaseLogic
                         'shortage_base_qty' => '0.00',
                         'update_time' => $now,
                     ]);
+                    if ($deliveryMethod === 'fixed_line_vehicle' && $trip && $tripReport) {
+                        $packedException = (string)($tripReport['packed_exception_note'] ?? '');
+                        $loadedException = (string)($tripReport['loaded_exception_note'] ?? '');
+                        $exceptionSummary = self::packageExceptionSummary(
+                            $packedException,
+                            $loadedException,
+                            $handoffNote
+                        );
+                        Db::name('line_vehicle_trip_report')->where('tenant_id', self::tenantId())
+                            ->where('id', (int)$tripReport['id'])->update([
+                                'active_report_id' => null,
+                                'actual_handoff_package_count' => $actualHandoffPackages,
+                                'handoff_checked' => 1,
+                                'actual_handoff_time' => (int)$actualHandoffTime,
+                                'handoff_exception_note' => $handoffNote,
+                                'package_exception_note' => mb_substr($exceptionSummary, 0, 500),
+                                'status' => 'handed_over',
+                                'delivery_event_id' => $eventId,
+                                'operator_id' => self::operatorId(),
+                                'update_time' => $now,
+                            ]);
+                        $remaining = Db::name('line_vehicle_trip_report')->where('tenant_id', self::tenantId())
+                            ->where('trip_id', (int)$trip['id'])->whereNotNull('active_report_id')->count();
+                        if ($remaining === 0) {
+                            $rerouted = Db::name('line_vehicle_trip_report')->where('tenant_id', self::tenantId())
+                                ->where('trip_id', (int)$trip['id'])->where('status', 'rerouted')->count();
+                            Db::name('line_vehicle_trip')->where('tenant_id', self::tenantId())
+                                ->where('id', (int)$trip['id'])->update([
+                                    'status' => $rerouted > 0 ? 'closed' : 'completed',
+                                    'operator_id' => self::operatorId(),
+                                    'update_time' => $now,
+                                ]);
+                        }
+                    }
                     AuditService::logWithinTransaction(
                         'fulfillment_delivery',
-                        'self_customer_handoff',
+                        $deliveryMethod === 'fixed_line_vehicle' ? 'fixed_line_handoff' : 'self_customer_handoff',
                         $eventId,
                         $idempotencyKey,
                         null,
@@ -337,8 +487,13 @@ final class DeliveryInventoryLogic extends BaseLogic
                             'task_id' => $taskId,
                             'actual_delivery_weight' => $totalDelivered,
                             'negative_count' => $openNegativeCount,
+                            'trip_id' => $trip ? (int)$trip['id'] : 0,
+                            'trip_report_id' => $tripReport ? (int)$tripReport['id'] : 0,
+                            'actual_handoff_packages' => $deliveryMethod === 'fixed_line_vehicle'
+                                ? $actualHandoffPackages
+                                : 0,
                             'operator_id' => self::operatorId(),
-                            'delivered_time' => $now,
+                            'delivered_time' => $deliveredTime,
                         ],
                         $handoffNote
                     );
@@ -367,12 +522,16 @@ final class DeliveryInventoryLogic extends BaseLogic
                     return $committedReplay;
                 }
                 if (!self::hasError()) {
-                    self::setError('自配送交付确认失败');
+                    self::setError($deliveryMethod === 'fixed_line_vehicle'
+                        ? '固定线车交接确认失败'
+                        : '自配送交付确认失败');
                 }
                 return false;
             }
         }
-        self::setError('自配送交付确认失败');
+        self::setError($deliveryMethod === 'fixed_line_vehicle'
+            ? '固定线车交接确认失败'
+            : '自配送交付确认失败');
         return false;
     }
 
@@ -408,6 +567,9 @@ final class DeliveryInventoryLogic extends BaseLogic
         $event['id'] = (int)$event['id'];
         $event['report_id'] = (int)$event['report_id'];
         $event['task_id'] = (int)$event['task_id'];
+        $event['trip_id'] = (int)($event['trip_id'] ?? 0);
+        $event['trip_report_id'] = (int)($event['trip_report_id'] ?? 0);
+        $event['line_schedule_id'] = (int)($event['line_schedule_id'] ?? 0);
         $event['items'] = Db::name('fulfillment_delivery_item')->where('tenant_id', self::tenantId())
             ->where('delivery_event_id', $eventId)->order('id')->select()->toArray();
         foreach ($event['items'] as &$item) {
@@ -436,6 +598,25 @@ final class DeliveryInventoryLogic extends BaseLogic
     private static function decimal(string $value): string
     {
         return bcadd($value === '' ? '0' : $value, '0', self::SCALE);
+    }
+
+    private static function timestamp(string $value): int|false
+    {
+        $value = trim($value);
+        $date = \DateTimeImmutable::createFromFormat('!Y-m-d H:i:s', $value);
+        return $date && $date->format('Y-m-d H:i:s') === $value ? $date->getTimestamp() : false;
+    }
+
+    private static function packageExceptionSummary(string $packed, string $loaded, string $handoff): string
+    {
+        $parts = [];
+        foreach (['打包' => $packed, '装车' => $loaded, '交接' => $handoff] as $stage => $note) {
+            $note = trim($note);
+            if ($note !== '') {
+                $parts[] = $stage . '：' . $note;
+            }
+        }
+        return implode('；', $parts);
     }
 
     private static function tenantId(): int

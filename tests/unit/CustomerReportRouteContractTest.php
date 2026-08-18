@@ -126,6 +126,16 @@ final class CustomerReportRouteContractTest extends TestCase
             "Route::get('jxc/delivery/detail', 'jxc.DeliveryInventory/detail');",
             "Route::get('jxc/inventory/negative_todos', 'jxc.DeliveryInventory/negativeTodos');",
             "Route::post('jxc/inventory/negative_resolve', 'jxc.DeliveryInventory/resolveNegative');",
+            "Route::get('jxc/line_vehicle/schedules', 'jxc.LineVehicle/schedules');",
+            "Route::post('jxc/line_vehicle/schedule_save', 'jxc.LineVehicle/scheduleSave');",
+            "Route::get('jxc/line_vehicle/trips', 'jxc.LineVehicle/trips');",
+            "Route::post('jxc/line_vehicle/trip_create', 'jxc.LineVehicle/tripCreate');",
+            "Route::get('jxc/line_vehicle/trip_detail', 'jxc.LineVehicle/tripDetail');",
+            "Route::post('jxc/line_vehicle/package_record', 'jxc.LineVehicle/packageRecord');",
+            "Route::post('jxc/line_vehicle/trip_depart', 'jxc.LineVehicle/tripDepart');",
+            "Route::post('jxc/line_vehicle/reroute', 'jxc.LineVehicle/reroute');",
+            "Route::post('jxc/line_vehicle/handoff_confirm', 'jxc.LineVehicle/handoffConfirm');",
+            "Route::get('jxc/line_vehicle/loading_manifest', 'jxc.LineVehicle/manifest');",
         ] as $route) {
             self::assertStringContainsString($route, $routes);
         }

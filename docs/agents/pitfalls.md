@@ -192,6 +192,7 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 - 开发库重建由 `scripts/lib/RebuildDatabaseSafety.ps1` 额外绑定 `.env` 库名、显式 `-ExpectedDatabase`、`APP_ENV=development` 与开发库白名单。
 - 自动化防线：`tests/unit/MigrationSqlPreprocessorTest.php` 验证非默认前缀、残留模板拒绝和危险前缀拒绝；`scripts/migrate_probe_metadata_contract.test.js` 比对 PHP 与 JavaScript 预处理输出并验证两端契约；全部 `scripts/*contract.test.js` 与静态迁移探针覆盖 26 份迁移、185 条语句和 99 张最终表；`scripts/rebuild_dev_database_contract.test.js` 验证开发库必须先备份再重建，并固定基础结构、JXC 结构和正式迁移的执行顺序；`scripts/nondefault_prefix_rebuild_integration.test.js` 在 3307 隔离测试库上以 `tenantx_` 实际重建、核验 99 张表与 26 条迁移历史，再恢复原测试库。
 - 2026-08-05 扩展：`scripts/migrate_probe_metadata_contract.test.js` 在调用静态探针前逐份验证迁移源的占位符和非默认前缀转换；`scripts/migrate_probe_core.js` 的静态与受控运行时清单同步为 26 份迁移、185 条语句和 99 张最终表，并固定商品别名迁移的预处理后校验值。
+- 2026-08-19 扩展：固定线车趟次迁移加入时，静态探针先以 `migration_count_mismatch` 阻断了未同步清单；同一变更同步静态与受控运行时的迁移数、语句数、最终表数和哈希清单，并由元数据契约固定为 39 份迁移、382 条语句和 121 张最终表。
 - 架构防线：`scripts/lib/MigrationSqlPreprocessor.php` 是真实 PHP 迁移执行器进入拆分与 PDO 前的统一边界；`scripts/migrate_probe_core.js` 的静态与固定运行时路径共同调用其唯一 JavaScript 契约实现，不再按迁移文件名特判。前缀安全校验在数据库连接与迁移历史表名拼接前执行。
 - 决策与知识：本记录；数据库前缀当前以 `config/database.php` 和运行环境 `DATABASE.PREFIX` 为准。
 
