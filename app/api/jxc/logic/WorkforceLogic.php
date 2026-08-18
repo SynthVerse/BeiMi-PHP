@@ -32,6 +32,7 @@ final class WorkforceLogic extends BaseLogic
             ['key' => 'task.print', 'name' => '首次打印工票'],
             ['key' => 'task.reprint', 'name' => '补打与重试工票'],
             ['key' => 'task.recover', 'name' => '确认纸质工票回收'],
+            ['key' => 'task.control', 'name' => '处理工票作废、异常补录与履约变更'],
         ],
         '结算' => [
             ['key' => 'settlement.view', 'name' => '查看结算'],
@@ -192,6 +193,8 @@ final class WorkforceLogic extends BaseLogic
                 self::setError('当前仅备注关键词工序支持自定义；其他触发类型由闭环核心工序专用');
                 return false;
             }
+            Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('process_id', $id)
+                ->where('process_name_snapshot', '')->update(['process_name_snapshot' => (string)$exists['name']]);
             Db::name('work_process')->where('tenant_id', self::tenantId())->where('id', $id)->update($data);
         } else {
             if ($triggerType !== 'remark') {

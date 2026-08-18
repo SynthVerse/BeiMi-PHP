@@ -401,16 +401,22 @@ final class FulfillmentTaskLogic extends BaseLogic
                     Db::name('customer_report')->where('tenant_id', self::tenantId())->where('id', $reportId)->lock(true)->find();
                 }
                 $raw = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', $id)->lock(true)->find();
-                if (!$raw || !in_array((string)$raw['status'], ['printable', 'print_failed'], true)) {
+                if (!$raw || !in_array((string)$raw['status'], ['printable', 'print_failed', 'printed', 'in_progress'], true)) {
                     self::setError('任务当前不可打印');
                     return false;
                 }
-                $permission = (int)$raw['print_count'] > 0 || (string)$raw['status'] === 'print_failed' ? 'task.reprint' : 'task.print';
+                $raw = self::ensureContentIdentity($raw);
+                $successfulCopies = (int)Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
+                    ->where('task_id', $id)->where('print_type', 'task')->whereNotIn('paper_status', ['not_issued', 'print_failed'])->count();
+                $permission = $successfulCopies > 0 || in_array((string)$raw['status'], ['print_failed', 'printed', 'in_progress'], true)
+                    ? 'task.reprint' : 'task.print';
                 if (!WorkforceLogic::requirePermission($permission)) {
                     return false;
                 }
-                $pending = Db::name('fulfillment_print_log')->where('tenant_id', self::tenantId())
-                    ->where('task_id', $id)->where('status', 'pending')->lock(true)->find();
+                $pending = Db::name('fulfillment_print_log')->alias('l')
+                    ->join('fulfillment_paper_copy c', 'c.print_log_id=l.id AND c.tenant_id=l.tenant_id')
+                    ->where('l.tenant_id', self::tenantId())->where('l.task_id', $id)
+                    ->where('c.print_type', 'task')->where('l.status', 'pending')->lock(true)->field('l.id')->find();
                 if ($pending) {
                     self::setError('上一张工票的打印回执尚未确认');
                     return false;
@@ -420,8 +426,19 @@ final class FulfillmentTaskLogic extends BaseLogic
                     'tenant_id' => self::tenantId(), 'task_id' => $id, 'operator_id' => self::operatorId(),
                     'status' => 'pending', 'create_time' => $now, 'update_time' => $now,
                 ]);
+                $copyNo = $successfulCopies + 1;
+                Db::name('fulfillment_paper_copy')->insert([
+                    'tenant_id' => self::tenantId(), 'task_id' => $id, 'print_log_id' => $logId,
+                    'control_id' => 0, 'print_type' => 'task', 'copy_no' => $copyNo,
+                    'ticket_no' => (string)$raw['ticket_no'], 'content_version' => (int)$raw['content_version'],
+                    'content_hash' => (string)$raw['content_hash'], 'paper_status' => 'not_issued',
+                    'create_time' => $now, 'update_time' => $now,
+                ]);
                 return [
                     'print_log_id' => $logId,
+                    'print_requested_time' => $now,
+                    'copy_no' => $copyNo,
+                    'is_reprint' => $successfulCopies > 0,
                     'printer' => ['name' => 'XP-N160II', 'paper_width_mm' => 80, 'transport' => 'bluetooth'],
                     'ticket' => self::taskById($id),
                 ];
@@ -447,8 +464,16 @@ final class FulfillmentTaskLogic extends BaseLogic
                 $task = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', $id)->lock(true)->find();
                 $log = Db::name('fulfillment_print_log')->where('tenant_id', self::tenantId())->where('id', $logId)
                     ->where('task_id', $id)->lock(true)->find();
-                if (!$task || !$log) {
+                $copy = Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
+                    ->where('print_log_id', $logId)->where('task_id', $id)->where('print_type', 'task')->lock(true)->find();
+                if (!$task || !$log || !$copy) {
                     self::setError('打印回执无效');
+                    return false;
+                }
+                if ((int)$copy['content_version'] !== (int)$task['content_version']
+                    || (string)$copy['content_hash'] !== (string)$task['content_hash']
+                    || (string)$log['status'] === 'superseded') {
+                    self::setError('打印回执已过期');
                     return false;
                 }
                 $wanted = $success ? 'success' : 'failed';
@@ -466,13 +491,17 @@ final class FulfillmentTaskLogic extends BaseLogic
                 if (!WorkforceLogic::requirePermission($permission)) {
                     return false;
                 }
-                if (!in_array((string)$task['status'], ['printable', 'print_failed'], true)) {
+                if (!in_array((string)$task['status'], ['printable', 'print_failed', 'printed', 'in_progress'], true)) {
                     self::setError('打印回执已过期');
                     return false;
                 }
                 $now = time();
                 Db::name('fulfillment_print_log')->where('tenant_id', self::tenantId())->where('id', $logId)
                     ->where('status', 'pending')->update(['status' => $wanted, 'error_message' => $error, 'update_time' => $now]);
+                Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())->where('id', (int)$copy['id'])->update([
+                    'paper_status' => $success ? 'issued' : 'print_failed',
+                    'printed_time' => $success ? $now : 0, 'update_time' => $now,
+                ]);
                 Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', $id)->update([
                     'status' => $success ? 'printed' : 'print_failed',
                     'print_count' => (int)$task['print_count'] + 1,
@@ -494,82 +523,13 @@ final class FulfillmentTaskLogic extends BaseLogic
     /** @return array<string,mixed>|false */
     public static function recover(array $params): array|false
     {
-        self::clearError();
-        if (!WorkforceLogic::requirePermission('task.recover')) {
-            return false;
-        }
-        $id = (int)($params['id'] ?? 0);
-        try {
-            return Db::transaction(static function () use ($id, $params) {
-                $task = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', $id)->lock(true)->find();
-                if (!$task) {
-                    self::setError('工票不存在');
-                    return false;
-                }
-                $requiresSettlement = self::isSettlementTask($task);
-                if ($requiresSettlement && !WorkforceLogic::requirePermission('settlement.weight')) {
-                    return false;
-                }
-                if ($requiresSettlement && !WorkforceLogic::requirePermission('settlement.price')) {
-                    return false;
-                }
-                $weightInput = trim((string)($params['actual_weight'] ?? ''));
-                $priceInput = trim((string)($params['actual_price'] ?? ''));
-                if ($requiresSettlement && ($weightInput === '' || $priceInput === '')) {
-                    self::setError('最终工序票回收必须录入实际重量和已确认单价');
-                    return false;
-                }
-                $weight = self::money($weightInput === '' ? '0' : $weightInput);
-                $price = self::money($priceInput === '' ? '0' : $priceInput);
-                if ($weight === false || $price === false) {
-                    self::setError('实际重量或价格格式不正确');
-                    return false;
-                }
-                if ($requiresSettlement && (bccomp($weight, '0.00', 2) <= 0 || bccomp($price, '0.00', 2) <= 0)) {
-                    self::setError('最终实重和已确认单价必须大于 0，未定价时不能完成结算回收');
-                    return false;
-                }
-                $note = mb_substr(trim((string)($params['recovery_note'] ?? '')), 0, 500);
-                if (in_array((string)$task['status'], ['recovered', 'ready_to_bill', 'completed'], true)) {
-                    if (
-                        bccomp((string)$task['actual_weight'], $weight, 2) === 0
-                        && bccomp((string)$task['actual_price'], $price, 2) === 0
-                        && (string)$task['recovery_note'] === $note
-                    ) {
-                        return self::taskById($id);
-                    }
-                    self::setError('工票已回收，不能覆盖最终实重、实价或回收说明');
-                    return false;
-                }
-                if (!in_array((string)$task['status'], ['printed', 'in_progress'], true)) {
-                    self::setError('只有已打印的工票可以回收');
-                    return false;
-                }
-                if (str_ends_with((string)$task['source_key'], ':shortage')
-                    && !CustomerReportLogic::completePurchaseForItem((int)$task['report_item_id'])) {
-                    self::setError(CustomerReportLogic::getError());
-                    return false;
-                }
-                $now = time();
-                $nextStatus = str_ends_with((string)$task['source_key'], ':bookkeeping') ? 'ready_to_bill' : 'recovered';
-                Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', $id)->update([
-                    'status' => $nextStatus,
-                    'actual_weight' => $weight,
-                    'actual_price' => $price,
-                    'recovery_note' => $note,
-                    'recovered_by' => self::operatorId(),
-                    'recovered_time' => $now,
-                    'update_time' => $now,
-                ]);
-                self::refreshGroupStates((int)$task['group_id']);
-                return self::taskById($id);
-            });
-        } catch (\Throwable) {
-            if (!self::hasError()) {
-                self::setError('工票回收失败');
-            }
-            return false;
-        }
+        return self::recoverPaper($params, false);
+    }
+
+    /** @return array<string,mixed>|false */
+    public static function recoverException(array $params): array|false
+    {
+        return self::recoverPaper($params, true);
     }
 
     /** @return array<string,mixed>|false */
@@ -590,6 +550,10 @@ final class FulfillmentTaskLogic extends BaseLogic
             self::setError('关联报货单不存在');
             return false;
         }
+        if (self::hasUnaccountedPaperForReport((int)$report['id'])) {
+            self::setError('仍有未回收或未完成作废控制的纸质工票，不能结算');
+            return false;
+        }
         $result = CustomerReportLogic::convert(['id' => (int)$report['id'], 'version' => (int)$report['version']]);
         if ($result === false) {
             self::setError(CustomerReportLogic::getError());
@@ -601,29 +565,539 @@ final class FulfillmentTaskLogic extends BaseLogic
         return ['task' => self::taskById($id), 'report' => $result];
     }
 
-    /** @return array<int,array{actual_weight:string,actual_price:string,task_id:int}> */
+    /** @return array<int,array{final_actual_weight:string,actual_weight:string,actual_price:string,task_id:int}> */
     public static function settlementValuesForReport(int $reportId): array
     {
-        $itemIds = array_map('intval', Db::name('customer_report_item')->where('tenant_id', self::tenantId())
-            ->where('report_id', $reportId)->whereNull('delete_time')->column('id'));
-        $settlementTaskIds = array_values(self::settlementTaskIdsForItems($itemIds));
-        if ($settlementTaskIds === []) {
-            return [];
-        }
-        $rows = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('report_id', $reportId)
-            ->whereIn('id', $settlementTaskIds)->whereIn('status', ['recovered', 'ready_to_bill', 'completed'])
-            ->where('actual_weight', '>', 0)->where('actual_price', '>', 0)
-            ->field('id,report_item_id,actual_weight,actual_price')->select()->toArray();
+        $rows = Db::name('customer_report_item')->alias('i')
+            ->join('fulfillment_task t', 't.id=i.final_weight_task_id AND t.tenant_id=i.tenant_id')
+            ->where('i.tenant_id', self::tenantId())->where('i.report_id', $reportId)->whereNull('i.delete_time')
+            ->where('i.fulfillment_status', 'final_weight_recorded')->where('i.final_actual_weight', '>', 0)
+            ->field('i.id AS report_item_id,i.final_actual_weight,t.id,t.actual_price')->select()->toArray();
         $values = [];
         foreach ($rows as $row) {
             $itemId = (int)$row['report_item_id'];
             $values[$itemId] = [
-                'actual_weight' => self::decimal((string)$row['actual_weight']),
+                'final_actual_weight' => self::decimal((string)$row['final_actual_weight']),
+                'actual_weight' => self::decimal((string)$row['final_actual_weight']),
                 'actual_price' => self::decimal((string)$row['actual_price']),
                 'task_id' => (int)$row['id'],
             ];
         }
         return $values;
+    }
+
+    /** @return array<string,mixed>|false */
+    private static function recoverPaper(array $params, bool $exception): array|false
+    {
+        self::clearError();
+        if (!WorkforceLogic::requirePermission('task.recover')
+            || ($exception && !WorkforceLogic::requirePermission('task.control'))) {
+            return false;
+        }
+        $id = (int)($params['id'] ?? 0);
+        $printLogId = (int)($params['print_log_id'] ?? 0);
+        $exceptionReason = trim((string)($params['exception_reason'] ?? ''));
+        $exceptionNote = mb_substr(trim((string)($params['exception_note'] ?? '')), 0, 500);
+        if ($exception && (!in_array($exceptionReason, ['lost', 'damaged', 'illegible'], true) || $exceptionNote === '')) {
+            self::setError('异常工票补录必须选择丢失、破损或字迹不清并填写核实说明');
+            return false;
+        }
+        try {
+            return Db::transaction(static function () use ($id, $printLogId, $params, $exception, $exceptionReason, $exceptionNote) {
+                $taskRef = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', $id)
+                    ->field('id,report_id,report_item_id')->find();
+                if (!$taskRef) {
+                    self::setError('工票不存在');
+                    return false;
+                }
+                if ((int)$taskRef['report_id'] > 0) {
+                    Db::name('customer_report')->where('tenant_id', self::tenantId())
+                        ->where('id', (int)$taskRef['report_id'])->lock(true)->find();
+                }
+                $lockedItem = (int)$taskRef['report_item_id'] > 0
+                    ? Db::name('customer_report_item')->where('tenant_id', self::tenantId())
+                        ->where('id', (int)$taskRef['report_item_id'])->lock(true)->find()
+                    : null;
+                $task = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', $id)->lock(true)->find();
+                if (!$task) {
+                    self::setError('工票不存在');
+                    return false;
+                }
+                $task = self::ensureContentIdentity($task);
+                $requiresSettlement = self::isSettlementTask($task);
+                if ($requiresSettlement && !WorkforceLogic::requirePermission('settlement.weight')) {
+                    return false;
+                }
+                $weightInput = trim((string)($params['actual_weight'] ?? ''));
+                $weight = self::money($weightInput === '' ? '0' : $weightInput);
+                if ($weight === false || ($requiresSettlement && bccomp($weight, '0.00', 2) <= 0)) {
+                    self::setError($requiresSettlement ? '最终称重工序必须录入大于 0 的最终实重' : '过程重量格式不正确');
+                    return false;
+                }
+                $priceInput = trim((string)($params['actual_price'] ?? ''));
+                $price = $priceInput === '' ? self::decimal((string)$task['actual_price']) : self::money($priceInput);
+                if ($price === false) {
+                    self::setError('已确认单价格式不正确');
+                    return false;
+                }
+                if ($priceInput !== '' && !WorkforceLogic::requirePermission('settlement.price')) {
+                    return false;
+                }
+                $note = mb_substr(trim((string)($params['recovery_note'] ?? '')), 0, 500);
+                $copy = null;
+                if ($printLogId > 0) {
+                    $copy = Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
+                        ->where('task_id', $id)->where('print_log_id', $printLogId)->where('print_type', 'task')->lock(true)->find();
+                    if (!$copy) {
+                        self::setError('纸质工票副本不存在');
+                        return false;
+                    }
+                } else {
+                    $issued = Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())->where('task_id', $id)
+                        ->where('print_type', 'task')->where('content_version', (int)$task['content_version'])
+                        ->where('paper_status', 'issued')->lock(true)->select()->toArray();
+                    if (count($issued) > 1) {
+                        self::setError('存在多张未回收工票，必须指定本次回收的打印副本');
+                        return false;
+                    }
+                    $copy = $issued[0] ?? null;
+                }
+                $allowedPaperStates = $exception ? ['issued'] : ['issued'];
+                if ($copy && !in_array((string)$copy['paper_status'], $allowedPaperStates, true)) {
+                    $savedModeMatches = $exception
+                        ? (string)$copy['paper_status'] === $exceptionReason && (string)$copy['account_note'] === $exceptionNote
+                        : (string)$copy['paper_status'] === 'recovered';
+                    $requestedNote = $exception ? $exceptionNote : $note;
+                    if ($savedModeMatches
+                        && bccomp((string)$task['process_weight'], $weight, 2) === 0
+                        && bccomp((string)$task['actual_price'], $price, 2) === 0
+                        && (string)$task['recovery_note'] === $requestedNote) {
+                        return self::taskById($id);
+                    }
+                    self::setError('该纸质工票副本已经处理，不能覆盖原结果');
+                    return false;
+                }
+                if (!$copy && in_array((string)$task['status'], ['recovered', 'ready_to_bill'], true)) {
+                    $accountedCopies = Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
+                        ->where('task_id', $id)->where('print_type', 'task')
+                        ->where('content_version', (int)$task['content_version'])->where('accounted_time', '>', 0)
+                        ->order('id')->select()->toArray();
+                    $modeMatches = $exception ? $accountedCopies !== [] : true;
+                    foreach ($accountedCopies as $accountedCopy) {
+                        if ($exception) {
+                            $modeMatches = $modeMatches
+                                && (string)$accountedCopy['account_reason'] === $exceptionReason
+                                && (string)$accountedCopy['account_note'] === $exceptionNote;
+                        } elseif ((string)$accountedCopy['account_reason'] !== 'normal_recovery') {
+                            $modeMatches = false;
+                        }
+                    }
+                    $requestedNote = $exception ? $exceptionNote : $note;
+                    if ($modeMatches
+                        && bccomp((string)$task['process_weight'], $weight, 2) === 0
+                        && bccomp((string)$task['actual_price'], $price, 2) === 0
+                        && (string)$task['recovery_note'] === $requestedNote) {
+                        return self::taskById($id);
+                    }
+                    self::setError('工票已回收，不能覆盖回收模式、重量、价格或说明');
+                    return false;
+                }
+                if (!$copy && !in_array((string)$task['status'], ['printed', 'in_progress'], true)) {
+                    self::setError('只有已打印的工票可以回收');
+                    return false;
+                }
+                if (bccomp((string)$task['process_weight'], '0.00', 2) > 0
+                    && bccomp((string)$task['process_weight'], $weight, 2) !== 0) {
+                    self::setError('同一工序任务的纸票副本重量不一致，不能覆盖已回录结果');
+                    return false;
+                }
+                $finalItem = null;
+                if ($requiresSettlement) {
+                    $finalItem = $lockedItem;
+                    if (!$finalItem || (string)($finalItem['fulfillment_status'] ?? '') === 'undelivered') {
+                        self::setError('未交货明细不能回录最终实重');
+                        return false;
+                    }
+                    if ((int)($finalItem['final_weight_task_id'] ?? 0) > 0
+                        && (int)$finalItem['final_weight_task_id'] !== $id
+                        && bccomp((string)$finalItem['final_actual_weight'], '0.00', 2) > 0) {
+                        self::setError('该报货明细已有其他最终称重工序结果');
+                        return false;
+                    }
+                }
+                if (str_ends_with((string)$task['source_key'], ':shortage')
+                    && !in_array((string)$task['status'], ['recovered', 'completed'], true)
+                    && !CustomerReportLogic::completePurchaseForItem((int)$task['report_item_id'])) {
+                    self::setError(CustomerReportLogic::getError());
+                    return false;
+                }
+                $now = time();
+                if ($copy) {
+                    Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())->where('id', (int)$copy['id'])->update([
+                        'paper_status' => $exception ? $exceptionReason : 'recovered',
+                        'accounted_by' => self::operatorId(), 'accounted_time' => $now,
+                        'account_reason' => $exception ? $exceptionReason : 'normal_recovery',
+                        'account_note' => $exception ? $exceptionNote : $note, 'update_time' => $now,
+                    ]);
+                }
+                $outstandingCurrentCopies = (int)Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
+                    ->where('task_id', $id)->where('print_type', 'task')->where('content_version', (int)$task['content_version'])
+                    ->where('paper_status', 'issued')->count();
+                $finishedStatus = str_ends_with((string)$task['source_key'], ':bookkeeping') ? 'ready_to_bill' : 'recovered';
+                $nextStatus = $outstandingCurrentCopies === 0 ? $finishedStatus : 'printed';
+                Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', $id)->update([
+                    'status' => $nextStatus, 'actual_weight' => $weight, 'process_weight' => $weight,
+                    'actual_price' => $price, 'recovery_note' => $exception ? $exceptionNote : $note,
+                    'recovered_by' => self::operatorId(), 'recovered_time' => $now, 'update_time' => $now,
+                ]);
+                if ($requiresSettlement) {
+                    Db::name('customer_report_item')->where('tenant_id', self::tenantId())->where('id', (int)$finalItem['id'])->update([
+                        'final_actual_weight' => $weight, 'final_weight_task_id' => $id,
+                        'fulfillment_status' => 'final_weight_recorded', 'update_time' => $now,
+                    ]);
+                }
+                AuditService::logWithinTransaction(
+                    'fulfillment_task', $exception ? 'exception_recover' : 'recover', $id, (string)$task['ticket_no'],
+                    $task,
+                    [
+                        'status' => $nextStatus, 'process_weight' => $weight,
+                        'recovery_mode' => $exception ? 'exception' : 'normal',
+                        'reason' => $exception ? $exceptionReason : 'normal_recovery',
+                        'note' => $exception ? $exceptionNote : $note,
+                        'operator_id' => self::operatorId(), 'recovered_time' => $now,
+                    ],
+                    $exception ? $exceptionNote : $note
+                );
+                if ($nextStatus === $finishedStatus) {
+                    self::refreshGroupStates((int)$task['group_id']);
+                }
+                return self::taskById($id);
+            });
+        } catch (\Throwable) {
+            if (!self::hasError()) {
+                self::setError($exception ? '异常工票补录失败' : '工票回收失败');
+            }
+            return false;
+        }
+    }
+
+    /** @return array<string,mixed>|false */
+    public static function paperControl(array $params): array|false
+    {
+        self::clearError();
+        if (!WorkforceLogic::requirePermission('task.control')) {
+            return false;
+        }
+        $controlId = (int)($params['control_id'] ?? 0);
+        $resolution = trim((string)($params['resolution'] ?? ''));
+        $note = mb_substr(trim((string)($params['note'] ?? '')), 0, 500);
+        if (!in_array($resolution, ['recovered', 'unrecoverable'], true) || $note === '') {
+            self::setError('工票作废控制必须选择已收回或无法收回并填写说明');
+            return false;
+        }
+        try {
+            return Db::transaction(static function () use ($controlId, $resolution, $note) {
+                $control = Db::name('fulfillment_ticket_control')->where('tenant_id', self::tenantId())
+                    ->where('id', $controlId)->lock(true)->find();
+                if (!$control) {
+                    self::setError('工票作废控制不存在');
+                    return false;
+                }
+                if ((string)$control['status'] === 'closed') {
+                    if ((string)$control['resolution'] === $resolution && (string)$control['resolution_note'] === $note) {
+                        return $control;
+                    }
+                    self::setError('工票作废控制已完成，不能覆盖处理结果');
+                    return false;
+                }
+                if ((string)$control['status'] !== 'pending_recovery') {
+                    self::setError('工票作废控制当前不可变更');
+                    return false;
+                }
+                $now = time();
+                $status = $resolution === 'recovered' ? 'closed' : 'notice_required';
+                Db::name('fulfillment_ticket_control')->where('tenant_id', self::tenantId())->where('id', $controlId)->update([
+                    'status' => $status, 'resolution' => $resolution, 'resolution_note' => $note,
+                    'resolved_by' => self::operatorId(), 'resolved_time' => $now, 'update_time' => $now,
+                ]);
+                if ($resolution === 'recovered') {
+                    Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
+                        ->where('print_log_id', (int)$control['print_log_id'])->update([
+                            'paper_status' => 'void_recovered', 'accounted_by' => self::operatorId(), 'accounted_time' => $now,
+                            'account_reason' => 'void_recovered', 'account_note' => $note, 'update_time' => $now,
+                        ]);
+                }
+                AuditService::logWithinTransaction(
+                    'fulfillment_ticket_control', 'resolve', $controlId, '', $control,
+                    array_replace($control, ['status' => $status, 'resolution' => $resolution, 'resolution_note' => $note]), $note
+                );
+                self::refreshGroupForTask((int)$control['task_id']);
+                return Db::name('fulfillment_ticket_control')->where('tenant_id', self::tenantId())->where('id', $controlId)->find();
+            });
+        } catch (\Throwable) {
+            if (!self::hasError()) {
+                self::setError('工票作废控制保存失败');
+            }
+            return false;
+        }
+    }
+
+    /** @return array<string,mixed>|false */
+    public static function controlPrintData(array $params): array|false
+    {
+        self::clearError();
+        if (!WorkforceLogic::requirePermission('task.control') || !WorkforceLogic::requirePermission('task.reprint')) {
+            return false;
+        }
+        $controlId = (int)($params['control_id'] ?? 0);
+        try {
+            return Db::transaction(static function () use ($controlId) {
+                $control = Db::name('fulfillment_ticket_control')->where('tenant_id', self::tenantId())
+                    ->where('id', $controlId)->lock(true)->find();
+                if (!$control) {
+                    self::setError('当前没有需要打印的工票作废通知');
+                    return false;
+                }
+                if ((string)$control['status'] === 'notice_printing' && (int)$control['notice_print_log_id'] > 0) {
+                    $existingLog = Db::name('fulfillment_print_log')->where('tenant_id', self::tenantId())
+                        ->where('id', (int)$control['notice_print_log_id'])->where('task_id', (int)$control['task_id'])
+                        ->where('status', 'pending')->find();
+                    $existingCopy = Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
+                        ->where('print_log_id', (int)$control['notice_print_log_id'])->where('control_id', $controlId)
+                        ->where('paper_status', 'not_issued')->find();
+                    if ($existingLog && $existingCopy) {
+                        return self::controlPrintPayload($control, (int)$existingLog['id'], (int)$existingLog['create_time']);
+                    }
+                }
+                if ((string)$control['status'] !== 'notice_required') {
+                    self::setError('当前没有需要打印的工票作废通知');
+                    return false;
+                }
+                $now = time();
+                $logId = (int)Db::name('fulfillment_print_log')->insertGetId([
+                    'tenant_id' => self::tenantId(), 'task_id' => (int)$control['task_id'], 'operator_id' => self::operatorId(),
+                    'status' => 'pending', 'create_time' => $now, 'update_time' => $now,
+                ]);
+                Db::name('fulfillment_paper_copy')->insert([
+                    'tenant_id' => self::tenantId(), 'task_id' => (int)$control['task_id'], 'print_log_id' => $logId,
+                    'control_id' => $controlId, 'print_type' => $control['action_type'] === 'void' ? 'void_notice' : 'change_notice',
+                    'copy_no' => 0, 'ticket_no' => '', 'content_version' => 1,
+                    'content_hash' => hash('sha256', (string)$control['after_snapshot']), 'paper_status' => 'not_issued',
+                    'create_time' => $now, 'update_time' => $now,
+                ]);
+                Db::name('fulfillment_ticket_control')->where('tenant_id', self::tenantId())->where('id', $controlId)->update([
+                    'status' => 'notice_printing', 'notice_print_log_id' => $logId, 'update_time' => $now,
+                ]);
+                return self::controlPrintPayload($control, $logId, $now);
+            });
+        } catch (\Throwable) {
+            if (!self::hasError()) {
+                self::setError('工票作废通知准备失败');
+            }
+            return false;
+        }
+    }
+
+    /** @return array<string,mixed>|false */
+    public static function controlPrintResult(array $params): array|false
+    {
+        self::clearError();
+        if (!WorkforceLogic::requirePermission('task.control') || !WorkforceLogic::requirePermission('task.reprint')) {
+            return false;
+        }
+        $controlId = (int)($params['control_id'] ?? 0);
+        $logId = (int)($params['print_log_id'] ?? 0);
+        $success = (int)($params['success'] ?? 0) === 1;
+        $error = mb_substr(trim((string)($params['error_message'] ?? '')), 0, 255);
+        try {
+            return Db::transaction(static function () use ($controlId, $logId, $success, $error) {
+                $control = Db::name('fulfillment_ticket_control')->where('tenant_id', self::tenantId())
+                    ->where('id', $controlId)->lock(true)->find();
+                $log = Db::name('fulfillment_print_log')->where('tenant_id', self::tenantId())->where('id', $logId)
+                    ->where('task_id', (int)($control['task_id'] ?? 0))->lock(true)->find();
+                $copy = Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
+                    ->where('print_log_id', $logId)->where('control_id', $controlId)->lock(true)->find();
+                if (!$control || !$log || !$copy) {
+                    self::setError('工票作废通知打印回执无效');
+                    return false;
+                }
+                $wanted = $success ? 'success' : 'failed';
+                if ((string)$log['status'] !== 'pending') {
+                    if ((string)$log['status'] === $wanted) {
+                        return $control;
+                    }
+                    self::setError('工票作废通知回执与已保存结果冲突');
+                    return false;
+                }
+                $now = time();
+                Db::name('fulfillment_print_log')->where('tenant_id', self::tenantId())->where('id', $logId)->update([
+                    'status' => $wanted, 'error_message' => $error, 'update_time' => $now,
+                ]);
+                Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())->where('id', (int)$copy['id'])->update([
+                    'paper_status' => $success ? 'notice_printed' : 'print_failed',
+                    'printed_time' => $success ? $now : 0, 'update_time' => $now,
+                ]);
+                $status = $success ? 'closed' : 'notice_required';
+                Db::name('fulfillment_ticket_control')->where('tenant_id', self::tenantId())->where('id', $controlId)->update([
+                    'status' => $status, 'update_time' => $now,
+                ]);
+                if ($success) {
+                    Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
+                        ->where('print_log_id', (int)$control['print_log_id'])->update([
+                            'paper_status' => 'void_notice_printed', 'accounted_by' => self::operatorId(),
+                            'accounted_time' => $now, 'account_reason' => 'void_notice_printed',
+                            'account_note' => (string)$control['resolution_note'], 'update_time' => $now,
+                        ]);
+                    AuditService::logWithinTransaction(
+                        'fulfillment_ticket_control', 'notice_printed', $controlId, '', $control,
+                        array_replace($control, ['status' => 'closed', 'notice_print_log_id' => $logId]), (string)$control['resolution_note']
+                    );
+                }
+                self::refreshGroupForTask((int)$control['task_id']);
+                return Db::name('fulfillment_ticket_control')->where('tenant_id', self::tenantId())->where('id', $controlId)->find();
+            });
+        } catch (\Throwable) {
+            if (!self::hasError()) {
+                self::setError('工票作废通知回执保存失败');
+            }
+            return false;
+        }
+    }
+
+    /** @param array<string,mixed> $control @return array<string,mixed> */
+    private static function controlPrintPayload(array $control, int $logId, int $requestedTime): array
+    {
+        return [
+            'print_log_id' => $logId,
+            'print_requested_time' => $requestedTime,
+            'print_type' => $control['action_type'] === 'void' ? 'void_notice' : 'change_notice',
+            'printer' => ['name' => 'XP-N160II', 'paper_width_mm' => 80, 'transport' => 'bluetooth'],
+            'notice' => [
+                'control_id' => (int)$control['id'], 'action_type' => $control['action_type'], 'reason' => $control['reason'],
+                'before' => json_decode((string)$control['before_snapshot'], true),
+                'after' => json_decode((string)$control['after_snapshot'], true),
+            ],
+        ];
+    }
+
+    public static function hasUnaccountedPaperForReport(int $reportId): bool
+    {
+        if ($reportId <= 0) {
+            return false;
+        }
+        $paperCount = (int)Db::name('fulfillment_paper_copy')->alias('c')
+            ->join('fulfillment_task t', 't.id=c.task_id AND t.tenant_id=c.tenant_id')
+            ->where('c.tenant_id', self::tenantId())->where('t.report_id', $reportId)
+            ->whereIn('c.paper_status', ['issued', 'void_required'])->count();
+        if ($paperCount > 0) {
+            return true;
+        }
+        $controlCount = (int)Db::name('fulfillment_ticket_control')->where('tenant_id', self::tenantId())
+            ->where('report_id', $reportId)->where('status', '<>', 'closed')->count();
+        if ($controlCount > 0) {
+            return true;
+        }
+        return (int)Db::name('fulfillment_print_log')->alias('l')
+            ->join('fulfillment_task t', 't.id=l.task_id AND t.tenant_id=l.tenant_id')
+            ->where('l.tenant_id', self::tenantId())->where('t.report_id', $reportId)->where('l.status', 'pending')->count() > 0;
+    }
+
+    /**
+     * 调用方必须已经锁定报货单和明细并处于事务内。
+     * @param array<string,mixed> $before @param array<string,mixed> $after
+     * @return array<int,array<string,mixed>>
+     */
+    public static function invalidatePrintedItemTickets(
+        int $itemId,
+        int $itemChangeId,
+        string $actionType,
+        string $actionKey,
+        string $reason,
+        array $before,
+        array $after,
+        string $plannedQty
+    ): array {
+        $tasks = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('report_item_id', $itemId)
+            ->where('status', '<>', 'cancelled')->order('id')->lock(true)->select()->toArray();
+        $controls = [];
+        foreach ($tasks as $task) {
+            $task = self::ensureContentIdentity($task);
+            $copies = Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
+                ->where('task_id', (int)$task['id'])->where('print_type', 'task')
+                ->where('content_version', (int)$task['content_version'])->where('paper_status', '<>', 'print_failed')
+                ->order('id')->lock(true)->select()->toArray();
+            $nextVersion = (int)$task['content_version'] + ($copies === [] ? 0 : 1);
+            $mustRepeatTask = $copies !== []
+                || bccomp((string)($task['process_weight'] ?? '0'), '0.00', 2) > 0
+                || in_array((string)$task['status'], ['recovered', 'ready_to_bill', 'completed'], true);
+            Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', (int)$task['id'])->update([
+                'planned_qty' => self::decimal($plannedQty), 'content_version' => $nextVersion, 'content_hash' => '',
+                'status' => $mustRepeatTask ? 'printable' : (string)$task['status'],
+                'actual_weight' => '0.00', 'process_weight' => '0.00', 'actual_price' => '0.00',
+                'recovery_note' => '', 'recovered_by' => 0, 'recovered_time' => 0, 'update_time' => time(),
+            ]);
+            $updatedTask = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', (int)$task['id'])->find();
+            self::ensureContentIdentity($updatedTask);
+            foreach ($copies as $copy) {
+                $controlKey = $actionKey . ':paper:' . (int)$copy['id'];
+                $existing = Db::name('fulfillment_ticket_control')->where('tenant_id', self::tenantId())
+                    ->where('action_key', $controlKey)->find();
+                if ($existing) {
+                    $controls[] = $existing;
+                    continue;
+                }
+                $paperStatus = (string)$copy['paper_status'];
+                $autoRecovered = in_array($paperStatus, ['recovered', 'void_recovered', 'void_notice_printed'], true);
+                $exceptionAccounted = in_array($paperStatus, ['lost', 'damaged', 'illegible'], true);
+                $now = time();
+                if ($paperStatus === 'not_issued') {
+                    Db::name('fulfillment_print_log')->where('tenant_id', self::tenantId())
+                        ->where('id', (int)$copy['print_log_id'])->where('status', 'pending')
+                        ->update(['status' => 'superseded', 'error_message' => 'printed_content_changed', 'update_time' => $now]);
+                }
+                Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())->where('id', (int)$copy['id'])->update([
+                    'paper_status' => $autoRecovered ? 'void_recovered' : 'void_required', 'update_time' => $now,
+                ]);
+                $controlId = (int)Db::name('fulfillment_ticket_control')->insertGetId([
+                    'tenant_id' => self::tenantId(), 'report_id' => (int)$task['report_id'], 'report_item_id' => $itemId,
+                    'item_change_id' => $itemChangeId,
+                    'task_id' => (int)$task['id'], 'print_log_id' => (int)$copy['print_log_id'],
+                    'action_type' => $actionType, 'action_key' => $controlKey, 'reason' => $reason,
+                    'before_snapshot' => json_encode($before, JSON_UNESCAPED_UNICODE),
+                    'after_snapshot' => json_encode($after, JSON_UNESCAPED_UNICODE),
+                    'status' => $autoRecovered ? 'closed' : ($exceptionAccounted ? 'notice_required' : 'pending_recovery'),
+                    'resolution' => ($autoRecovered || $exceptionAccounted) ? ($autoRecovered ? 'recovered' : 'unrecoverable') : '',
+                    'resolution_note' => ($autoRecovered || $exceptionAccounted)
+                        ? ((string)$copy['account_note'] !== '' ? (string)$copy['account_note'] : $reason) : '',
+                    'resolved_by' => ($autoRecovered || $exceptionAccounted)
+                        ? ((int)$copy['accounted_by'] > 0 ? (int)$copy['accounted_by'] : self::operatorId()) : 0,
+                    'resolved_time' => ($autoRecovered || $exceptionAccounted)
+                        ? ((int)$copy['accounted_time'] > 0 ? (int)$copy['accounted_time'] : $now) : 0,
+                    'create_time' => $now, 'update_time' => $now,
+                ]);
+                $controls[] = Db::name('fulfillment_ticket_control')->where('id', $controlId)->find();
+            }
+        }
+        Db::name('customer_report_item')->where('tenant_id', self::tenantId())->where('id', $itemId)->update([
+            'final_actual_weight' => '0.00', 'final_weight_task_id' => 0,
+            'fulfillment_status' => (string)($after['fulfillment_status'] ?? 'pending'), 'update_time' => time(),
+        ]);
+        self::refreshGroupForItem($itemId);
+        return $controls;
+    }
+
+    public static function refreshGroupForItem(int $itemId): void
+    {
+        $groupId = (int)Db::name('fulfillment_task')->where('tenant_id', self::tenantId())
+            ->where('report_item_id', $itemId)->order('id')->value('group_id');
+        self::refreshGroupStates($groupId);
+    }
+
+    private static function refreshGroupForTask(int $taskId): void
+    {
+        $groupId = (int)Db::name('fulfillment_task')->where('tenant_id', self::tenantId())
+            ->where('id', $taskId)->value('group_id');
+        self::refreshGroupStates($groupId);
     }
 
     /** @param array<string,mixed> $report @param array<string,mixed>|null $item @param array<string,mixed>|null $process @param array<string,mixed> $overrides */
@@ -636,6 +1110,8 @@ final class FulfillmentTaskLogic extends BaseLogic
             'group_id' => $groupId,
             'report_item_id' => (int)($item['id'] ?? 0),
             'process_id' => (int)($process['id'] ?? 0),
+            'process_name_snapshot' => $existing && trim((string)($existing['process_name_snapshot'] ?? '')) !== ''
+                ? (string)$existing['process_name_snapshot'] : (string)($process['name'] ?? ''),
             'task_type' => 'process',
             'exception_code' => '',
             'depends_on_task_id' => 0,
@@ -654,6 +1130,7 @@ final class FulfillmentTaskLogic extends BaseLogic
                 if ((int)$existing['assignee_employee_id'] > 0 && $data['status'] === 'unassigned') {
                     $data['status'] = 'printable';
                 }
+                $data['content_hash'] = '';
                 Db::name('fulfillment_task')->where('tenant_id', $tenantId)->where('id', (int)$existing['id'])->update($data);
             }
             return (int)$existing['id'];
@@ -672,7 +1149,7 @@ final class FulfillmentTaskLogic extends BaseLogic
         if ($groupId <= 0) {
             return;
         }
-        $tasks = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('group_id', $groupId)->where('status', '<>', 'cancelled')->select()->toArray();
+        $tasks = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('group_id', $groupId)->select()->toArray();
         if ($tasks === []) {
             return;
         }
@@ -694,8 +1171,11 @@ final class FulfillmentTaskLogic extends BaseLogic
             self::unlockReportTask($groupId, 'bookkeeping');
         }
         $remaining = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('group_id', $groupId)->whereNotIn('status', self::FINISHED)->count();
+        $openControls = (int)Db::name('fulfillment_ticket_control')->where('tenant_id', self::tenantId())
+            ->whereIn('task_id', array_map('intval', array_column($tasks, 'id')))->where('status', '<>', 'closed')->count();
+        $groupStatus = $openControls > 0 ? 'paper_control_pending' : ($remaining === 0 ? 'completed' : 'open');
         Db::name('fulfillment_task_group')->where('tenant_id', self::tenantId())->where('id', $groupId)
-            ->update(['status' => $remaining === 0 ? 'completed' : 'open', 'update_time' => time()]);
+            ->update(['status' => $groupStatus, 'update_time' => time()]);
     }
 
     private static function unlockReportTask(int $groupId, string $code): void
@@ -736,10 +1216,32 @@ final class FulfillmentTaskLogic extends BaseLogic
         $itemIds = array_values(array_unique(array_filter(array_map(static fn(array $task): int => (int)$task['report_item_id'], $tasks))));
         $settlementTaskIds = self::settlementTaskIdsForItems($itemIds);
         foreach ($tasks as &$task) {
-            $task['process_name'] = (string)($processes[$task['process_id']] ?? '');
+            if (trim((string)($task['process_name_snapshot'] ?? '')) === '' && (int)$task['process_id'] > 0) {
+                $task['process_name_snapshot'] = (string)($processes[$task['process_id']] ?? '');
+                if ($task['process_name_snapshot'] !== '') {
+                    Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', (int)$task['id'])->update([
+                        'process_name_snapshot' => $task['process_name_snapshot'], 'update_time' => time(),
+                    ]);
+                }
+            }
+            $task = self::ensureContentIdentity($task);
+            $task['process_name'] = (string)($task['process_name_snapshot'] ?? '');
             $task['is_supplement'] = (int)Db::name('fulfillment_task_group')->where('tenant_id', self::tenantId())->where('id', (int)$task['group_id'])->value('is_supplement');
             $task['candidates_count'] = (int)$task['process_id'] > 0 ? count(WorkforceLogic::candidatesForProcess((int)$task['process_id'])) : 0;
             $task['requires_settlement'] = (int)($settlementTaskIds[(int)$task['report_item_id']] ?? 0) === (int)$task['id'];
+            $successfulCopies = (int)Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
+                ->where('task_id', (int)$task['id'])->where('print_type', 'task')
+                ->whereNotIn('paper_status', ['not_issued', 'print_failed'])->count();
+            $task['reprint_count'] = max(0, $successfulCopies - 1);
+            $task['outstanding_paper_count'] = (int)Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
+                ->where('task_id', (int)$task['id'])->whereIn('paper_status', ['issued', 'void_required'])->count();
+            $accounted = Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
+                ->where('task_id', (int)$task['id'])->where('accounted_time', '>', 0)->order('accounted_time desc,id desc')->find();
+            $task['recovery_mode'] = $accounted && in_array((string)$accounted['account_reason'], ['lost', 'damaged', 'illegible'], true)
+                ? 'exception' : ($accounted ? 'normal' : '');
+            $task['recovery_exception_reason'] = $task['recovery_mode'] === 'exception' ? (string)$accounted['account_reason'] : '';
+            $task['recovery_exception_note'] = $task['recovery_mode'] === 'exception' ? (string)$accounted['account_note'] : '';
+            $task['ticket_display'] = self::ticketSnapshot($task);
         }
         unset($task);
         return $tasks;
@@ -754,6 +1256,70 @@ final class FulfillmentTaskLogic extends BaseLogic
         }
         $ids = self::settlementTaskIdsForItems([$itemId]);
         return (int)($ids[$itemId] ?? 0) === (int)($task['id'] ?? 0);
+    }
+
+    /** @param array<string,mixed> $task @return array<string,mixed> */
+    private static function ensureContentIdentity(array $task): array
+    {
+        $task = self::ensureProcessNameSnapshot($task);
+        $snapshot = self::ticketSnapshot($task);
+        $hash = hash('sha256', (string)json_encode($snapshot, JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION));
+        if ((string)($task['content_hash'] ?? '') !== $hash) {
+            Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', (int)$task['id'])->update([
+                'content_hash' => $hash, 'update_time' => time(),
+            ]);
+            $task['content_hash'] = $hash;
+        }
+        $task['content_version'] = max(1, (int)($task['content_version'] ?? 1));
+        return $task;
+    }
+
+    /** @param array<string,mixed> $task @return array<string,mixed> */
+    private static function ensureProcessNameSnapshot(array $task): array
+    {
+        if (trim((string)($task['process_name_snapshot'] ?? '')) !== '' || (int)($task['process_id'] ?? 0) <= 0) {
+            return $task;
+        }
+        $name = (string)Db::name('work_process')->where('tenant_id', self::tenantId())
+            ->where('id', (int)$task['process_id'])->value('name');
+        if ($name !== '') {
+            Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', (int)$task['id'])
+                ->where('process_name_snapshot', '')->update(['process_name_snapshot' => $name, 'update_time' => time()]);
+            $task['process_name_snapshot'] = $name;
+        }
+        return $task;
+    }
+
+    /** @param array<string,mixed> $task @return array<string,mixed> */
+    private static function ticketSnapshot(array $task): array
+    {
+        $report = Db::name('customer_report')->where('tenant_id', self::tenantId())->where('id', (int)($task['report_id'] ?? 0))
+            ->field('sn,main_customer_id,main_customer_name,is_supplement')->find() ?: [];
+        $item = (int)($task['report_item_id'] ?? 0) > 0
+            ? (Db::name('customer_report_item')->where('tenant_id', self::tenantId())->where('id', (int)$task['report_item_id'])
+                ->field('goods_name,sku_name,delivery_customer_id,delivery_customer_name,base_unit_name')->find() ?: [])
+            : [];
+        $processName = (string)($task['process_name_snapshot'] ?? '');
+        $mainName = (string)($report['main_customer_name'] ?? '');
+        $deliveryName = (string)($item['delivery_customer_name'] ?? $mainName);
+        return [
+            'ticket_no' => (string)($task['ticket_no'] ?? ''),
+            'report_sn' => (string)($report['sn'] ?? ''),
+            'content_version' => max(1, (int)($task['content_version'] ?? 1)),
+            'is_supplement' => (int)($report['is_supplement'] ?? 0),
+            'main_customer' => ['name' => $mainName, 'emphasis' => true],
+            'delivery_customer' => [
+                'name' => $deliveryName,
+                'is_child' => (int)($item['delivery_customer_id'] ?? 0) > 0
+                    && (int)($item['delivery_customer_id'] ?? 0) !== (int)($report['main_customer_id'] ?? 0),
+                'emphasis' => false,
+            ],
+            'process_name' => $processName,
+            'goods_name' => (string)(($item['sku_name'] ?? '') ?: ($item['goods_name'] ?? $task['goods_name'] ?? '')),
+            'planned_qty' => self::decimal((string)($task['planned_qty'] ?? '0')),
+            'unit_name' => (string)(($item['base_unit_name'] ?? '') ?: ($task['unit_name'] ?? '')),
+            'requirement' => (string)($task['requirement'] ?? ''),
+        ];
     }
 
     /** @param array<int,int> $itemIds @return array<int,int> report_item_id => task_id */

@@ -177,6 +177,12 @@ Route::group('', function () {
     Route::post('jxc/tasks/print_data', 'jxc.FulfillmentTask/printData');
     Route::post('jxc/tasks/print_result', 'jxc.FulfillmentTask/printResult');
     Route::post('jxc/tasks/recover', 'jxc.FulfillmentTask/recover');
+    Route::post('jxc/tasks/recover_exception', 'jxc.FulfillmentTask/recoverException');
+    Route::post('jxc/tasks/paper_control', 'jxc.FulfillmentTask/paperControl');
+    Route::post('jxc/tasks/control_print_data', 'jxc.FulfillmentTask/controlPrintData');
+    Route::post('jxc/tasks/control_print_result', 'jxc.FulfillmentTask/controlPrintResult');
+    Route::post('jxc/tasks/reduce_item', 'jxc.FulfillmentTask/reduceItem');
+    Route::post('jxc/tasks/mark_undelivered', 'jxc.FulfillmentTask/markUndelivered');
     Route::post('jxc/tasks/bill', 'jxc.FulfillmentTask/bill');
 
     Route::get('jxc/workforce/permissions', 'jxc.Workforce/permissionCatalog');

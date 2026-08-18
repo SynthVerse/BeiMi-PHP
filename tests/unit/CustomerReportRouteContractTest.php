@@ -35,6 +35,19 @@ final class CustomerReportRouteContractTest extends TestCase
         self::assertStringContainsString("->where('id', \$goodsId)->lock(true)->value('id')", $logic);
     }
 
+    public function test_fulfillment_change_idempotency_never_locks_an_absent_key_and_retries_deadlocks(): void
+    {
+        $root = dirname(__DIR__, 2);
+        $logic = (string)file_get_contents($root . '/app/api/jxc/logic/FulfillmentChangeLogic.php');
+
+        self::assertStringContainsString('self::transactionWithRetry(', $logic);
+        self::assertStringContainsString("str_contains(\$exception->getMessage(), '1213')", $logic);
+        self::assertStringContainsString("str_contains(\$exception->getMessage(), '1205')", $logic);
+        self::assertStringNotContainsString('self::replay($key, $fingerprint, true)', $logic);
+        self::assertStringNotContainsString('$query->lock(true)', $logic);
+        self::assertStringContainsString("->where('item_change_id', \$changeId)", $logic);
+    }
+
     public function test_customer_report_sales_source_is_visible_while_standard_sales_returns_remain_legal(): void
     {
         $root = dirname(__DIR__, 2);
@@ -68,6 +81,12 @@ final class CustomerReportRouteContractTest extends TestCase
             "Route::post('jxc/customer_report/batch_process', 'jxc.CustomerReport/batchProcess');",
             "Route::post('jxc/customer_report/batch_end', 'jxc.CustomerReport/batchEnd');",
             "Route::get('jxc/customer_report/batch_detail', 'jxc.CustomerReport/batchDetail');",
+            "Route::post('jxc/tasks/recover_exception', 'jxc.FulfillmentTask/recoverException');",
+            "Route::post('jxc/tasks/paper_control', 'jxc.FulfillmentTask/paperControl');",
+            "Route::post('jxc/tasks/control_print_data', 'jxc.FulfillmentTask/controlPrintData');",
+            "Route::post('jxc/tasks/control_print_result', 'jxc.FulfillmentTask/controlPrintResult');",
+            "Route::post('jxc/tasks/reduce_item', 'jxc.FulfillmentTask/reduceItem');",
+            "Route::post('jxc/tasks/mark_undelivered', 'jxc.FulfillmentTask/markUndelivered');",
         ] as $route) {
             self::assertStringContainsString($route, $routes);
         }

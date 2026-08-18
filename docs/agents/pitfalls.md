@@ -119,9 +119,9 @@
 
 - 状态：已防护
 - 首次发生：2026-07-29
-- 最近发生：2026-07-30
-- 复发次数：1
-- 适用范围：`CustomerReportLogic` 等已开启业务事务后调用仓库余额原语的路径
+- 最近发生：2026-08-18
+- 复发次数：2
+- 适用范围：`CustomerReportLogic`、`FulfillmentChangeLogic` 等已开启业务事务后调用仓库余额原语或写入幂等事实的路径
 - 相关问题：PIT-0022
 
 ### 触发场景
@@ -145,6 +145,7 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 - 2026-07-30 扩展：跨仓转换在创建任何销售单前，按 `goods_id` 升序预锁本次涉及的全部商品；销售单、订单商品、库存流水和应收／应付在外层事务中统一使用 Query Builder 写入，禁止重新引入 ORM 隐式事务。
 - 自动化防线扩展：`tests/unit/CustomerReportWorkflowTest.php` 的多仓后置计价失败用例断言销售单、库存流水、应收及报货状态整体回滚；`tests/unit/CustomerReportRouteContractTest.php` 禁止外层事务路径重新引入 `Model::create()`，并断言商品预锁早于任何标准销售单发布。
 - 自动化防线：`tests/unit/CustomerReportWorkflowTest.php` 的 `test_two_concurrent_submissions_cannot_over_reserve_one_warehouse_balance()` 使用两个 PHP 进程同时提交，断言一单 `submitted_ready`、一单 `submitted_shortage`，且总预留不超过余额。
+- 2026-08-18 扩展：`FulfillmentChangeLogic` 对不存在的履约变更幂等键只做普通查询，依靠 `(tenant_id,idempotency_key)` 唯一键解决竞态；减量和未交货事务统一只对 MySQL `1213`/`1205` 做最多三次有界重试。`CustomerReportRouteContractTest::test_fulfillment_change_idempotency_never_locks_an_absent_key_and_retries_deadlocks()` 固定这一结构契约，并要求作废控制按 `item_change_id` 精确关联幂等事实；`FulfillmentWorkflowTest::test_concurrent_reduction_with_one_idempotency_key_applies_inventory_once()` 用两个 PHP 进程证明同一减量请求只生成一条变更事实且库存只释放一次。
 - 架构防线：`WarehouseGoodsBalanceService` 明确提供 `reserveWithinTransaction()`、`reserveUpToWithinTransaction()`、`releaseWithinTransaction()` 与 `consumeReservedWithinTransaction()`；`CustomerReportLogic` 在外层事务内只调用这些入口，并以 Query Builder 写入主表、明细和预留记录。`CustomerReportPreferenceService::remember()` 用唯一键原子 upsert 保存建议数据，不加间隙锁。`transactionWithRetry()` 统一包裹提交外的编辑、补预留、取消与转换销售事务；明细按 `(goods_id, warehouse_id)` 排序后才触发库存原语。
 - 决策与知识：本记录及 `docs/adr/0001-客户报货库存边界.md`。
 
@@ -154,6 +155,7 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 |---|---|---|---|
 | 2026-07-29 | Project #1 / 客户报货新链路 | 第 7 张并发提交验收 | 既有实现未区分外层事务与 ORM 隐式事务，也对不存在的幂等键和客户商品偏好键加悲观锁。 |
 | 2026-07-30 | 客户报货旧链路删除与标准销售单桥接 | 外层报货转换调用标准销售发布时重新使用 ORM `create()`，并按仓循环触发库存锁 | 原防线只覆盖报货主从表和直接库存原语，没有覆盖新接入的销售、库存流水、财务副作用，也没有对跨仓转换建立“先预锁全部商品”的结构契约。 |
+| 2026-08-18 | BeiMi-PHP #7 履约工票闭环 | 履约减量与未交货事务再次对尚不存在的幂等键执行 `FOR UPDATE`，并缺少 `1213`/`1205` 有界重试 | 原防线只约束 `CustomerReportLogic` 的提交、编辑、补预留、取消和转销售路径，未把新增的追加式履约变更入口纳入静态结构契约。 |
 
 ## PIT-0005：迁移静态探针替换前缀但真实执行器保留占位符
 

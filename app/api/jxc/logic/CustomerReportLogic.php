@@ -210,9 +210,18 @@ class CustomerReportLogic extends BaseLogic
                     ->whereNull('delete_time')->order(['goods_id' => 'asc', 'warehouse_id' => 'asc', 'id' => 'asc'])
                     ->lock(true)->select()->toArray();
                 if ($items === []) { self::setError('报货单没有可转销售的明细'); return false; }
+                $items = array_values(array_filter(
+                    $items,
+                    static fn(array $item): bool => (string)($item['fulfillment_status'] ?? 'pending') !== 'undelivered'
+                ));
+                if ($items === []) { self::setError('报货单没有实际交付明细，不能生成销售单'); return false; }
 
                 $hasTaskGroup = Db::name('fulfillment_task_group')->where('tenant_id', self::tenantId())->where('report_id', $reportId)->count() > 0;
                 if ($hasTaskGroup) {
+                    if (FulfillmentTaskLogic::hasUnaccountedPaperForReport($reportId)) {
+                        self::setError('仍有未回收或未完成作废控制的纸质工票，不能结算');
+                        return false;
+                    }
                     $bookkeeping = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())
                         ->where('report_id', $reportId)->where('source_key', 'report:' . $reportId . ':bookkeeping')->lock(true)->find();
                     if (!$bookkeeping || (string)$bookkeeping['status'] !== 'ready_to_bill') {

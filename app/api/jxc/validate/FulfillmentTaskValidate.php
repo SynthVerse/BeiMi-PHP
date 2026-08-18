@@ -10,7 +10,9 @@ final class FulfillmentTaskValidate extends BaseValidate
         'id' => 'require|integer|gt:0',
         'employee_id' => 'require|integer|gt:0',
         'process_id' => 'require|integer|gt:0',
-        'print_log_id' => 'require|integer|gt:0',
+        'print_log_id' => 'integer|gt:0',
+        'control_id' => 'integer|gt:0',
+        'report_item_id' => 'integer|gt:0',
         'success' => 'require|in:0,1',
         'error_message' => 'max:255',
         'actual_weight' => 'max:20',
@@ -19,6 +21,17 @@ final class FulfillmentTaskValidate extends BaseValidate
         'requirement' => 'max:500',
         'delivery_date' => 'dateFormat:Y-m-d',
         'status_scope' => 'in:printable,working,recovered,exception',
+        'exception_reason' => 'in:lost,damaged,illegible',
+        'exception_note' => 'max:500',
+        'resolution' => 'in:recovered,unrecoverable',
+        'note' => 'max:500',
+        'new_expected_base_qty' => 'max:20',
+        'processed_reduction_qty' => 'max:20',
+        'processed_disposition' => 'in:return_to_stock,internal_loss,other',
+        'other_inventory_action' => 'in:release,consume',
+        'reason_code' => 'in:shortage,damage,customer_cancel',
+        'reason' => 'max:500',
+        'idempotency_key' => 'max:96',
     ];
 
     public function sceneDashboard() { return $this->only(['delivery_date']); }
@@ -28,7 +41,13 @@ final class FulfillmentTaskValidate extends BaseValidate
     public function sceneAssign() { return $this->only(['id', 'employee_id']); }
     public function sceneResolve() { return $this->only(['id', 'process_id', 'requirement']); }
     public function scenePrintData() { return $this->only(['id']); }
-    public function scenePrintResult() { return $this->only(['id', 'print_log_id', 'success', 'error_message']); }
-    public function sceneRecover() { return $this->only(['id', 'actual_weight', 'actual_price', 'recovery_note']); }
+    public function scenePrintResult() { return $this->only(['id', 'print_log_id', 'success', 'error_message'])->append('print_log_id', 'require'); }
+    public function sceneRecover() { return $this->only(['id', 'print_log_id', 'actual_weight', 'actual_price', 'recovery_note']); }
+    public function sceneRecoverException() { return $this->only(['id', 'print_log_id', 'actual_weight', 'actual_price', 'exception_reason', 'exception_note'])->append('print_log_id', 'require'); }
+    public function scenePaperControl() { return $this->only(['control_id', 'resolution', 'note'])->append('control_id', 'require'); }
+    public function sceneControlPrintData() { return $this->only(['control_id'])->append('control_id', 'require'); }
+    public function sceneControlPrintResult() { return $this->only(['control_id', 'print_log_id', 'success', 'error_message'])->append('control_id', 'require')->append('print_log_id', 'require'); }
+    public function sceneReduceItem() { return $this->only(['report_item_id', 'new_expected_base_qty', 'processed_reduction_qty', 'processed_disposition', 'other_inventory_action', 'reason', 'idempotency_key'])->append('report_item_id', 'require'); }
+    public function sceneMarkUndelivered() { return $this->only(['report_item_id', 'reason_code', 'reason', 'idempotency_key'])->append('report_item_id', 'require'); }
     public function sceneBill() { return $this->only(['id']); }
 }

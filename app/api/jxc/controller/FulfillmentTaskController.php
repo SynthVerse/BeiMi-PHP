@@ -2,6 +2,7 @@
 
 namespace app\api\jxc\controller;
 
+use app\api\jxc\logic\FulfillmentChangeLogic;
 use app\api\jxc\logic\FulfillmentTaskLogic;
 use app\api\jxc\validate\FulfillmentTaskValidate;
 
@@ -16,6 +17,12 @@ class FulfillmentTaskController extends BaseJxcController
     public function printData() { return $this->write('printData'); }
     public function printResult() { return $this->write('printResult'); }
     public function recover() { return $this->write('recover'); }
+    public function recoverException() { return $this->write('recoverException'); }
+    public function paperControl() { return $this->write('paperControl'); }
+    public function controlPrintData() { return $this->write('controlPrintData'); }
+    public function controlPrintResult() { return $this->write('controlPrintResult'); }
+    public function reduceItem() { return $this->writeChange('reduceItem'); }
+    public function markUndelivered() { return $this->writeChange('markUndelivered'); }
     public function bill() { return $this->write('bill'); }
 
     private function read(string $action)
@@ -30,5 +37,12 @@ class FulfillmentTaskController extends BaseJxcController
         $params = (new FulfillmentTaskValidate())->post()->goCheck($scene ?? $logicAction);
         $result = FulfillmentTaskLogic::$logicAction($params);
         return $result === false ? $this->fail(FulfillmentTaskLogic::getError()) : $this->success('操作成功', $result, 1, 1);
+    }
+
+    private function writeChange(string $action)
+    {
+        $params = (new FulfillmentTaskValidate())->post()->goCheck($action);
+        $result = FulfillmentChangeLogic::$action($params);
+        return $result === false ? $this->fail(FulfillmentChangeLogic::getError()) : $this->success('操作成功', $result, 1, 1);
     }
 }
