@@ -48,6 +48,41 @@ final class CustomerReportRouteContractTest extends TestCase
         self::assertStringContainsString("->where('item_change_id', \$changeId)", $logic);
     }
 
+    public function test_delivery_and_negative_actions_use_canonical_locks_then_replay_the_committed_idempotent_fact(): void
+    {
+        $root = dirname(__DIR__, 2);
+        $delivery = (string)file_get_contents($root . '/app/api/jxc/logic/DeliveryInventoryLogic.php');
+        $negative = (string)file_get_contents($root . '/app/api/jxc/logic/NegativeInventoryLogic.php');
+        $stock = (string)file_get_contents($root . '/app/api/jxc/logic/StockService.php');
+        $balance = (string)file_get_contents($root . '/app/api/jxc/logic/WarehouseSkuBalanceService.php');
+
+        foreach ([$delivery, $negative] as $logic) {
+            self::assertStringContainsString('replayAfterConcurrentCommit(', $logic);
+            self::assertStringContainsString("->where('idempotency_key', \$idempotencyKey)->find();", $logic);
+            self::assertStringContainsString('request_fingerprint', $logic);
+        }
+        self::assertStringContainsString("->where('id', \$taskId)->lock(true)->find();", $delivery);
+        self::assertStringContainsString("->where('id', \$id)->lock(true)->find();", $negative);
+        $balanceLock = strpos($negative, 'WarehouseSkuBalanceService::lockBalanceWithinTransaction(');
+        $sourceLock = strpos($negative, "->where('id', \$id)->lock(true)->find();");
+        self::assertNotFalse($balanceLock);
+        self::assertNotFalse($sourceLock);
+        self::assertLessThan($sourceLock, $balanceLock, '库存余额锁必须先于负库存来源锁');
+        self::assertStringContainsString(
+            "->order(['sku_id' => 'asc', 'goods_id' => 'asc', 'warehouse_id' => 'asc', 'id' => 'asc'])",
+            $delivery
+        );
+        self::assertStringNotContainsString('WarehouseSkuBalance::create(', $balance);
+        foreach ([$delivery, $negative, $stock] as $transactionOwner) {
+            self::assertStringContainsString("str_contains(\$exception->getMessage(), '1213')", $transactionOwner);
+            self::assertStringContainsString("str_contains(\$exception->getMessage(), '1205')", $transactionOwner);
+        }
+        self::assertStringNotContainsString("str_contains(strtolower(\$exception->getMessage()), 'duplicate')", $delivery);
+        self::assertStringNotContainsString("str_contains(strtolower(\$exception->getMessage()), 'deadlock')", $delivery);
+        self::assertStringContainsString('WarehouseSkuBalanceService::deliverAttributedWithinTransaction(', $stock);
+        self::assertStringContainsString('WarehouseSkuBalanceService::inboundWithinTransaction(', $stock);
+    }
+
     public function test_customer_report_sales_source_is_visible_while_standard_sales_returns_remain_legal(): void
     {
         $root = dirname(__DIR__, 2);
@@ -87,6 +122,10 @@ final class CustomerReportRouteContractTest extends TestCase
             "Route::post('jxc/tasks/control_print_result', 'jxc.FulfillmentTask/controlPrintResult');",
             "Route::post('jxc/tasks/reduce_item', 'jxc.FulfillmentTask/reduceItem');",
             "Route::post('jxc/tasks/mark_undelivered', 'jxc.FulfillmentTask/markUndelivered');",
+            "Route::post('jxc/delivery/self_confirm', 'jxc.DeliveryInventory/confirmSelf');",
+            "Route::get('jxc/delivery/detail', 'jxc.DeliveryInventory/detail');",
+            "Route::get('jxc/inventory/negative_todos', 'jxc.DeliveryInventory/negativeTodos');",
+            "Route::post('jxc/inventory/negative_resolve', 'jxc.DeliveryInventory/resolveNegative');",
         ] as $route) {
             self::assertStringContainsString($route, $routes);
         }

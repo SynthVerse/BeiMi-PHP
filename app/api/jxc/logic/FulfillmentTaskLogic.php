@@ -218,11 +218,18 @@ final class FulfillmentTaskLogic extends BaseLogic
             ->join('customer_report r', 'r.id=g.report_id AND r.tenant_id=g.tenant_id')
             ->where('g.tenant_id', self::tenantId())->whereIn('g.id', $groupIds)->whereNull('r.delete_time')
             ->count('DISTINCT r.main_customer_id');
+        $negativeTodos = [];
+        if (WorkforceLogic::hasPermission('inventory.negative.manage')) {
+            $negativeResult = NegativeInventoryLogic::todos(['status' => 'open']);
+            $negativeTodos = $negativeResult === false ? [] : $negativeResult['lists'];
+        }
         return [
             'batch' => ['delivery_date' => $deliveryDate, 'customer_count' => $customerCount, 'task_group_count' => count($groupIds)],
             'printer' => ['name' => 'XP-N160II', 'paper_width_mm' => 80, 'transport' => 'bluetooth'],
             'exceptions' => array_slice($exceptions, 0, 20),
-            'exception_count' => count($exceptions),
+            'exception_count' => count($exceptions) + count($negativeTodos),
+            'negative_inventory_todos' => array_slice($negativeTodos, 0, 20),
+            'negative_inventory_count' => count($negativeTodos),
             'tabs' => $counts,
             'process_groups' => $processGroups,
         ];

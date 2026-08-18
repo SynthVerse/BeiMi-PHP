@@ -26,31 +26,47 @@ class StockService
         int $skuId = 0,
         int $batchId = 0
     ): bool {
-        try {
-            return Db::transaction(static function () use ($warehouseId, $goodsId, $quantity, $orderId, $orderType, $orderSn, $remark, $skuId, $batchId) {
-                $movement = WarehouseSkuBalanceService::inbound($warehouseId, $skuId, $quantity);
-                if ($movement === false) {
-                    throw new \RuntimeException('Unable to receive warehouse stock.');
+        for ($attempt = 0; $attempt < 3; $attempt++) {
+            try {
+                return Db::transaction(static function () use ($warehouseId, $goodsId, $quantity, $orderId, $orderType, $orderSn, $remark, $skuId, $batchId) {
+                    $movement = WarehouseSkuBalanceService::inboundWithinTransaction($warehouseId, $skuId, $quantity);
+                    if ($movement === false) {
+                        throw new \RuntimeException('Unable to receive warehouse stock.');
+                    }
+
+                    self::writeFlow([
+                        'warehouse_id' => $warehouseId,
+                        'goods_id' => $goodsId,
+                        'sku_id' => $skuId,
+                        'batch_id' => $batchId,
+                        'order_id' => $orderId,
+                        'order_type' => $orderType,
+                        'order_sn' => $orderSn,
+                        'flow_type' => StockFlow::FLOW_IN,
+                        'quantity' => $quantity,
+                        'remark' => $remark ?: '入库-' . $orderType,
+                    ], $movement);
+
+                    NegativeInventoryLogic::autoOffsetWithinTransaction(
+                        $warehouseId,
+                        $skuId,
+                        $movement,
+                        $orderId,
+                        $orderType,
+                        $orderSn
+                    );
+
+                    return true;
+                });
+            } catch (\Throwable $exception) {
+                if (self::isLockRetryable($exception) && $attempt < 2) {
+                    usleep(20_000 * ($attempt + 1));
+                    continue;
                 }
-
-                self::writeFlow([
-                    'warehouse_id' => $warehouseId,
-                    'goods_id' => $goodsId,
-                    'sku_id' => $skuId,
-                    'batch_id' => $batchId,
-                    'order_id' => $orderId,
-                    'order_type' => $orderType,
-                    'order_sn' => $orderSn,
-                    'flow_type' => StockFlow::FLOW_IN,
-                    'quantity' => $quantity,
-                    'remark' => $remark ?: '入库-' . $orderType,
-                ], $movement);
-
-                return true;
-            });
-        } catch (\Throwable) {
-            return false;
+                return false;
+            }
         }
+        return false;
     }
 
     /**
@@ -139,6 +155,81 @@ class StockService
         } catch (\Throwable) {
             return false;
         }
+    }
+
+    /**
+     * 真实交付专用出库。调用方持有事务，并已经锁定报货单、明细、预留和销售单身份。
+     * 返回本次新增负库存及预留消费/释放数量，普通库存入口不能调用该原语。
+     */
+    public static function outboundDeliveryWithinTransaction(
+        int $warehouseId,
+        int $goodsId,
+        int $skuId,
+        string $actualQuantity,
+        string $reservationQuantity,
+        int $salesOrderId,
+        string $salesOrderSn,
+        int $deliveryEventId
+    ): array|false {
+        $movement = WarehouseSkuBalanceService::deliverAttributedWithinTransaction(
+            $warehouseId,
+            $skuId,
+            $actualQuantity,
+            $reservationQuantity
+        );
+        if ($movement === false) {
+            return false;
+        }
+        self::writeFlow([
+            'warehouse_id' => $warehouseId,
+            'goods_id' => $goodsId,
+            'sku_id' => $skuId,
+            'batch_id' => 0,
+            'order_id' => $salesOrderId,
+            'order_type' => 'sales_delivery',
+            'order_sn' => $salesOrderSn,
+            'flow_type' => StockFlow::FLOW_OUT,
+            'quantity' => $actualQuantity,
+            'remark' => '实际交付出库-事件' . $deliveryEventId,
+        ], $movement);
+        NegativeInventoryLogic::autoOffsetDeliveryReleaseWithinTransaction(
+            $warehouseId,
+            $skuId,
+            $movement,
+            $salesOrderId,
+            $salesOrderSn,
+            $deliveryEventId
+        );
+        return $movement;
+    }
+
+    /** 负库存遗漏入库或核销调整；调用方持有事务并追加审计动作。 */
+    public static function adjustNegativeWithinTransaction(
+        int $warehouseId,
+        int $goodsId,
+        int $skuId,
+        string $quantity,
+        int $attributionId,
+        string $actionType,
+        string $reason
+    ): array|false {
+        $movement = WarehouseSkuBalanceService::inboundWithinTransaction($warehouseId, $skuId, $quantity);
+        if ($movement === false) {
+            return false;
+        }
+        self::writeFlow([
+            'warehouse_id' => $warehouseId,
+            'goods_id' => $goodsId,
+            'sku_id' => $skuId,
+            'batch_id' => 0,
+            'order_id' => $attributionId,
+            'order_type' => 'negative_inventory_resolution',
+            'order_sn' => 'NEG-' . $attributionId,
+            'flow_type' => StockFlow::FLOW_IN,
+            'quantity' => $quantity,
+            'remark' => $actionType . '-' . $reason,
+        ], $movement);
+        return $movement;
     }
 
     public static function transfer(
@@ -317,5 +408,12 @@ class StockService
         if ($inserted !== 1) {
             throw new \RuntimeException('Unable to write stock flow.');
         }
+    }
+
+    private static function isLockRetryable(\Throwable $exception): bool
+    {
+        return in_array((int)$exception->getCode(), [1205, 1213], true)
+            || str_contains($exception->getMessage(), '1205')
+            || str_contains($exception->getMessage(), '1213');
     }
 }

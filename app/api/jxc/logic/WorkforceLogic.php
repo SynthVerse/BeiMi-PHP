@@ -40,6 +40,10 @@ final class WorkforceLogic extends BaseLogic
             ['key' => 'settlement.price', 'name' => '录入最终实价'],
             ['key' => 'settlement.bill', 'name' => '确认并开销售单'],
         ],
+        '配送与库存异常' => [
+            ['key' => 'delivery.confirm', 'name' => '确认真实交付事件'],
+            ['key' => 'inventory.negative.manage', 'name' => '处理真负库存待办'],
+        ],
         '商品' => [
             ['key' => 'goods.maintain', 'name' => '商品维护'],
         ],

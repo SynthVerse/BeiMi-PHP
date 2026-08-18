@@ -410,12 +410,12 @@ final class CustomerReportWorkflowTest extends TestCase
         self::assertSame('submitted_ready', $report['status']);
 
         self::assertFalse(CustomerReportLogic::convert(['id' => $report['id'], 'version' => $report['version']]));
-        self::assertSame('报货单存在未定价明细，不能转销售', CustomerReportLogic::getError());
+        self::assertSame('必须先确认真实交付事件；车辆离店或手工改任务状态都不能触发出库', CustomerReportLogic::getError());
         self::assertSame(0, Db::name('sales_order')->where('tenant_id', self::TENANT_ID)->count());
         self::assertSame('1.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
     }
 
-    public function test_ready_priced_report_converts_to_one_canonical_sales_order_exactly_once(): void
+    public function test_ready_priced_report_cannot_bypass_real_delivery_to_create_a_sales_order(): void
     {
         $customerId = $this->createCustomer('标准销售客户');
         $goodsId = $this->createCustomerReportGoods('标准销售桂鱼', 'CR-CANONICAL');
@@ -435,48 +435,16 @@ final class CustomerReportWorkflowTest extends TestCase
         $report = CustomerReportLogic::submit($payload);
         self::assertNotFalse($report, CustomerReportLogic::getError());
 
-        $converted = CustomerReportLogic::convert(['id' => $report['id'], 'version' => $report['version']]);
-        self::assertNotFalse($converted, CustomerReportLogic::getError());
-        self::assertSame('completed', $converted['status']);
-        self::assertCount(1, $converted['sales_orders']);
-        $salesOrder = $converted['sales_orders'][0];
-        self::assertSame('customer_report', (string)$salesOrder['source_type']);
-        self::assertSame((int)$report['id'], (int)$salesOrder['source_id']);
-        self::assertSame($warehouseId, (int)$salesOrder['warehouse_id']);
-        self::assertSame('12.50', (string)$salesOrder['order_money']);
-        self::assertSame(1, Db::name('sales_order')->where('tenant_id', self::TENANT_ID)->count());
-        self::assertSame(1, Db::name('order_goods')->where('tenant_id', self::TENANT_ID)->where('order_type', 'sales')->count());
-        self::assertSame('1.0000', (string)Db::name('order_goods')->where('order_id', (int)$salesOrder['id'])->value('base_quantity'));
-        self::assertSame(1, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->where('order_type', 'sales')->count());
-        self::assertSame(1, Db::name('receivable_flow')->where('tenant_id', self::TENANT_ID)->where('order_type', 'sales')->count());
-        self::assertSame(1, Db::name('audit_log')->where('tenant_id', self::TENANT_ID)
-            ->where('module', 'sales_order')->where('action', 'create')
-            ->where('target_id', (int)$salesOrder['id'])->count());
-        self::assertSame('0.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
-        self::assertSame('1.0000', WarehouseGoodsBalanceService::onHand($warehouseId, $goodsId));
-
-        $again = CustomerReportLogic::convert(['id' => $report['id'], 'version' => $report['version']]);
-        self::assertNotFalse($again, CustomerReportLogic::getError());
-        self::assertCount(1, $again['sales_orders']);
-        self::assertSame((int)$salesOrder['id'], (int)$again['sales_orders'][0]['id']);
-        self::assertSame(1, Db::name('sales_order')->where('tenant_id', self::TENANT_ID)->count());
-        self::assertSame(1, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->where('order_type', 'sales')->count());
-        self::assertSame(1, Db::name('receivable_flow')->where('tenant_id', self::TENANT_ID)->where('order_type', 'sales')->count());
-        self::assertSame(1, Db::name('audit_log')->where('tenant_id', self::TENANT_ID)
-            ->where('module', 'sales_order')->where('action', 'create')
-            ->where('target_id', (int)$salesOrder['id'])->count());
-
-        self::assertFalse(SalesOrderLogic::edit(['id' => (int)$salesOrder['id']]));
-        self::assertSame('客户报货生成的销售单不可直接编辑，请通过销售退货处理', SalesOrderLogic::getError());
-        self::assertFalse(SalesOrderLogic::remove(['id' => (int)$salesOrder['id']]));
-        self::assertSame('客户报货生成的销售单不可直接删除，请通过销售退货处理', SalesOrderLogic::getError());
-        self::assertSame(1, Db::name('sales_order')->where('tenant_id', self::TENANT_ID)->count());
-        self::assertSame('completed', (string)Db::name('customer_report')->where('id', (int)$report['id'])->value('status'));
-        self::assertSame('0.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
-        self::assertSame('1.0000', WarehouseGoodsBalanceService::onHand($warehouseId, $goodsId));
+        self::assertFalse(CustomerReportLogic::convert(['id' => $report['id'], 'version' => $report['version']]));
+        self::assertSame('必须先确认真实交付事件；车辆离店或手工改任务状态都不能触发出库', CustomerReportLogic::getError());
+        self::assertSame(0, Db::name('sales_order')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame(0, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->where('order_type', 'sales')->count());
+        self::assertSame(0, Db::name('receivable_flow')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame('1.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
+        self::assertSame('2.0000', WarehouseGoodsBalanceService::onHand($warehouseId, $goodsId));
     }
 
-    public function test_priced_report_spanning_two_warehouses_creates_two_sales_orders(): void
+    public function test_priced_report_spanning_two_warehouses_still_requires_one_real_delivery_event(): void
     {
         $customerId = $this->createCustomer('多仓销售客户');
         $goodsA = $this->createCustomerReportGoods('多仓商品甲', 'CR-MULTI-A');
@@ -509,19 +477,12 @@ final class CustomerReportWorkflowTest extends TestCase
         ]);
         self::assertNotFalse($report, CustomerReportLogic::getError());
 
-        $converted = CustomerReportLogic::convert(['id' => $report['id'], 'version' => $report['version']]);
-        self::assertNotFalse($converted, CustomerReportLogic::getError());
-        self::assertCount(2, $converted['sales_orders']);
-        self::assertSame([$warehouseA, $warehouseB], array_map(
-            static fn(array $order): int => (int)$order['warehouse_id'],
-            $converted['sales_orders']
-        ));
-        self::assertSame(2, Db::name('sales_order')->where('tenant_id', self::TENANT_ID)->count());
-        self::assertSame(2, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->where('order_type', 'sales')->count());
-        self::assertSame(2, Db::name('receivable_flow')->where('tenant_id', self::TENANT_ID)->where('order_type', 'sales')->count());
-        self::assertSame(2, Db::name('audit_log')->where('tenant_id', self::TENANT_ID)
-            ->where('module', 'sales_order')->where('action', 'create')->count());
-        self::assertSame('30.00', (string)Db::name('customer')->where('id', $customerId)->value('order_receivable'));
+        self::assertFalse(CustomerReportLogic::convert(['id' => $report['id'], 'version' => $report['version']]));
+        self::assertSame('必须先确认真实交付事件；车辆离店或手工改任务状态都不能触发出库', CustomerReportLogic::getError());
+        self::assertSame(0, Db::name('sales_order')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame(0, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->where('order_type', 'sales')->count());
+        self::assertSame('1.0000', WarehouseGoodsBalanceService::reserved($warehouseA, $goodsA));
+        self::assertSame('1.0000', WarehouseGoodsBalanceService::reserved($warehouseB, $goodsB));
     }
 
     public function test_pending_list_count_is_filtered_on_the_server_before_pagination(): void
@@ -591,7 +552,7 @@ final class CustomerReportWorkflowTest extends TestCase
             'id' => $report['id'],
             'version' => $report['version'],
         ]));
-        self::assertSame('计价单位暂不支持转换为标准销售单', CustomerReportLogic::getError());
+        self::assertSame('必须先确认真实交付事件；车辆离店或手工改任务状态都不能触发出库', CustomerReportLogic::getError());
         self::assertSame(0, Db::name('sales_order')->where('tenant_id', self::TENANT_ID)->count());
         self::assertSame(0, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->where('order_type', 'sales')->count());
         self::assertSame(0, Db::name('receivable_flow')->where('tenant_id', self::TENANT_ID)->where('order_type', 'sales')->count());

@@ -27,10 +27,14 @@ class SalesOrderLists extends BaseDataLists
             'source_type',
             'source_id',
             'source_version',
+            'settlement_status',
+            'cost_status',
+            'profit_status',
             'admin_id',
             'create_time',
             'update_time',
-        ])->where('tenant_id', $tenantId > 0 ? $tenantId : -1);
+        ])->where('tenant_id', $tenantId > 0 ? $tenantId : -1)
+            ->where('settlement_status', 'formal');
 
         $keyword = trim((string)($this->params['keyword'] ?? $this->params['order_sn'] ?? $this->params['customer_name'] ?? ''));
         if ($keyword !== '') {

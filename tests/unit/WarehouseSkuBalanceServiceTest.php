@@ -125,4 +125,18 @@ final class WarehouseSkuBalanceServiceTest extends TestCase
         self::assertSame([StockFlow::FLOW_OUT, StockFlow::FLOW_IN], array_map('intval', array_column($flows, 'flow_type')));
         self::assertSame(['WT-9001', 'WT-9001'], array_column($flows, 'order_sn'));
     }
+
+    public function test_regular_outbound_cannot_deepen_negative_available_stock_reserved_by_other_orders(): void
+    {
+        $goodsId = $this->createCustomerReportGoods('Reserved SKU Goods', 'RESERVED-SKU', 'kg');
+        $skuId = $this->customerReportSkuId($goodsId);
+        $warehouseId = $this->createCustomerReportWarehouse('Reserved Warehouse');
+
+        self::assertNotFalse(WarehouseSkuBalanceService::inbound($warehouseId, $skuId, '10.0000'));
+        self::assertNotFalse(WarehouseSkuBalanceService::reserve($warehouseId, $skuId, '10.0000'));
+        self::assertFalse(WarehouseSkuBalanceService::outbound($warehouseId, $skuId, '1.0000'));
+        self::assertSame('10.0000', WarehouseSkuBalanceService::onHand($warehouseId, $skuId));
+        self::assertSame('10.0000', WarehouseSkuBalanceService::reserved($warehouseId, $skuId));
+        self::assertSame('0.0000', WarehouseSkuBalanceService::available($warehouseId, $skuId));
+    }
 }

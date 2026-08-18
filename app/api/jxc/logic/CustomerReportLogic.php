@@ -197,6 +197,12 @@ class CustomerReportLogic extends BaseLogic
                 if (!$report) { self::setError('报货单不存在、版本冲突或不可转销售'); return false; }
                 $existing = self::salesOrdersByReport($reportId, true);
                 if ($existing !== []) {
+                    foreach ($existing as $salesOrder) {
+                        if ((string)($salesOrder['settlement_status'] ?? 'formal') !== 'formal') {
+                            self::setError('交付已经完成出库，请在后续销售结算中正式确认，不能再次扣减库存');
+                            return false;
+                        }
+                    }
                     return self::detailById($reportId);
                 }
                 if (
@@ -220,6 +226,10 @@ class CustomerReportLogic extends BaseLogic
                 if ($hasTaskGroup) {
                     if (FulfillmentTaskLogic::hasUnaccountedPaperForReport($reportId)) {
                         self::setError('仍有未回收或未完成作废控制的纸质工票，不能结算');
+                        return false;
+                    }
+                    if (!DeliveryInventoryLogic::hasCompletedDelivery($reportId)) {
+                        self::setError('必须先确认真实交付事件；车辆离店或手工改任务状态都不能触发出库');
                         return false;
                     }
                     $bookkeeping = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())

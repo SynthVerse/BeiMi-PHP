@@ -23,6 +23,14 @@ class WarehouseSkuBalanceService
         return $quantity === false ? false : self::change($warehouseId, $skuId, $quantity, '0.0000');
     }
 
+    public static function inboundWithinTransaction(int $warehouseId, int $skuId, string $quantity)
+    {
+        $quantity = self::normalizeQuantity($quantity);
+        return $quantity === false
+            ? false
+            : self::changeWithinTransaction($warehouseId, $skuId, $quantity, '0.0000');
+    }
+
     public static function outbound(int $warehouseId, int $skuId, string $quantity)
     {
         $quantity = self::normalizeQuantity($quantity);
@@ -111,6 +119,51 @@ class WarehouseSkuBalanceService
             : self::changeWithinTransaction($warehouseId, $skuId, '-' . $quantity, '-' . $quantity);
     }
 
+    /**
+     * 交付出库专用原语。只有上层已经建立完整销售单与报货行归因时才能调用。
+     * 普通出库、调拨和预留继续禁止制造新的负数。
+     */
+    public static function deliverAttributedWithinTransaction(
+        int $warehouseId,
+        int $skuId,
+        string $actualQuantity,
+        string $reservationQuantity
+    ): array|false {
+        $actualQuantity = self::normalizeQuantity($actualQuantity);
+        $reservationQuantity = self::normalizeNonNegativeQuantity($reservationQuantity);
+        if ($actualQuantity === false || $reservationQuantity === false) {
+            return false;
+        }
+        $movement = self::changeWithinTransaction(
+            $warehouseId,
+            $skuId,
+            '-' . $actualQuantity,
+            bccomp($reservationQuantity, '0.0000', self::SCALE) > 0 ? '-' . $reservationQuantity : '0.0000',
+            true
+        );
+        if ($movement === false) {
+            return false;
+        }
+        $beforeNegative = bccomp((string)$movement['before_available_qty'], '0.0000', self::SCALE) < 0
+            ? ltrim((string)$movement['before_available_qty'], '-') : '0.0000';
+        $afterNegative = bccomp((string)$movement['after_available_qty'], '0.0000', self::SCALE) < 0
+            ? ltrim((string)$movement['after_available_qty'], '-') : '0.0000';
+        $consumed = bccomp($actualQuantity, $reservationQuantity, self::SCALE) < 0
+            ? $actualQuantity : $reservationQuantity;
+        $released = bccomp($reservationQuantity, $actualQuantity, self::SCALE) > 0
+            ? bcsub($reservationQuantity, $actualQuantity, self::SCALE) : '0.0000';
+        $negativeDelta = bcsub($afterNegative, $beforeNegative, self::SCALE);
+        $healedDelta = bcsub($beforeNegative, $afterNegative, self::SCALE);
+        return $movement + [
+            'negative_qty' => bccomp($negativeDelta, '0.0000', self::SCALE) > 0
+                ? $negativeDelta : '0.0000',
+            'healed_negative_qty' => bccomp($healedDelta, '0.0000', self::SCALE) > 0
+                ? $healedDelta : '0.0000',
+            'reservation_consumed_qty' => $consumed,
+            'reservation_released_qty' => $released,
+        ];
+    }
+
     public static function transfer(int $fromWarehouseId, int $toWarehouseId, int $skuId, string $quantity)
     {
         $quantity = self::normalizeQuantity($quantity);
@@ -152,6 +205,23 @@ class WarehouseSkuBalanceService
         return $balance ? self::decimal((string)$balance->reserved_qty) : '0.0000';
     }
 
+    /**
+     * 让外层业务事务按权威顺序先取得 SKU、商品、仓库和余额锁，再锁业务来源。
+     */
+    public static function lockBalanceWithinTransaction(int $warehouseId, int $skuId): bool
+    {
+        $context = self::lockedContext($warehouseId, $skuId);
+        if ($context === false) {
+            return false;
+        }
+        WarehouseSkuBalance::where('tenant_id', self::tenantId())
+            ->where('warehouse_id', $warehouseId)
+            ->where('sku_id', $skuId)
+            ->lock(true)
+            ->find();
+        return true;
+    }
+
     private static function change(int $warehouseId, int $skuId, string $onHandDelta, string $reservedDelta)
     {
         if ($warehouseId <= 0 || $skuId <= 0) {
@@ -173,7 +243,8 @@ class WarehouseSkuBalanceService
         int $warehouseId,
         int $skuId,
         string $onHandDelta,
-        string $reservedDelta
+        string $reservedDelta,
+        bool $allowAttributedNegative = false
     ) {
         if (!self::isSignedDecimal($onHandDelta) || !self::isSignedDecimal($reservedDelta)) {
             return false;
@@ -202,15 +273,19 @@ class WarehouseSkuBalanceService
         $afterOnHand = bcadd($beforeOnHand, $onHandDelta, self::SCALE);
         $afterReserved = bcadd($beforeReserved, $reservedDelta, self::SCALE);
         $afterAvailable = bcsub($afterOnHand, $afterReserved, self::SCALE);
-        if (bccomp($afterOnHand, '0.0000', self::SCALE) < 0
-            || bccomp($afterReserved, '0.0000', self::SCALE) < 0
-            || bccomp($afterAvailable, '0.0000', self::SCALE) < 0
-        ) {
+        if (bccomp($afterReserved, '0.0000', self::SCALE) < 0) {
             return false;
+        }
+        if (!$allowAttributedNegative) {
+            $deepensNegativeAvailability = bccomp($afterAvailable, '0.0000', self::SCALE) < 0
+                && bccomp($afterAvailable, $beforeAvailable, self::SCALE) < 0;
+            if ($deepensNegativeAvailability) {
+                return false;
+            }
         }
 
         if (!$balance) {
-            WarehouseSkuBalance::create([
+            $inserted = Db::name('warehouse_sku_balance')->insert([
                 'tenant_id' => $tenantId,
                 'warehouse_id' => $warehouseId,
                 'goods_id' => $goodsId,
@@ -224,6 +299,9 @@ class WarehouseSkuBalanceService
                 'create_time' => time(),
                 'update_time' => time(),
             ]);
+            if ($inserted !== 1) {
+                throw new \RuntimeException('Unable to create warehouse SKU balance.');
+            }
         } else {
             $updated = WarehouseSkuBalance::where('id', (int)$balance->id)->update([
                 'on_hand_qty' => $afterOnHand,
@@ -324,6 +402,14 @@ class WarehouseSkuBalanceService
         }
         $quantity = self::decimal($quantity);
         return bccomp($quantity, '0.0000', self::SCALE) > 0 ? $quantity : false;
+    }
+
+    private static function normalizeNonNegativeQuantity(string $quantity): string|false
+    {
+        if (!preg_match('/^\d+(?:\.\d{1,4})?$/', $quantity)) {
+            return false;
+        }
+        return self::decimal($quantity);
     }
 
     private static function isSignedDecimal(string $value): bool

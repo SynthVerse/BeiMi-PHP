@@ -46,6 +46,125 @@ class SalesOrderLogic extends BaseLogic
         return self::publishInternal($params, false, true);
     }
 
+    /**
+     * 为交付出库建立现有 sales_order 体系内的待结算身份；这里不扣库存、不记应收。
+     * 后续销售结算只正式化该身份，不能新建平行订单或再次出库。
+     *
+     * @param array<string,mixed> $report
+     * @return array{id:int,order_sn:string,settlement_status:string}|false
+     */
+    public static function ensurePendingDeliveryOrderWithinTransaction(array $report, int $warehouseId): array|false
+    {
+        $tenantId = (int)(request()->tenantId ?? 0);
+        $reportId = (int)($report['id'] ?? 0);
+        if ($tenantId <= 0 || $reportId <= 0 || $warehouseId <= 0) {
+            self::setError('交付销售单身份无效');
+            return false;
+        }
+        $existing = Db::name('sales_order')->where('tenant_id', $tenantId)
+            ->where('source_type', 'customer_report')->where('source_id', $reportId)
+            ->where('warehouse_id', $warehouseId)->lock(true)->find();
+        if ($existing) {
+            if ((string)($existing['settlement_status'] ?? 'formal') !== 'pending') {
+                self::setError('该报货单已存在正式销售单，不能重复交付出库');
+                return false;
+            }
+            return [
+                'id' => (int)$existing['id'],
+                'order_sn' => (string)$existing['order_sn'],
+                'settlement_status' => (string)$existing['settlement_status'],
+            ];
+        }
+        $now = time();
+        $orderSn = self::generateOrderSn();
+        $orderId = (int)Db::name('sales_order')->insertGetId([
+            'tenant_id' => $tenantId,
+            'order_sn' => $orderSn,
+            'customer_id' => (int)$report['main_customer_id'],
+            'customer_name' => (string)$report['main_customer_name'],
+            'warehouse_id' => $warehouseId,
+            'order_money' => '0.00',
+            'order_pay_money' => '0.00',
+            'order_arrears_money' => '0.00',
+            'datetimesingle' => $now,
+            'source_type' => 'customer_report',
+            'source_id' => $reportId,
+            'source_version' => (int)($report['version'] ?? 1),
+            'settlement_status' => 'pending',
+            'cost_status' => 'confirmed',
+            'profit_status' => 'pending_settlement',
+            'status' => SalesOrder::STATUS_SOLD,
+            'purpose_type' => 'customer_report',
+            'remarks' => '待销售结算；来源报货单：' . (string)($report['sn'] ?? ''),
+            'admin_id' => (int)(request()->adminId ?? request()->userId ?? 0),
+            'idempotent_key' => 'delivery-pending:' . $reportId . ':warehouse:' . $warehouseId,
+            'create_time' => $now,
+            'update_time' => $now,
+        ]);
+        if ($orderId <= 0) {
+            self::setError('待结算销售单身份创建失败');
+            return false;
+        }
+        AuditService::logWithinTransaction(
+            AuditService::MODULE_SALES_ORDER,
+            'delivery_pending_create',
+            $orderId,
+            $orderSn,
+            null,
+            ['settlement_status' => 'pending', 'source_type' => 'customer_report', 'source_id' => $reportId],
+            '实际交付先建立销售单归因身份，不产生应收'
+        );
+        return ['id' => $orderId, 'order_sn' => $orderSn, 'settlement_status' => 'pending'];
+    }
+
+    /** @param array<string,mixed> $item */
+    public static function recordDeliveredItemWithinTransaction(int $orderId, array $item, string $actualQuantity): bool
+    {
+        $tenantId = (int)(request()->tenantId ?? 0);
+        $existing = Db::name('order_goods')->where('tenant_id', $tenantId)->where('order_id', $orderId)
+            ->where('order_type', self::ORDER_TYPE)->where('source_line_type', 'customer_report_item')
+            ->where('source_line_id', (int)$item['id'])->lock(true)->find();
+        if ($existing) {
+            $next = bcadd((string)$existing['base_quantity'], $actualQuantity, 4);
+            return Db::name('order_goods')->where('tenant_id', $tenantId)->where('id', (int)$existing['id'])->update([
+                'number' => $next,
+                'base_quantity' => $next,
+                'update_time' => time(),
+            ]) !== false;
+        }
+        $now = time();
+        return Db::name('order_goods')->insert([
+            'tenant_id' => $tenantId,
+            'order_id' => $orderId,
+            'order_type' => self::ORDER_TYPE,
+            'goods_id' => (int)$item['goods_id'],
+            'sku_id' => (int)$item['sku_id'],
+            'sku_name' => (string)($item['sku_name'] ?? ''),
+            'name' => (string)$item['goods_name'],
+            'units' => (string)$item['base_unit_name'],
+            'number' => $actualQuantity,
+            'base_quantity' => $actualQuantity,
+            'price' => '0.00',
+            'amount' => '0.00',
+            'pricing_unit_id' => (int)$item['base_unit_id'],
+            'source_line_type' => 'customer_report_item',
+            'source_line_id' => (int)$item['id'],
+            'remark' => (string)($item['line_remark'] ?? ''),
+            'sort' => (int)($item['sort'] ?? 0),
+            'create_time' => $now,
+            'update_time' => $now,
+        ]) === 1;
+    }
+
+    public static function markCostPendingWithinTransaction(int $orderId): void
+    {
+        Db::name('sales_order')->where('tenant_id', (int)(request()->tenantId ?? 0))->where('id', $orderId)->update([
+            'cost_status' => 'pending',
+            'profit_status' => 'cost_pending',
+            'update_time' => time(),
+        ]);
+    }
+
     private static function publishInternal(
         array $params,
         bool $ownsTransaction,
@@ -480,6 +599,9 @@ class SalesOrderLogic extends BaseLogic
             'source_type' => (string)($item['source_type'] ?? ''),
             'source_id' => (int)($item['source_id'] ?? 0),
             'source_version' => (int)($item['source_version'] ?? 0),
+            'settlement_status' => (string)($item['settlement_status'] ?? 'formal'),
+            'cost_status' => (string)($item['cost_status'] ?? 'confirmed'),
+            'profit_status' => (string)($item['profit_status'] ?? 'accurate'),
             'admin_id' => (int)($item['admin_id'] ?? 0),
             'create_time' => $item['create_time'] ?? '',
             'update_time' => $item['update_time'] ?? '',

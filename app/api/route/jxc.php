@@ -185,6 +185,12 @@ Route::group('', function () {
     Route::post('jxc/tasks/mark_undelivered', 'jxc.FulfillmentTask/markUndelivered');
     Route::post('jxc/tasks/bill', 'jxc.FulfillmentTask/bill');
 
+    // === 真实交付出库与真负库存待办 ===
+    Route::post('jxc/delivery/self_confirm', 'jxc.DeliveryInventory/confirmSelf');
+    Route::get('jxc/delivery/detail', 'jxc.DeliveryInventory/detail');
+    Route::get('jxc/inventory/negative_todos', 'jxc.DeliveryInventory/negativeTodos');
+    Route::post('jxc/inventory/negative_resolve', 'jxc.DeliveryInventory/resolveNegative');
+
     Route::get('jxc/workforce/permissions', 'jxc.Workforce/permissionCatalog');
     Route::get('jxc/workforce/me/permissions', 'jxc.Workforce/currentPermissions');
     Route::get('jxc/workforce/employees', 'jxc.Workforce/employees');

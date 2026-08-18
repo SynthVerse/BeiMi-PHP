@@ -41,7 +41,7 @@
 
 ## PIT-0002：测试复用旧表时未实际执行新迁移
 
-- 状态：已防护
+- 状态：复发
 - 首次发生：2026-07-29
 - 最近发生：2026-08-18
 - 复发次数：1
@@ -119,9 +119,9 @@
 
 - 状态：已防护
 - 首次发生：2026-07-29
-- 最近发生：2026-08-18
-- 复发次数：2
-- 适用范围：`CustomerReportLogic`、`FulfillmentChangeLogic` 等已开启业务事务后调用仓库余额原语或写入幂等事实的路径
+- 最近发生：2026-08-19
+- 复发次数：3
+- 适用范围：`CustomerReportLogic`、`FulfillmentChangeLogic`、`DeliveryInventoryLogic`、`NegativeInventoryLogic` 等已开启业务事务后调用仓库余额原语或写入幂等事实的路径
 - 相关问题：PIT-0022
 
 ### 触发场景
@@ -130,7 +130,7 @@
 
 ### 根因
 
-ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务入口，以及 `CustomerReport` 模型的 `create()` 隐式事务，都可能在外层客户报货事务中创建内层保存点；并发路径会丢失内层保存点并抛出 `SAVEPOINT trans2 does not exist`。修正保存点问题后，两个请求又会在“不存在的幂等键”或“不存在的客户商品偏好键”的悲观查询上互相持有间隙锁，插入不同键或同一偏好键时触发 MySQL `1213` 死锁。
+ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务入口，以及 `CustomerReport` 模型的 `create()` 隐式事务，都可能在外层客户报货事务中创建内层保存点；并发路径会丢失内层保存点并抛出 `SAVEPOINT trans2 does not exist`。修正保存点问题后，两个请求又会在“不存在的幂等键”或“不存在的客户商品偏好键”的悲观查询上互相持有间隙锁，插入不同键或同一偏好键时触发 MySQL `1213` 死锁。即使唯一动作最终提交，竞争请求仍可能从事务旧快照返回动作前状态；因此“唯一键没有重复”不等于调用者已经得到可重放的权威结果。
 
 ### 错误做法
 
@@ -138,7 +138,7 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 
 ### 正确做法
 
-外层业务事务应调用库存服务的 `*WithinTransaction` 同事务入口，并通过 `Db::name(...)->insert()` 写入报货主从表；只有没有外层事务的调用者才使用服务的独立事务入口。多商品操作必须以库存原语的实际取锁顺序 `(goods_id, warehouse_id)` 排序。幂等键先以普通查询判断，依靠唯一键兜底；客户商品偏好以唯一键上的原子 upsert 写入，不先锁不存在记录；所有客户报货写状态转换仅对 MySQL `1213`/`1205` 做有界重试，最终再按请求指纹回放已成功结果。
+外层业务事务应调用库存服务的 `*WithinTransaction` 同事务入口，并通过 `Db::name(...)->insert()` 写入报货主从表；只有没有外层事务的调用者才使用服务的独立事务入口。多商品操作必须以库存原语的实际取锁顺序排序。幂等键先以普通查询判断，依靠唯一键兜底；客户商品偏好以唯一键上的原子 upsert 写入，不先锁不存在记录；写状态转换先锁定稳定来源实体，再复查幂等事实，对 MySQL `1213`/`1205` 做有界重试，并在事务结束后按请求指纹读取已提交的追加动作。只有追加动作已经可见时才能向调用者返回成功。
 
 ### 防线
 
@@ -146,6 +146,7 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 - 自动化防线扩展：`tests/unit/CustomerReportWorkflowTest.php` 的多仓后置计价失败用例断言销售单、库存流水、应收及报货状态整体回滚；`tests/unit/CustomerReportRouteContractTest.php` 禁止外层事务路径重新引入 `Model::create()`，并断言商品预锁早于任何标准销售单发布。
 - 自动化防线：`tests/unit/CustomerReportWorkflowTest.php` 的 `test_two_concurrent_submissions_cannot_over_reserve_one_warehouse_balance()` 使用两个 PHP 进程同时提交，断言一单 `submitted_ready`、一单 `submitted_shortage`，且总预留不超过余额。
 - 2026-08-18 扩展：`FulfillmentChangeLogic` 对不存在的履约变更幂等键只做普通查询，依靠 `(tenant_id,idempotency_key)` 唯一键解决竞态；减量和未交货事务统一只对 MySQL `1213`/`1205` 做最多三次有界重试。`CustomerReportRouteContractTest::test_fulfillment_change_idempotency_never_locks_an_absent_key_and_retries_deadlocks()` 固定这一结构契约，并要求作废控制按 `item_change_id` 精确关联幂等事实；`FulfillmentWorkflowTest::test_concurrent_reduction_with_one_idempotency_key_applies_inventory_once()` 用两个 PHP 进程证明同一减量请求只生成一条变更事实且库存只释放一次。
+- 2026-08-19 扩展：交付确认和负库存处理都先普通查询幂等键，交付明细按 `(sku_id, goods_id, warehouse_id, id)` 排序；负库存处理按 SKU、商品、仓库、余额、来源归因的统一顺序取锁，锁后复查幂等事实。余额缺行时只用 Query Builder 插入，事务拥有者只对 MySQL `1213`/`1205` 最多重试三次；事务结束后由 `replayAfterConcurrentCommit()` 按请求指纹读取已提交事实。`FulfillmentWorkflowTest::test_concurrent_same_delivery_key_returns_one_event_and_one_inventory_side_effect()`、`test_two_reports_can_concurrently_create_one_missing_sku_balance_in_canonical_order()`、`test_concurrent_same_negative_resolution_key_appends_one_action()` 与 `test_concurrent_regular_inbound_and_negative_resolution_share_one_lock_order()` 使用真实 PHP 进程固定一次交付只出库一次、无余额并发建账、一次负库存处理只追加一个动作以及普通入库/人工处理共享锁序；`CustomerReportRouteContractTest::test_delivery_and_negative_actions_use_canonical_locks_then_replay_the_committed_idempotent_fact()` 固定结构边界。
 - 架构防线：`WarehouseGoodsBalanceService` 明确提供 `reserveWithinTransaction()`、`reserveUpToWithinTransaction()`、`releaseWithinTransaction()` 与 `consumeReservedWithinTransaction()`；`CustomerReportLogic` 在外层事务内只调用这些入口，并以 Query Builder 写入主表、明细和预留记录。`CustomerReportPreferenceService::remember()` 用唯一键原子 upsert 保存建议数据，不加间隙锁。`transactionWithRetry()` 统一包裹提交外的编辑、补预留、取消与转换销售事务；明细按 `(goods_id, warehouse_id)` 排序后才触发库存原语。
 - 决策与知识：本记录及 `docs/adr/0001-客户报货库存边界.md`。
 
@@ -156,6 +157,7 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 | 2026-07-29 | Project #1 / 客户报货新链路 | 第 7 张并发提交验收 | 既有实现未区分外层事务与 ORM 隐式事务，也对不存在的幂等键和客户商品偏好键加悲观锁。 |
 | 2026-07-30 | 客户报货旧链路删除与标准销售单桥接 | 外层报货转换调用标准销售发布时重新使用 ORM `create()`，并按仓循环触发库存锁 | 原防线只覆盖报货主从表和直接库存原语，没有覆盖新接入的销售、库存流水、财务副作用，也没有对跨仓转换建立“先预锁全部商品”的结构契约。 |
 | 2026-08-18 | BeiMi-PHP #7 履约工票闭环 | 履约减量与未交货事务再次对尚不存在的幂等键执行 `FOR UPDATE`，并缺少 `1213`/`1205` 有界重试 | 原防线只约束 `CustomerReportLogic` 的提交、编辑、补预留、取消和转销售路径，未把新增的追加式履约变更入口纳入静态结构契约。 |
+| 2026-08-19 | BeiMi-PHP #8 自配送交付与真负库存 | 同交付键/同处理键竞争会读到旧快照；无余额交付重新使用 ORM `create()`；人工核销与普通入库形成来源→余额/余额→来源反向锁序 | 原防线已覆盖报货与履约减量，但没有把新增交付、负库存处理、余额缺行和普通入库交叉流程纳入统一结构与双进程防线，也没有要求成功返回必须来自事务后可见的追加事实。 |
 
 ## PIT-0005：迁移静态探针替换前缀但真实执行器保留占位符
 
