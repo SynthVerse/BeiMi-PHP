@@ -119,6 +119,7 @@ CREATE TABLE IF NOT EXISTS `la_warehouse` (
 CREATE TABLE IF NOT EXISTS `la_customer` (
   `id` int unsigned NOT NULL AUTO_INCREMENT, `tenant_id` int unsigned NOT NULL DEFAULT 0,
   `customer_name` varchar(100) NOT NULL DEFAULT '', `parent_id` int unsigned NOT NULL DEFAULT 0,
+  `phone` varchar(20) NOT NULL DEFAULT '', `address` varchar(255) NOT NULL DEFAULT '',
   `order_receivable` decimal(18,2) NOT NULL DEFAULT 0.00, `order_money` decimal(18,2) NOT NULL DEFAULT 0.00,
   `is_disabled` tinyint unsigned NOT NULL DEFAULT 0, `is_archived` tinyint unsigned NOT NULL DEFAULT 0,
   `create_time` int unsigned NOT NULL DEFAULT 0,
@@ -171,15 +172,6 @@ CREATE TABLE IF NOT EXISTS `la_stock_flow` (
   `remark` varchar(255) NOT NULL DEFAULT '', `create_time` int unsigned NOT NULL DEFAULT 0,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-CREATE TABLE IF NOT EXISTS `la_goods_supplier_price_history` (
-  `id` int unsigned NOT NULL AUTO_INCREMENT, `tenant_id` int unsigned NOT NULL DEFAULT 0,
-  `goods_supplier_id` int unsigned NOT NULL DEFAULT 0, `goods_id` int unsigned NOT NULL DEFAULT 0,
-  `sku_id` int unsigned NOT NULL DEFAULT 0, `supplier_id` int unsigned NOT NULL DEFAULT 0,
-  `purchase_price` decimal(12,2) NOT NULL DEFAULT 0.00, `effective_date` date DEFAULT NULL,
-  `remark` varchar(500) NOT NULL DEFAULT '', `create_time` int unsigned NOT NULL DEFAULT 0,
-  PRIMARY KEY (`id`), KEY `idx_customer_report_price_relation` (`tenant_id`,`goods_supplier_id`),
-  KEY `idx_customer_report_price_sku` (`tenant_id`,`sku_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE TABLE IF NOT EXISTS `la_receivable_flow` (
   `id` int unsigned NOT NULL AUTO_INCREMENT, `tenant_id` int unsigned NOT NULL DEFAULT 0,
   `customer_id` int unsigned NOT NULL DEFAULT 0, `order_id` int unsigned NOT NULL DEFAULT 0,
@@ -190,10 +182,20 @@ CREATE TABLE IF NOT EXISTS `la_receivable_flow` (
   `create_time` int unsigned NOT NULL DEFAULT 0, PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 SQL;
+        $root = dirname(__DIR__, 2);
+        Db::execute('DROP TABLE IF EXISTS `la_goods_supplier`');
+        Db::execute('DROP TABLE IF EXISTS `la_goods_supplier_price_history`');
+        Db::execute('DROP TABLE IF EXISTS `la_goods_unit_conversion_rule`');
         $this->runStatements($sql);
+        $this->runStatements($this->authoritativeCreateTable(
+            (string)file_get_contents($root . '/database/sql/jxc_phase1_schema.sql'),
+            'goods_supplier'
+        ));
         foreach ([
             'ALTER TABLE `la_customer` ADD COLUMN `order_receivable` decimal(18,2) NOT NULL DEFAULT 0.00',
             'ALTER TABLE `la_customer` ADD COLUMN `order_money` decimal(18,2) NOT NULL DEFAULT 0.00',
+            "ALTER TABLE `la_customer` ADD COLUMN `phone` varchar(20) NOT NULL DEFAULT ''",
+            "ALTER TABLE `la_customer` ADD COLUMN `address` varchar(255) NOT NULL DEFAULT ''",
             'ALTER TABLE `la_goods` ADD COLUMN `is_archived` tinyint unsigned NOT NULL DEFAULT 0',
             'ALTER TABLE `la_goods` ADD COLUMN `primary_supplier_id` int unsigned NOT NULL DEFAULT 0',
             "ALTER TABLE `la_goods` ADD COLUMN `remark` varchar(500) NOT NULL DEFAULT ''",
@@ -230,7 +232,6 @@ SQL;
             . time()
             . ') ON DUPLICATE KEY UPDATE `disable`=0'
         );
-        $root = dirname(__DIR__, 2);
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260419_000002_create_audit_log.sql')));
         foreach ([
             '{{prefix}}warehouse_sku_balance',
@@ -254,11 +255,14 @@ SQL;
             Db::execute('ALTER TABLE `la_goods` DROP COLUMN `dimension_mode`');
         } catch (\Throwable) {
         }
-        $goodsSpecStatements = array_values(array_filter(array_map('trim', explode(
-            ';',
-            $this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260603_000002_aquatic_goods_v1.sql'))
-        ))));
-        $this->runStatements(implode(";\n", array_slice($goodsSpecStatements, 0, 5)) . ';');
+        $aquaticMigration = $this->prepareMigration(
+            (string)file_get_contents($root . '/database/migrations/20260603_000002_aquatic_goods_v1.sql')
+        );
+        $orderGoodsMigrationOffset = strpos($aquaticMigration, 'ALTER TABLE `la_order_goods`');
+        if ($orderGoodsMigrationOffset === false) {
+            throw new \RuntimeException('aquatic_goods_order_goods_boundary_missing');
+        }
+        $this->runStatements(substr($aquaticMigration, 0, $orderGoodsMigrationOffset));
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260614_000001_quality_spec_separation.sql')));
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260614_000002_spec_value_goods_id.sql')));
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260811_000001_create_goods_dimensions.sql')));
@@ -274,12 +278,13 @@ SQL;
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260811_000002_add_customer_report_sku_snapshot.sql')));
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260817_000003_add_customer_report_reservation_sku.sql')));
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260810_000001_create_fulfillment_workflow.sql')));
+        $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260818_000001_customer_report_batch_and_cancellation.sql')));
         self::$customerReportSchemaReady = true;
     }
 
     protected function cleanCustomerReportData(): void
     {
-        foreach (['fulfillment_print_log', 'fulfillment_task', 'fulfillment_task_group', 'employee_permission', 'employee_process', 'employee', 'work_process', 'audit_log', 'receivable_flow', 'stock_flow', 'order_goods', 'sales_order', 'customer_report_reservation', 'customer_report_item', 'customer_report', 'customer_goods_report_preference', 'warehouse_sku_balance', 'warehouse_goods_balance', 'goods_supplier_price_history', 'goods_supplier', 'goods_sku_spec_value', 'goods_dimension_setting', 'goods_spec_value', 'goods_sku', 'goods_spec', 'goods_spec_template', 'goods_alias', 'goods_units_binding', 'goods_unit', 'warehouse', 'goods', 'customer'] as $table) {
+        foreach (['fulfillment_print_log', 'fulfillment_task', 'fulfillment_task_group', 'employee_permission', 'employee_process', 'employee', 'work_process', 'audit_log', 'receivable_flow', 'stock_flow', 'order_goods', 'sales_order', 'customer_report_reservation', 'customer_report_item', 'customer_report', 'customer_report_batch', 'customer_goods_report_preference', 'warehouse_sku_balance', 'warehouse_goods_balance', 'goods_supplier_price_history', 'goods_supplier', 'goods_sku_spec_value', 'goods_dimension_setting', 'goods_spec_value', 'goods_sku', 'goods_spec', 'goods_spec_template', 'goods_alias', 'goods_units_binding', 'goods_unit', 'warehouse', 'goods', 'customer'] as $table) {
             try {
                 Db::name($table)->where('tenant_id', self::TENANT_ID)->delete();
             } catch (\Throwable) {
@@ -287,10 +292,11 @@ SQL;
         }
     }
 
-    protected function createCustomer(string $name, int $parentId = 0): int
+    protected function createCustomer(string $name, int $parentId = 0, string $phone = '', string $address = ''): int
     {
         return (int)Db::name('customer')->insertGetId([
             'tenant_id' => self::TENANT_ID, 'customer_name' => $name, 'parent_id' => $parentId,
+            'phone' => $phone, 'address' => $address,
             'is_disabled' => 0, 'create_time' => time(), 'update_time' => time(),
         ]);
     }
@@ -333,6 +339,18 @@ SQL;
         foreach (array_filter(array_map('trim', explode(';', $sql))) as $statement) {
             Db::execute($statement);
         }
+    }
+
+    private function authoritativeCreateTable(string $schemaSql, string $table): string
+    {
+        $prepared = $this->prepareMigration($schemaSql);
+        $marker = 'CREATE TABLE IF NOT EXISTS `la_' . $table . '`';
+        $start = strpos($prepared, $marker);
+        $end = $start === false ? false : strpos($prepared, ';', $start);
+        if ($start === false || $end === false) {
+            throw new \RuntimeException('authoritative_create_table_missing:' . $table);
+        }
+        return substr($prepared, $start, $end - $start + 1);
     }
 
     protected function createCustomerReportUnit(string $name, int $status = 1): int

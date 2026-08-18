@@ -106,6 +106,29 @@ final class CustomerReportWorkflowTest extends TestCase
         );
     }
 
+    public function test_identical_customer_display_names_include_stable_distinguishing_fields(): void
+    {
+        $firstMainId = $this->createCustomer('同名总店', 0, '13800000001', '海珠区一号');
+        $firstChildId = $this->createCustomer('采购部', $firstMainId, '13900000001', '一楼档口');
+        $secondMainId = $this->createCustomer('同名总店', 0, '13800000002', '番禺区二号');
+        $secondChildId = $this->createCustomer('采购部', $secondMainId, '13900000002', '二楼档口');
+        $this->createCustomerReportGoods('桂鱼', 'CR-SAME-DISPLAY-CUSTOMER');
+
+        $customer = CustomerReportCandidateLogic::recognize('采购部 桂鱼 2斤')['lines'][0]['customer'];
+
+        self::assertSame('ambiguous', $customer['status']);
+        self::assertSame([$firstChildId, $secondChildId], array_column($customer['candidates'], 'id'));
+        self::assertSame(['同名总店 / 采购部', '同名总店 / 采购部'], array_column($customer['candidates'], 'display_name'));
+        self::assertSame(
+            ['C' . str_pad((string)$firstChildId, 8, '0', STR_PAD_LEFT), 'C' . str_pad((string)$secondChildId, 8, '0', STR_PAD_LEFT)],
+            array_column($customer['candidates'], 'customer_no')
+        );
+        self::assertSame(['13900000001', '13900000002'], array_column($customer['candidates'], 'phone'));
+        self::assertSame(['一楼档口', '二楼档口'], array_column($customer['candidates'], 'address'));
+        self::assertSame('13800000001', $customer['candidates'][0]['main_customer']['phone']);
+        self::assertSame('海珠区一号', $customer['candidates'][0]['main_customer']['address']);
+    }
+
     public function test_recognition_uniquely_matches_canonical_name_and_alias_and_preserves_the_remainder(): void
     {
         $customerId = $this->createCustomer('客户甲');
@@ -370,7 +393,7 @@ final class CustomerReportWorkflowTest extends TestCase
         self::assertSame('submitted_ready', $retried['status']);
         self::assertSame('3.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
 
-        $cancelled = CustomerReportLogic::cancel(['id' => $retried['id'], 'version' => $retried['version']]);
+        $cancelled = CustomerReportLogic::cancel(['id' => $retried['id'], 'version' => $retried['version'], 'reason' => '客户取消整单']);
         self::assertNotFalse($cancelled, CustomerReportLogic::getError());
         self::assertSame('cancelled', $cancelled['status']);
         self::assertSame('0.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
@@ -649,6 +672,139 @@ final class CustomerReportWorkflowTest extends TestCase
         }
     }
 
+    public function test_submission_rejects_mixed_actual_receiving_customers_without_side_effects(): void
+    {
+        $mainCustomerId = $this->createCustomer('连锁酒楼');
+        $firstChildId = $this->createCustomer('城北店', $mainCustomerId);
+        $secondChildId = $this->createCustomer('城南店', $mainCustomerId);
+        $goodsId = $this->createCustomerReportGoods('多宝鱼', 'CR-SINGLE-RECEIVER');
+        $warehouseId = $this->createCustomerReportWarehouse('单一收货对象仓');
+        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, '2.0000'));
+
+        $payload = $this->submitPayload(
+            $mainCustomerId,
+            $goodsId,
+            $warehouseId,
+            'mixed-actual-receivers',
+            '1',
+            '1.00',
+            '1.00'
+        );
+        $payload['items'][0]['delivery_customer_id'] = $firstChildId;
+        $secondLine = $payload['items'][0];
+        $secondLine['delivery_customer_id'] = $secondChildId;
+        $payload['items'][] = $secondLine;
+
+        self::assertFalse(CustomerReportLogic::submit($payload));
+        self::assertSame('一张报货单只能对应一个实际收货客户', CustomerReportLogic::getError());
+        self::assertSame(0, Db::name('customer_report')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame(0, Db::name('customer_report_reservation')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame('0.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
+    }
+
+    public function test_submission_rolls_back_report_reservation_and_tasks_when_a_late_write_fails(): void
+    {
+        $customerId = $this->createCustomer('事务回滚客户');
+        $goodsId = $this->createCustomerReportGoods('事务回滚鲈鱼', 'CR-ROLLBACK');
+        $warehouseId = $this->createCustomerReportWarehouse('事务回滚仓');
+        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, '1.0000'));
+        $tableName = (string)config('database.connections.mysql.prefix') . 'customer_report_item';
+        $autoIncrement = Db::query(
+            'SELECT `AUTO_INCREMENT` FROM `information_schema`.`TABLES` '
+            . 'WHERE `TABLE_SCHEMA` = DATABASE() AND `TABLE_NAME` = :table_name',
+            ['table_name' => $tableName]
+        );
+        $nextItemId = (int)($autoIncrement[0]['AUTO_INCREMENT'] ?? 1);
+        $fakeReservationId = (int)Db::name('customer_report_reservation')->insertGetId([
+            'tenant_id' => self::TENANT_ID,
+            'report_id' => 0,
+            'report_item_id' => $nextItemId,
+            'warehouse_id' => $warehouseId,
+            'goods_id' => $goodsId,
+            'sku_id' => $this->customerReportSkuId($goodsId),
+            'reserved_base_qty' => '0.00',
+            'consumed_base_qty' => '0.00',
+            'released_base_qty' => '0.00',
+            'status' => 'fault_injection',
+            'create_time' => time(),
+            'update_time' => time(),
+        ]);
+
+        try {
+            $payload = $this->submitPayload(
+                $customerId,
+                $goodsId,
+                $warehouseId,
+                'late-write-rollback',
+                '1',
+                '1.00',
+                '1.00'
+            );
+            self::assertFalse(CustomerReportLogic::submit($payload));
+            self::assertSame(0, Db::name('customer_report')->where('tenant_id', self::TENANT_ID)->count());
+            self::assertSame(0, Db::name('customer_report_item')->where('tenant_id', self::TENANT_ID)->count());
+            self::assertSame(1, Db::name('customer_report_reservation')->where('id', $fakeReservationId)->count());
+            self::assertSame(0, Db::name('customer_report_reservation')->where('tenant_id', self::TENANT_ID)->where('report_id', '>', 0)->count());
+            self::assertSame(0, Db::name('fulfillment_task_group')->where('tenant_id', self::TENANT_ID)->count());
+            self::assertSame('0.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
+            self::assertSame('1.0000', WarehouseGoodsBalanceService::onHand($warehouseId, $goodsId));
+        } finally {
+            Db::name('customer_report_reservation')->where('id', $fakeReservationId)->delete();
+        }
+    }
+
+    public function test_cross_tenant_customer_and_report_ids_cannot_cross_the_submission_boundary(): void
+    {
+        $mainCustomerId = $this->createCustomer('租户甲主客户');
+        $goodsId = $this->createCustomerReportGoods('租户甲石斑鱼', 'CR-TENANT-BOUNDARY');
+        $warehouseId = $this->createCustomerReportWarehouse('租户甲报货仓');
+        $otherTenantCustomerId = (int)Db::name('customer')->insertGetId([
+            'tenant_id' => self::OTHER_TENANT_ID,
+            'customer_name' => '租户乙猜测客户',
+            'parent_id' => 0,
+            'is_disabled' => 0,
+            'create_time' => time(),
+            'update_time' => time(),
+        ]);
+
+        try {
+            $guessedCustomerPayload = $this->submitPayload(
+                $mainCustomerId,
+                $goodsId,
+                $warehouseId,
+                'cross-tenant-customer-id',
+                '1',
+                '1.00',
+                '1.00'
+            );
+            $guessedCustomerPayload['items'][0]['delivery_customer_id'] = $otherTenantCustomerId;
+            self::assertFalse(CustomerReportLogic::submit($guessedCustomerPayload));
+            self::assertSame('配送客户必须是该主客户或其一级子客户', CustomerReportLogic::getError());
+
+            $validPayload = $guessedCustomerPayload;
+            $validPayload['idempotency_key'] = 'tenant-a-valid-report';
+            $validPayload['items'][0]['delivery_customer_id'] = $mainCustomerId;
+            $report = CustomerReportLogic::submit($validPayload);
+            self::assertNotFalse($report, CustomerReportLogic::getError());
+
+            $this->prepareCustomerReportRequestContext(self::OTHER_TENANT_ID);
+            self::assertFalse(CustomerReportLogic::detail(['id' => (int)$report['id']]));
+            self::assertFalse(CustomerReportLogic::cancel([
+                'id' => (int)$report['id'],
+                'version' => (int)$report['version'],
+                'reason' => '跨租户猜测取消',
+            ]));
+
+            $this->prepareCustomerReportRequestContext();
+            $unchanged = CustomerReportLogic::detail(['id' => (int)$report['id']]);
+            self::assertNotFalse($unchanged, CustomerReportLogic::getError());
+            self::assertSame('submitted_shortage', $unchanged['status']);
+        } finally {
+            $this->prepareCustomerReportRequestContext();
+            Db::name('customer')->where('tenant_id', self::OTHER_TENANT_ID)->where('id', $otherTenantCustomerId)->delete();
+        }
+    }
+
     public function test_two_concurrent_submissions_cannot_over_reserve_one_warehouse_balance(): void
     {
         $customerId = $this->createCustomer('并发客户');
@@ -673,18 +829,35 @@ final class CustomerReportWorkflowTest extends TestCase
             }
             usleep(100_000);
             touch($startPath);
-            foreach ($processes as [$process, $pipes]) {
+            foreach ($processes as $index => [$process, $pipes]) {
                 self::assertIsResource($process);
-                stream_get_contents($pipes[1]); stream_get_contents($pipes[2]);
+                $stdout = stream_get_contents($pipes[1]);
+                $stderr = stream_get_contents($pipes[2]);
                 fclose($pipes[1]); fclose($pipes[2]);
-                self::assertSame(0, proc_close($process));
+                $processes[$index][3] = $stdout;
+                $processes[$index][4] = $stderr;
+                $exitCode = proc_close($process);
+                self::assertSame(
+                    0,
+                    $exitCode,
+                    '并发报货工作进程失败：stdout=' . $stdout . '; stderr=' . $stderr
+                );
             }
-            $statuses = array_map(static function (array $process): string {
-                $response = json_decode((string)file_get_contents($process[2]), true) ?: [];
+            $responses = array_map(
+                static function (array $process): array {
+                    $response = json_decode((string)file_get_contents($process[2]), true) ?: [];
+                    $response['_stdout'] = (string)($process[3] ?? '');
+                    $response['_stderr'] = (string)($process[4] ?? '');
+                    return $response;
+                },
+                $processes
+            );
+            $statuses = array_map(static function (array $response): string {
                 return (string)($response['result']['status'] ?? '');
-            }, $processes);
-            self::assertContains('submitted_ready', $statuses);
-            self::assertContains('submitted_shortage', $statuses, json_encode(array_map(static fn(array $process): array => json_decode((string)file_get_contents($process[2]), true) ?: [], $processes), JSON_UNESCAPED_UNICODE));
+            }, $responses);
+            $diagnostic = json_encode($responses, JSON_UNESCAPED_UNICODE);
+            self::assertContains('submitted_ready', $statuses, $diagnostic);
+            self::assertContains('submitted_shortage', $statuses, $diagnostic);
             self::assertSame('1.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
             self::assertSame('0.0000', WarehouseGoodsBalanceService::available($warehouseId, $goodsId));
             self::assertSame(2, CustomerReportLogic::lists([])['count']);

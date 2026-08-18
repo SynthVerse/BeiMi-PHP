@@ -43,25 +43,55 @@ class CustomerReportLogic extends BaseLogic
                     }
                     return self::detailById((int)$existing->id);
                 }
+                $deliveryDate = self::deliveryDate((string)($params['delivery_date'] ?? ''));
+                $isSupplement = (int)($params['is_supplement'] ?? 0) === 1;
+                $batchId = (int)($params['batch_id'] ?? 0);
+                $supplementForReportId = (int)($params['supplement_for_report_id'] ?? 0);
                 $items = CustomerReportLineService::normalizeItems((array)($params['items'] ?? []), (int)($params['main_customer_id'] ?? 0));
                 if ($items === false) {
                     self::setError(CustomerReportLineService::getError());
                     return false;
                 }
+                if (self::lockBatchForSubmit(
+                    $batchId,
+                    $deliveryDate,
+                    $isSupplement,
+                    $supplementForReportId,
+                    $items
+                ) === false) {
+                    return false;
+                }
                 $now = time();
                 $reportId = (int)Db::name('customer_report')->insertGetId([
-                    'tenant_id' => $tenantId, 'sn' => self::sn(),
+                    'tenant_id' => $tenantId, 'batch_id' => $batchId,
+                    'supplement_for_report_id' => $supplementForReportId, 'sn' => self::sn(),
                     'main_customer_id' => (int)$items[0]['main_customer_id'], 'main_customer_name' => (string)$items[0]['main_customer_name'],
                     'status' => 'submitted_ready', 'idempotency_key' => $key, 'request_fingerprint' => $fingerprint,
                     'version' => 1, 'submitted_time' => $now,
-                    'delivery_date' => self::deliveryDate((string)($params['delivery_date'] ?? '')),
-                    'is_supplement' => (int)($params['is_supplement'] ?? 0) === 1 ? 1 : 0,
+                    'delivery_date' => $deliveryDate,
+                    'is_supplement' => $isSupplement ? 1 : 0,
                     'remark' => trim((string)($params['remark'] ?? '')),
                     'create_time' => $now, 'update_time' => $now,
                 ]);
                 $summary = self::writeNewItems($reportId, $items, $now);
                 Db::name('customer_report')->where('id', $reportId)->where('tenant_id', $tenantId)->update($summary + ['update_time' => $now]);
                 FulfillmentTaskLogic::syncForReport($reportId);
+                if ($isSupplement) {
+                    AuditService::logWithinTransaction(
+                        AuditService::MODULE_CUSTOMER_REPORT,
+                        AuditService::ACTION_SUPPLEMENT,
+                        $reportId,
+                        (string)Db::name('customer_report')->where('tenant_id', $tenantId)->where('id', $reportId)->value('sn'),
+                        null,
+                        [
+                            'batch_id' => $batchId,
+                            'supplement_for_report_id' => $supplementForReportId,
+                            'delivery_date' => $deliveryDate,
+                            'is_supplement' => 1,
+                        ],
+                        '补报进入原报货批次'
+                    );
+                }
                 return self::detailById($reportId);
                 });
             } catch (\Throwable $caught) {
@@ -399,8 +429,6 @@ class CustomerReportLogic extends BaseLogic
                 $summary = self::summary($summaryRows);
                 $updated = CustomerReport::where('tenant_id', self::tenantId())->where('id', $reportId)->where('version', $version)->update($summary + [
                     'main_customer_id' => (int)$items[0]['main_customer_id'], 'main_customer_name' => (string)$items[0]['main_customer_name'],
-                    'delivery_date' => self::deliveryDate((string)($params['delivery_date'] ?? $report->delivery_date ?? '')),
-                    'is_supplement' => (int)($params['is_supplement'] ?? $report->is_supplement ?? 0) === 1 ? 1 : 0,
                     'remark' => trim((string)($params['remark'] ?? '')), 'version' => $version + 1, 'update_time' => $now,
                 ]);
                 if ($updated !== 1) { throw new \RuntimeException('version_conflict'); }
@@ -458,21 +486,67 @@ class CustomerReportLogic extends BaseLogic
             return false;
         }
         $reportId = (int)($params['id'] ?? 0); $version = (int)($params['version'] ?? 0);
+        $reason = trim((string)($params['reason'] ?? ''));
+        if ($reason === '' || mb_strlen($reason) > 255) {
+            self::setError('取消报货单必须填写原因');
+            return false;
+        }
         try {
-            return self::transactionWithRetry(static function () use ($reportId, $version) {
+            return self::transactionWithRetry(static function () use ($reportId, $version, $reason) {
                 $report = CustomerReport::where('tenant_id', self::tenantId())->where('id', $reportId)->lock(true)->find();
-                if (!$report || (int)$report->version !== $version || in_array((string)$report->status, ['completed','cancelled'], true)) {
+                if (!$report) {
                     self::setError('报货单不存在、版本冲突或不可取消'); return false;
+                }
+                if ((string)$report->status === 'cancelled') {
+                    $currentVersion = (int)$report->version;
+                    if (($version === $currentVersion || $version === $currentVersion - 1)
+                        && (string)$report->cancellation_reason === $reason) {
+                        return self::detailById($reportId);
+                    }
+                    self::setError('报货单已取消，取消请求与已保存事实不一致'); return false;
+                }
+                if ((int)$report->version !== $version || (string)$report->status === 'completed') {
+                    self::setError('报货单不存在、版本冲突或不可取消'); return false;
+                }
+                Db::name('fulfillment_task_group')->where('tenant_id', self::tenantId())
+                    ->where('report_id', $reportId)->lock(true)->find();
+                $tasks = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())
+                    ->where('report_id', $reportId)->order('id')->lock(true)->select()->toArray();
+                $taskIds = array_map(static fn(array $task): int => (int)$task['id'], $tasks);
+                $hasPrintAttempt = $taskIds !== [] && Db::name('fulfillment_print_log')
+                    ->where('tenant_id', self::tenantId())->whereIn('task_id', $taskIds)->lock(true)->count() > 0;
+                $hasStartedTask = array_filter($tasks, static fn(array $task): bool => !in_array(
+                    (string)$task['status'], ['unassigned', 'blocked', 'printable', 'exception', 'cancelled'], true
+                )) !== [];
+                if ($hasPrintAttempt || $hasStartedTask) {
+                    self::setError('报货单已经开始纸票或履约作业，不能取消'); return false;
                 }
                 $items = CustomerReportItem::where('tenant_id', self::tenantId())->where('report_id', $reportId)->order(['goods_id' => 'asc', 'warehouse_id' => 'asc', 'id' => 'asc'])->lock(true)->select()->toArray();
                 $now=time();
+                $before = $report->toArray();
                 foreach ($items as $item) {
                     self::releaseLine($item);
                     CustomerReportItem::where('tenant_id', self::tenantId())->where('id',(int)$item['id'])->update(['reserved_base_qty'=>'0.00','shortage_base_qty'=>'0.00','status'=>'cancelled','update_time'=>$now]);
                     CustomerReportReservation::where('tenant_id', self::tenantId())->where('report_item_id',(int)$item['id'])->update(['reserved_base_qty'=>'0.00','released_base_qty'=>self::decimal((string)$item['reserved_base_qty']),'status'=>'released','update_time'=>$now]);
                 }
-                CustomerReport::where('tenant_id', self::tenantId())->where('id',$reportId)->where('version',$version)->update(['status'=>'cancelled','reserved_base_qty'=>'0.00','shortage_base_qty'=>'0.00','version'=>$version+1,'update_time'=>$now]);
+                $cancelled = [
+                    'status'=>'cancelled','reserved_base_qty'=>'0.00','shortage_base_qty'=>'0.00',
+                    'cancellation_reason'=>$reason,'cancelled_by'=>self::operatorId(),'cancelled_time'=>$now,
+                    'version'=>$version+1,'update_time'=>$now,
+                ];
+                $updated = CustomerReport::where('tenant_id', self::tenantId())->where('id',$reportId)
+                    ->where('version',$version)->update($cancelled);
+                if ($updated !== 1) { throw new \RuntimeException('version_conflict'); }
                 FulfillmentTaskLogic::cancelReport($reportId);
+                AuditService::logWithinTransaction(
+                    AuditService::MODULE_CUSTOMER_REPORT,
+                    AuditService::ACTION_CANCEL,
+                    $reportId,
+                    (string)$report->sn,
+                    $before,
+                    array_replace($before, $cancelled),
+                    $reason
+                );
                 return self::detailById($reportId);
             });
         } catch (\Throwable) { if (!self::hasError()) { self::setError('取消客户报货失败'); } return false; }
@@ -693,7 +767,83 @@ class CustomerReportLogic extends BaseLogic
         }
         return $value;
     }
+    /** @param array<int,array<string,mixed>> $items @return array<string,mixed>|null|false */
+    private static function lockBatchForSubmit(
+        int $batchId,
+        string $deliveryDate,
+        bool $isSupplement,
+        int $supplementForReportId,
+        array $items
+    ): array|null|false
+    {
+        if ($batchId <= 0) {
+            if ($isSupplement) {
+                self::setError('补报必须进入原报货批次');
+                return false;
+            }
+            if ($supplementForReportId > 0) {
+                self::setError('普通报货单不能关联补报原单');
+                return false;
+            }
+            return null;
+        }
+        $batch = Db::name('customer_report_batch')->where('tenant_id', self::tenantId())
+            ->where('id', $batchId)->lock(true)->find();
+        if (!$batch) {
+            self::setError('报货批次不存在或不属于当前门店');
+            return false;
+        }
+        if ((string)$batch['delivery_date'] !== $deliveryDate) {
+            self::setError('报货单送货日期必须与报货批次一致');
+            return false;
+        }
+        if ((string)$batch['status'] === 'ended') {
+            self::setError('报货批次已结束，不能继续报货');
+            return false;
+        }
+        if ($isSupplement && (string)$batch['status'] !== 'processing') {
+            self::setError('报货批次尚未开始处理，不能提交补报');
+            return false;
+        }
+        if (!$isSupplement && (string)$batch['status'] !== 'open') {
+            self::setError('报货批次已开始处理，新增需求必须作为补报提交');
+            return false;
+        }
+        if (!$isSupplement) {
+            if ($supplementForReportId > 0) {
+                self::setError('普通报货单不能关联补报原单');
+                return false;
+            }
+            return $batch;
+        }
+        if ($supplementForReportId <= 0) {
+            self::setError('补报必须关联原报货单');
+            return false;
+        }
+        $original = CustomerReport::where('tenant_id', self::tenantId())
+            ->where('id', $supplementForReportId)->lock(true)->find();
+        if (!$original || (int)$original->is_supplement === 1 || (string)$original->status === 'cancelled') {
+            self::setError('补报关联的原报货单不存在或不可用');
+            return false;
+        }
+        if ((int)$original->batch_id !== $batchId) {
+            self::setError('补报必须进入原报货单所属批次');
+            return false;
+        }
+        $originalItem = CustomerReportItem::where('tenant_id', self::tenantId())
+            ->where('report_id', $supplementForReportId)->whereNull('delete_time')
+            ->order('id')->lock(true)->find();
+        if (!$originalItem
+            || (string)$original->delivery_date !== $deliveryDate
+            || (int)$original->main_customer_id !== (int)$items[0]['main_customer_id']
+            || (int)$originalItem->delivery_customer_id !== (int)$items[0]['delivery_customer_id']) {
+            self::setError('补报必须沿用原报货单的主客户和实际收货客户');
+            return false;
+        }
+        return $batch;
+    }
     private static function tenantId(): int { return (int)(request()->tenantId??0); }
+    private static function operatorId(): int { return (int)(request()->adminId ?? request()->userId ?? 0); }
     private static function sn(): string { return 'CR'.date('YmdHis').random_int(1000,9999); }
     private static function isRetryableTransactionError(\Throwable $exception): bool
     {

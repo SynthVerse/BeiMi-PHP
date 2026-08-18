@@ -301,8 +301,9 @@ class CustomerReportCandidateLogic extends BaseLogic
             ->where('delivery.tenant_id', self::tenantId())->where('delivery.is_disabled', 0)
             ->whereLike('delivery.customer_name', '%' . $needle . '%')
             ->field([
-                'delivery.id', 'delivery.customer_name', 'delivery.parent_id',
-                'main.id' => 'main_id', 'main.customer_name' => 'main_name', 'main.is_disabled' => 'main_disabled',
+                'delivery.id', 'delivery.customer_name', 'delivery.parent_id', 'delivery.phone', 'delivery.address',
+                'main.id' => 'main_id', 'main.customer_name' => 'main_name', 'main.phone' => 'main_phone',
+                'main.address' => 'main_address', 'main.is_disabled' => 'main_disabled',
             ])->order('delivery.id asc')->limit(self::LIMIT)->select()->toArray();
         $candidates = array_values(array_filter(array_map(static function (array $row): ?array {
             $deliveryId = (int)$row['id'];
@@ -312,18 +313,34 @@ class CustomerReportCandidateLogic extends BaseLogic
             if ($mainId <= 0 || $mainName === '' || ($parentId > 0 && (int)$row['main_disabled'] === 1)) {
                 return null;
             }
+            $deliveryPhone = (string)($row['phone'] ?? '');
+            $deliveryAddress = (string)($row['address'] ?? '');
+            $mainPhone = $parentId > 0 ? (string)($row['main_phone'] ?? '') : $deliveryPhone;
+            $mainAddress = $parentId > 0 ? (string)($row['main_address'] ?? '') : $deliveryAddress;
             return [
                 'id' => $deliveryId, 'name' => (string)$row['customer_name'], 'parent_id' => $parentId,
+                'customer_no' => self::customerNo($deliveryId), 'phone' => $deliveryPhone, 'address' => $deliveryAddress,
                 'display_name' => $parentId > 0
                     ? $mainName . ' / ' . (string)$row['customer_name']
                     : (string)$row['customer_name'],
-                'main_customer' => ['id' => $mainId, 'name' => $mainName],
-                'delivery_customer' => ['id' => $deliveryId, 'name' => (string)$row['customer_name']],
+                'main_customer' => [
+                    'id' => $mainId, 'name' => $mainName, 'customer_no' => self::customerNo($mainId),
+                    'phone' => $mainPhone, 'address' => $mainAddress,
+                ],
+                'delivery_customer' => [
+                    'id' => $deliveryId, 'name' => (string)$row['customer_name'], 'customer_no' => self::customerNo($deliveryId),
+                    'phone' => $deliveryPhone, 'address' => $deliveryAddress,
+                ],
             ];
         }, $rows)));
         $exact = array_values(array_filter($candidates, static fn(array $one): bool => mb_strtolower($one['name']) === mb_strtolower($needle)));
         $selected = count($exact) === 1 ? $exact[0] : (count($candidates) === 1 ? $candidates[0] : null);
         return ['status' => $selected ? 'unique' : ($candidates === [] ? 'none' : 'ambiguous'), 'selected' => $selected, 'candidates' => $candidates];
+    }
+
+    private static function customerNo(int $customerId): string
+    {
+        return 'C' . str_pad((string)$customerId, 8, '0', STR_PAD_LEFT);
     }
 
     /** @return array<int,array<string,mixed>> */

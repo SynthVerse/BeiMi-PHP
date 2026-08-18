@@ -101,19 +101,7 @@ final class WorkforceLogic extends BaseLogic
         }
         $now = time();
         foreach (self::INITIAL_PROCESSES as $process) {
-            $exists = Db::name('work_process')->where('tenant_id', $tenantId)->where('code', $process['code'])->find();
-            if ($exists) {
-                if (isset(self::CORE_PROCESS_TRIGGERS[(string)$process['code']])) {
-                    Db::name('work_process')->where('tenant_id', $tenantId)->where('id', (int)$exists['id'])->update([
-                        'trigger_type' => self::CORE_PROCESS_TRIGGERS[(string)$process['code']],
-                        'is_enabled' => 1,
-                        'delete_time' => null,
-                        'update_time' => $now,
-                    ]);
-                }
-                continue;
-            }
-            Db::name('work_process')->insert([
+            Db::name('work_process')->duplicate(['code'])->insert([
                 'tenant_id' => $tenantId,
                 'code' => $process['code'],
                 'name' => $process['name'],
@@ -125,6 +113,14 @@ final class WorkforceLogic extends BaseLogic
                 'create_time' => $now,
                 'update_time' => $now,
             ]);
+            if (isset(self::CORE_PROCESS_TRIGGERS[(string)$process['code']])) {
+                Db::name('work_process')->where('tenant_id', $tenantId)->where('code', $process['code'])->update([
+                    'trigger_type' => self::CORE_PROCESS_TRIGGERS[(string)$process['code']],
+                    'is_enabled' => 1,
+                    'delete_time' => null,
+                    'update_time' => $now,
+                ]);
+            }
         }
     }
 

@@ -30,6 +30,7 @@ class CustomerReportLineService extends BaseLogic
             return false;
         }
         $normalized = [];
+        $actualReceivingCustomerId = null;
         foreach (array_values($items) as $index => $item) {
             if (!is_array($item)) {
                 self::setError('报货行格式无效');
@@ -37,6 +38,12 @@ class CustomerReportLineService extends BaseLogic
             }
             $line = self::normalizeItem($item, $main, $index);
             if ($line === false) {
+                return false;
+            }
+            if ($actualReceivingCustomerId === null) {
+                $actualReceivingCustomerId = (int)$line['delivery_customer_id'];
+            } elseif ($actualReceivingCustomerId !== (int)$line['delivery_customer_id']) {
+                self::setError('一张报货单只能对应一个实际收货客户');
                 return false;
             }
             $normalized[] = $line;

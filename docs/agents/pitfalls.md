@@ -43,9 +43,9 @@
 
 - 状态：已防护
 - 首次发生：2026-07-29
-- 最近发生：2026-07-29
-- 复发次数：0
-- 适用范围：新增表的 SQL 迁移与 PHPUnit 集成测试
+- 最近发生：2026-08-18
+- 复发次数：1
+- 适用范围：新增表的 SQL 迁移、`CustomerReportTestSupport` 共享 schema 与 PHPUnit 集成测试
 - 相关问题：PIT-0001
 
 ### 触发场景
@@ -67,6 +67,7 @@
 ### 防线
 
 - 自动化防线：`tests/unit/WarehouseGoodsBalanceServiceTest.php` 的 `resetWarehouseGoodsBalanceSchema()` 在每个用例前重建目标表，并从实际迁移文件执行建表 SQL。
+- 2026-08-18 扩展：`CustomerReportTestSupport` 不再手抄 `goods_supplier` 最终结构；它从 `database/sql/jxc_phase1_schema.sql` 抽取权威基线建表，并通过生产同款 `MigrationSqlPreprocessor` 连续执行 `20260603_000002_aquatic_goods_v1.sql` 中供应商/SKU 相关迁移段。`WarehouseSkuBalanceServiceTest` 实际运行同商品多 SKU、跨租户 SKU 与基准 SKU 三类隔离行为。
 - 架构防线：生产迁移仍只做建表，不对无历史数据项目的旧库存进行回填或猜测性修复。
 - 决策与知识：本记录及 `docs/adr/0001-客户报货库存边界.md`。
 
@@ -75,6 +76,7 @@
 | 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
 |---|---|---|---|
 | 2026-07-29 | Project #1 / 仓库级库存余额与统一库存原语 | 首次执行余额服务测试 | 测试库保留了开发初期临时表，但测试未重建目标 schema。 |
+| 2026-08-18 | BeiMi-PHP#6 | SKU 报货回归调用商品维度保存 | 共享测试 schema 只截取水产迁移前 5 条语句，遗漏其后才使用的 `goods_supplier.sku_id` 最终结构。 |
 
 ## PIT-0003：临时 ThinkPHP App 污染 ORM 静态数据库状态
 
@@ -120,7 +122,7 @@
 - 最近发生：2026-07-30
 - 复发次数：1
 - 适用范围：`CustomerReportLogic` 等已开启业务事务后调用仓库余额原语的路径
-- 相关问题：无
+- 相关问题：PIT-0022
 
 ### 触发场景
 
@@ -805,3 +807,89 @@ PHP `trim($value, $characterMask)` 的第二参数按字节集合处理，不理
 | 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
 |---|---|---|---|
 | 2026-08-18 | BeiMi-PHP#2 / BeiMi-ERP#3 | 测试账号预览 4 个 SKU 后保存失败 | 原权限测试只覆盖后台根管理员和菜单授权，没有覆盖小程序用户令牌与店铺 owner/admin 身份。 |
+
+## PIT-0021：并发测试子进程遗漏权威身份上下文
+
+- 状态：已防护
+- 首次发生：2026-08-18
+- 最近发生：2026-08-18
+- 复发次数：0
+- 适用范围：`tests/fixtures` 中独立启动 ThinkPHP 的并发 worker、员工电子权限校验
+- 相关问题：PIT-0022
+
+### 触发场景
+
+`CustomerReportWorkflowTest` 使用两个 PHP 子进程并发提交报货，父进程已配置最高权限
+测试管理员，但 worker 只写入 `tenantId`、`adminId` 和 `userId`。
+
+### 根因
+
+`WorkforceLogic::requirePermission()` 以 `request()->adminInfo.root` 和令牌来源作为权威
+身份上下文。worker 没有复用父测试的完整上下文，权限服务因此退回租户成员数据库
+查询；测试最小 schema 又不包含 `tenant_member`，两个子进程均在进入报货事务前退出。
+
+### 错误做法
+
+在并发或隔离进程测试中只复制租户 ID 和用户 ID，并假定权限服务会把该身份视为
+根管理员；同时丢弃 worker 的 stderr，使夹具错误表现为业务结果为空。
+
+### 正确做法
+
+独立 worker 必须显式建立与测试场景一致的权威身份上下文，包括令牌来源和
+`adminInfo`；并发断言应保留每个 worker 的 stdout/stderr 作为失败诊断。
+
+### 防线
+
+- 自动化防线：`tests/unit/CustomerReportWorkflowTest.php::test_two_concurrent_submissions_cannot_over_reserve_one_warehouse_balance()` 验证两个真实子进程均进入公开提交 seam，并在失败时输出各自 stdout/stderr。
+- 架构防线：`tests/fixtures/customer_report_submit_worker.php` 显式设置 `jxcFromUserToken=false` 和根管理员 `adminInfo`，不依赖缺省权限回退。
+- 决策与知识：本记录；测试身份必须与生产权限入口使用相同的权威字段。
+- 验证结果：修复前两个 worker 均报 `la_tenant_member` 不存在；修复后 worker 进入真实并发事务，夹具根因不再复现。
+
+### 发生记录
+
+| 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-08-18 | BeiMi-PHP#6 | 并发 SKU 预留验收 | 既有并发测试丢弃子进程 stderr，且 worker 没有完整身份上下文。 |
+
+## PIT-0022：默认工序惰性初始化使用先查后插
+
+- 状态：已防护
+- 首次发生：2026-08-18
+- 最近发生：2026-08-18
+- 复发次数：0
+- 适用范围：`WorkforceLogic::ensureInitialProcesses()`、首次报货生成履约任务
+- 相关问题：PIT-0004、PIT-0021
+
+### 触发场景
+
+一个新测试租户尚无默认工序，两个报货请求同时提交并在各自事务中生成履约任务。
+
+### 根因
+
+默认工序初始化按每个工序执行普通查询，再在不存在时插入。两个事务可以同时看到
+`purchase` 不存在，随后一个事务提交，另一个事务因唯一键
+`uk_tenant_work_process_code` 冲突而让整张报货单回滚；该冲突不是可重试死锁，提交层
+只能返回通用失败。
+
+### 错误做法
+
+把数据库唯一键当作“先查再插”的并发兜底，却不在同一 SQL 中处理重复键；或者在
+事务快照中捕获重复键后再做普通查询，后者仍可能看不到刚提交的并发行。
+
+### 正确做法
+
+默认工序首次写入必须使用原子 upsert。重复键分支只对唯一键中的 `code` 做同值更新，
+保留既有工序名称、关键词和运营配置；核心工序的触发类型再按既有规则显式校准。
+
+### 防线
+
+- 自动化防线：`tests/unit/CustomerReportWorkflowTest.php::test_two_concurrent_submissions_cannot_over_reserve_one_warehouse_balance()` 在空默认工序状态下同时启动两个提交，断言一单 `submitted_ready`、一单 `submitted_shortage`，总预留为 1.0000。
+- 架构防线：`WorkforceLogic::ensureInitialProcesses()` 通过 `duplicate(['code'])` 生成原子 `ON DUPLICATE KEY UPDATE`，不再使用“先查再插”。
+- 决策与知识：本记录及 PIT-0004；所有位于报货事务内的惰性初始化都必须具备并发首写语义。
+- 验证结果：修复前第二个事务稳定报默认 `purchase` 工序唯一键冲突；修复后并发测试通过（1 个测试、10 条断言）。
+
+### 发生记录
+
+| 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-08-18 | BeiMi-PHP#6 | 新租户首次并发报货 | PIT-0004 已保护库存事务和幂等键，但未覆盖履约任务依赖的默认工序惰性初始化。 |

@@ -25,18 +25,24 @@ class CustomerReportValidate extends BaseValidate
         'status_scope' => 'in:pending,completed,cancelled',
         'delivery_date' => 'dateFormat:Y-m-d',
         'is_supplement' => 'in:0,1',
+        'batch_id' => 'integer|gt:0',
+        'supplement_for_report_id' => 'integer|gt:0',
+        'reason' => 'require|max:255',
         'dimensions' => 'array',
         'combinations' => 'array',
     ];
 
     public function sceneRecognize() { return $this->only(['text']); }
     public function sceneQuickCreateGoods() { return $this->only(['name','category_id','unit_id','dimensions','combinations']); }
-    public function sceneSubmit() { return $this->only(['main_customer_id','items','remark','idempotency_key','delivery_date','is_supplement']); }
+    public function sceneSubmit() { return $this->only(['main_customer_id','items','remark','idempotency_key','delivery_date','is_supplement','batch_id','supplement_for_report_id']); }
     public function sceneDetail() { return $this->only(['id']); }
     public function sceneLists() { return $this->only(['page_no','page_size','status_scope']); }
     public function sceneAvailability() { return $this->only(['warehouse_id','sku_id']); }
-    public function sceneEdit() { return $this->only(['id','version','main_customer_id','items','remark','delivery_date','is_supplement']); }
+    public function sceneEdit() { return $this->only(['id','version','main_customer_id','items','remark']); }
     public function sceneRetry() { return $this->only(['id','version']); }
     public function sceneConvert() { return $this->only(['id','version']); }
-    public function sceneCancel() { return $this->only(['id','version']); }
+    public function sceneCancel() { return $this->only(['id','version','reason']); }
+    public function sceneBatchStart() { return $this->only(['delivery_date','idempotency_key']); }
+    public function sceneBatchTransition() { return $this->only(['id','version']); }
+    public function sceneBatchDetail() { return $this->only(['id']); }
 }

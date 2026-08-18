@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace tests\unit;
 
+use app\api\jxc\logic\CustomerReportBatchLogic;
 use app\api\jxc\logic\CustomerReportLogic;
 use app\api\jxc\logic\FulfillmentTaskLogic;
 use app\api\jxc\logic\GoodsDimensionLogic;
@@ -41,7 +42,18 @@ final class FulfillmentWorkflowTest extends TestCase
         $warehouseId = $this->createCustomerReportWarehouse('鲜活仓');
         self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, '1.00'));
 
+        $batch = CustomerReportBatchLogic::start(['delivery_date' => '2026-08-10', 'idempotency_key' => 'task-batch-1']);
+        self::assertNotFalse($batch, CustomerReportBatchLogic::getError());
+        $primer = $this->fulfillmentPayload($customerId, $goodsId, $warehouseId, 'task-batch-primer-1', '1', '');
+        $primer['batch_id'] = (int)$batch['id'];
+        $primerReport = CustomerReportLogic::submit($primer);
+        self::assertNotFalse($primerReport, CustomerReportLogic::getError());
+        $processing = CustomerReportBatchLogic::process(['id' => $batch['id'], 'version' => $batch['version']]);
+        self::assertNotFalse($processing, CustomerReportBatchLogic::getError());
         $payload = $this->fulfillmentPayload($customerId, $goodsId, $warehouseId, 'task-idem-1', '2', '杀好、活鱼打包');
+        $payload['batch_id'] = (int)$processing['id'];
+        $payload['is_supplement'] = 1;
+        $payload['supplement_for_report_id'] = (int)$primerReport['id'];
         $first = CustomerReportLogic::submit($payload);
         self::assertNotFalse($first, CustomerReportLogic::getError());
         self::assertSame('2026-08-10', $first['delivery_date']);
@@ -51,11 +63,161 @@ final class FulfillmentWorkflowTest extends TestCase
             ->where('report_id', (int)$first['id'])->order('id')->select()->toArray();
         self::assertCount(5, $tasks, '采购、杀鱼、活鱼打包、送货、记账各一项');
         self::assertSame(1, count(array_filter($tasks, static fn(array $task): bool => $task['source_key'] === 'item:' . $first['items'][0]['id'] . ':shortage')));
-        self::assertSame(2, count(array_filter($tasks, static fn(array $task): bool => (int)$task['report_item_id'] === (int)$first['items'][0]['id'] && $task['task_type'] === 'process')));
+        self::assertSame(
+            2,
+            count(array_filter(
+                $tasks,
+                static fn(array $task): bool => (int)$task['report_item_id'] === (int)$first['items'][0]['id']
+                    && str_contains((string)$task['source_key'], ':process:')
+            )),
+            json_encode($tasks, JSON_UNESCAPED_UNICODE)
+        );
 
         $again = CustomerReportLogic::submit($payload);
         self::assertNotFalse($again, CustomerReportLogic::getError());
         self::assertSame(5, Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)->where('report_id', (int)$first['id'])->count());
+    }
+
+    public function test_report_batch_enforces_processing_supplement_date_tenant_and_manual_end_boundaries(): void
+    {
+        $customerId = $this->createCustomer('批次边界客户');
+        $goodsId = $this->createCustomerReportGoods('批次桂鱼', 'TASK-BATCH');
+        $warehouseId = $this->createCustomerReportWarehouse('批次仓');
+        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, '10.00'));
+
+        $batchRequest = ['delivery_date' => '2026-08-10', 'idempotency_key' => 'batch-boundary-1'];
+        $batch = CustomerReportBatchLogic::start($batchRequest);
+        self::assertNotFalse($batch, CustomerReportBatchLogic::getError());
+        self::assertSame('open', $batch['status']);
+        self::assertSame((int)$batch['id'], (int)CustomerReportBatchLogic::start($batchRequest)['id']);
+        $differentBatchReplay = $batchRequest;
+        $differentBatchReplay['delivery_date'] = '2026-08-11';
+        self::assertFalse(CustomerReportBatchLogic::start($differentBatchReplay));
+        self::assertSame('幂等键已用于不同的报货批次', CustomerReportBatchLogic::getError());
+        self::assertFalse(CustomerReportBatchLogic::end(['id' => $batch['id'], 'version' => $batch['version']]));
+        self::assertSame('只有处理中的报货批次可以结束', CustomerReportBatchLogic::getError());
+
+        $normal = $this->fulfillmentPayload($customerId, $goodsId, $warehouseId, 'batch-normal-1', '1', '');
+        $normal['batch_id'] = (int)$batch['id'];
+        $normalReport = CustomerReportLogic::submit($normal);
+        self::assertNotFalse($normalReport, CustomerReportLogic::getError());
+        self::assertSame(0, (int)$normalReport['is_supplement']);
+        self::assertSame((int)$batch['id'], (int)$normalReport['batch_id']);
+
+        $processRequest = ['id' => $batch['id'], 'version' => $batch['version']];
+        $processing = CustomerReportBatchLogic::process($processRequest);
+        self::assertNotFalse($processing, CustomerReportBatchLogic::getError());
+        self::assertSame('processing', $processing['status']);
+        self::assertSame((int)$processing['version'], (int)CustomerReportBatchLogic::process($processRequest)['version']);
+
+        $ordinaryAfterProcessing = $normal;
+        $ordinaryAfterProcessing['idempotency_key'] = 'batch-normal-too-late';
+        self::assertFalse(CustomerReportLogic::submit($ordinaryAfterProcessing));
+        self::assertSame('报货批次已开始处理，新增需求必须作为补报提交', CustomerReportLogic::getError());
+
+        $supplement = $normal;
+        $supplement['idempotency_key'] = 'batch-supplement-1';
+        $supplement['is_supplement'] = 1;
+        $supplement['supplement_for_report_id'] = (int)$normalReport['id'];
+        $supplementReport = CustomerReportLogic::submit($supplement);
+        self::assertNotFalse($supplementReport, CustomerReportLogic::getError());
+        self::assertSame(1, (int)$supplementReport['is_supplement']);
+        self::assertSame((int)$batch['id'], (int)$supplementReport['batch_id']);
+        self::assertSame((int)$normalReport['id'], (int)$supplementReport['supplement_for_report_id']);
+        self::assertSame(1, Db::name('audit_log')->where('tenant_id', self::TENANT_ID)
+            ->where('module', 'customer_report')->where('action', 'supplement')
+            ->where('target_id', (int)$supplementReport['id'])->count());
+        self::assertSame((int)$supplementReport['id'], (int)CustomerReportLogic::submit($supplement)['id']);
+
+        $identityEdit = $supplement;
+        unset($identityEdit['idempotency_key']);
+        $identityEdit['id'] = (int)$supplementReport['id'];
+        $identityEdit['version'] = (int)$supplementReport['version'];
+        $identityEdit['is_supplement'] = 0;
+        $identityEdit['delivery_date'] = '2026-08-11';
+        $identityEdit['items'][0]['client_line_id'] = (int)$supplementReport['items'][0]['id'];
+        $editedSupplement = CustomerReportLogic::edit($identityEdit);
+        self::assertNotFalse($editedSupplement, CustomerReportLogic::getError());
+        self::assertSame(1, (int)$editedSupplement['is_supplement']);
+        self::assertSame('2026-08-10', $editedSupplement['delivery_date']);
+        self::assertSame((int)$batch['id'], (int)$editedSupplement['batch_id']);
+
+        $otherBatch = CustomerReportBatchLogic::start([
+            'delivery_date' => '2026-08-10', 'idempotency_key' => 'batch-boundary-other',
+        ]);
+        self::assertNotFalse($otherBatch, CustomerReportBatchLogic::getError());
+        $otherNormal = $normal;
+        $otherNormal['batch_id'] = (int)$otherBatch['id'];
+        $otherNormal['idempotency_key'] = 'batch-normal-other';
+        self::assertNotFalse(CustomerReportLogic::submit($otherNormal), CustomerReportLogic::getError());
+        $otherProcessing = CustomerReportBatchLogic::process([
+            'id' => $otherBatch['id'], 'version' => $otherBatch['version'],
+        ]);
+        self::assertNotFalse($otherProcessing, CustomerReportBatchLogic::getError());
+        $wrongOriginalBatch = $supplement;
+        $wrongOriginalBatch['batch_id'] = (int)$otherProcessing['id'];
+        $wrongOriginalBatch['idempotency_key'] = 'batch-supplement-wrong-original-batch';
+        self::assertFalse(CustomerReportLogic::submit($wrongOriginalBatch));
+        self::assertSame('补报必须进入原报货单所属批次', CustomerReportLogic::getError());
+
+        $otherCustomerId = $this->createCustomer('批次另一收货客户');
+        $wrongCustomer = $supplement;
+        $wrongCustomer['idempotency_key'] = 'batch-supplement-wrong-customer';
+        $wrongCustomer['main_customer_id'] = $otherCustomerId;
+        $wrongCustomer['items'][0]['delivery_customer_id'] = $otherCustomerId;
+        self::assertFalse(CustomerReportLogic::submit($wrongCustomer));
+        self::assertSame('补报必须沿用原报货单的主客户和实际收货客户', CustomerReportLogic::getError());
+
+        $wrongDate = $supplement;
+        $wrongDate['idempotency_key'] = 'batch-supplement-wrong-date';
+        $wrongDate['delivery_date'] = '2026-08-11';
+        self::assertFalse(CustomerReportLogic::submit($wrongDate));
+        self::assertSame('报货单送货日期必须与报货批次一致', CustomerReportLogic::getError());
+
+        $missingBatch = $supplement;
+        $missingBatch['idempotency_key'] = 'batch-supplement-missing-batch';
+        unset($missingBatch['batch_id']);
+        self::assertFalse(CustomerReportLogic::submit($missingBatch));
+        self::assertSame('补报必须进入原报货批次', CustomerReportLogic::getError());
+
+        $this->prepareCustomerReportRequestContext(self::OTHER_TENANT_ID);
+        self::assertFalse(CustomerReportBatchLogic::detail(['id' => (int)$batch['id']]));
+        self::assertFalse(CustomerReportBatchLogic::process([
+            'id' => (int)$batch['id'], 'version' => (int)$processing['version'],
+        ]));
+        $guessedBatch = $supplement;
+        $guessedBatch['idempotency_key'] = 'batch-supplement-cross-tenant';
+        self::assertFalse(CustomerReportLogic::submit($guessedBatch));
+        self::assertSame('主客户不存在或已停用', CustomerReportLogic::getError());
+        $this->prepareCustomerReportRequestContext();
+
+        $endRequest = ['id' => $processing['id'], 'version' => $processing['version']];
+        $ended = CustomerReportBatchLogic::end($endRequest);
+        self::assertNotFalse($ended, CustomerReportBatchLogic::getError());
+        self::assertSame('ended', $ended['status']);
+        self::assertSame((int)$ended['version'], (int)CustomerReportBatchLogic::end($endRequest)['version']);
+
+        $afterEnd = $supplement;
+        $afterEnd['idempotency_key'] = 'batch-supplement-after-end';
+        self::assertFalse(CustomerReportLogic::submit($afterEnd));
+        self::assertSame('报货批次已结束，不能继续报货', CustomerReportLogic::getError());
+    }
+
+    public function test_customer_report_batch_migration_is_safe_to_replay(): void
+    {
+        $root = dirname(__DIR__, 2);
+        $migration = $this->prepareMigration((string)file_get_contents(
+            $root . '/database/migrations/20260818_000001_customer_report_batch_and_cancellation.sql'
+        ));
+
+        $this->runStatements($migration);
+        $this->runStatements($migration);
+
+        self::assertSame(1, Db::query("SHOW COLUMNS FROM `la_customer_report` LIKE 'batch_id'") !== [] ? 1 : 0);
+        self::assertSame(1, Db::query("SHOW COLUMNS FROM `la_customer_report` LIKE 'supplement_for_report_id'") !== [] ? 1 : 0);
+        self::assertSame(1, Db::query("SHOW COLUMNS FROM `la_customer_report` LIKE 'cancellation_reason'") !== [] ? 1 : 0);
+        self::assertSame(1, Db::query("SHOW INDEX FROM `la_customer_report` WHERE Key_name = 'idx_tenant_customer_report_batch'") !== [] ? 1 : 0);
+        self::assertSame(1, Db::query("SHOW INDEX FROM `la_customer_report` WHERE Key_name = 'idx_tenant_customer_report_supplement_source'") !== [] ? 1 : 0);
     }
 
     public function test_blank_or_unrecognized_requirement_becomes_explicit_exception(): void
@@ -92,6 +254,44 @@ final class FulfillmentWorkflowTest extends TestCase
         self::assertSame(['task.recover', 'task.view'], $employee['permission_keys']);
         self::assertNotContains('task.assign', $employee['permission_keys']);
         self::assertNotContains('employee.manage', $employee['permission_keys']);
+    }
+
+    public function test_repeated_initial_process_upsert_preserves_operator_configuration(): void
+    {
+        WorkforceLogic::ensureInitialProcesses();
+        $killFish = Db::name('work_process')->where('tenant_id', self::TENANT_ID)->where('code', 'kill_fish')->find();
+        $purchase = Db::name('work_process')->where('tenant_id', self::TENANT_ID)->where('code', 'purchase')->find();
+        self::assertIsArray($killFish);
+        self::assertIsArray($purchase);
+
+        Db::name('work_process')->where('id', (int)$killFish['id'])->update([
+            'name' => '水产精加工',
+            'trigger_keywords' => '["精加工"]',
+            'sort' => 88,
+            'is_enabled' => 0,
+        ]);
+        Db::name('work_process')->where('id', (int)$purchase['id'])->update([
+            'name' => '紧急采购',
+            'trigger_keywords' => '["紧急"]',
+            'sort' => 99,
+            'trigger_type' => 'remark',
+            'is_enabled' => 0,
+        ]);
+
+        WorkforceLogic::ensureInitialProcesses();
+
+        $killFish = Db::name('work_process')->where('id', (int)$killFish['id'])->find();
+        self::assertSame('水产精加工', $killFish['name']);
+        self::assertSame('["精加工"]', $killFish['trigger_keywords']);
+        self::assertSame(88, (int)$killFish['sort']);
+        self::assertSame(0, (int)$killFish['is_enabled']);
+
+        $purchase = Db::name('work_process')->where('id', (int)$purchase['id'])->find();
+        self::assertSame('紧急采购', $purchase['name']);
+        self::assertSame('["紧急"]', $purchase['trigger_keywords']);
+        self::assertSame(99, (int)$purchase['sort']);
+        self::assertSame('shortage', $purchase['trigger_type']);
+        self::assertSame(1, (int)$purchase['is_enabled']);
     }
 
     public function test_assignment_print_failure_retry_and_ticket_recovery_follow_state_machine(): void
@@ -145,12 +345,60 @@ final class FulfillmentWorkflowTest extends TestCase
         $payload = $this->fulfillmentPayload($customerId, $goodsId, $warehouseId, 'task-cancel-replay', '1', '杀好');
         $submitted = CustomerReportLogic::submit($payload);
         self::assertNotFalse($submitted, CustomerReportLogic::getError());
-        $cancelled = CustomerReportLogic::cancel(['id' => $submitted['id'], 'version' => $submitted['version']]);
+        self::assertFalse(CustomerReportLogic::cancel(['id' => $submitted['id'], 'version' => $submitted['version']]));
+        self::assertSame('取消报货单必须填写原因', CustomerReportLogic::getError());
+        $cancelRequest = ['id' => $submitted['id'], 'version' => $submitted['version'], 'reason' => '客户临时取消'];
+        $cancelled = CustomerReportLogic::cancel($cancelRequest);
         self::assertNotFalse($cancelled, CustomerReportLogic::getError());
+        self::assertSame('客户临时取消', $cancelled['cancellation_reason']);
+        self::assertSame(self::ADMIN_ID, (int)$cancelled['cancelled_by']);
+        self::assertGreaterThan(0, (int)$cancelled['cancelled_time']);
+        $audit = Db::name('audit_log')->where('tenant_id', self::TENANT_ID)
+            ->where('module', 'customer_report')->where('action', 'cancel')->where('target_id', (int)$submitted['id'])->find();
+        self::assertNotEmpty($audit);
+        self::assertSame(self::ADMIN_ID, (int)$audit['admin_id']);
+        self::assertSame('客户临时取消', $audit['remark']);
+        self::assertSame('客户临时取消', json_decode((string)$audit['after_data'], true)['cancellation_reason']);
+        $replayedCancel = CustomerReportLogic::cancel($cancelRequest);
+        self::assertNotFalse($replayedCancel, CustomerReportLogic::getError());
+        self::assertSame((int)$cancelled['version'], (int)$replayedCancel['version']);
+        self::assertSame(1, Db::name('audit_log')->where('tenant_id', self::TENANT_ID)
+            ->where('module', 'customer_report')->where('action', 'cancel')->where('target_id', (int)$submitted['id'])->count());
+        $conflictingReplay = $cancelRequest;
+        $conflictingReplay['reason'] = '改写取消原因';
+        self::assertFalse(CustomerReportLogic::cancel($conflictingReplay));
+        self::assertSame('报货单已取消，取消请求与已保存事实不一致', CustomerReportLogic::getError());
         $replayed = CustomerReportLogic::submit($payload);
         self::assertNotFalse($replayed, CustomerReportLogic::getError());
         self::assertSame('cancelled', $replayed['status']);
         self::assertSame(0, Db::name('fulfillment_task')->where('report_id', (int)$submitted['id'])->whereNotIn('status', ['cancelled', 'recovered', 'ready_to_bill', 'completed'])->count());
+    }
+
+    public function test_report_cannot_be_cancelled_after_any_paper_work_has_started(): void
+    {
+        $customerId = $this->createCustomer('已开工客户');
+        $goodsId = $this->createCustomerReportGoods('已开工海鲈鱼', 'TASK-STARTED-CANCEL');
+        $warehouseId = $this->createCustomerReportWarehouse('已开工仓');
+        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, '2.00'));
+        $submitted = CustomerReportLogic::submit($this->fulfillmentPayload(
+            $customerId, $goodsId, $warehouseId, 'task-started-cancel', '1', '杀好'
+        ));
+        self::assertNotFalse($submitted, CustomerReportLogic::getError());
+        $taskId = (int)Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)
+            ->where('report_id', (int)$submitted['id'])->order('id')->value('id');
+        Db::name('fulfillment_print_log')->insert([
+            'tenant_id' => self::TENANT_ID, 'task_id' => $taskId, 'operator_id' => self::ADMIN_ID,
+            'status' => 'pending', 'create_time' => time(), 'update_time' => time(),
+        ]);
+
+        self::assertFalse(CustomerReportLogic::cancel([
+            'id' => $submitted['id'], 'version' => $submitted['version'], 'reason' => '纸票已经开始处理',
+        ]));
+        self::assertSame('报货单已经开始纸票或履约作业，不能取消', CustomerReportLogic::getError());
+        self::assertSame('submitted_ready', Db::name('customer_report')->where('id', (int)$submitted['id'])->value('status'));
+        self::assertSame('1.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
+        self::assertSame(0, Db::name('audit_log')->where('tenant_id', self::TENANT_ID)
+            ->where('module', 'customer_report')->where('action', 'cancel')->where('target_id', (int)$submitted['id'])->count());
     }
 
     public function test_resolved_exception_uses_stable_process_source_key_after_sync(): void
@@ -336,7 +584,7 @@ final class FulfillmentWorkflowTest extends TestCase
         return [
             'main_customer_id' => $customerId,
             'delivery_date' => '2026-08-10',
-            'is_supplement' => 1,
+            'is_supplement' => 0,
             'idempotency_key' => $key,
             'remark' => '',
             'items' => [[

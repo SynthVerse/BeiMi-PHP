@@ -20,6 +20,12 @@ if (!is_array($payload) || $outputPath === '') {
 request()->tenantId = (int)$payload['tenant_id'];
 request()->adminId = (int)$payload['admin_id'];
 request()->userId = (int)$payload['admin_id'];
+request()->jxcFromUserToken = false;
+request()->adminInfo = [
+    'admin_id' => (int)$payload['admin_id'],
+    'tenant_id' => (int)$payload['tenant_id'],
+    'root' => 1,
+];
 
 for ($attempt = 0; $attempt < 200 && !is_file($startPath); $attempt++) {
     usleep(10_000);

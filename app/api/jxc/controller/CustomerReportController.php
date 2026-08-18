@@ -3,6 +3,7 @@
 namespace app\api\jxc\controller;
 
 use app\api\jxc\logic\CustomerReportCandidateLogic;
+use app\api\jxc\logic\CustomerReportBatchLogic;
 use app\api\jxc\logic\CustomerReportLogic;
 use app\api\jxc\validate\CustomerReportValidate;
 
@@ -34,6 +35,16 @@ class CustomerReportController extends BaseJxcController
     public function retry() { return $this->respond('retry'); }
     public function convert() { return $this->respond('convert'); }
     public function cancel() { return $this->respond('cancel'); }
+    public function batchStart() { return $this->respondBatch('start', 'batchStart'); }
+    public function batchProcess() { return $this->respondBatch('process', 'batchTransition'); }
+    public function batchEnd() { return $this->respondBatch('end', 'batchTransition'); }
+
+    public function batchDetail()
+    {
+        $params = (new CustomerReportValidate())->get()->goCheck('batchDetail');
+        $result = CustomerReportBatchLogic::detail($params);
+        return $result === false ? $this->fail(CustomerReportBatchLogic::getError()) : $this->data($result);
+    }
 
     public function lists()
     {
@@ -61,5 +72,14 @@ class CustomerReportController extends BaseJxcController
         $params = (new CustomerReportValidate())->post()->goCheck($action);
         $result = CustomerReportLogic::$action($params);
         return $result === false ? $this->fail(CustomerReportLogic::getError(), CustomerReportLogic::getReturnData() ?: []) : $this->success('操作成功', $result, 1, 1);
+    }
+
+    private function respondBatch(string $action, string $scene)
+    {
+        $params = (new CustomerReportValidate())->post()->goCheck($scene);
+        $result = CustomerReportBatchLogic::$action($params);
+        return $result === false
+            ? $this->fail(CustomerReportBatchLogic::getError(), CustomerReportBatchLogic::getReturnData() ?: [])
+            : $this->success('操作成功', $result, 1, 1);
     }
 }
