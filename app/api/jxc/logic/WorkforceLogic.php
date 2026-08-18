@@ -39,6 +39,9 @@ final class WorkforceLogic extends BaseLogic
             ['key' => 'settlement.price', 'name' => '录入最终实价'],
             ['key' => 'settlement.bill', 'name' => '确认并开销售单'],
         ],
+        '商品' => [
+            ['key' => 'goods.maintain', 'name' => '商品维护'],
+        ],
         '设置' => [
             ['key' => 'employee.manage', 'name' => '管理员工'],
             ['key' => 'process.manage', 'name' => '管理工序'],

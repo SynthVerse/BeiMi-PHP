@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace tests\unit;
 
 use app\api\jxc\logic\CustomerReportCandidateLogic;
+use app\api\jxc\logic\GoodsDimensionLogic;
 use app\api\jxc\logic\GoodsLogic;
+use app\api\jxc\logic\WorkforceLogic;
 use app\common\service\goods\GoodsMaintenancePermissionService;
 use PHPUnit\Framework\TestCase;
 use think\facade\Db;
@@ -71,6 +73,73 @@ final class GoodsCreationConstraintTest extends TestCase
             self::TENANT_ID,
             (int)Db::name('goods')->where('id', (int)$granted['id'])->value('tenant_id')
         );
+    }
+
+    public function test_store_owner_using_a_user_token_can_maintain_goods_and_see_the_permission(): void
+    {
+        Db::name('tenant_member')->where('tenant_id', self::TENANT_ID)->where('user_id', self::ADMIN_ID)->delete();
+        Db::name('tenant_member')->insert([
+            'tenant_id' => self::TENANT_ID,
+            'user_id' => self::ADMIN_ID,
+            'role' => 'owner',
+            'status' => 1,
+            'invite_code' => '',
+            'inviter_id' => 0,
+            'joined_at' => time(),
+            'create_time' => time(),
+            'update_time' => time(),
+            'delete_time' => null,
+        ]);
+        $this->setUserTokenIdentity();
+
+        self::assertTrue(GoodsMaintenancePermissionService::canMaintain());
+        self::assertContains('goods.maintain', WorkforceLogic::currentPermissions()['keys']);
+
+        $dimension = GoodsDimensionLogic::saveDefinition([
+            'name' => '测试产地',
+            'code' => 'test_owner_origin',
+            'dimension_type' => 'sku',
+            'status' => 1,
+            'sort' => 0,
+        ]);
+        self::assertNotFalse($dimension, GoodsDimensionLogic::getError());
+        self::assertSame('测试产地', $dimension['name']);
+    }
+
+    public function test_bound_employee_with_goods_maintenance_permission_can_maintain_goods(): void
+    {
+        Db::name('tenant_member')->insert([
+            'tenant_id' => self::TENANT_ID,
+            'user_id' => self::ADMIN_ID,
+            'role' => 'member',
+            'status' => 1,
+            'invite_code' => '',
+            'inviter_id' => 0,
+            'joined_at' => time(),
+            'create_time' => time(),
+            'update_time' => time(),
+            'delete_time' => null,
+        ]);
+        $employeeId = (int)Db::name('employee')->insertGetId([
+            'tenant_id' => self::TENANT_ID,
+            'name' => '商品维护员工',
+            'mobile' => '13900000001',
+            'bind_user_id' => self::ADMIN_ID,
+            'is_enabled' => 1,
+            'create_time' => time(),
+            'update_time' => time(),
+            'delete_time' => null,
+        ]);
+        Db::name('employee_permission')->insert([
+            'tenant_id' => self::TENANT_ID,
+            'employee_id' => $employeeId,
+            'permission_key' => GoodsMaintenancePermissionService::USER_MAINTAIN_PERMISSION,
+            'create_time' => time(),
+        ]);
+        $this->setUserTokenIdentity();
+
+        self::assertTrue(GoodsMaintenancePermissionService::canMaintain());
+        self::assertContains('goods.maintain', WorkforceLogic::currentPermissions()['keys']);
     }
 
     public function test_duplicate_canonical_name_or_alias_returns_the_existing_tenant_goods(): void
@@ -562,6 +631,17 @@ final class GoodsCreationConstraintTest extends TestCase
         ]);
     }
 
+    private function setUserTokenIdentity(): void
+    {
+        request()->jxcFromUserToken = true;
+        request()->adminInfo = [
+            'admin_id' => self::ADMIN_ID,
+            'user_id' => self::ADMIN_ID,
+            'tenant_id' => self::TENANT_ID,
+            'root' => 0,
+        ];
+    }
+
     private function grantGoodsMaintenancePermission(): void
     {
         $roleId = (int)Db::name('tenant_system_role')->insertGetId([
@@ -617,6 +697,10 @@ final class GoodsCreationConstraintTest extends TestCase
 
     private function ensureConstraintTables(): void
     {
+        $root = dirname(__DIR__, 2);
+        $this->runStatements($this->prepareMigration((string)file_get_contents(
+            $root . '/database/migrations/20260521_000001_create_tenant_membership.sql'
+        )));
         foreach ([
             'CREATE TABLE IF NOT EXISTS `la_tenant_goodscat` (
                 `id` int unsigned NOT NULL AUTO_INCREMENT,
@@ -727,6 +811,7 @@ final class GoodsCreationConstraintTest extends TestCase
             Db::name('tenant_admin_role')->whereIn('role_id', $roleIds)->delete();
         }
         Db::name('tenant_admin_role')->where('admin_id', self::ADMIN_ID)->delete();
+        Db::name('tenant_member')->where('tenant_id', 'in', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('tenant_system_menu')->where('tenant_id', 'in', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('tenant_system_role')->where('tenant_id', 'in', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('tenant_admin')->where('id', self::ADMIN_ID)->delete();
