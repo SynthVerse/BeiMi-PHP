@@ -113,6 +113,103 @@ class FinanceService
         return true;
     }
 
+    /** 外层业务事务内增加客户应收；只使用 Query Builder，不开启内层事务。 */
+    public static function addReceivableWithinTransaction(
+        int $customerId,
+        string $amount,
+        int $orderId,
+        string $orderType,
+        string $orderSn,
+        string $remark = ''
+    ): bool {
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) {
+            return false;
+        }
+        if (bccomp($amount, '0', 2) <= 0) {
+            return true;
+        }
+        $customer = Db::name('customer')->where('tenant_id', $tenantId)
+            ->where('id', $customerId)->lock(true)->find();
+        if (!$customer) {
+            return false;
+        }
+        $beforeAmount = (string)$customer['order_receivable'];
+        $afterAmount = bcadd($beforeAmount, $amount, 2);
+        $updated = Db::name('customer')->where('tenant_id', $tenantId)->where('id', $customerId)->update([
+            'order_receivable' => $afterAmount,
+            'order_money' => bcadd((string)$customer['order_money'], $amount, 2),
+            'update_time' => time(),
+        ]);
+        if ($updated === false) {
+            return false;
+        }
+        return Db::name('receivable_flow')->insert([
+            'tenant_id' => $tenantId,
+            'customer_id' => $customerId,
+            'order_id' => $orderId,
+            'order_type' => $orderType,
+            'order_sn' => $orderSn,
+            'flow_type' => ReceivableFlow::TYPE_SALES_ADD,
+            'amount' => $amount,
+            'before_amount' => $beforeAmount,
+            'after_amount' => $afterAmount,
+            'admin_id' => self::operatorId(),
+            'remark' => $remark ?: '销售应收-' . $orderSn,
+            'create_time' => time(),
+        ]) === 1;
+    }
+
+    /** 外层业务事务内减少客户应收；只使用 Query Builder，不开启内层事务。 */
+    public static function reduceReceivableWithinTransaction(
+        int $customerId,
+        string $amount,
+        int $orderId,
+        string $orderType,
+        string $orderSn,
+        int $flowType = ReceivableFlow::TYPE_PAYMENT,
+        string $remark = ''
+    ): bool {
+        $tenantId = (int)(request()->tenantId ?? 0);
+        if ($tenantId <= 0) {
+            return false;
+        }
+        if (bccomp($amount, '0', 2) <= 0) {
+            return true;
+        }
+        $customer = Db::name('customer')->where('tenant_id', $tenantId)
+            ->where('id', $customerId)->lock(true)->find();
+        if (!$customer) {
+            return false;
+        }
+        $beforeAmount = (string)$customer['order_receivable'];
+        $afterAmount = bcsub($beforeAmount, $amount, 2);
+        $update = ['order_receivable' => $afterAmount, 'update_time' => time()];
+        if ($flowType === ReceivableFlow::TYPE_RETURN_REDUCE) {
+            $update['order_money'] = bcsub((string)$customer['order_money'], $amount, 2);
+        } else {
+            $update['order_pay_money'] = bcadd((string)$customer['order_pay_money'], $amount, 2);
+        }
+        $updated = Db::name('customer')->where('tenant_id', $tenantId)->where('id', $customerId)->update($update);
+        if ($updated === false) {
+            return false;
+        }
+        return Db::name('receivable_flow')->insert([
+            'tenant_id' => $tenantId,
+            'customer_id' => $customerId,
+            'order_id' => $orderId,
+            'order_type' => $orderType,
+            'order_sn' => $orderSn,
+            'flow_type' => $flowType,
+            'amount' => $amount,
+            'before_amount' => $beforeAmount,
+            'after_amount' => $afterAmount,
+            'admin_id' => self::operatorId(),
+            'remark' => $remark ?: '应收减少-' . $orderSn,
+            'create_time' => time(),
+        ]) === 1;
+    }
+
     /**
      * 按单据回滚应收（删除/作废单据时调用）
      */
@@ -393,6 +490,12 @@ class FinanceService
         }
 
         return true;
+    }
+
+    private static function operatorId(): int
+    {
+        $userId = (int)(request()->userId ?? 0);
+        return $userId > 0 ? $userId : (int)(request()->adminId ?? 0);
     }
 
     protected static function createPayableRollbackFlow(

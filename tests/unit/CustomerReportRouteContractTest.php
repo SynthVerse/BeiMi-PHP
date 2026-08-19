@@ -212,4 +212,40 @@ final class CustomerReportRouteContractTest extends TestCase
         self::assertStringContainsString('AFTER `datetimesingle`', $bridgeMigration);
         self::assertStringNotContainsString('from_purchase_order_id', $bridgeMigration);
     }
+
+    public function test_sales_settlement_uses_query_builder_receivable_primitives_inside_its_transaction(): void
+    {
+        $root = dirname(__DIR__, 2);
+        $settlement = (string)file_get_contents($root . '/app/api/jxc/logic/SalesSettlementLogic.php');
+        $finance = (string)file_get_contents($root . '/app/api/jxc/logic/FinanceService.php');
+
+        self::assertStringContainsString('FinanceService::addReceivableWithinTransaction(', $settlement);
+        self::assertStringContainsString('FinanceService::reduceReceivableWithinTransaction(', $settlement);
+        self::assertStringNotContainsString('FinanceService::addReceivable(', $settlement);
+        self::assertStringNotContainsString('FinanceService::reduceReceivable(', $settlement);
+        foreach (['addReceivableWithinTransaction', 'reduceReceivableWithinTransaction'] as $method) {
+            $start = strpos($finance, 'public static function ' . $method . '(');
+            self::assertNotFalse($start);
+            $end = strpos($finance, "\n    public static function ", (int)$start + 1);
+            $body = substr($finance, (int)$start, $end === false ? null : $end - (int)$start);
+            self::assertStringContainsString("Db::name('customer')", $body);
+            self::assertStringContainsString("Db::name('receivable_flow')", $body);
+            self::assertStringNotContainsString('Customer::', $body);
+            self::assertStringNotContainsString('Db::transaction(', $body);
+        }
+    }
+
+    public function test_directed_sales_correction_locks_negative_sources_in_global_fifo_order_before_prioritizing_allocation(): void
+    {
+        $root = dirname(__DIR__, 2);
+        $negative = (string)file_get_contents($root . '/app/api/jxc/logic/NegativeInventoryLogic.php');
+
+        $fifoLock = strpos($negative, "->order(['occurred_time' => 'asc', 'id' => 'asc'])->lock(true)->select()->toArray();");
+        $allocationPriority = strpos($negative, 'usort($sources, static function');
+        self::assertNotFalse($fifoLock);
+        self::assertNotFalse($allocationPriority);
+        self::assertLessThan($allocationPriority, $fifoLock);
+        self::assertStringContainsString('$preferredSalesOrderId', $negative);
+        self::assertStringContainsString('$preferredReportItemId', $negative);
+    }
 }

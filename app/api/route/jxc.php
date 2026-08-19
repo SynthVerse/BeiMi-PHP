@@ -194,6 +194,13 @@ Route::group('', function () {
     Route::get('jxc/inventory/negative_todos', 'jxc.DeliveryInventory/negativeTodos');
     Route::post('jxc/inventory/negative_resolve', 'jxc.DeliveryInventory/resolveNegative');
 
+    // === 交付后的销售结算、计费重量差与不可变版本 ===
+    Route::get('jxc/sales_settlement/lists', 'jxc.SalesSettlement/lists');
+    Route::get('jxc/sales_settlement/detail', 'jxc.SalesSettlement/detail');
+    Route::post('jxc/sales_settlement/submit', 'jxc.SalesSettlement/submit');
+    Route::get('jxc/sales_settlement/weight_todos', 'jxc.SalesSettlement/weightTodos');
+    Route::post('jxc/sales_settlement/weight_resolve', 'jxc.SalesSettlement/resolveWeight');
+
     // === 固定线车班次、门店送站趟次与纸质装车清单 ===
     Route::get('jxc/line_vehicle/schedules', 'jxc.LineVehicle/schedules');
     Route::post('jxc/line_vehicle/schedule_save', 'jxc.LineVehicle/scheduleSave');

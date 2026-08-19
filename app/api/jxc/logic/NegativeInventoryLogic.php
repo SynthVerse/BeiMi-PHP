@@ -293,6 +293,36 @@ final class NegativeInventoryLogic extends BaseLogic
     }
 
     /**
+     * 实际交付重量减少时，先冲销本销售单同一来源明细的负库存，再按既有 FIFO 处理剩余量。
+     * 余额锁已经由调用方持有；来源仍按全局 FIFO 顺序加锁，排序只影响锁后的分摊优先级。
+     * @param array<string,mixed> $movement
+     */
+    public static function autoOffsetDeliveryCorrectionWithinTransaction(
+        int $warehouseId,
+        int $skuId,
+        array $movement,
+        int $salesOrderId,
+        string $salesOrderSn,
+        int $sourceLineId,
+        int $settlementActionId
+    ): void {
+        self::allocateHealedAvailabilityWithinTransaction(
+            $warehouseId,
+            $skuId,
+            $movement,
+            $salesOrderId,
+            'sales_delivery_correction',
+            $salesOrderSn,
+            ['open', 'waiting_inbound', 'retained'],
+            'sales_delivery_correction_offset',
+            '实际交付重量更正定向补平',
+            $salesOrderId,
+            $sourceLineId,
+            $settlementActionId
+        );
+    }
+
+    /**
      * @param array<string,mixed> $movement
      * @param array<int,string> $eligibleStatuses
      */
@@ -305,7 +335,10 @@ final class NegativeInventoryLogic extends BaseLogic
         string $orderSn,
         array $eligibleStatuses,
         string $actionType,
-        string $reasonPrefix
+        string $reasonPrefix,
+        int $preferredSalesOrderId = 0,
+        int $preferredReportItemId = 0,
+        int $businessActionId = 0
     ): void {
         $beforeNegative = bccomp((string)$movement['before_available_qty'], '0.0000', self::SCALE) < 0
             ? ltrim((string)$movement['before_available_qty'], '-') : '0.0000';
@@ -319,6 +352,20 @@ final class NegativeInventoryLogic extends BaseLogic
             ->where('warehouse_id', $warehouseId)->where('sku_id', $skuId)
             ->whereIn('resolution_status', $eligibleStatuses)->where('remaining_qty', '>', 0)
             ->order(['occurred_time' => 'asc', 'id' => 'asc'])->lock(true)->select()->toArray();
+        if ($preferredSalesOrderId > 0) {
+            usort($sources, static function (array $left, array $right) use ($preferredSalesOrderId, $preferredReportItemId): int {
+                $priority = static function (array $source) use ($preferredSalesOrderId, $preferredReportItemId): int {
+                    if ((int)$source['sales_order_id'] === $preferredSalesOrderId
+                        && $preferredReportItemId > 0
+                        && (int)$source['report_item_id'] === $preferredReportItemId) {
+                        return 0;
+                    }
+                    return (int)$source['sales_order_id'] === $preferredSalesOrderId ? 1 : 2;
+                };
+                return [$priority($left), (int)$left['occurred_time'], (int)$left['id']]
+                    <=> [$priority($right), (int)$right['occurred_time'], (int)$right['id']];
+            });
+        }
         $remainingHealed = $healed;
         foreach ($sources as $source) {
             if (bccomp($remainingHealed, '0.0000', self::SCALE) <= 0) {
@@ -345,6 +392,7 @@ final class NegativeInventoryLogic extends BaseLogic
             $fingerprint = hash('sha256', implode('|', [
                 $actionType, (string)$source['id'], $orderType, (string)$orderId, $orderSn,
                 (string)$movement['before_available_qty'], (string)$movement['after_available_qty'], $allocated,
+                (string)$businessActionId,
             ]));
             $reason = $reasonPrefix . '：' . $orderType . '-' . $orderSn;
             $inserted = Db::name('negative_inventory_action')->insert([

@@ -69,6 +69,45 @@ class StockService
         return false;
     }
 
+    /** 销售单实际交付重量更正入库；调用方持有销售结算事务。 */
+    public static function inboundDeliveryCorrectionWithinTransaction(
+        int $warehouseId,
+        int $goodsId,
+        int $skuId,
+        string $quantity,
+        int $salesOrderId,
+        string $salesOrderSn,
+        int $sourceLineId,
+        int $settlementActionId
+    ): array|false {
+        $movement = WarehouseSkuBalanceService::inboundWithinTransaction($warehouseId, $skuId, $quantity);
+        if ($movement === false) {
+            return false;
+        }
+        self::writeFlow([
+            'warehouse_id' => $warehouseId,
+            'goods_id' => $goodsId,
+            'sku_id' => $skuId,
+            'batch_id' => 0,
+            'order_id' => $salesOrderId,
+            'order_type' => 'sales_delivery_correction',
+            'order_sn' => $salesOrderSn,
+            'flow_type' => StockFlow::FLOW_IN,
+            'quantity' => $quantity,
+            'remark' => '销售单实际交付重量录入更正-减少实重',
+        ], $movement);
+        NegativeInventoryLogic::autoOffsetDeliveryCorrectionWithinTransaction(
+            $warehouseId,
+            $skuId,
+            $movement,
+            $salesOrderId,
+            $salesOrderSn,
+            $sourceLineId,
+            $settlementActionId
+        );
+        return $movement;
+    }
+
     /**
      * 出库操作。仓库可用量不足时拒绝，不能再写出负库存。
      */

@@ -117,11 +117,11 @@
 
 ## PIT-0004：外层业务事务中再次开启嵌套事务
 
-- 状态：已防护
+- 状态：防护中
 - 首次发生：2026-07-29
 - 最近发生：2026-08-19
-- 复发次数：4
-- 适用范围：`CustomerReportLogic`、`FulfillmentChangeLogic`、`DeliveryInventoryLogic`、`DeliveryVariantLogic`、`LineVehicleLogic`、`NegativeInventoryLogic` 等已开启业务事务后调用仓库余额原语或写入幂等事实的路径
+- 复发次数：5
+- 适用范围：`CustomerReportLogic`、`FulfillmentChangeLogic`、`DeliveryInventoryLogic`、`DeliveryVariantLogic`、`LineVehicleLogic`、`NegativeInventoryLogic`、`SalesSettlementLogic`、`FinanceService` 等已开启业务事务后调用库存、财务原语或写入幂等事实的路径
 - 相关问题：PIT-0022
 
 ### 触发场景
@@ -148,6 +148,8 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 - 2026-08-18 扩展：`FulfillmentChangeLogic` 对不存在的履约变更幂等键只做普通查询，依靠 `(tenant_id,idempotency_key)` 唯一键解决竞态；减量和未交货事务统一只对 MySQL `1213`/`1205` 做最多三次有界重试。`CustomerReportRouteContractTest::test_fulfillment_change_idempotency_never_locks_an_absent_key_and_retries_deadlocks()` 固定这一结构契约，并要求作废控制按 `item_change_id` 精确关联幂等事实；`FulfillmentWorkflowTest::test_concurrent_reduction_with_one_idempotency_key_applies_inventory_once()` 用两个 PHP 进程证明同一减量请求只生成一条变更事实且库存只释放一次。
 - 2026-08-19 扩展：交付确认和负库存处理都先普通查询幂等键，交付明细按 `(sku_id, goods_id, warehouse_id, id)` 排序；负库存处理按 SKU、商品、仓库、余额、来源归因的统一顺序取锁，锁后复查幂等事实。余额缺行时只用 Query Builder 插入，事务拥有者只对 MySQL `1213`/`1205` 最多重试三次；事务结束后由 `replayAfterConcurrentCommit()` 按请求指纹读取已提交事实。`FulfillmentWorkflowTest::test_concurrent_same_delivery_key_returns_one_event_and_one_inventory_side_effect()`、`test_two_reports_can_concurrently_create_one_missing_sku_balance_in_canonical_order()`、`test_concurrent_same_negative_resolution_key_appends_one_action()` 与 `test_concurrent_regular_inbound_and_negative_resolution_share_one_lock_order()` 使用真实 PHP 进程固定一次交付只出库一次、无余额并发建账、一次负库存处理只追加一个动作以及普通入库/人工处理共享锁序；`CustomerReportRouteContractTest::test_delivery_and_negative_actions_use_canonical_locks_then_replay_the_committed_idempotent_fact()` 固定结构边界。
 - 2026-08-19 Ticket #10 扩展：变体交付与改派返回门店在取得稳定业务锁后仍只普通查询幂等事实，唯一键竞争异常统一在事务结束后按指纹重放；多商品变体交付按 `(sku_id, goods_id, warehouse_id, id)` 获取库存锁。新建趟次改为先锁报货单再普通查询活动分配，不再锁不存在的活动行间隙。`CustomerReportRouteContractTest::test_delivery_variant_and_return_actions_do_not_lock_absent_idempotency_keys()` 固定这些结构边界，双进程交付与改派竞态行为测试固定真实结果。
+- 2026-08-19 Ticket #11 扩展：销售结算事务改用 `FinanceService::addReceivableWithinTransaction()` / `reduceReceivableWithinTransaction()`，两个原语只以 Query Builder 锁定并更新客户、追加应收流水，不开启内层事务或调用 ORM 模型。`CustomerReportRouteContractTest::test_sales_settlement_uses_query_builder_receivable_primitives_inside_its_transaction()` 固定结算入口不得退回普通财务方法，并检查同事务原语不含 `Customer::` 或 `Db::transaction()`。
+- 2026-08-19 Ticket #11 锁序扩展：实际交付重量减少时仍先持有余额锁，再按 `(occurred_time,id)` 全局 FIFO 对全部负库存来源执行 `FOR UPDATE`；本单／本行优先级只能在来源全部锁定后于内存排序。`CustomerReportRouteContractTest::test_directed_sales_correction_locks_negative_sources_in_global_fifo_order_before_prioritizing_allocation()` 固定这一顺序，避免定向冲销把优先级下推到 SQL 后与普通入库形成反向锁序。
 - 架构防线：`WarehouseGoodsBalanceService` 明确提供 `reserveWithinTransaction()`、`reserveUpToWithinTransaction()`、`releaseWithinTransaction()` 与 `consumeReservedWithinTransaction()`；`CustomerReportLogic` 在外层事务内只调用这些入口，并以 Query Builder 写入主表、明细和预留记录。`CustomerReportPreferenceService::remember()` 用唯一键原子 upsert 保存建议数据，不加间隙锁。`transactionWithRetry()` 统一包裹提交外的编辑、补预留、取消与转换销售事务；明细按 `(goods_id, warehouse_id)` 排序后才触发库存原语。
 - 决策与知识：本记录及 `docs/adr/0001-客户报货库存边界.md`。
 
@@ -160,6 +162,7 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 | 2026-08-18 | BeiMi-PHP #7 履约工票闭环 | 履约减量与未交货事务再次对尚不存在的幂等键执行 `FOR UPDATE`，并缺少 `1213`/`1205` 有界重试 | 原防线只约束 `CustomerReportLogic` 的提交、编辑、补预留、取消和转销售路径，未把新增的追加式履约变更入口纳入静态结构契约。 |
 | 2026-08-19 | BeiMi-PHP #8 自配送交付与真负库存 | 同交付键/同处理键竞争会读到旧快照；无余额交付重新使用 ORM `create()`；人工核销与普通入库形成来源→余额/余额→来源反向锁序 | 原防线已覆盖报货与履约减量，但没有把新增交付、负库存处理、余额缺行和普通入库交叉流程纳入统一结构与双进程防线，也没有要求成功返回必须来自事务后可见的追加事实。 |
 | 2026-08-19 | BeiMi-PHP #10 第三方与部分交付 | 变体交付和返回门店在稳定业务锁后重新对缺失幂等键执行 `FOR UPDATE`，返回门店唯一键竞争异常也没有事务后重放 | #8 防线只覆盖旧 `DeliveryInventoryLogic` 和负库存入口，新增写入口没有自动继承“缺失键普通查询 + 唯一键兜底 + 事务后重放”的结构契约。 |
+| 2026-08-19 | BeiMi-PHP #11 销售结算与版本快照 | 结算外层事务直接调用使用 ORM 锁定/更新客户的普通应收方法 | 原结构契约只枚举报货、履约、交付和负库存事务入口，没有要求新增结算模块必须使用显式 `*WithinTransaction` 财务原语。 |
 
 ## PIT-0005：迁移静态探针替换前缀但真实执行器保留占位符
 
@@ -946,3 +949,96 @@ PHP `trim($value, $characterMask)` 的第二参数按字节集合处理，不理
 | 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
 |---|---|---|---|
 | 2026-08-19 | BeiMi-PHP#10 | 同一自配送交付键由两个进程并发确认 | PIT-0004 已约束锁序、事务后重放和请求指纹比对，但没有约束指纹只能包含可稳定重放的客户端事实。 |
+
+## PIT-0024：待审批版本草案覆盖当前权威销售单
+
+- 状态：防护中
+- 首次发生：2026-08-19
+- 最近发生：2026-08-19
+- 复发次数：0
+- 适用范围：销售结算 V1/V2、计费重量差待办、版本审批与拒绝恢复
+- 相关问题：无
+
+### 触发场景
+
+已经形成正式 V1 的销售单提交 V2 更正。V2 包含非零计费重量差，需要最高权限审批；
+服务端正确返回 `pending_weight_review`，但审批前的商品重量、金额和应收投影已经被
+V2 草案覆盖。此时客户看到的当前详情不再是已批准的 V1，拒绝草案也无法可靠证明
+权威版本从未被污染。
+
+### 根因
+
+待审批提案与已批准版本共用了同一组可变 `sales_order` / `sales_order_goods` 投影。
+提交层先调用正式版本使用的 `applyDraft()`，再把动作标为待审批；状态字段虽然是
+pending，权威明细和金额却已经发生了副作用。代码缺少“草案只保存于追加式动作快照，
+批准后才应用到权威投影”的事务边界。
+
+### 错误做法
+
+先覆盖当前销售单投影，再依靠 `settlement_status=pending_weight_review` 表示尚未批准；
+或者拒绝时再尝试从历史版本反向恢复。前者让未批准事实进入打印、分享、金额和应收
+读取路径，后者增加恢复遗漏和并发覆盖风险。
+
+### 正确做法
+
+已有正式版本时，待审批 V2 只能把规范化明细、抹零、偏好、版本基线和原因保存到
+`sales_settlement_action` 的不可变提案快照。当前 `sales_order`、
+`sales_order_goods`、应收及债务快照在批准前保持 V1 不变；最高权限批准时在同一事务
+中校验乐观版本并一次性应用提案，拒绝只关闭提案，不写回权威订单。首次 V1 尚无正式
+版本时可以使用 `pending` 投影表达待审批，并在拒绝后恢复为未结算状态。
+
+### 防线
+
+- 自动化防线：`tests/unit/SalesSettlementWorkflowTest.php::test_pending_v2_weight_proposal_never_overwrites_authoritative_v1_and_reject_restores_it()` 先形成 V1，再提交需审批的 V2，断言待审批详情仍展示 V1、草案仅从 `pending_proposal` 读取、拒绝后 V1 明细与金额不变。
+- 架构防线：`SalesSettlementLogic` 对已有正式版本的待审批分支只写追加式 action/todo；正式投影统一在批准或无需审批的正式化路径中应用，V2 拒绝路径不更新 `sales_order.update_time`。
+- 决策与知识：`E:\object\BeiMi\CONTEXT.md` 中“待确认销售结算”“销售单编辑”“销售结算幂等”和“销售单版本冲突”的冻结定义。
+- 当前验证证据：回归测试在修复前稳定暴露 V1 明细被 V2 覆盖和拒绝动作改写 V1 `update_time`；修复后 `SalesSettlementWorkflowTest` 20 个测试、204 条断言通过，Standards/Spec 双轴最终复审均无 P0-P2。
+
+### 发生记录
+
+| 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-08-19 | BeiMi-PHP#11 | 正式 V1 提交带计费重量差的 V2 草案 | 首版结算测试覆盖待审批 V1 和正式版本幂等，但未覆盖已有正式版本上的待审批更正是否保持权威投影不变。 |
+
+## PIT-0025：派生幂等键遗漏独立业务动作身份
+
+- 状态：防护中
+- 首次发生：2026-08-19
+- 最近发生：2026-08-19
+- 复发次数：0
+- 适用范围：负库存自动核销、库存更正及其他由业务事实派生内部幂等键的追加动作
+- 相关问题：PIT-0004、PIT-0023
+
+### 触发场景
+
+同一销售单对同一负库存来源先减少实际交付重量、再加回、随后再次减少到相同重量。
+两次合法减少会产生相同的余额前后值和分摊数量，但分别属于不同的销售结算动作。
+
+### 根因
+
+自动核销动作键只包含来源、订单、余额前后值和分摊数量，没有包含本次结算动作身份。
+业务状态往返后，两个独立事实可以拥有完全相同的数值快照，第二个事实因此撞上第一个
+事实的唯一键并回滚整次结算。稳定的状态字段不能代替业务动作身份。
+
+### 错误做法
+
+仅以“来源 ID + 订单 + before/after + 数量”派生内部幂等键，并假设同一状态变化不会在
+后续合法业务动作中再次出现。
+
+### 正确做法
+
+内部派生幂等键必须同时包含调用链上已持久化、稳定且唯一的业务事实身份，例如
+`settlement_action_id`；状态快照继续用于识别该事实的副作用内容，但不能单独充当事实身份。
+
+### 防线
+
+- 自动化防线：`SalesSettlementWorkflowTest::test_repeated_decrease_increase_decrease_uses_each_settlement_action_as_a_distinct_offset_fact()` 通过“减→加→减”回到相同余额前后值，断言两次核销动作均追加成功且结算推进到 V4。
+- 架构防线：`settlement_action_id` 从 `SalesSettlementLogic` 经 `StockService` 传入 `NegativeInventoryLogic`，并进入 `sales_delivery_correction_offset` 的派生指纹；唯一约束仍以租户和派生动作键防止同一事实重复。
+- 决策与知识：本记录、PIT-0004 与 PIT-0023；服务端生成时间不得进入请求指纹，独立业务动作身份也不得从内部派生键中遗漏。
+- 验证结果：修复前目标测试稳定触发 `uk_tenant_negative_action_idempotency` 重复键并回滚；修复后 PHP #11 全部 20 个测试、204 条断言通过，Standards/Spec 双轴最终复审均无 P0-P2。
+
+### 发生记录
+
+| 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-08-19 | BeiMi-PHP#11 | 同一来源两次合法减少实重产生相同余额差量 | 既有 PIT-0023 只禁止不稳定的服务端时间进入请求指纹，没有要求内部派生键必须包含独立业务动作身份。 |
