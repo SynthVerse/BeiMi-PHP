@@ -896,14 +896,103 @@ final class FulfillmentWorkflowTest extends TestCase
         self::assertNotFalse($delivered, DeliveryInventoryLogic::getError());
         Db::name('fulfillment_task')->where('id', (int)$bookkeeping['id'])->update(['status' => 'ready_to_bill']);
 
-        self::assertFalse(FulfillmentTaskLogic::bill(['id' => (int)$bookkeeping['id']]));
-        self::assertSame('交付已经完成出库，请在后续销售结算中正式确认，不能再次扣减库存', FulfillmentTaskLogic::getError());
+        $bill = FulfillmentTaskLogic::bill(['id' => (int)$bookkeeping['id']]);
+        self::assertNotFalse($bill, FulfillmentTaskLogic::getError());
         self::assertSame('partially_delivered_pending', (string)Db::name('customer_report')->where('id', (int)$report['id'])->value('status'));
         self::assertSame(1, Db::name('order_goods')->where('source_line_type', 'customer_report_item')
             ->whereIn('source_line_id', [(int)$deliveredItem['id'], (int)$undeliveredItem['id']])->count());
         self::assertSame(1, Db::name('order_goods')->where('source_line_id', (int)$deliveredItem['id'])->count());
         self::assertSame(0, Db::name('order_goods')->where('source_line_id', (int)$undeliveredItem['id'])->count());
         self::assertSame('undelivered', (string)Db::name('customer_report_item')->where('id', (int)$undeliveredItem['id'])->value('fulfillment_status'));
+        self::assertSame(1, count($bill['settlement_orders']));
+        self::assertSame('pending', (string)$bill['settlement_orders'][0]['settlement_status']);
+        self::assertSame('completed', (string)$bill['task']['status']);
+        self::assertSame(0, Db::name('receivable_flow')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
+    public function test_bill_retries_one_recoverable_task_lock_timeout_without_duplicate_side_effects(): void
+    {
+        $fixture = $this->selfDeliveryFixture('bill-lock-retry', '1.00', '1.00');
+        self::assertNotFalse(DeliveryInventoryLogic::confirmSelfDelivery([
+            'task_id' => $fixture['delivery_task_id'], 'event_type' => 'customer_handoff',
+            'idempotency_key' => 'bill-lock-retry-handoff',
+        ]), DeliveryInventoryLogic::getError());
+        $bookkeeping = Db::name('fulfillment_task')->where('report_id', $fixture['report_id'])
+            ->whereLike('source_key', '%:bookkeeping')->find();
+        Db::name('fulfillment_task')->where('id', (int)$bookkeeping['id'])->update(['status' => 'ready_to_bill']);
+
+        $readyPath = tempnam(sys_get_temp_dir(), 'fulfillment-bill-lock-ready-');
+        $stdoutPath = tempnam(sys_get_temp_dir(), 'fulfillment-bill-lock-stdout-');
+        $stderrPath = tempnam(sys_get_temp_dir(), 'fulfillment-bill-lock-stderr-');
+        unlink($readyPath);
+        $command = escapeshellarg(PHP_BINARY) . ' '
+            . escapeshellarg(dirname(__DIR__) . '/fixtures/fulfillment_bill_lock_worker.php') . ' '
+            . escapeshellarg((string)$bookkeeping['id']) . ' ' . escapeshellarg($readyPath) . ' 1800000';
+        $process = proc_open($command, [
+            1 => ['file', $stdoutPath, 'w'],
+            2 => ['file', $stderrPath, 'w'],
+        ], $pipes);
+        $workerTimedOut = false;
+        $workerExit = -1;
+        $workerStatus = null;
+        $workerStdout = '';
+        $workerStderr = '';
+        $configuredLockTimeout = 0;
+        $billElapsed = 0.0;
+        $bill = false;
+        try {
+            self::assertIsResource($process);
+            for ($attempt = 0; $attempt < 200 && !is_file($readyPath); $attempt++) {
+                usleep(10_000);
+            }
+            self::assertFileExists($readyPath, '锁持有进程未准备完成');
+            $lockAcquiredAt = (float)trim((string)file_get_contents($readyPath));
+            Db::execute('SET SESSION innodb_lock_wait_timeout = 1');
+            $configuredLockTimeout = (int)(Db::query('SELECT @@SESSION.innodb_lock_wait_timeout AS timeout')[0]['timeout'] ?? 0);
+            $billStartedAt = microtime(true);
+            self::assertLessThan(0.5, $billStartedAt - $lockAcquiredAt, '主进程必须在线程锁剩余时间大于 1 秒时进入 bill');
+            $bill = FulfillmentTaskLogic::bill(['id' => (int)$bookkeeping['id']]);
+            $billElapsed = microtime(true) - $billStartedAt;
+        } finally {
+            Db::execute('SET SESSION innodb_lock_wait_timeout = DEFAULT');
+            if (is_resource($process)) {
+                $deadline = microtime(true) + 5;
+                do {
+                    $workerStatus = proc_get_status($process);
+                    if (!$workerStatus['running']) {
+                        break;
+                    }
+                    usleep(10_000);
+                } while (microtime(true) < $deadline);
+                if ($workerStatus['running']) {
+                    $workerTimedOut = true;
+                    proc_terminate($process);
+                }
+                if (!$workerStatus['running']) {
+                    $closed = proc_close($process);
+                    $workerExit = $closed >= 0 ? $closed : (int)($workerStatus['exitcode'] ?? -1);
+                }
+            }
+            $workerStdout = is_file($stdoutPath) ? (string)file_get_contents($stdoutPath) : '';
+            $workerStderr = is_file($stderrPath) ? (string)file_get_contents($stderrPath) : '';
+            foreach ([$readyPath, $stdoutPath, $stderrPath] as $path) {
+                if (is_file($path)) {
+                    unlink($path);
+                }
+            }
+        }
+
+        $diagnostic = 'worker exit=' . $workerExit . ', timed_out=' . ($workerTimedOut ? 'yes' : 'no')
+            . ', stdout=' . $workerStdout . ', stderr=' . $workerStderr;
+        self::assertFalse($workerTimedOut, $diagnostic);
+        self::assertSame(0, $workerExit, $diagnostic);
+        self::assertSame(1, $configuredLockTimeout);
+        self::assertGreaterThan(1.0, $billElapsed, 'bill 必须跨过首次 1 秒锁等待超时后成功');
+        self::assertNotFalse($bill, FulfillmentTaskLogic::getError());
+        self::assertSame('completed', (string)$bill['task']['status']);
+        self::assertSame(1, count($bill['settlement_orders']));
+        self::assertSame(1, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)
+            ->where('order_type', 'sales_delivery')->count());
         self::assertSame(0, Db::name('receivable_flow')->where('tenant_id', self::TENANT_ID)->count());
     }
 
@@ -1180,8 +1269,8 @@ final class FulfillmentWorkflowTest extends TestCase
         ]), DeliveryInventoryLogic::getError());
         Db::name('fulfillment_task')->where('id', (int)$bookkeeping['id'])->update(['status' => 'ready_to_bill']);
 
-        self::assertFalse(FulfillmentTaskLogic::bill(['id' => (int)$bookkeeping['id']]));
-        self::assertSame('交付已经完成出库，请在后续销售结算中正式确认，不能再次扣减库存', FulfillmentTaskLogic::getError());
+        $bill = FulfillmentTaskLogic::bill(['id' => (int)$bookkeeping['id']]);
+        self::assertNotFalse($bill, FulfillmentTaskLogic::getError());
         $line = Db::name('customer_report_item')->where('id', (int)$report['items'][0]['id'])->find();
         $orderGoods = Db::name('order_goods')->where('source_line_type', 'customer_report_item')
             ->where('source_line_id', (int)$line['id'])->find();
@@ -1192,6 +1281,30 @@ final class FulfillmentWorkflowTest extends TestCase
         self::assertSame((string)$sku['sku_name'], (string)$salesDetail['goods'][0]['sku_name']);
         self::assertSame('pending', (string)$salesDetail['settlement_status']);
         self::assertSame('0.00', (string)$salesDetail['order_money']);
+        self::assertSame((int)$orderGoods['order_id'], (int)$bill['settlement_orders'][0]['id']);
+        self::assertSame('pending', (string)$bill['settlement_orders'][0]['settlement_status']);
+        self::assertSame('completed', (string)$bill['task']['status']);
+        self::assertSame('completed', (string)Db::name('fulfillment_task_group')
+            ->where('id', (int)$bookkeeping['group_id'])->value('status'));
+        $replayedBill = FulfillmentTaskLogic::bill(['id' => (int)$bookkeeping['id']]);
+        self::assertNotFalse($replayedBill, FulfillmentTaskLogic::getError());
+        self::assertSame((int)$bill['settlement_orders'][0]['id'], (int)$replayedBill['settlement_orders'][0]['id']);
+        Db::name('sales_order')->where('id', (int)$orderGoods['order_id'])->update([
+            'settlement_status' => 'pending_weight_review',
+        ]);
+        $reviewReplay = FulfillmentTaskLogic::bill(['id' => (int)$bookkeeping['id']]);
+        self::assertNotFalse($reviewReplay, FulfillmentTaskLogic::getError());
+        self::assertSame((int)$orderGoods['order_id'], (int)$reviewReplay['settlement_orders'][0]['id']);
+        self::assertSame('pending_weight_review', (string)$reviewReplay['settlement_orders'][0]['settlement_status']);
+        Db::name('sales_order')->where('id', (int)$orderGoods['order_id'])->update([
+            'settlement_status' => 'formal', 'settlement_version' => 1,
+        ]);
+        $formalReplay = FulfillmentTaskLogic::bill(['id' => (int)$bookkeeping['id']]);
+        self::assertNotFalse($formalReplay, FulfillmentTaskLogic::getError());
+        self::assertSame((int)$orderGoods['order_id'], (int)$formalReplay['settlement_orders'][0]['id']);
+        self::assertSame('formal', (string)$formalReplay['settlement_orders'][0]['settlement_status']);
+        self::assertSame(1, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)
+            ->where('order_type', 'sales_delivery')->count());
         self::assertSame(0, Db::name('receivable_flow')->where('tenant_id', self::TENANT_ID)->count());
     }
 

@@ -547,29 +547,56 @@ final class FulfillmentTaskLogic extends BaseLogic
             return false;
         }
         $id = (int)($params['id'] ?? 0);
-        $task = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', $id)->find();
-        if (!$task || !str_ends_with((string)$task['source_key'], ':bookkeeping') || (string)$task['status'] !== 'ready_to_bill') {
+        $locator = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', $id)->find();
+        if (!$locator || !str_ends_with((string)$locator['source_key'], ':bookkeeping')) {
             self::setError('只有已回收的记账工票可以确认开单');
             return false;
         }
-        $report = Db::name('customer_report')->where('tenant_id', self::tenantId())->where('id', (int)$task['report_id'])->find();
-        if (!$report) {
-            self::setError('关联报货单不存在');
+        $reportId = (int)$locator['report_id'];
+        try {
+            return self::transactionWithRetry(static function () use ($id, $reportId) {
+                $report = Db::name('customer_report')->where('tenant_id', self::tenantId())
+                    ->where('id', $reportId)->lock(true)->find();
+                if (!$report) {
+                    self::setError('关联报货单不存在');
+                    return false;
+                }
+                $task = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())
+                    ->where('id', $id)->lock(true)->find();
+                if (!$task || !str_ends_with((string)$task['source_key'], ':bookkeeping')
+                    || (int)$task['report_id'] !== $reportId
+                    || !in_array((string)$task['status'], ['ready_to_bill', 'completed'], true)) {
+                    self::setError('只有已回收的记账工票可以确认开单');
+                    return false;
+                }
+                if (self::hasUnaccountedPaperForReport((int)$report['id'])) {
+                    self::setError('仍有未回收或未完成作废控制的纸质工票，不能结算');
+                    return false;
+                }
+                $orders = Db::name('sales_order')->where('tenant_id', self::tenantId())
+                    ->where('source_type', 'customer_report')->where('source_id', (int)$report['id'])
+                    ->whereIn('settlement_status', ['pending', 'pending_weight_review', 'formal'])
+                    ->field('id,order_sn,warehouse_id,settlement_status,settlement_version,order_money')
+                    ->order('id')->select()->toArray();
+                if ($orders === []) {
+                    self::setError('真实交付尚未形成待结算销售单，不能确认开单');
+                    return false;
+                }
+                if ((string)$task['status'] === 'ready_to_bill') {
+                    $now = time();
+                    if (Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', $id)
+                        ->update(['status' => 'completed', 'update_time' => $now]) === false
+                        || Db::name('fulfillment_task_group')->where('tenant_id', self::tenantId())
+                            ->where('id', (int)$task['group_id'])->update(['status' => 'completed', 'update_time' => $now]) === false) {
+                        throw new \RuntimeException('fulfillment_bill_completion_failed');
+                    }
+                }
+                return ['task' => self::taskById($id), 'report' => $report, 'settlement_orders' => $orders];
+            });
+        } catch (\Throwable) {
+            self::setError('确认开单失败，任务状态未改变');
             return false;
         }
-        if (self::hasUnaccountedPaperForReport((int)$report['id'])) {
-            self::setError('仍有未回收或未完成作废控制的纸质工票，不能结算');
-            return false;
-        }
-        $result = CustomerReportLogic::convert(['id' => (int)$report['id'], 'version' => (int)$report['version']]);
-        if ($result === false) {
-            self::setError(CustomerReportLogic::getError());
-            return false;
-        }
-        $now = time();
-        Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', $id)->update(['status' => 'completed', 'update_time' => $now]);
-        Db::name('fulfillment_task_group')->where('tenant_id', self::tenantId())->where('id', (int)$task['group_id'])->update(['status' => 'completed', 'update_time' => $now]);
-        return ['task' => self::taskById($id), 'report' => $result];
     }
 
     /** @return array<int,array{final_actual_weight:string,actual_weight:string,actual_price:string,task_id:int}> */
@@ -1369,6 +1396,24 @@ final class FulfillmentTaskLogic extends BaseLogic
             'unrecognized_remark' => ['label' => '确认工序', 'type' => 'resolve_process'],
             default => ['label' => '去处理', 'type' => 'open_task'],
         };
+    }
+
+    private static function transactionWithRetry(callable $operation): mixed
+    {
+        for ($attempt = 1; $attempt <= 3; $attempt++) {
+            try {
+                return Db::transaction($operation);
+            } catch (\Throwable $exception) {
+                $retryable = in_array((int)$exception->getCode(), [1205, 1213], true)
+                    || str_contains($exception->getMessage(), '1205')
+                    || str_contains($exception->getMessage(), '1213');
+                if (!$retryable || $attempt === 3) {
+                    throw $exception;
+                }
+                usleep(50_000 * $attempt);
+            }
+        }
+        throw new \RuntimeException('fulfillment_transaction_retry_exhausted');
     }
 
     private static function money(string $value): string|false

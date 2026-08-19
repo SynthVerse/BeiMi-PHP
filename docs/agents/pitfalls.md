@@ -117,11 +117,11 @@
 
 ## PIT-0004：外层业务事务中再次开启嵌套事务
 
-- 状态：防护中
+- 状态：已防护
 - 首次发生：2026-07-29
 - 最近发生：2026-08-19
-- 复发次数：5
-- 适用范围：`CustomerReportLogic`、`FulfillmentChangeLogic`、`DeliveryInventoryLogic`、`DeliveryVariantLogic`、`LineVehicleLogic`、`NegativeInventoryLogic`、`SalesSettlementLogic`、`FinanceService` 等已开启业务事务后调用库存、财务原语或写入幂等事实的路径
+- 复发次数：6
+- 适用范围：`CustomerReportLogic`、`FulfillmentChangeLogic`、`FulfillmentTaskLogic`、`DeliveryInventoryLogic`、`DeliveryVariantLogic`、`LineVehicleLogic`、`NegativeInventoryLogic`、`SalesSettlementLogic`、`FinanceService` 等已开启业务事务后调用库存、财务原语或写入幂等事实的路径
 - 相关问题：PIT-0022
 
 ### 触发场景
@@ -150,6 +150,7 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 - 2026-08-19 Ticket #10 扩展：变体交付与改派返回门店在取得稳定业务锁后仍只普通查询幂等事实，唯一键竞争异常统一在事务结束后按指纹重放；多商品变体交付按 `(sku_id, goods_id, warehouse_id, id)` 获取库存锁。新建趟次改为先锁报货单再普通查询活动分配，不再锁不存在的活动行间隙。`CustomerReportRouteContractTest::test_delivery_variant_and_return_actions_do_not_lock_absent_idempotency_keys()` 固定这些结构边界，双进程交付与改派竞态行为测试固定真实结果。
 - 2026-08-19 Ticket #11 扩展：销售结算事务改用 `FinanceService::addReceivableWithinTransaction()` / `reduceReceivableWithinTransaction()`，两个原语只以 Query Builder 锁定并更新客户、追加应收流水，不开启内层事务或调用 ORM 模型。`CustomerReportRouteContractTest::test_sales_settlement_uses_query_builder_receivable_primitives_inside_its_transaction()` 固定结算入口不得退回普通财务方法，并检查同事务原语不含 `Customer::` 或 `Db::transaction()`。
 - 2026-08-19 Ticket #11 锁序扩展：实际交付重量减少时仍先持有余额锁，再按 `(occurred_time,id)` 全局 FIFO 对全部负库存来源执行 `FOR UPDATE`；本单／本行优先级只能在来源全部锁定后于内存排序。`CustomerReportRouteContractTest::test_directed_sales_correction_locks_negative_sources_in_global_fifo_order_before_prioritizing_allocation()` 固定这一顺序，避免定向冲销把优先级下推到 SQL 后与普通入库形成反向锁序。
+- 2026-08-19 BeiMi-PHP #11 接线扩展：`FulfillmentTaskLogic::bill()` 保持 report→bookkeeping task 锁序，并只对 MySQL `1213`/`1205` 最多重试三次。`FulfillmentWorkflowTest::test_bill_retries_one_recoverable_task_lock_timeout_without_duplicate_side_effects()` 用第二连接持有记账任务锁 1.8 秒，断言主连接以 1 秒锁等待上限、在剩余持锁时间大于 1 秒时进入并跨过首次超时后成功；worker 设有有界终止和临时文件清理。
 - 架构防线：`WarehouseGoodsBalanceService` 明确提供 `reserveWithinTransaction()`、`reserveUpToWithinTransaction()`、`releaseWithinTransaction()` 与 `consumeReservedWithinTransaction()`；`CustomerReportLogic` 在外层事务内只调用这些入口，并以 Query Builder 写入主表、明细和预留记录。`CustomerReportPreferenceService::remember()` 用唯一键原子 upsert 保存建议数据，不加间隙锁。`transactionWithRetry()` 统一包裹提交外的编辑、补预留、取消与转换销售事务；明细按 `(goods_id, warehouse_id)` 排序后才触发库存原语。
 - 决策与知识：本记录及 `docs/adr/0001-客户报货库存边界.md`。
 
@@ -163,6 +164,7 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 | 2026-08-19 | BeiMi-PHP #8 自配送交付与真负库存 | 同交付键/同处理键竞争会读到旧快照；无余额交付重新使用 ORM `create()`；人工核销与普通入库形成来源→余额/余额→来源反向锁序 | 原防线已覆盖报货与履约减量，但没有把新增交付、负库存处理、余额缺行和普通入库交叉流程纳入统一结构与双进程防线，也没有要求成功返回必须来自事务后可见的追加事实。 |
 | 2026-08-19 | BeiMi-PHP #10 第三方与部分交付 | 变体交付和返回门店在稳定业务锁后重新对缺失幂等键执行 `FOR UPDATE`，返回门店唯一键竞争异常也没有事务后重放 | #8 防线只覆盖旧 `DeliveryInventoryLogic` 和负库存入口，新增写入口没有自动继承“缺失键普通查询 + 唯一键兜底 + 事务后重放”的结构契约。 |
 | 2026-08-19 | BeiMi-PHP #11 销售结算与版本快照 | 结算外层事务直接调用使用 ORM 锁定/更新客户的普通应收方法 | 原结构契约只枚举报货、履约、交付和负库存事务入口，没有要求新增结算模块必须使用显式 `*WithinTransaction` 财务原语。 |
+| 2026-08-19 | BeiMi-PHP #11 → BeiMi-ERP #11 接口接线 | 记账完成新增 report→task 写事务，但首次实现遇到 `1213`/`1205` 直接失败 | 原防线覆盖了交付、结算与财务写入口，却没有把新迁移职责后的 `FulfillmentTaskLogic::bill()` 纳入有界重试结构与可恢复锁等待行为测试。 |
 
 ## PIT-0005：迁移静态探针替换前缀但真实执行器保留占位符
 
@@ -1042,3 +1044,50 @@ pending，权威明细和金额却已经发生了副作用。代码缺少“草�
 | 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
 |---|---|---|---|
 | 2026-08-19 | BeiMi-PHP#11 | 同一来源两次合法减少实重产生相同余额差量 | 既有 PIT-0023 只禁止不稳定的服务端时间进入请求指纹，没有要求内部派生键必须包含独立业务动作身份。 |
+
+## PIT-0026：交付完成入口继续调用旧转销售链路
+
+- 状态：防护中
+- 首次发生：2026-08-19
+- 最近发生：2026-08-19
+- 复发次数：0
+- 适用范围：真实交付后的记账工票完成、待结算销售单身份与销售结算入口
+- 相关问题：PIT-0004
+
+### 触发场景
+
+真实交付已经按实际交付重量出库并创建 pending 销售单身份，记账工票随后进入
+`ready_to_bill`。用户点击“确认开单”时，服务端却返回“交付已经完成出库，请在后续
+销售结算中正式确认”，前端无法取得进入结算页所需的销售单 ID。
+
+### 根因
+
+交付模块接管“真实交付即出库并建立待结算身份”后，记账工票的完成入口仍调用旧
+`CustomerReportLogic::convert()`。旧入口的职责是从报货单创建并出库销售单，它正确
+拒绝已存在的 pending 身份；调用方却没有随领域职责迁移为“返回已存在身份”。原测试
+把这条拒绝当成预期结果，因而保护了断链而不是保护主业务闭环。
+
+### 错误做法
+
+在交付后再次调用“报货转销售”入口，或把“旧入口正确拒绝二次出库”当作记账完成的
+成功语义。
+
+### 正确做法
+
+记账完成必须锁定报货单和记账任务，读取交付事务已经创建的同租户 pending／pending_weight_review／formal
+销售单身份，完成履约任务并返回 `settlement_orders`；响应丢失后的 completed 状态重放
+仍返回同一身份。该入口不得再次扣库存、增加应收或创建平行销售单。
+
+### 防线
+
+- 自动化防线：`FulfillmentWorkflowTest::test_customer_report_delivery_creates_pending_order_without_running_sales_settlement()` 覆盖真实交付、记账完成和丢响应重放，断言返回同一 pending order、交付出库流水仍只有一条且应收仍为零。
+- 边界防线：`test_mixed_delivered_and_undelivered_items_only_outbound_and_stage_the_delivered_lines()` 断言混合未交货只返回包含实际交付行的待结算身份。
+- 架构防线：`FulfillmentTaskLogic::bill()` 按 report→task 稳定顺序加锁，只读取 `source_type=customer_report` 的既有销售单，不调用旧 `convert()`。
+- 决策与知识：根目录 `CONTEXT.md` 中“交付出库”“待确认销售结算”和“赶线后补结算”的冻结定义。
+- 当前验证证据：修复前两条公开行为测试稳定返回旧转换拒绝；修复后 `FulfillmentWorkflowTest` 58 个测试、868 条断言，`SalesSettlementWorkflowTest` 20 个测试、204 条断言，`CustomerReportRouteContractTest` 9 个测试、137 条断言通过，Standards/Spec 双轴最终均无 P0-P3。Codegraph 无 pending，但仍搜索不到本次新增重试方法与既有 `SalesSettlementLogic`，因此本 PIT 保持“防护中”。
+
+### 发生记录
+
+| 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-08-19 | BeiMi-PHP#11 → BeiMi-ERP#11 接口接线 | 任务看板确认开单无法取得待结算销售单 ID | PHP #8 测试只验证交付创建 pending 身份和防止二次出库，却把后续 bill 拒绝固化为预期，没有断言主链路能继续进入销售结算。 |
