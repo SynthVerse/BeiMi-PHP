@@ -203,6 +203,71 @@ class StockService
         return $movement;
     }
 
+    /** 运输损耗专用出库；库存减少但不得计入客户销售数量。 */
+    public static function outboundTransportLossWithinTransaction(
+        int $warehouseId,
+        int $goodsId,
+        int $skuId,
+        string $lossQuantity,
+        string $reservationQuantity,
+        int $deliveryEventId
+    ): array|false {
+        $movement = WarehouseSkuBalanceService::deliverAttributedWithinTransaction(
+            $warehouseId,
+            $skuId,
+            $lossQuantity,
+            $reservationQuantity
+        );
+        if ($movement === false) {
+            return false;
+        }
+        self::writeFlow([
+            'warehouse_id' => $warehouseId,
+            'goods_id' => $goodsId,
+            'sku_id' => $skuId,
+            'batch_id' => 0,
+            'order_id' => $deliveryEventId,
+            'order_type' => 'delivery_transport_loss',
+            'order_sn' => 'DELIVERY-LOSS-' . $deliveryEventId,
+            'flow_type' => StockFlow::FLOW_OUT,
+            'quantity' => $lossQuantity,
+            'remark' => '运输损耗出库-交付事件' . $deliveryEventId,
+        ], $movement);
+        NegativeInventoryLogic::autoOffsetDeliveryReleaseWithinTransaction(
+            $warehouseId,
+            $skuId,
+            $movement,
+            0,
+            'DELIVERY-LOSS-' . $deliveryEventId,
+            $deliveryEventId
+        );
+        return $movement;
+    }
+
+    /** 部分交付终结余量时释放剩余预留，并审计化核减被释放量补平的负库存来源。 */
+    public static function releaseDeliveryReservationWithinTransaction(
+        int $warehouseId,
+        int $skuId,
+        string $quantity,
+        int $salesOrderId,
+        string $salesOrderSn,
+        int $deliveryEventId
+    ): array|false {
+        $movement = WarehouseSkuBalanceService::releaseWithinTransaction($warehouseId, $skuId, $quantity);
+        if ($movement === false) {
+            return false;
+        }
+        NegativeInventoryLogic::autoOffsetDeliveryReleaseWithinTransaction(
+            $warehouseId,
+            $skuId,
+            $movement,
+            $salesOrderId,
+            $salesOrderSn,
+            $deliveryEventId
+        );
+        return $movement;
+    }
+
     /** 负库存遗漏入库或核销调整；调用方持有事务并追加审计动作。 */
     public static function adjustNegativeWithinTransaction(
         int $warehouseId,

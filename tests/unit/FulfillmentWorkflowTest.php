@@ -8,11 +8,13 @@ use app\api\jxc\logic\CustomerReportBatchLogic;
 use app\api\jxc\logic\FulfillmentChangeLogic;
 use app\api\jxc\logic\CustomerReportLogic;
 use app\api\jxc\logic\DeliveryInventoryLogic;
+use app\api\jxc\logic\FulfillmentClock;
 use app\api\jxc\logic\FulfillmentTaskLogic;
 use app\api\jxc\logic\GoodsDimensionLogic;
 use app\api\jxc\logic\NegativeInventoryLogic;
 use app\api\jxc\logic\SalesOrderLogic;
 use app\api\jxc\logic\StockService;
+use app\api\jxc\logic\ThirdPartyDriverLogic;
 use app\api\jxc\logic\WarehouseSkuBalanceService;
 use app\api\jxc\logic\WorkforceLogic;
 use tests\unit\WarehouseSkuBalanceForGoodsTestAdapter as WarehouseGoodsBalanceService;
@@ -36,6 +38,7 @@ final class FulfillmentWorkflowTest extends TestCase
 
     protected function tearDown(): void
     {
+        FulfillmentClock::freezeForTesting(null);
         $this->cleanCustomerReportData();
         parent::tearDown();
     }
@@ -265,6 +268,26 @@ final class FulfillmentWorkflowTest extends TestCase
         self::assertNotEmpty(Db::query("SHOW COLUMNS FROM `la_sales_order` LIKE 'cost_status'"));
         self::assertNotEmpty(Db::query("SHOW COLUMNS FROM `la_sales_order` LIKE 'profit_status'"));
         self::assertEmpty(Db::query("SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='la_warehouse_sku_balance' AND CONSTRAINT_NAME='chk_warehouse_sku_on_hand_non_negative'"));
+    }
+
+    public function test_delivery_variants_migration_is_safe_to_replay(): void
+    {
+        $root = dirname(__DIR__, 2);
+        $migration = $this->prepareMigration((string)file_get_contents(
+            $root . '/database/migrations/20260819_000002_delivery_variants.sql'
+        ));
+        $this->runStatements($migration);
+        $this->runStatements($migration);
+
+        foreach (['la_third_party_driver', 'la_fulfillment_delivery_loss', 'la_fulfillment_delivery_remainder'] as $table) {
+            self::assertNotEmpty(Db::query("SHOW TABLES LIKE '{$table}'"));
+        }
+        foreach (['driver_id', 'driver_snapshot', 'actual_handoff_time', 'delivery_outcome'] as $column) {
+            self::assertNotEmpty(Db::query("SHOW COLUMNS FROM `la_fulfillment_delivery_event` LIKE '{$column}'"));
+        }
+        foreach (['loss_weight', 'undelivered_weight', 'remaining_action'] as $column) {
+            self::assertNotEmpty(Db::query("SHOW COLUMNS FROM `la_fulfillment_delivery_item` LIKE '{$column}'"));
+        }
     }
 
     public function test_blank_or_unrecognized_requirement_becomes_explicit_exception(): void
@@ -1528,6 +1551,12 @@ final class FulfillmentWorkflowTest extends TestCase
         $delivery = [
             'task_id' => $fixture['delivery_task_id'], 'event_type' => 'customer_handoff',
             'handoff_note' => '并发确认同一次客户交接', 'idempotency_key' => 'delivery-concurrent-event',
+            'items' => [[
+                'report_item_id' => $fixture['report_item_id'],
+                'actual_delivery_weight' => '1.2000',
+                'loss_weight' => '0.0000',
+                'remaining_action' => 'none',
+            ]],
         ];
         $paths = [];
         $startPath = tempnam(sys_get_temp_dir(), 'delivery-start-');
@@ -1577,6 +1606,35 @@ final class FulfillmentWorkflowTest extends TestCase
             if (is_file($startPath)) { unlink($startPath); }
             foreach ($paths as $path) { if (is_file($path)) { unlink($path); } }
         }
+    }
+
+    public function test_self_delivery_replay_ignores_server_generated_handoff_clock(): void
+    {
+        $fixture = $this->selfDeliveryFixture('delivery-clock-replay', '1.00', '1.00');
+        $delivery = [
+            'task_id' => $fixture['delivery_task_id'],
+            'event_type' => 'customer_handoff',
+            'handoff_note' => '同一客户交接跨服务端时钟重放',
+            'idempotency_key' => 'delivery-clock-replay-event',
+            'items' => [[
+                'report_item_id' => $fixture['report_item_id'],
+                'actual_delivery_weight' => '1.0000',
+                'loss_weight' => '0.0000',
+                'remaining_action' => 'none',
+            ]],
+        ];
+
+        FulfillmentClock::freezeForTesting(1_776_729_600);
+        $first = DeliveryInventoryLogic::confirmSelfDelivery($delivery);
+        self::assertNotFalse($first, DeliveryInventoryLogic::getError());
+
+        FulfillmentClock::freezeForTesting(1_776_729_605);
+        $replayed = DeliveryInventoryLogic::confirmSelfDelivery($delivery);
+        self::assertNotFalse($replayed, DeliveryInventoryLogic::getError());
+        self::assertSame((int)$first['id'], (int)$replayed['id']);
+        self::assertSame(1, Db::name('fulfillment_delivery_event')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame(1, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)
+            ->where('order_type', 'sales_delivery')->count());
     }
 
     public function test_two_reports_can_concurrently_create_one_missing_sku_balance_in_canonical_order(): void
@@ -1963,6 +2021,428 @@ final class FulfillmentWorkflowTest extends TestCase
                 'line_remark' => $processing,
             ]],
         ];
+    }
+
+    public function test_third_party_delivery_requires_an_enabled_registered_driver_and_replays_one_fact(): void
+    {
+        $fixture = $this->selfDeliveryFixture('third-party-driver', '2.00', '2.00');
+        $payload = [
+            'task_id' => $fixture['delivery_task_id'],
+            'driver_id' => 999999,
+            'actual_handoff_time' => date('Y-m-d H:i:s'),
+            'handoff_note' => '已交给第三方司机',
+            'idempotency_key' => 'third-party-driver-handoff',
+            'items' => [[
+                'report_item_id' => $fixture['report_item_id'],
+                'actual_delivery_weight' => '2.0000',
+                'loss_weight' => '0.0000',
+                'remaining_action' => 'none',
+            ]],
+        ];
+
+        self::assertFalse(DeliveryInventoryLogic::confirmThirdPartyDelivery($payload));
+        self::assertSame('第三方司机不存在或已停用', DeliveryInventoryLogic::getError());
+        self::assertSame('2.0000', WarehouseSkuBalanceService::onHand($fixture['warehouse_id'], $fixture['sku_id']));
+        self::assertSame(0, Db::name('fulfillment_delivery_event')->where('report_id', $fixture['report_id'])->count());
+
+        $driver = ThirdPartyDriverLogic::save([
+            'name' => '王师傅',
+            'mobile' => '13800000088',
+            'platform' => '货拉拉',
+            'vehicle_no' => '辽A88888',
+            'is_enabled' => 1,
+        ]);
+        self::assertNotFalse($driver, ThirdPartyDriverLogic::getError());
+        $payload['driver_id'] = (int)$driver['id'];
+
+        $this->prepareCustomerReportRequestContext(self::OTHER_TENANT_ID);
+        self::assertFalse(DeliveryInventoryLogic::confirmThirdPartyDelivery($payload));
+        self::assertSame('第三方司机不存在或已停用', DeliveryInventoryLogic::getError());
+        $this->prepareCustomerReportRequestContext();
+
+        $first = DeliveryInventoryLogic::confirmThirdPartyDelivery($payload);
+        self::assertNotFalse($first, DeliveryInventoryLogic::getError());
+        self::assertSame('third_party', (string)$first['delivery_method']);
+        self::assertSame('third_party_driver_handoff', (string)$first['event_type']);
+        self::assertSame((int)$driver['id'], (int)$first['driver_id']);
+        self::assertSame('王师傅', (string)$first['driver']['name']);
+        self::assertSame((int)$first['id'], (int)DeliveryInventoryLogic::confirmThirdPartyDelivery($payload)['id']);
+        self::assertSame(1, Db::name('fulfillment_delivery_event')->where('report_id', $fixture['report_id'])->count());
+        self::assertSame('0.0000', WarehouseSkuBalanceService::onHand($fixture['warehouse_id'], $fixture['sku_id']));
+
+        $lossFixture = $this->selfDeliveryFixture('third-party-full-loss', '1.00', '1.00');
+        $lossEvent = DeliveryInventoryLogic::confirmThirdPartyDelivery([
+            'task_id' => $lossFixture['delivery_task_id'],
+            'driver_id' => (int)$driver['id'],
+            'handoff_note' => '交给司机前发现全部损坏，未发生实际交付',
+            'idempotency_key' => 'third-party-full-loss-exception',
+            'items' => [[
+                'report_item_id' => $lossFixture['report_item_id'],
+                'actual_delivery_weight' => '0.0000',
+                'loss_weight' => '1.0000',
+                'loss_package_count' => 1,
+                'loss_reason' => '全部损坏，无法交给司机',
+                'remaining_action' => 'none',
+            ]],
+        ]);
+        self::assertNotFalse($lossEvent, DeliveryInventoryLogic::getError());
+        self::assertSame('delivery_exception', (string)$lossEvent['event_type']);
+        self::assertSame('handled_without_delivery', (string)$lossEvent['status']);
+        self::assertSame('handled_without_delivery', (string)$lossEvent['delivery_outcome']);
+        self::assertSame(0, (int)$lossEvent['actual_handoff_time']);
+        self::assertSame(0, (int)$lossEvent['delivered_time']);
+        self::assertSame('delivery_exception_completed', (string)Db::name('customer_report')
+            ->where('id', $lossFixture['report_id'])->value('status'));
+        self::assertSame(0, Db::name('sales_order')->where('source_id', $lossFixture['report_id'])->count());
+        self::assertSame(1, Db::name('audit_log')->where('tenant_id', self::TENANT_ID)
+            ->where('module', 'fulfillment_delivery')
+            ->where('action', 'third_party_delivery_exception')
+            ->where('target_id', (int)$lossEvent['id'])->count());
+    }
+
+    public function test_partial_delivery_keeps_the_remainder_pending_and_finishes_without_over_delivery(): void
+    {
+        $fixture = $this->selfDeliveryFixture('partial-resume', '3.00', '3.00');
+        $firstPayload = [
+            'task_id' => $fixture['delivery_task_id'],
+            'event_type' => 'customer_handoff',
+            'idempotency_key' => 'partial-resume-first',
+            'items' => [[
+                'report_item_id' => $fixture['report_item_id'],
+                'actual_delivery_weight' => '1.0000',
+                'loss_weight' => '0.0000',
+                'remaining_action' => 'pending',
+            ]],
+        ];
+        $first = DeliveryInventoryLogic::confirmSelfDelivery($firstPayload);
+        self::assertNotFalse($first, DeliveryInventoryLogic::getError());
+        self::assertSame('partial', (string)$first['delivery_outcome']);
+        self::assertSame('2.0000', WarehouseSkuBalanceService::onHand($fixture['warehouse_id'], $fixture['sku_id']));
+        self::assertSame('partially_delivered_pending', (string)Db::name('customer_report')->where('id', $fixture['report_id'])->value('status'));
+        self::assertSame('partially_delivered_pending', (string)Db::name('customer_report_item')->where('id', $fixture['report_item_id'])->value('fulfillment_status'));
+        self::assertNotSame('recovered', (string)Db::name('fulfillment_task')->where('id', $fixture['delivery_task_id'])->value('status'));
+
+        $tooMuch = $firstPayload;
+        $tooMuch['idempotency_key'] = 'partial-resume-too-much';
+        $tooMuch['items'][0]['actual_delivery_weight'] = '3.0000';
+        $tooMuch['items'][0]['remaining_action'] = 'none';
+        self::assertFalse(DeliveryInventoryLogic::confirmSelfDelivery($tooMuch));
+        self::assertSame('本次交付、损耗和未交货数量不能超过该明细剩余数量', DeliveryInventoryLogic::getError());
+        self::assertSame('2.0000', WarehouseSkuBalanceService::onHand($fixture['warehouse_id'], $fixture['sku_id']));
+
+        $secondPayload = $firstPayload;
+        $secondPayload['idempotency_key'] = 'partial-resume-second';
+        $secondPayload['items'][0]['actual_delivery_weight'] = '2.0000';
+        $secondPayload['items'][0]['remaining_action'] = 'none';
+        $second = DeliveryInventoryLogic::confirmSelfDelivery($secondPayload);
+        self::assertNotFalse($second, DeliveryInventoryLogic::getError());
+        self::assertSame('partial_completed', (string)$second['delivery_outcome']);
+        self::assertSame('partial_pending_settlement', (string)Db::name('customer_report')->where('id', $fixture['report_id'])->value('status'));
+        self::assertSame('partially_delivered_completed', (string)Db::name('customer_report_item')->where('id', $fixture['report_item_id'])->value('fulfillment_status'));
+        self::assertSame('3.0000', (string)Db::name('order_goods')->where('source_line_id', $fixture['report_item_id'])->value('base_quantity'));
+        self::assertSame(2, Db::name('fulfillment_delivery_event')->where('report_id', $fixture['report_id'])->count());
+        self::assertSame('0.0000', WarehouseSkuBalanceService::onHand($fixture['warehouse_id'], $fixture['sku_id']));
+    }
+
+    public function test_transport_loss_is_separate_from_delivered_sales_quantity_and_failed_retry_rolls_back(): void
+    {
+        $fixture = $this->selfDeliveryFixture('transport-loss', '3.00', '3.00');
+        $payload = [
+            'task_id' => $fixture['delivery_task_id'],
+            'event_type' => 'customer_handoff',
+            'idempotency_key' => 'transport-loss-event',
+            'items' => [[
+                'report_item_id' => $fixture['report_item_id'],
+                'actual_delivery_weight' => '2.0000',
+                'loss_weight' => '1.0000',
+                'loss_package_count' => 1,
+                'loss_reason' => '',
+                'remaining_action' => 'none',
+            ]],
+        ];
+        self::assertFalse(DeliveryInventoryLogic::confirmSelfDelivery($payload));
+        self::assertSame('运输损耗必须填写损耗原因', DeliveryInventoryLogic::getError());
+        self::assertSame('3.0000', WarehouseSkuBalanceService::onHand($fixture['warehouse_id'], $fixture['sku_id']));
+        self::assertSame(0, Db::name('fulfillment_delivery_event')->where('report_id', $fixture['report_id'])->count());
+
+        $payload['items'][0]['loss_reason'] = '送站途中包装破损，损耗 1 斤';
+        $event = DeliveryInventoryLogic::confirmSelfDelivery($payload);
+        self::assertNotFalse($event, DeliveryInventoryLogic::getError());
+        self::assertSame('partial_completed', (string)$event['delivery_outcome']);
+        self::assertSame('2.0000', (string)$event['items'][0]['actual_delivery_weight']);
+        self::assertSame('1.0000', (string)$event['items'][0]['loss_weight']);
+        self::assertSame('2.0000', (string)Db::name('order_goods')->where('source_line_id', $fixture['report_item_id'])->value('base_quantity'));
+        self::assertSame('1.0000', (string)Db::name('fulfillment_delivery_loss')->where('report_item_id', $fixture['report_item_id'])->value('loss_weight'));
+        self::assertSame(1, Db::name('stock_flow')->where('order_type', 'delivery_transport_loss')->where('order_id', (int)$event['id'])->count());
+        self::assertSame('0.0000', WarehouseSkuBalanceService::onHand($fixture['warehouse_id'], $fixture['sku_id']));
+    }
+
+    public function test_package_only_transport_loss_is_a_persisted_exception_without_weight_stock_flow(): void
+    {
+        $fixture = $this->selfDeliveryFixture('transport-package-loss', '2.00', '2.00');
+        $payload = [
+            'task_id' => $fixture['delivery_task_id'],
+            'event_type' => 'customer_handoff',
+            'idempotency_key' => 'transport-package-loss-event',
+            'items' => [[
+                'report_item_id' => $fixture['report_item_id'],
+                'actual_delivery_weight' => '2.0000',
+                'loss_weight' => '0.0000',
+                'loss_package_count' => 1,
+                'loss_reason' => '',
+                'remaining_action' => 'none',
+            ]],
+        ];
+
+        self::assertFalse(DeliveryInventoryLogic::confirmSelfDelivery($payload));
+        self::assertSame('运输损耗必须填写损耗原因', DeliveryInventoryLogic::getError());
+        $payload['items'][0]['loss_reason'] = '外包装破损一包，货物重新合包后重量无损';
+        $event = DeliveryInventoryLogic::confirmSelfDelivery($payload);
+        self::assertNotFalse($event, DeliveryInventoryLogic::getError());
+        self::assertSame('partial_completed', (string)$event['delivery_outcome']);
+        $loss = Db::name('fulfillment_delivery_loss')->where('report_item_id', $fixture['report_item_id'])->find();
+        self::assertNotEmpty($loss);
+        self::assertSame('0.0000', (string)$loss['loss_weight']);
+        self::assertSame(1, (int)$loss['loss_package_count']);
+        self::assertSame(0, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)
+            ->where('order_type', 'delivery_transport_loss')->count());
+        self::assertSame('2.0000', (string)Db::name('order_goods')
+            ->where('source_line_id', $fixture['report_item_id'])->value('base_quantity'));
+    }
+
+    public function test_full_loss_and_zero_delivery_undelivered_rows_do_not_create_empty_sales_orders(): void
+    {
+        $customerId = $this->createCustomer('全损耗与未交货客户');
+        $goodsA = $this->createCustomerReportGoods('全损耗商品', 'DELIVERY-FULL-LOSS');
+        $goodsB = $this->createCustomerReportGoods('零交付商品', 'DELIVERY-ZERO-UNDELIVERED');
+        $warehouseA = $this->createCustomerReportWarehouse('全损耗仓');
+        $warehouseB = $this->createCustomerReportWarehouse('零交付仓');
+        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseA, $goodsA, '2.0000'));
+        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseB, $goodsB, '2.0000'));
+
+        $payload = $this->fulfillmentPayload(
+            $customerId, $goodsA, $warehouseA, 'delivery-non-sales-multi-warehouse', '2', '杀好'
+        );
+        $secondItem = $payload['items'][0];
+        $secondItem['goods_id'] = $goodsB;
+        $secondItem['warehouse_id'] = $warehouseB;
+        $payload['items'][] = $secondItem;
+        $report = CustomerReportLogic::submit($payload);
+        self::assertNotFalse($report, CustomerReportLogic::getError());
+
+        foreach ($report['items'] as $item) {
+            $finalTask = Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)
+                ->where('report_item_id', (int)$item['id'])->where('is_settlement_task', 1)->find();
+            self::assertNotEmpty($finalTask);
+            Db::name('fulfillment_task')->where('id', (int)$finalTask['id'])->update([
+                'status' => 'recovered', 'actual_weight' => '2.0000', 'process_weight' => '2.0000',
+                'actual_price' => '20.00', 'recovered_time' => time(), 'update_time' => time(),
+            ]);
+            Db::name('customer_report_item')->where('id', (int)$item['id'])->update([
+                'final_actual_weight' => '2.0000', 'final_weight_task_id' => (int)$finalTask['id'],
+                'fulfillment_status' => 'final_weight_recorded', 'update_time' => time(),
+            ]);
+            FulfillmentTaskLogic::refreshGroupForItem((int)$item['id']);
+        }
+        $deliveryTask = Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)
+            ->where('report_id', (int)$report['id'])
+            ->where('source_key', 'report:' . (int)$report['id'] . ':delivery')->find();
+        self::assertNotEmpty($deliveryTask);
+
+        $itemsByWarehouse = [];
+        foreach ($report['items'] as $item) {
+            $itemsByWarehouse[(int)$item['warehouse_id']] = $item;
+        }
+        $lossItem = $itemsByWarehouse[$warehouseA];
+        $undeliveredItem = $itemsByWarehouse[$warehouseB];
+        $event = DeliveryInventoryLogic::confirmSelfDelivery([
+            'task_id' => (int)$deliveryTask['id'],
+            'event_type' => 'customer_handoff',
+            'idempotency_key' => 'delivery-non-sales-multi-warehouse-event',
+            'items' => [[
+                'report_item_id' => (int)$lossItem['id'],
+                'actual_delivery_weight' => '0.0000',
+                'loss_weight' => '2.0000',
+                'loss_package_count' => 2,
+                'loss_reason' => '运输途中全部损坏，无法交付',
+                'remaining_action' => 'none',
+            ], [
+                'report_item_id' => (int)$undeliveredItem['id'],
+                'actual_delivery_weight' => '0.0000',
+                'loss_weight' => '0.0000',
+                'remaining_action' => 'undelivered',
+                'undelivered_reason_code' => 'customer_cancelled',
+                'undelivered_reason' => '客户取消该商品，零交付关闭余量',
+            ]],
+        ]);
+
+        self::assertNotFalse($event, DeliveryInventoryLogic::getError());
+        self::assertSame('handled_without_delivery', (string)$event['delivery_outcome']);
+        self::assertSame('delivery_exception', (string)$event['event_type']);
+        self::assertSame('handled_without_delivery', (string)$event['status']);
+        self::assertSame('delivery_exception_completed', (string)Db::name('customer_report')
+            ->where('id', (int)$report['id'])->value('status'));
+        self::assertSame(0, Db::name('sales_order')->where('source_id', (int)$report['id'])->count());
+        self::assertSame(0, Db::name('order_goods')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame('2.0000', (string)Db::name('fulfillment_delivery_loss')
+            ->where('report_item_id', (int)$lossItem['id'])->value('loss_weight'));
+        self::assertSame('2.0000', (string)Db::name('fulfillment_delivery_remainder')
+            ->where('report_item_id', (int)$undeliveredItem['id'])->value('quantity'));
+        self::assertSame('0.0000', WarehouseSkuBalanceService::onHand($warehouseA, (int)$lossItem['sku_id']));
+        self::assertSame('2.0000', WarehouseSkuBalanceService::onHand($warehouseB, (int)$undeliveredItem['sku_id']));
+        self::assertSame('0.0000', WarehouseSkuBalanceService::reserved($warehouseB, (int)$undeliveredItem['sku_id']));
+
+        $undeliveredOnly = $this->selfDeliveryFixture('zero-delivery-undelivered-only', '1.00', '1.00');
+        $undeliveredEvent = DeliveryInventoryLogic::confirmSelfDelivery([
+            'task_id' => $undeliveredOnly['delivery_task_id'],
+            'event_type' => 'customer_handoff',
+            'idempotency_key' => 'zero-delivery-undelivered-only-event',
+            'items' => [[
+                'report_item_id' => $undeliveredOnly['report_item_id'],
+                'actual_delivery_weight' => '0.0000',
+                'loss_weight' => '0.0000',
+                'remaining_action' => 'undelivered',
+                'undelivered_reason_code' => 'customer_cancelled',
+                'undelivered_reason' => '客户取消全部商品，未发生交接',
+            ]],
+        ]);
+        self::assertNotFalse($undeliveredEvent, DeliveryInventoryLogic::getError());
+        self::assertSame('delivery_exception', (string)$undeliveredEvent['event_type']);
+        self::assertSame('handled_without_delivery', (string)$undeliveredEvent['status']);
+        self::assertSame('undelivered', (string)Db::name('customer_report')
+            ->where('id', $undeliveredOnly['report_id'])->value('status'));
+        self::assertSame('undelivered', (string)Db::name('customer_report_item')
+            ->where('id', $undeliveredOnly['report_item_id'])->value('fulfillment_status'));
+        self::assertSame(0, Db::name('sales_order')->where('source_id', $undeliveredOnly['report_id'])->count());
+    }
+
+    public function test_loss_only_negative_inventory_is_visible_and_resolvable_without_a_sales_order(): void
+    {
+        $customerId = $this->createCustomer('损耗负库存客户');
+        $goodsId = $this->createCustomerReportGoods('损耗负库存商品', 'DELIVERY-LOSS-NEGATIVE');
+        $warehouseId = $this->createCustomerReportWarehouse('损耗负库存仓');
+        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, '1.0000'));
+        $fixture = $this->selfDeliveryFixtureForCatalog(
+            $customerId, $goodsId, $warehouseId, 'delivery-loss-negative', '2.0000'
+        );
+        $event = DeliveryInventoryLogic::confirmSelfDelivery([
+            'task_id' => $fixture['delivery_task_id'],
+            'event_type' => 'customer_handoff',
+            'exception_reason' => '全损耗超过可用库存，进入独立待办',
+            'second_confirmed' => 1,
+            'idempotency_key' => 'delivery-loss-negative-event',
+            'items' => [[
+                'report_item_id' => $fixture['report_item_id'],
+                'actual_delivery_weight' => '0.0000',
+                'loss_weight' => '2.0000',
+                'loss_package_count' => 2,
+                'loss_reason' => '运输途中全部损坏',
+                'remaining_action' => 'none',
+            ]],
+        ]);
+        self::assertNotFalse($event, DeliveryInventoryLogic::getError());
+        self::assertSame(0, Db::name('sales_order')->where('source_id', $fixture['report_id'])->count());
+        self::assertSame('-1.0000', WarehouseSkuBalanceService::onHand($warehouseId, $fixture['sku_id']));
+        $todos = NegativeInventoryLogic::todos(['status' => 'open']);
+        self::assertNotFalse($todos, NegativeInventoryLogic::getError());
+        self::assertCount(1, $todos['lists']);
+        self::assertSame('', (string)$todos['lists'][0]['order_sn']);
+        self::assertSame(0, (int)$todos['lists'][0]['sales_order_id']);
+
+        $resolved = NegativeInventoryLogic::resolve([
+            'id' => (int)$todos['lists'][0]['attribution_id'],
+            'action' => 'inventory_writeoff',
+            'quantity' => '1.0000',
+            'amount' => '0.00',
+            'reason' => '确认运输损耗并核销无销售来源负库存',
+            'cost_status' => 'pending',
+            'idempotency_key' => 'delivery-loss-negative-writeoff',
+        ]);
+        self::assertNotFalse($resolved, NegativeInventoryLogic::getError());
+        self::assertSame('resolved', (string)$resolved['resolution_status']);
+        self::assertSame('0.0000', WarehouseSkuBalanceService::onHand($warehouseId, $fixture['sku_id']));
+        self::assertSame('closed', (string)Db::name('negative_inventory_todo')
+            ->where('attribution_id', (int)$resolved['id'])->value('status'));
+    }
+
+    public function test_delivery_variant_rejects_fractional_item_ids_and_package_counts_without_side_effects(): void
+    {
+        $fixture = $this->selfDeliveryFixture('delivery-strict-integers', '1.00', '1.00');
+        $payload = [
+            'task_id' => $fixture['delivery_task_id'],
+            'event_type' => 'customer_handoff',
+            'idempotency_key' => 'delivery-strict-integers-event',
+            'items' => [[
+                'report_item_id' => (string)$fixture['report_item_id'] . '.9',
+                'actual_delivery_weight' => '1.0000',
+                'loss_weight' => '0.0000',
+                'loss_package_count' => 0,
+                'remaining_action' => 'none',
+            ]],
+        ];
+        self::assertFalse(DeliveryInventoryLogic::confirmSelfDelivery($payload));
+        self::assertSame('交付明细数量、余量处理或身份格式不正确', DeliveryInventoryLogic::getError());
+
+        $payload['items'][0]['report_item_id'] = $fixture['report_item_id'];
+        $payload['items'][0]['loss_package_count'] = '1.9';
+        $payload['items'][0]['loss_reason'] = '不得静默截断损耗包数';
+        self::assertFalse(DeliveryInventoryLogic::confirmSelfDelivery($payload));
+        self::assertSame('交付明细数量、余量处理或身份格式不正确', DeliveryInventoryLogic::getError());
+        self::assertSame(0, Db::name('fulfillment_delivery_event')->where('report_id', $fixture['report_id'])->count());
+        self::assertSame('1.0000', WarehouseSkuBalanceService::onHand($fixture['warehouse_id'], $fixture['sku_id']));
+    }
+
+    public function test_partial_delivery_can_explicitly_close_the_remainder_as_undelivered(): void
+    {
+        $fixture = $this->selfDeliveryFixture('partial-undelivered', '3.00', '3.00');
+        $payload = [
+            'task_id' => $fixture['delivery_task_id'],
+            'event_type' => 'customer_handoff',
+            'idempotency_key' => 'partial-undelivered-event',
+            'items' => [[
+                'report_item_id' => $fixture['report_item_id'],
+                'actual_delivery_weight' => '1.0000',
+                'loss_weight' => '0.0000',
+                'remaining_action' => 'undelivered',
+                'undelivered_reason_code' => 'shortage',
+                'undelivered_reason' => '剩余 2 斤确认缺货，不再配送',
+            ]],
+        ];
+        $event = DeliveryInventoryLogic::confirmSelfDelivery($payload);
+        self::assertNotFalse($event, DeliveryInventoryLogic::getError());
+        self::assertSame('partial_completed', (string)$event['delivery_outcome']);
+        self::assertSame('2.0000', (string)$event['items'][0]['undelivered_weight']);
+        self::assertSame('2.0000', (string)Db::name('fulfillment_delivery_remainder')->where('report_item_id', $fixture['report_item_id'])->value('quantity'));
+        self::assertSame('partial_pending_settlement', (string)Db::name('customer_report')->where('id', $fixture['report_id'])->value('status'));
+        self::assertSame('1.0000', (string)Db::name('order_goods')->where('source_line_id', $fixture['report_item_id'])->value('base_quantity'));
+        self::assertSame('2.0000', WarehouseSkuBalanceService::onHand($fixture['warehouse_id'], $fixture['sku_id']));
+        self::assertSame('0.0000', WarehouseSkuBalanceService::reserved($fixture['warehouse_id'], $fixture['sku_id']));
+    }
+
+    public function test_partial_delivery_rolls_back_event_order_inventory_and_progress_when_audit_fails(): void
+    {
+        $fixture = $this->selfDeliveryFixture('partial-audit-rollback', '2.00', '2.00');
+        Db::execute('RENAME TABLE `la_audit_log` TO `la_audit_log_delivery_variant_failure`');
+        try {
+            self::assertFalse(DeliveryInventoryLogic::confirmSelfDelivery([
+                'task_id' => $fixture['delivery_task_id'],
+                'event_type' => 'customer_handoff',
+                'idempotency_key' => 'partial-audit-rollback-event',
+                'items' => [[
+                    'report_item_id' => $fixture['report_item_id'],
+                    'actual_delivery_weight' => '1.0000',
+                    'loss_weight' => '0.0000',
+                    'remaining_action' => 'pending',
+                ]],
+            ]));
+        } finally {
+            Db::execute('RENAME TABLE `la_audit_log_delivery_variant_failure` TO `la_audit_log`');
+        }
+        self::assertSame(0, Db::name('fulfillment_delivery_event')->where('report_id', $fixture['report_id'])->count());
+        self::assertSame(0, Db::name('sales_order')->where('source_id', $fixture['report_id'])->count());
+        self::assertSame('2.0000', WarehouseSkuBalanceService::onHand($fixture['warehouse_id'], $fixture['sku_id']));
+        self::assertSame('0.00', (string)Db::name('customer_report_item')->where('id', $fixture['report_item_id'])->value('fulfilled_base_qty'));
+        self::assertSame('final_weight_recorded', (string)Db::name('customer_report_item')->where('id', $fixture['report_item_id'])->value('fulfillment_status'));
     }
 
     /** @return array{report_id:int,report_item_id:int,delivery_task_id:int,warehouse_id:int,goods_id:int,sku_id:int} */

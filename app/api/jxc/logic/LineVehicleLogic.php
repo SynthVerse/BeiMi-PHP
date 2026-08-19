@@ -198,28 +198,25 @@ final class LineVehicleLogic extends BaseLogic
                 $reportEntries = $normalized;
                 usort($reportEntries, static fn(array $left, array $right): int =>
                     (int)$left['report_id'] <=> (int)$right['report_id']);
-                foreach ($reportEntries as $entry) {
-                    $activeAssignment = Db::name('line_vehicle_trip_report')->where('tenant_id', self::tenantId())
-                        ->where('active_report_id', (int)$entry['report_id'])->lock(true)->find();
-                    if ($activeAssignment) {
-                        self::setError('报货单已在其他未完成送站趟次中');
-                        return false;
-                    }
-                }
-
                 $snapshots = [];
                 foreach ($reportEntries as $entry) {
                     $schedule = $schedules[(int)$entry['schedule_id']];
                     $report = Db::name('customer_report')->where('tenant_id', self::tenantId())
                         ->where('id', $entry['report_id'])->whereNull('delete_time')->lock(true)->find();
                     if (!$report || in_array((string)$report['status'], [
-                        'cancelled', 'completed', 'delivered_pending_settlement', 'partially_delivered_pending',
+                        'cancelled', 'completed', 'delivered_pending_settlement', 'partial_pending_settlement',
                     ], true)) {
                         self::setError('报货单不存在或当前不能加入送站趟次');
                         return false;
                     }
                     if ((string)$report['delivery_date'] !== $tripDate) {
                         self::setError('报货单送货日期必须与送站趟次日期一致');
+                        return false;
+                    }
+                    $activeAssignment = Db::name('line_vehicle_trip_report')->where('tenant_id', self::tenantId())
+                        ->where('active_report_id', (int)$report['id'])->find();
+                    if ($activeAssignment) {
+                        self::setError('报货单已在其他未完成送站趟次中');
                         return false;
                     }
                     $task = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())
@@ -458,6 +455,113 @@ final class LineVehicleLogic extends BaseLogic
             return $after;
         });
         return $result === false ? false : $result;
+    }
+
+    /** @return array<string,mixed>|false */
+    public static function returnReroutedToPending(array $params): array|false
+    {
+        self::clearError();
+        if (!WorkforceLogic::requirePermission('delivery.line.manage')) {
+            self::setError(WorkforceLogic::getError());
+            return false;
+        }
+        $id = (int)($params['trip_report_id'] ?? 0);
+        $reason = mb_substr(trim((string)($params['return_reason'] ?? '')), 0, 500);
+        $key = trim((string)($params['idempotency_key'] ?? ''));
+        if ($id <= 0 || $reason === '' || $key === '' || mb_strlen($key) > 96) {
+            self::setError('返回门店原因和幂等键不能为空');
+            return false;
+        }
+        $fingerprint = hash('sha256', json_encode([
+            'trip_report_id' => $id, 'return_reason' => $reason,
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        for ($attempt = 0; $attempt < 3; $attempt++) {
+            try {
+                $result = Db::transaction(static function () use ($id, $reason, $key, $fingerprint) {
+                    $existing = Db::name('line_vehicle_return_event')->where('tenant_id', self::tenantId())
+                        ->where('idempotency_key', $key)->find();
+                    if ($existing) {
+                        return self::replayReturnEvent($existing, $fingerprint);
+                    }
+                    $reference = Db::name('line_vehicle_trip_report')->where('tenant_id', self::tenantId())
+                        ->where('id', $id)->field('id,trip_id')->find();
+                    if (!$reference) {
+                        self::setError('送站报货单不存在');
+                        return false;
+                    }
+                    $trip = Db::name('line_vehicle_trip')->where('tenant_id', self::tenantId())
+                        ->where('id', (int)$reference['trip_id'])->lock(true)->find();
+                    $item = Db::name('line_vehicle_trip_report')->where('tenant_id', self::tenantId())
+                        ->where('id', $id)->lock(true)->find();
+                    if (!$trip || !$item || (string)$item['status'] !== 'rerouted') {
+                        self::setError('只有已改派且尚未交付的货物才能返回门店待配送');
+                        return false;
+                    }
+                    $replayed = Db::name('line_vehicle_return_event')->where('tenant_id', self::tenantId())
+                        ->where('idempotency_key', $key)->find();
+                    if ($replayed) {
+                        return self::replayReturnEvent($replayed, $fingerprint);
+                    }
+                    if ((int)($item['return_event_id'] ?? 0) > 0) {
+                        self::setError('该货物已经记录返回门店，不能覆盖原事实');
+                        return false;
+                    }
+                    $now = FulfillmentClock::now();
+                    $eventId = (int)Db::name('line_vehicle_return_event')->insertGetId([
+                        'tenant_id' => self::tenantId(), 'trip_id' => (int)$trip['id'],
+                        'trip_report_id' => $id, 'report_id' => (int)$item['report_id'],
+                        'status' => 'returned_to_pending', 'reason' => $reason,
+                        'idempotency_key' => $key, 'request_fingerprint' => $fingerprint,
+                        'operator_id' => self::operatorId(), 'returned_time' => $now, 'create_time' => $now,
+                    ]);
+                    if ($eventId <= 0) {
+                        throw new \RuntimeException('line_vehicle_return_insert_failed');
+                    }
+                    Db::name('line_vehicle_trip_report')->where('tenant_id', self::tenantId())->where('id', $id)->update([
+                        'return_event_id' => $eventId, 'return_status' => 'returned_to_pending',
+                        'return_reason' => $reason, 'returned_to_store_time' => $now,
+                        'operator_id' => self::operatorId(), 'update_time' => $now,
+                    ]);
+                    Db::name('fulfillment_task')->where('tenant_id', self::tenantId())
+                        ->where('id', (int)$item['delivery_task_id'])->whereNotIn('status', ['cancelled', 'completed'])
+                        ->update(['status' => 'printable', 'update_time' => $now]);
+                    $after = Db::name('line_vehicle_trip_report')->where('tenant_id', self::tenantId())
+                        ->where('id', $id)->find();
+                    AuditService::logWithinTransaction(
+                        'line_vehicle', 'return_to_pending', $eventId, $key,
+                        ['trip_report_id' => $id, 'status' => 'rerouted'], $after, $reason
+                    );
+                    return $after;
+                });
+                if ($result === false) {
+                    $replayed = self::replayReturnAfterCommit($key, $fingerprint);
+                    if ($replayed !== false) {
+                        self::clearError();
+                        return $replayed;
+                    }
+                }
+                return $result;
+            } catch (\Throwable $exception) {
+                $retryable = in_array((int)$exception->getCode(), [1205, 1213], true)
+                    || str_contains($exception->getMessage(), '1205')
+                    || str_contains($exception->getMessage(), '1213');
+                if ($retryable && $attempt < 2) {
+                    usleep(20_000 * ($attempt + 1));
+                    continue;
+                }
+                $replayed = self::replayReturnAfterCommit($key, $fingerprint);
+                if ($replayed !== false) {
+                    self::clearError();
+                    return $replayed;
+                }
+                if (!self::hasError()) {
+                    self::setError('返回门店待配送保存失败');
+                }
+                return false;
+            }
+        }
+        self::setError('返回门店待配送保存失败');
+        return false;
     }
 
     /** @return array<string,mixed>|false */
@@ -738,6 +842,30 @@ final class LineVehicleLogic extends BaseLogic
             return false;
         }
         return self::tripDetailWithinTransaction((int)$trip['id']);
+    }
+
+    /** @param array<string,mixed> $event @return array<string,mixed>|false */
+    private static function replayReturnEvent(array $event, string $fingerprint): array|false
+    {
+        if (!hash_equals((string)$event['request_fingerprint'], $fingerprint)) {
+            self::setError('同一幂等键不能提交不同的返回门店事实');
+            return false;
+        }
+        $item = Db::name('line_vehicle_trip_report')->where('tenant_id', self::tenantId())
+            ->where('id', (int)$event['trip_report_id'])->find();
+        if (!$item) {
+            self::setError('返回门店事实关联货物不存在');
+            return false;
+        }
+        return $item;
+    }
+
+    /** @return array<string,mixed>|false */
+    private static function replayReturnAfterCommit(string $key, string $fingerprint): array|false
+    {
+        $event = Db::name('line_vehicle_return_event')->where('tenant_id', self::tenantId())
+            ->where('idempotency_key', $key)->find();
+        return $event ? self::replayReturnEvent($event, $fingerprint) : false;
     }
 
     private static function scheduleTimestamp(string $tripDate, string $departureTime): int

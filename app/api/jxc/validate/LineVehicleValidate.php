@@ -28,8 +28,10 @@ final class LineVehicleValidate extends BaseValidate
         'second_confirmed' => 'in:0,1',
         'idempotency_key' => 'max:96',
         'reports' => 'require|array|min:1',
+        'items' => 'array|min:1',
         'reroute_method' => 'require|in:fixed_line_vehicle,third_party,self_delivery',
         'reroute_reason' => 'require|max:500',
+        'return_reason' => 'require|max:500',
         'status' => 'in:planned,loading,departed,completed,closed',
     ];
 
@@ -41,6 +43,7 @@ final class LineVehicleValidate extends BaseValidate
     public function scenePackageRecord() { return $this->only(['trip_report_id', 'stage', 'actual_package_count', 'exception_note']); }
     public function sceneTripDepart() { return $this->only(['trip_id', 'actual_store_departure_time']); }
     public function sceneReroute() { return $this->only(['trip_report_id', 'reroute_method', 'reroute_reason']); }
-    public function sceneHandoffConfirm() { return $this->only(['trip_report_id', 'actual_handoff_packages', 'actual_handoff_time', 'exception_note', 'exception_reason', 'second_confirmed', 'idempotency_key']); }
+    public function sceneReturnPending() { return $this->only(['trip_report_id', 'return_reason', 'idempotency_key']); }
+    public function sceneHandoffConfirm() { return $this->only(['trip_report_id', 'actual_handoff_packages', 'actual_handoff_time', 'items', 'exception_note', 'exception_reason', 'second_confirmed', 'idempotency_key']); }
     public function sceneManifest() { return $this->only(['trip_id']); }
 }

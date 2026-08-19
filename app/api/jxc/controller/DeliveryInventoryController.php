@@ -4,6 +4,7 @@ namespace app\api\jxc\controller;
 
 use app\api\jxc\logic\DeliveryInventoryLogic;
 use app\api\jxc\logic\NegativeInventoryLogic;
+use app\api\jxc\logic\ThirdPartyDriverLogic;
 use app\api\jxc\validate\DeliveryInventoryValidate;
 
 class DeliveryInventoryController extends BaseJxcController
@@ -15,6 +16,29 @@ class DeliveryInventoryController extends BaseJxcController
         return $result === false
             ? $this->fail(DeliveryInventoryLogic::getError())
             : $this->success('交付确认成功', $result, 1, 1);
+    }
+
+    public function confirmThirdParty()
+    {
+        $params = (new DeliveryInventoryValidate())->post()->goCheck('confirmThirdParty');
+        $result = DeliveryInventoryLogic::confirmThirdPartyDelivery($params);
+        return $result === false
+            ? $this->fail(DeliveryInventoryLogic::getError())
+            : $this->success('第三方司机交接成功', $result, 1, 1);
+    }
+
+    public function driverSave()
+    {
+        $params = (new DeliveryInventoryValidate())->post()->goCheck('driverSave');
+        $result = ThirdPartyDriverLogic::save($params);
+        return $result === false ? $this->fail(ThirdPartyDriverLogic::getError()) : $this->data($result);
+    }
+
+    public function drivers()
+    {
+        $params = (new DeliveryInventoryValidate())->get()->goCheck('driverLists');
+        $result = ThirdPartyDriverLogic::lists($params);
+        return $result === false ? $this->fail(ThirdPartyDriverLogic::getError()) : $this->data($result);
     }
 
     public function detail()

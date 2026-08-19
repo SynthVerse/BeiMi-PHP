@@ -120,8 +120,8 @@
 - 状态：已防护
 - 首次发生：2026-07-29
 - 最近发生：2026-08-19
-- 复发次数：3
-- 适用范围：`CustomerReportLogic`、`FulfillmentChangeLogic`、`DeliveryInventoryLogic`、`NegativeInventoryLogic` 等已开启业务事务后调用仓库余额原语或写入幂等事实的路径
+- 复发次数：4
+- 适用范围：`CustomerReportLogic`、`FulfillmentChangeLogic`、`DeliveryInventoryLogic`、`DeliveryVariantLogic`、`LineVehicleLogic`、`NegativeInventoryLogic` 等已开启业务事务后调用仓库余额原语或写入幂等事实的路径
 - 相关问题：PIT-0022
 
 ### 触发场景
@@ -147,6 +147,7 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 - 自动化防线：`tests/unit/CustomerReportWorkflowTest.php` 的 `test_two_concurrent_submissions_cannot_over_reserve_one_warehouse_balance()` 使用两个 PHP 进程同时提交，断言一单 `submitted_ready`、一单 `submitted_shortage`，且总预留不超过余额。
 - 2026-08-18 扩展：`FulfillmentChangeLogic` 对不存在的履约变更幂等键只做普通查询，依靠 `(tenant_id,idempotency_key)` 唯一键解决竞态；减量和未交货事务统一只对 MySQL `1213`/`1205` 做最多三次有界重试。`CustomerReportRouteContractTest::test_fulfillment_change_idempotency_never_locks_an_absent_key_and_retries_deadlocks()` 固定这一结构契约，并要求作废控制按 `item_change_id` 精确关联幂等事实；`FulfillmentWorkflowTest::test_concurrent_reduction_with_one_idempotency_key_applies_inventory_once()` 用两个 PHP 进程证明同一减量请求只生成一条变更事实且库存只释放一次。
 - 2026-08-19 扩展：交付确认和负库存处理都先普通查询幂等键，交付明细按 `(sku_id, goods_id, warehouse_id, id)` 排序；负库存处理按 SKU、商品、仓库、余额、来源归因的统一顺序取锁，锁后复查幂等事实。余额缺行时只用 Query Builder 插入，事务拥有者只对 MySQL `1213`/`1205` 最多重试三次；事务结束后由 `replayAfterConcurrentCommit()` 按请求指纹读取已提交事实。`FulfillmentWorkflowTest::test_concurrent_same_delivery_key_returns_one_event_and_one_inventory_side_effect()`、`test_two_reports_can_concurrently_create_one_missing_sku_balance_in_canonical_order()`、`test_concurrent_same_negative_resolution_key_appends_one_action()` 与 `test_concurrent_regular_inbound_and_negative_resolution_share_one_lock_order()` 使用真实 PHP 进程固定一次交付只出库一次、无余额并发建账、一次负库存处理只追加一个动作以及普通入库/人工处理共享锁序；`CustomerReportRouteContractTest::test_delivery_and_negative_actions_use_canonical_locks_then_replay_the_committed_idempotent_fact()` 固定结构边界。
+- 2026-08-19 Ticket #10 扩展：变体交付与改派返回门店在取得稳定业务锁后仍只普通查询幂等事实，唯一键竞争异常统一在事务结束后按指纹重放；多商品变体交付按 `(sku_id, goods_id, warehouse_id, id)` 获取库存锁。新建趟次改为先锁报货单再普通查询活动分配，不再锁不存在的活动行间隙。`CustomerReportRouteContractTest::test_delivery_variant_and_return_actions_do_not_lock_absent_idempotency_keys()` 固定这些结构边界，双进程交付与改派竞态行为测试固定真实结果。
 - 架构防线：`WarehouseGoodsBalanceService` 明确提供 `reserveWithinTransaction()`、`reserveUpToWithinTransaction()`、`releaseWithinTransaction()` 与 `consumeReservedWithinTransaction()`；`CustomerReportLogic` 在外层事务内只调用这些入口，并以 Query Builder 写入主表、明细和预留记录。`CustomerReportPreferenceService::remember()` 用唯一键原子 upsert 保存建议数据，不加间隙锁。`transactionWithRetry()` 统一包裹提交外的编辑、补预留、取消与转换销售事务；明细按 `(goods_id, warehouse_id)` 排序后才触发库存原语。
 - 决策与知识：本记录及 `docs/adr/0001-客户报货库存边界.md`。
 
@@ -158,6 +159,7 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 | 2026-07-30 | 客户报货旧链路删除与标准销售单桥接 | 外层报货转换调用标准销售发布时重新使用 ORM `create()`，并按仓循环触发库存锁 | 原防线只覆盖报货主从表和直接库存原语，没有覆盖新接入的销售、库存流水、财务副作用，也没有对跨仓转换建立“先预锁全部商品”的结构契约。 |
 | 2026-08-18 | BeiMi-PHP #7 履约工票闭环 | 履约减量与未交货事务再次对尚不存在的幂等键执行 `FOR UPDATE`，并缺少 `1213`/`1205` 有界重试 | 原防线只约束 `CustomerReportLogic` 的提交、编辑、补预留、取消和转销售路径，未把新增的追加式履约变更入口纳入静态结构契约。 |
 | 2026-08-19 | BeiMi-PHP #8 自配送交付与真负库存 | 同交付键/同处理键竞争会读到旧快照；无余额交付重新使用 ORM `create()`；人工核销与普通入库形成来源→余额/余额→来源反向锁序 | 原防线已覆盖报货与履约减量，但没有把新增交付、负库存处理、余额缺行和普通入库交叉流程纳入统一结构与双进程防线，也没有要求成功返回必须来自事务后可见的追加事实。 |
+| 2026-08-19 | BeiMi-PHP #10 第三方与部分交付 | 变体交付和返回门店在稳定业务锁后重新对缺失幂等键执行 `FOR UPDATE`，返回门店唯一键竞争异常也没有事务后重放 | #8 防线只覆盖旧 `DeliveryInventoryLogic` 和负库存入口，新增写入口没有自动继承“缺失键普通查询 + 唯一键兜底 + 事务后重放”的结构契约。 |
 
 ## PIT-0005：迁移静态探针替换前缀但真实执行器保留占位符
 
@@ -898,3 +900,49 @@ PHP `trim($value, $characterMask)` 的第二参数按字节集合处理，不理
 | 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
 |---|---|---|---|
 | 2026-08-18 | BeiMi-PHP#6 | 新租户首次并发报货 | PIT-0004 已保护库存事务和幂等键，但未覆盖履约任务依赖的默认工序惰性初始化。 |
+
+## PIT-0023：服务端生成时间进入请求幂等指纹
+
+- 状态：已防护
+- 首次发生：2026-08-19
+- 最近发生：2026-08-19
+- 复发次数：0
+- 适用范围：交付、结算及其他“客户端事实 + 服务端生成事实”共同落库的幂等写入口
+- 相关问题：PIT-0004、PIT-0021
+
+### 触发场景
+
+两个进程使用同一幂等键并发确认同一次自配送客户交接。自配送没有客户端交接时间，
+服务端在每个进程中各自读取当前秒；一个事务提交后，另一个进程按同键重放时跨过秒
+边界，被错误判定为“同一幂等键提交了不同事实”。
+
+### 根因
+
+请求指纹混入了服务端当前时间。该字段是落库时由服务端生成的结果，不是客户端声明
+且可稳定重放的输入，因此同一请求的指纹会随执行时刻变化。数据库唯一键正确阻止了
+重复副作用，但不稳定指纹又拒绝返回已经提交的权威事实。
+
+### 错误做法
+
+把 `now()`、自动编号、数据库默认值或其他服务端生成结果直接放入请求指纹；或者只验证
+“只有一条记录”，没有验证竞争请求和跨时钟重放都返回同一权威记录。
+
+### 正确做法
+
+请求指纹只包含客户端可重复声明、经过确定性规范化的业务输入。服务端生成时间可以保存
+为首次提交事实，但不得参与后续请求相等性判断；客户端必须声明的实际时间仍应进入指纹。
+提交竞争失败后，调用者按这个稳定指纹读取并返回已提交的追加事实。
+
+### 防线
+
+- 自动化防线：`FulfillmentWorkflowTest::test_self_delivery_replay_ignores_server_generated_handoff_clock()` 使用可控服务端时钟，在相同请求两次执行之间推进五秒，断言重放同一事件且库存只出库一次。
+- 并发防线：`FulfillmentWorkflowTest::test_concurrent_same_delivery_key_returns_one_event_and_one_inventory_side_effect()` 使用两个真实 PHP 进程提交同一交付键，断言都返回同一事件，且交付事件、库存流水和负库存来源均只产生一次。
+- 架构防线：`DeliveryVariantLogic` 只对固定线车和第三方配送这两类客户端必须声明的交接时间生成指纹；自配送的服务端交接时间只写入首次事件。
+- 决策与知识：本记录及 PIT-0004。
+- 验证结果：修复前双进程重放跨秒时稳定返回“同一幂等键不能提交不同的交付事实”；修复后原双进程用例通过（1 个测试、16 条断言），可控时钟回归通过（1 个测试、10 条断言）。
+
+### 发生记录
+
+| 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-08-19 | BeiMi-PHP#10 | 同一自配送交付键由两个进程并发确认 | PIT-0004 已约束锁序、事务后重放和请求指纹比对，但没有约束指纹只能包含可稳定重放的客户端事实。 |

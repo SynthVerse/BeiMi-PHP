@@ -97,6 +97,31 @@ final class CustomerReportRouteContractTest extends TestCase
         self::assertStringNotContainsString("where('source_type'", $returnLogic);
     }
 
+    public function test_delivery_variant_and_return_actions_do_not_lock_absent_idempotency_keys(): void
+    {
+        $root = dirname(__DIR__, 2);
+        $variant = (string)file_get_contents($root . '/app/api/jxc/logic/DeliveryVariantLogic.php');
+        $lineVehicle = (string)file_get_contents($root . '/app/api/jxc/logic/LineVehicleLogic.php');
+        $validator = (string)file_get_contents($root . '/app/api/jxc/validate/DeliveryInventoryValidate.php');
+        $returnStart = strpos($lineVehicle, 'public static function returnReroutedToPending(');
+        $returnEnd = strpos($lineVehicle, 'public static function departTrip(', (int)$returnStart);
+        self::assertNotFalse($returnStart);
+        self::assertNotFalse($returnEnd);
+        $returnMethod = substr($lineVehicle, (int)$returnStart, (int)$returnEnd - (int)$returnStart);
+
+        foreach ([$variant, $returnMethod] as $idempotentWriter) {
+            self::assertSame(0, preg_match(
+                "/where\\('idempotency_key'[^;]+?lock\\(true\\)->find\\(\\)/s",
+                $idempotentWriter
+            ), '不存在的幂等键只能普通查询并由唯一键兜底');
+        }
+        self::assertStringContainsString('self::replayReturnAfterCommit($key, $fingerprint)', $returnMethod);
+        self::assertStringContainsString("usort(\$work, [self::class, 'compareWorkItems']);", $variant);
+        self::assertStringContainsString("public function sceneDetail() { return \$this->only(['id'])->append('id', 'require'); }", $validator);
+        self::assertStringContainsString("public function sceneResolveNegative()", $validator);
+        self::assertStringContainsString("->append('id', 'require')", $validator);
+    }
+
     public function test_customer_report_workflow_has_explicit_authenticated_routes(): void
     {
         $root = dirname(__DIR__, 2);
@@ -123,6 +148,9 @@ final class CustomerReportRouteContractTest extends TestCase
             "Route::post('jxc/tasks/reduce_item', 'jxc.FulfillmentTask/reduceItem');",
             "Route::post('jxc/tasks/mark_undelivered', 'jxc.FulfillmentTask/markUndelivered');",
             "Route::post('jxc/delivery/self_confirm', 'jxc.DeliveryInventory/confirmSelf');",
+            "Route::post('jxc/delivery/third_party_confirm', 'jxc.DeliveryInventory/confirmThirdParty');",
+            "Route::get('jxc/delivery/third_party_drivers', 'jxc.DeliveryInventory/drivers');",
+            "Route::post('jxc/delivery/third_party_driver_save', 'jxc.DeliveryInventory/driverSave');",
             "Route::get('jxc/delivery/detail', 'jxc.DeliveryInventory/detail');",
             "Route::get('jxc/inventory/negative_todos', 'jxc.DeliveryInventory/negativeTodos');",
             "Route::post('jxc/inventory/negative_resolve', 'jxc.DeliveryInventory/resolveNegative');",
@@ -134,6 +162,7 @@ final class CustomerReportRouteContractTest extends TestCase
             "Route::post('jxc/line_vehicle/package_record', 'jxc.LineVehicle/packageRecord');",
             "Route::post('jxc/line_vehicle/trip_depart', 'jxc.LineVehicle/tripDepart');",
             "Route::post('jxc/line_vehicle/reroute', 'jxc.LineVehicle/reroute');",
+            "Route::post('jxc/line_vehicle/return_pending', 'jxc.LineVehicle/returnPending');",
             "Route::post('jxc/line_vehicle/handoff_confirm', 'jxc.LineVehicle/handoffConfirm');",
             "Route::get('jxc/line_vehicle/loading_manifest', 'jxc.LineVehicle/manifest');",
         ] as $route) {

@@ -15,6 +15,10 @@ final class DeliveryInventoryLogic extends BaseLogic
     /** @return array<string,mixed>|false */
     public static function confirmSelfDelivery(array $params): array|false
     {
+        if (array_key_exists('items', $params)) {
+            $params['event_type'] = (string)($params['event_type'] ?? 'customer_handoff');
+            return self::confirmVariant($params, 'self_delivery', 'customer_handoff');
+        }
         return self::confirmDelivery($params, 'self_delivery', 'customer_handoff');
     }
 
@@ -22,7 +26,29 @@ final class DeliveryInventoryLogic extends BaseLogic
     public static function confirmFixedLineHandoff(array $params): array|false
     {
         $params['event_type'] = 'line_vehicle_handoff';
+        if (array_key_exists('items', $params)) {
+            return self::confirmVariant($params, 'fixed_line_vehicle', 'line_vehicle_handoff');
+        }
         return self::confirmDelivery($params, 'fixed_line_vehicle', 'line_vehicle_handoff');
+    }
+
+    /** @return array<string,mixed>|false */
+    public static function confirmThirdPartyDelivery(array $params): array|false
+    {
+        $params['event_type'] = 'third_party_driver_handoff';
+        return self::confirmVariant($params, 'third_party', 'third_party_driver_handoff');
+    }
+
+    /** @return array<string,mixed>|false */
+    private static function confirmVariant(array $params, string $method, string $eventType): array|false
+    {
+        $result = DeliveryVariantLogic::confirm($params, $method, $eventType);
+        if ($result === false) {
+            self::setError(DeliveryVariantLogic::getError());
+        } else {
+            self::clearError();
+        }
+        return $result;
     }
 
     /** @return array<string,mixed>|false */
@@ -570,14 +596,20 @@ final class DeliveryInventoryLogic extends BaseLogic
         $event['trip_id'] = (int)($event['trip_id'] ?? 0);
         $event['trip_report_id'] = (int)($event['trip_report_id'] ?? 0);
         $event['line_schedule_id'] = (int)($event['line_schedule_id'] ?? 0);
+        $event['driver_id'] = (int)($event['driver_id'] ?? 0);
+        $event['actual_handoff_time'] = (int)($event['actual_handoff_time'] ?? 0);
+        $event['driver'] = !empty($event['driver_snapshot'])
+            ? (json_decode((string)$event['driver_snapshot'], true) ?: null)
+            : null;
+        unset($event['driver_snapshot']);
         $event['items'] = Db::name('fulfillment_delivery_item')->where('tenant_id', self::tenantId())
             ->where('delivery_event_id', $eventId)->order('id')->select()->toArray();
         foreach ($event['items'] as &$item) {
             $item['id'] = (int)$item['id'];
             $item['sales_order_id'] = (int)$item['sales_order_id'];
             $item['report_item_id'] = (int)$item['report_item_id'];
-            foreach (['actual_delivery_weight', 'reservation_consumed_qty', 'reservation_released_qty', 'negative_qty'] as $field) {
-                $item[$field] = self::decimal((string)$item[$field]);
+            foreach (['actual_delivery_weight', 'loss_weight', 'undelivered_weight', 'reservation_consumed_qty', 'reservation_released_qty', 'negative_qty'] as $field) {
+                $item[$field] = self::decimal((string)($item[$field] ?? '0'));
             }
         }
         unset($item);

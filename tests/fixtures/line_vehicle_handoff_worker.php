@@ -6,6 +6,7 @@ $_SERVER['JXC_PHPUNIT_ENV'] = 'testing';
 require dirname(__DIR__) . '/bootstrap.php';
 
 use app\api\jxc\logic\FulfillmentClock;
+use app\api\jxc\logic\DeliveryInventoryLogic;
 use app\api\jxc\logic\LineVehicleLogic;
 
 $inputPath = (string)($argv[1] ?? '');
@@ -37,10 +38,16 @@ for ($attempt = 0; $attempt < 200 && !is_file($startPath); $attempt++) {
 
 $action = (string)($payload['action'] ?? 'handoff');
 $params = (array)($payload['params'] ?? $payload['handoff'] ?? []);
-$result = $action === 'reroute'
-    ? LineVehicleLogic::reroute($params)
-    : LineVehicleLogic::confirmHandoff($params);
+$result = match ($action) {
+    'reroute' => LineVehicleLogic::reroute($params),
+    'return_pending' => LineVehicleLogic::returnReroutedToPending($params),
+    'self_delivery' => DeliveryInventoryLogic::confirmSelfDelivery($params),
+    default => LineVehicleLogic::confirmHandoff($params),
+};
+$error = $action === 'self_delivery'
+    ? DeliveryInventoryLogic::getError()
+    : LineVehicleLogic::getError();
 file_put_contents($outputPath, json_encode([
     'result' => $result,
-    'error' => LineVehicleLogic::getError(),
+    'error' => $error,
 ], JSON_UNESCAPED_UNICODE));

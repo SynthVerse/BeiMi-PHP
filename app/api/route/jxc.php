@@ -187,6 +187,9 @@ Route::group('', function () {
 
     // === 真实交付出库与真负库存待办 ===
     Route::post('jxc/delivery/self_confirm', 'jxc.DeliveryInventory/confirmSelf');
+    Route::post('jxc/delivery/third_party_confirm', 'jxc.DeliveryInventory/confirmThirdParty');
+    Route::get('jxc/delivery/third_party_drivers', 'jxc.DeliveryInventory/drivers');
+    Route::post('jxc/delivery/third_party_driver_save', 'jxc.DeliveryInventory/driverSave');
     Route::get('jxc/delivery/detail', 'jxc.DeliveryInventory/detail');
     Route::get('jxc/inventory/negative_todos', 'jxc.DeliveryInventory/negativeTodos');
     Route::post('jxc/inventory/negative_resolve', 'jxc.DeliveryInventory/resolveNegative');
@@ -200,6 +203,7 @@ Route::group('', function () {
     Route::post('jxc/line_vehicle/package_record', 'jxc.LineVehicle/packageRecord');
     Route::post('jxc/line_vehicle/trip_depart', 'jxc.LineVehicle/tripDepart');
     Route::post('jxc/line_vehicle/reroute', 'jxc.LineVehicle/reroute');
+    Route::post('jxc/line_vehicle/return_pending', 'jxc.LineVehicle/returnPending');
     Route::post('jxc/line_vehicle/handoff_confirm', 'jxc.LineVehicle/handoffConfirm');
     Route::get('jxc/line_vehicle/loading_manifest', 'jxc.LineVehicle/manifest');
 

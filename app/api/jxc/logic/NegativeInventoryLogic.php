@@ -23,13 +23,14 @@ final class NegativeInventoryLogic extends BaseLogic
         $status = trim((string)($params['status'] ?? 'open'));
         $query = Db::name('negative_inventory_todo')->alias('todo')
             ->join('negative_inventory_attribution source', 'source.id=todo.attribution_id AND source.tenant_id=todo.tenant_id')
-            ->join('sales_order sales', 'sales.id=source.sales_order_id AND sales.tenant_id=source.tenant_id')
+            ->leftJoin('sales_order sales', 'sales.id=source.sales_order_id AND sales.tenant_id=source.tenant_id')
             ->where('todo.tenant_id', self::tenantId());
         if (in_array($status, ['open', 'closed'], true)) {
             $query->where('todo.status', $status);
         }
         $rows = $query->field('todo.id AS todo_id,todo.status AS todo_status,todo.severity,todo.assignee_scope,'
-            . 'source.*,sales.order_sn')->order('todo.id desc')->select()->toArray();
+            . "source.id AS attribution_id,source.*,IFNULL(sales.order_sn, '') AS order_sn")
+            ->order('todo.id desc')->select()->toArray();
         return ['lists' => $rows, 'count' => count($rows)];
     }
 
@@ -170,7 +171,7 @@ final class NegativeInventoryLogic extends BaseLogic
                     'resolved_time' => $nextStatus === 'resolved' ? $now : 0,
                     'update_time' => $now,
                 ]);
-                if ($nextCostStatus === 'pending') {
+                if ($nextCostStatus === 'pending' && (int)$source['sales_order_id'] > 0) {
                     SalesOrderLogic::markCostPendingWithinTransaction((int)$source['sales_order_id']);
                 }
                 self::updateTodoWithinTransaction($id, $nextStatus === 'resolved', $now);

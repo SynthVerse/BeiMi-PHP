@@ -65,6 +65,13 @@ class LineVehicleController extends BaseJxcController
         return $result === false ? $this->fail(LineVehicleLogic::getError()) : $this->data($result);
     }
 
+    public function returnPending()
+    {
+        $params = (new LineVehicleValidate())->post()->goCheck('returnPending');
+        $result = LineVehicleLogic::returnReroutedToPending($params);
+        return $result === false ? $this->fail(LineVehicleLogic::getError()) : $this->data($result);
+    }
+
     public function handoffConfirm()
     {
         $params = (new LineVehicleValidate())->post()->goCheck('handoffConfirm');

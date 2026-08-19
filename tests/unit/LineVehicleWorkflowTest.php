@@ -5,9 +5,11 @@ declare(strict_types=1);
 namespace tests\unit;
 
 use app\api\jxc\logic\CustomerReportLogic;
+use app\api\jxc\logic\DeliveryInventoryLogic;
 use app\api\jxc\logic\FulfillmentClock;
 use app\api\jxc\logic\FulfillmentTaskLogic;
 use app\api\jxc\logic\LineVehicleLogic;
+use app\api\jxc\logic\ThirdPartyDriverLogic;
 use app\api\jxc\logic\WarehouseSkuBalanceService;
 use PHPUnit\Framework\TestCase;
 use tests\unit\WarehouseSkuBalanceForGoodsTestAdapter as WarehouseGoodsBalanceService;
@@ -517,6 +519,76 @@ final class LineVehicleWorkflowTest extends TestCase
         }
     }
 
+    public function test_self_and_third_party_delivery_require_an_explicit_reroute_from_the_active_line_trip(): void
+    {
+        $fixture = $this->fixedLineFixture('line-alternate-gate', '1.00', '1.00');
+        [, $trip, $tripReport] = $this->createTripForFixture($fixture, 'line-alternate-gate-trip', 1);
+        foreach (['packed', 'loaded'] as $stage) {
+            self::assertNotFalse(LineVehicleLogic::recordPackages([
+                'trip_report_id' => (int)$tripReport['id'],
+                'stage' => $stage,
+                'actual_package_count' => 1,
+            ]), LineVehicleLogic::getError());
+        }
+        self::assertNotFalse(LineVehicleLogic::departTrip([
+            'trip_id' => (int)$trip['id'],
+            'actual_store_departure_time' => '2026-08-20 05:30:00',
+        ]), LineVehicleLogic::getError());
+
+        $selfDelivery = [
+            'task_id' => $fixture['delivery_task_id'],
+            'event_type' => 'customer_handoff',
+            'idempotency_key' => 'line-alternate-self-delivery',
+            'items' => [[
+                'report_item_id' => $fixture['report_item_id'],
+                'actual_delivery_weight' => '1.0000',
+                'loss_weight' => '0.0000',
+                'remaining_action' => 'none',
+            ]],
+        ];
+        self::assertFalse(DeliveryInventoryLogic::confirmSelfDelivery($selfDelivery));
+        self::assertSame('报货单仍在活动的固定线趟次中，必须先记录改派', DeliveryInventoryLogic::getError());
+
+        $driver = ThirdPartyDriverLogic::save([
+            'name' => '改派司机', 'mobile' => '13800000110', 'platform' => '跑腿',
+            'vehicle_no' => '辽A0110', 'is_enabled' => 1,
+        ]);
+        self::assertNotFalse($driver, ThirdPartyDriverLogic::getError());
+        $thirdParty = $selfDelivery;
+        unset($thirdParty['event_type']);
+        $thirdParty['driver_id'] = (int)$driver['id'];
+        $thirdParty['actual_handoff_time'] = '2026-08-20 06:59:00';
+        $thirdParty['idempotency_key'] = 'line-alternate-third-party';
+        self::assertFalse(DeliveryInventoryLogic::confirmThirdPartyDelivery($thirdParty));
+        self::assertSame('报货单仍在活动的固定线趟次中，必须先记录改派', DeliveryInventoryLogic::getError());
+        self::assertSame(0, Db::name('fulfillment_delivery_event')->where('report_id', $fixture['report_id'])->count());
+
+        $responses = $this->runConcurrentLineActions([[
+            'action' => 'self_delivery',
+            'params' => $selfDelivery,
+        ], [
+            'action' => 'reroute',
+            'params' => [
+                'trip_report_id' => (int)$tripReport['id'],
+                'reroute_method' => 'self_delivery',
+                'reroute_reason' => '错过原线车后明确改为自配送',
+            ],
+        ]]);
+        $diagnostic = json_encode($responses, JSON_UNESCAPED_UNICODE);
+        self::assertNotEmpty($responses[1]['result'], $diagnostic);
+        $oldAssignment = Db::name('line_vehicle_trip_report')->where('tenant_id', self::TENANT_ID)
+            ->where('id', (int)$tripReport['id'])->find();
+        self::assertSame('rerouted', (string)$oldAssignment['status'], $diagnostic);
+        self::assertNull($oldAssignment['active_report_id'], $diagnostic);
+        $deliveryCount = Db::name('fulfillment_delivery_event')->where('report_id', $fixture['report_id'])->count();
+        self::assertContains($deliveryCount, [0, 1], $diagnostic);
+        self::assertSame(
+            $deliveryCount === 1 ? '0.0000' : '1.0000',
+            WarehouseSkuBalanceService::onHand($fixture['warehouse_id'], $fixture['sku_id']),
+            $diagnostic
+        );
+    }
+
     public function test_rerouted_report_cannot_handoff_from_an_old_multi_report_trip(): void
     {
         $first = $this->fixedLineFixture('line-old-trip-a', '1.00', '1.00');
@@ -598,6 +670,57 @@ final class LineVehicleWorkflowTest extends TestCase
         self::assertSame('departed', (string)Db::name('line_vehicle_trip')->where('id', (int)$trip['id'])->value('status'));
     }
 
+    public function test_full_loss_without_actual_line_handoff_closes_as_delivery_exception(): void
+    {
+        $fixture = $this->fixedLineFixture('line-full-loss', '1.00', '1.00');
+        [, $trip, $tripReport] = $this->createTripForFixture($fixture, 'line-full-loss-trip', 1);
+        foreach (['packed', 'loaded'] as $stage) {
+            self::assertNotFalse(LineVehicleLogic::recordPackages([
+                'trip_report_id' => (int)$tripReport['id'],
+                'stage' => $stage,
+                'actual_package_count' => 1,
+                'exception_note' => '',
+            ]), LineVehicleLogic::getError());
+        }
+        self::assertNotFalse(LineVehicleLogic::departTrip([
+            'trip_id' => (int)$trip['id'],
+            'actual_store_departure_time' => '2026-08-20 05:30:00',
+        ]), LineVehicleLogic::getError());
+        self::assertGreaterThan((int)$tripReport['handoff_deadline'], FulfillmentClock::now());
+
+        $result = LineVehicleLogic::confirmHandoff([
+            'trip_report_id' => (int)$tripReport['id'],
+            'exception_note' => '整包损坏，未发生实际线车交接',
+            'idempotency_key' => 'line-full-loss-handoff',
+            'items' => [[
+                'report_item_id' => $fixture['report_item_id'],
+                'actual_delivery_weight' => '0.0000',
+                'loss_weight' => '1.0000',
+                'loss_package_count' => 1,
+                'loss_reason' => '整包损坏',
+                'remaining_action' => 'none',
+            ]],
+        ]);
+        self::assertNotFalse($result, LineVehicleLogic::getError());
+        self::assertSame('delivery_exception', (string)$result['delivery_event']['event_type']);
+        self::assertSame('handled_without_delivery', (string)$result['delivery_event']['status']);
+        self::assertSame('handled_without_delivery', (string)$result['delivery_event']['delivery_outcome']);
+        self::assertSame(0, (int)$result['delivery_event']['actual_handoff_time']);
+        self::assertSame(0, (int)$result['delivery_event']['delivered_time']);
+
+        $storedTripReport = Db::name('line_vehicle_trip_report')->where('id', (int)$tripReport['id'])->find();
+        self::assertSame('delivery_exception', (string)$storedTripReport['status']);
+        self::assertSame(0, (int)$storedTripReport['handoff_checked']);
+        self::assertSame(0, (int)$storedTripReport['actual_handoff_time']);
+        self::assertNull($storedTripReport['active_report_id']);
+        self::assertSame('closed', (string)Db::name('line_vehicle_trip')->where('id', (int)$trip['id'])->value('status'));
+        self::assertSame('delivery_exception_completed', (string)Db::name('customer_report')
+            ->where('id', $fixture['report_id'])->value('status'));
+        self::assertSame(0, Db::name('sales_order')->where('tenant_id', self::TENANT_ID)
+            ->where('source_type', 'customer_report')->where('source_id', $fixture['report_id'])->count());
+        self::assertSame('0.0000', WarehouseSkuBalanceService::onHand($fixture['warehouse_id'], $fixture['sku_id']));
+    }
+
     public function test_handoff_business_failure_rolls_back_trip_delivery_and_inventory_facts(): void
     {
         $fixture = $this->fixedLineFixture('line-rollback', '1.00', '1.00');
@@ -657,6 +780,51 @@ final class LineVehicleWorkflowTest extends TestCase
         self::assertSame('1.0000', WarehouseSkuBalanceService::onHand($fixture['warehouse_id'], $fixture['sku_id']));
         self::assertSame('1.0000', WarehouseSkuBalanceService::reserved($fixture['warehouse_id'], $fixture['sku_id']));
         self::assertSame('departed', (string)Db::name('line_vehicle_trip')->where('id', (int)$trip['id'])->value('status'));
+    }
+
+    public function test_rerouted_goods_can_return_to_pending_without_erasing_the_old_trip_history(): void
+    {
+        $fixture = $this->fixedLineFixture('line-return-pending', '1.00', '1.00');
+        [, $trip, $tripReport] = $this->createTripForFixture($fixture, 'line-return-pending-trip', 1);
+        foreach (['packed', 'loaded'] as $stage) {
+            self::assertNotFalse(LineVehicleLogic::recordPackages([
+                'trip_report_id' => (int)$tripReport['id'],
+                'stage' => $stage,
+                'actual_package_count' => 1,
+                'exception_note' => '',
+            ]), LineVehicleLogic::getError());
+        }
+        self::assertNotFalse(LineVehicleLogic::departTrip([
+            'trip_id' => (int)$trip['id'],
+            'actual_store_departure_time' => '2026-08-20 05:30:00',
+        ]), LineVehicleLogic::getError());
+        self::assertNotFalse(LineVehicleLogic::reroute([
+            'trip_report_id' => (int)$tripReport['id'],
+            'reroute_method' => 'self_delivery',
+            'reroute_reason' => '错过原线车后带回门店改为自配送',
+        ]), LineVehicleLogic::getError());
+
+        $payload = [
+            'trip_report_id' => (int)$tripReport['id'],
+            'return_reason' => '货物已安全返回门店冷库，等待重新配送',
+            'idempotency_key' => 'line-return-pending-fact',
+        ];
+        $first = LineVehicleLogic::returnReroutedToPending($payload);
+        self::assertNotFalse($first, LineVehicleLogic::getError());
+        self::assertSame('rerouted', (string)$first['status']);
+        self::assertSame('returned_to_pending', (string)$first['return_status']);
+        self::assertGreaterThan(0, (int)$first['returned_to_store_time']);
+        self::assertSame((int)$first['returned_to_store_time'], (int)LineVehicleLogic::returnReroutedToPending($payload)['returned_to_store_time']);
+
+        $conflict = $payload;
+        $conflict['return_reason'] = '试图覆盖原返回原因';
+        self::assertFalse(LineVehicleLogic::returnReroutedToPending($conflict));
+        self::assertSame('同一幂等键不能提交不同的返回门店事实', LineVehicleLogic::getError());
+        self::assertSame('rerouted', (string)Db::name('line_vehicle_trip_report')->where('id', (int)$tripReport['id'])->value('status'));
+        self::assertSame(0, Db::name('fulfillment_delivery_event')->where('report_id', $fixture['report_id'])->count());
+        self::assertSame('1.0000', WarehouseSkuBalanceService::onHand($fixture['warehouse_id'], $fixture['sku_id']));
+        self::assertSame('1.0000', WarehouseSkuBalanceService::reserved($fixture['warehouse_id'], $fixture['sku_id']));
+        self::assertNotSame('completed', (string)Db::name('fulfillment_task')->where('id', $fixture['delivery_task_id'])->value('status'));
     }
 
     /** @return array{0:array<string,mixed>,1:array<string,mixed>,2:array<string,mixed>} */
@@ -748,7 +916,7 @@ final class LineVehicleWorkflowTest extends TestCase
         }
     }
 
-    /** @return array{report_id:int,delivery_task_id:int,warehouse_id:int,goods_id:int,sku_id:int} */
+    /** @return array{report_id:int,report_item_id:int,delivery_task_id:int,warehouse_id:int,goods_id:int,sku_id:int} */
     private function fixedLineFixture(string $key, string $stock, string $finalWeight, bool $useChild = false): array
     {
         $mainCustomerId = $this->createCustomer('固定线主客户-' . $key);
@@ -807,6 +975,7 @@ final class LineVehicleWorkflowTest extends TestCase
         self::assertNotEmpty($deliveryTask);
         return [
             'report_id' => (int)$report['id'],
+            'report_item_id' => (int)$item['id'],
             'delivery_task_id' => (int)$deliveryTask['id'],
             'warehouse_id' => $warehouseId,
             'goods_id' => $goodsId,
