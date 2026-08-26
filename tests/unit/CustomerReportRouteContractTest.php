@@ -235,6 +235,33 @@ final class CustomerReportRouteContractTest extends TestCase
         }
     }
 
+    public function test_customer_sales_printing_exposes_prepare_and_result_receipt_routes(): void
+    {
+        $root = dirname(__DIR__, 2);
+        $routes = (string)file_get_contents($root . '/app/api/route/jxc.php');
+        $controller = (string)file_get_contents($root . '/app/api/jxc/controller/SalesSettlementController.php');
+
+        self::assertStringContainsString(
+            "Route::post('jxc/sales_settlement/print_prepare', 'jxc.SalesSettlement/preparePrint')",
+            $routes
+        );
+        self::assertStringContainsString(
+            "Route::post('jxc/sales_settlement/print_result', 'jxc.SalesSettlement/printResult')",
+            $routes
+        );
+        self::assertStringContainsString('public function preparePrint()', $controller);
+        self::assertStringContainsString('public function printResult()', $controller);
+
+        $logic = (string)file_get_contents($root . '/app/api/jxc/logic/SalesSettlementLogic.php');
+        self::assertStringContainsString('replayPrintPreparation($idempotencyKey, $orderId, $expectedVersion)', $logic);
+        preg_match('/public static function preparePrint\b.*?private static function replayPrintPreparation/s', $logic, $match);
+        self::assertNotEmpty($match, 'preparePrint method should remain discoverable for lock-discipline checks');
+        self::assertDoesNotMatchRegularExpression(
+            "/where\\('(idempotency_key|status)'[^;]+?lock\\(true\\)->find\\(\\)/s",
+            $match[0]
+        );
+    }
+
     public function test_directed_sales_correction_locks_negative_sources_in_global_fifo_order_before_prioritizing_allocation(): void
     {
         $root = dirname(__DIR__, 2);

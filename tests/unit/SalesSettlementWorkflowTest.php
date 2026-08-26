@@ -48,6 +48,294 @@ final class SalesSettlementWorkflowTest extends TestCase
         foreach (['customer_settlement_quantity', 'billing_weight_difference', 'pricing_unit_name', 'price_status', 'zero_price_reason'] as $column) {
             self::assertNotEmpty(Db::query("SHOW COLUMNS FROM `la_order_goods` LIKE '{$column}'"));
         }
+
+        $printMigration = $this->prepareMigration((string)file_get_contents(
+            dirname(__DIR__, 2) . '/database/migrations/20260819_000004_customer_sales_print_receipts.sql'
+        ));
+        $this->runStatements($printMigration);
+        $this->runStatements($printMigration);
+        self::assertNotEmpty(Db::query("SHOW TABLES LIKE 'la_customer_sales_print_log'"));
+    }
+
+    public function test_customer_identity_uses_first_valid_report_item_identically_for_detail_and_list(): void
+    {
+        $fixture = $this->pendingOrderFixture('2.0000');
+        $mainName = (string)Db::name('customer')->where('id', $fixture['customer_id'])->value('customer_name');
+        $firstChildName = '结算子客户-首项-' . uniqid();
+        $firstChildId = $this->createCustomer($firstChildName, $fixture['customer_id']);
+        $secondChildName = '结算子客户-后项-' . uniqid();
+        $secondChildId = $this->createCustomer($secondChildName, $fixture['customer_id']);
+        $reportId = (int)Db::name('sales_order')->where('id', $fixture['order_id'])->value('source_id');
+        $now = time();
+        $firstSourceLineId = $fixture['source_line_id'];
+        $secondSourceLineId = $firstSourceLineId + 1;
+        $reportItem = [
+            'tenant_id' => self::TENANT_ID,
+            'report_id' => $reportId,
+            'main_customer_id' => $fixture['customer_id'],
+            'main_customer_name' => $mainName,
+            'warehouse_id' => $fixture['warehouse_id'],
+            'goods_id' => $fixture['goods_id'],
+            'goods_name' => '结算商品',
+            'sku_id' => $fixture['sku_id'],
+            'unit_id' => $fixture['unit_id'],
+            'unit_name' => '斤',
+            'base_unit_id' => $fixture['unit_id'],
+            'base_unit_name' => '斤',
+            'order_qty' => '2.00',
+            'expected_base_qty' => '2.00',
+            'fulfilled_base_qty' => '2.00',
+            'create_time' => $now,
+            'update_time' => $now,
+        ];
+        Db::name('customer_report_item')->insert(array_merge($reportItem, [
+            'id' => $firstSourceLineId,
+            'delivery_customer_id' => $firstChildId,
+            'delivery_customer_name' => $firstChildName,
+        ]));
+        Db::name('customer_report_item')->insert(array_merge($reportItem, [
+            'id' => $secondSourceLineId,
+            'delivery_customer_id' => $secondChildId,
+            'delivery_customer_name' => $secondChildName,
+        ]));
+        Db::name('order_goods')->where('id', $fixture['order_goods_id'])->update([
+            'source_line_id' => $secondSourceLineId,
+            'update_time' => $now,
+        ]);
+        $secondOrderGoods = Db::name('order_goods')->where('id', $fixture['order_goods_id'])->find();
+        unset($secondOrderGoods['id']);
+        $secondOrderGoods['source_line_id'] = $firstSourceLineId;
+        $secondOrderGoods['sort'] = 2;
+        $secondOrderGoods['create_time'] = $now;
+        $secondOrderGoods['update_time'] = $now;
+        Db::name('order_goods')->insert($secondOrderGoods);
+
+        $detail = SalesSettlementLogic::detail(['id' => $fixture['order_id']]);
+
+        self::assertNotFalse($detail, SalesSettlementLogic::getError());
+        self::assertSame($fixture['customer_id'], $detail['main_customer_id']);
+        self::assertSame($mainName, $detail['main_customer_name']);
+        self::assertSame($firstChildId, $detail['delivery_customer_id']);
+        self::assertSame($firstChildName, $detail['delivery_customer_name']);
+        self::assertSame($firstChildName, $detail['sub_customer_name']);
+        self::assertSame($mainName, $detail['customer_name']);
+
+        $list = SalesSettlementLogic::lists(['status' => 'all']);
+        self::assertNotFalse($list, SalesSettlementLogic::getError());
+        $listedOrder = array_values(array_filter(
+            $list['lists'],
+            static fn(array $row): bool => (int)$row['order_id'] === $fixture['order_id'],
+        ))[0] ?? null;
+        self::assertNotNull($listedOrder);
+        self::assertSame($mainName, $listedOrder['main_customer_name']);
+        self::assertSame($firstChildName, $listedOrder['sub_customer_name']);
+
+        Db::name('customer_report_item')->where('id', $firstSourceLineId)->update([
+            'delete_time' => $now,
+            'update_time' => $now,
+        ]);
+        $detailAfterSoftDelete = SalesSettlementLogic::detail(['id' => $fixture['order_id']]);
+        self::assertNotFalse($detailAfterSoftDelete, SalesSettlementLogic::getError());
+        self::assertSame($secondChildName, $detailAfterSoftDelete['sub_customer_name']);
+        $listAfterSoftDelete = SalesSettlementLogic::lists(['status' => 'all']);
+        self::assertNotFalse($listAfterSoftDelete, SalesSettlementLogic::getError());
+        $listedOrderAfterSoftDelete = array_values(array_filter(
+            $listAfterSoftDelete['lists'],
+            static fn(array $row): bool => (int)$row['order_id'] === $fixture['order_id'],
+        ))[0] ?? null;
+        self::assertNotNull($listedOrderAfterSoftDelete);
+        self::assertSame($secondChildName, $listedOrderAfterSoftDelete['sub_customer_name']);
+    }
+
+    public function test_print_receipts_accumulate_for_one_sales_order_across_versions_and_devices(): void
+    {
+        $fixture = $this->pendingOrderFixture('2.0000');
+        $v1 = SalesSettlementLogic::submit($this->settlementPayload(
+            $fixture,
+            'settlement-print-receipt-v1',
+            '2.0000',
+            '10.00'
+        ));
+        self::assertNotFalse($v1, SalesSettlementLogic::getError());
+
+        $first = SalesSettlementLogic::preparePrint([
+            'id' => $fixture['order_id'],
+            'expected_version' => 1,
+            'idempotency_key' => 'customer-sales-print-v1-first',
+        ]);
+        self::assertNotFalse($first, SalesSettlementLogic::getError());
+        self::assertSame(1, $first['copy_no']);
+        self::assertFalse($first['is_reprint']);
+        self::assertSame(0, $first['successful_print_count']);
+        self::assertSame($first, SalesSettlementLogic::preparePrint([
+            'id' => $fixture['order_id'],
+            'expected_version' => 1,
+            'idempotency_key' => 'customer-sales-print-v1-first',
+        ]));
+        self::assertSame(1, Db::name('customer_sales_print_log')->where('order_id', $fixture['order_id'])->count());
+        self::assertFalse(SalesSettlementLogic::preparePrint([
+            'id' => $fixture['order_id'],
+            'expected_version' => 1,
+            'idempotency_key' => 'customer-sales-print-v1-concurrent',
+        ]));
+        self::assertSame('上一张销售单的打印回执尚未确认', SalesSettlementLogic::getError());
+
+        $firstResult = SalesSettlementLogic::printResult([
+            'id' => $fixture['order_id'],
+            'print_log_id' => $first['print_log_id'],
+            'success' => 1,
+        ]);
+        self::assertNotFalse($firstResult, SalesSettlementLogic::getError());
+        self::assertSame(1, $firstResult['successful_print_count']);
+        self::assertSame($firstResult, SalesSettlementLogic::printResult([
+            'id' => $fixture['order_id'],
+            'print_log_id' => $first['print_log_id'],
+            'success' => 1,
+        ]));
+
+        $v2Payload = $this->settlementPayload($fixture, 'settlement-print-receipt-v2', '2.0000', '11.00');
+        $v2Payload['expected_version'] = 1;
+        $v2Payload['edit_reason'] = '录入更正：打印后修正最终实价';
+        $v2 = SalesSettlementLogic::submit($v2Payload);
+        self::assertNotFalse($v2, SalesSettlementLogic::getError());
+
+        $v2Detail = SalesSettlementLogic::detail(['id' => $fixture['order_id']]);
+        self::assertNotFalse($v2Detail, SalesSettlementLogic::getError());
+        self::assertSame(2, $v2Detail['version']);
+        self::assertSame(1, $v2Detail['successful_print_count']);
+        $recoveredV1 = SalesSettlementLogic::preparePrint([
+            'id' => $fixture['order_id'],
+            'expected_version' => 1,
+            'idempotency_key' => 'customer-sales-print-v1-first',
+        ]);
+        self::assertNotFalse($recoveredV1, SalesSettlementLogic::getError());
+        self::assertSame($first['print_log_id'], $recoveredV1['print_log_id']);
+        self::assertSame(1, $recoveredV1['version']);
+        self::assertSame('success', $recoveredV1['status']);
+        self::assertFalse(SalesSettlementLogic::preparePrint([
+            'id' => $fixture['order_id'],
+            'expected_version' => 1,
+            'idempotency_key' => 'customer-sales-print-stale-v1',
+        ]));
+        self::assertSame('销售单版本已变化，请重新加载后再打印', SalesSettlementLogic::getError());
+
+        $second = SalesSettlementLogic::preparePrint([
+            'id' => $fixture['order_id'],
+            'expected_version' => 2,
+            'idempotency_key' => 'customer-sales-print-v2-second',
+        ]);
+        self::assertNotFalse($second, SalesSettlementLogic::getError());
+        self::assertSame(2, $second['copy_no']);
+        self::assertTrue($second['is_reprint']);
+        self::assertSame(1, $second['reprint_count']);
+        self::assertSame(2, $second['version']);
+
+        $failedResult = SalesSettlementLogic::printResult([
+            'id' => $fixture['order_id'],
+            'print_log_id' => $second['print_log_id'],
+            'success' => 0,
+            'error_message' => '测试打印机断开',
+        ]);
+        self::assertNotFalse($failedResult, SalesSettlementLogic::getError());
+        self::assertSame(1, $failedResult['successful_print_count']);
+        self::assertSame(1, Db::name('customer_sales_print_log')->where('order_id', $fixture['order_id'])
+            ->where('status', 'success')->count());
+    }
+
+    public function test_lost_v1_print_prepare_can_be_replayed_and_closed_after_v2_is_saved(): void
+    {
+        $fixture = $this->pendingOrderFixture('2.0000');
+        self::assertNotFalse(SalesSettlementLogic::submit($this->settlementPayload(
+            $fixture,
+            'settlement-lost-print-v1',
+            '2.0000',
+            '10.00'
+        )), SalesSettlementLogic::getError());
+        $lost = SalesSettlementLogic::preparePrint([
+            'id' => $fixture['order_id'],
+            'expected_version' => 1,
+            'idempotency_key' => 'customer-sales-lost-prepare-v1',
+        ]);
+        self::assertNotFalse($lost, SalesSettlementLogic::getError());
+
+        $v2Payload = $this->settlementPayload($fixture, 'settlement-after-lost-print-v2', '2.0000', '11.00');
+        $v2Payload['expected_version'] = 1;
+        $v2Payload['edit_reason'] = '录入更正：打印准备响应丢失后修改价格';
+        self::assertNotFalse(SalesSettlementLogic::submit($v2Payload), SalesSettlementLogic::getError());
+
+        $replayed = SalesSettlementLogic::preparePrint([
+            'id' => $fixture['order_id'],
+            'expected_version' => 1,
+            'idempotency_key' => 'customer-sales-lost-prepare-v1',
+        ]);
+        self::assertNotFalse($replayed, SalesSettlementLogic::getError());
+        self::assertSame($lost['print_log_id'], $replayed['print_log_id']);
+        self::assertSame('pending', $replayed['status']);
+        self::assertNotFalse(SalesSettlementLogic::printResult([
+            'id' => $fixture['order_id'],
+            'print_log_id' => $replayed['print_log_id'],
+            'success' => 0,
+            'error_message' => '打印准备响应中断，客户端未启动打印',
+        ]), SalesSettlementLogic::getError());
+
+        $v2Print = SalesSettlementLogic::preparePrint([
+            'id' => $fixture['order_id'],
+            'expected_version' => 2,
+            'idempotency_key' => 'customer-sales-print-after-recovery-v2',
+        ]);
+        self::assertNotFalse($v2Print, SalesSettlementLogic::getError());
+        self::assertSame(2, $v2Print['version']);
+        self::assertSame(1, $v2Print['copy_no']);
+    }
+
+    public function test_late_success_receipt_remains_replayable_after_another_device_reserves_the_next_copy(): void
+    {
+        $fixture = $this->pendingOrderFixture('2.0000');
+        self::assertNotFalse(SalesSettlementLogic::submit($this->settlementPayload(
+            $fixture,
+            'settlement-late-print-receipt',
+            '2.0000',
+            '10.00'
+        )), SalesSettlementLogic::getError());
+
+        $first = SalesSettlementLogic::preparePrint([
+            'id' => $fixture['order_id'],
+            'expected_version' => 1,
+            'idempotency_key' => 'customer-sales-print-device-a',
+        ]);
+        self::assertNotFalse($first, SalesSettlementLogic::getError());
+        Db::name('customer_sales_print_log')->where('id', $first['print_log_id'])->update([
+            'create_time' => time() - 601,
+            'update_time' => time() - 601,
+        ]);
+
+        $second = SalesSettlementLogic::preparePrint([
+            'id' => $fixture['order_id'],
+            'expected_version' => 1,
+            'idempotency_key' => 'customer-sales-print-device-b',
+        ]);
+        self::assertNotFalse($second, SalesSettlementLogic::getError());
+        self::assertSame(2, $second['copy_no']);
+        self::assertSame('pending', Db::name('customer_sales_print_log')
+            ->where('id', $first['print_log_id'])->value('status'));
+
+        $lateFirstResult = SalesSettlementLogic::printResult([
+            'id' => $fixture['order_id'],
+            'print_log_id' => $first['print_log_id'],
+            'success' => 1,
+        ]);
+        self::assertNotFalse($lateFirstResult, SalesSettlementLogic::getError());
+        self::assertSame(1, $lateFirstResult['successful_print_count']);
+
+        $secondResult = SalesSettlementLogic::printResult([
+            'id' => $fixture['order_id'],
+            'print_log_id' => $second['print_log_id'],
+            'success' => 1,
+        ]);
+        self::assertNotFalse($secondResult, SalesSettlementLogic::getError());
+        self::assertSame(2, $secondResult['successful_print_count']);
+        self::assertSame(2, Db::name('customer_sales_print_log')
+            ->where('order_id', $fixture['order_id'])->where('status', 'success')->count());
     }
 
     public function test_migration_backfills_existing_formal_customer_report_order_as_v1_without_readding_receivable(): void

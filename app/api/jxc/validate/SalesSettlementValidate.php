@@ -25,6 +25,9 @@ final class SalesSettlementValidate extends BaseValidate
         'keyword' => 'max:100',
         'decision' => 'require|in:approve,reject',
         'reason' => 'require|max:500',
+        'print_log_id' => 'require|integer|gt:0',
+        'success' => 'require|in:0,1',
+        'error_message' => 'max:255',
     ];
 
     public function sceneLists() { return $this->only(['status', 'keyword']); }
@@ -36,6 +39,15 @@ final class SalesSettlementValidate extends BaseValidate
             'rounding_reason', 'second_confirmed', 'show_cumulative_debt', 'edit_reason',
             'inventory_exception_reason', 'inventory_second_confirmed',
         ]);
+    }
+    public function scenePreparePrint()
+    {
+        return $this->only(['id', 'expected_version', 'idempotency_key'])
+            ->append('id', 'require')->append('expected_version', 'require|integer|gt:0');
+    }
+    public function scenePrintResult()
+    {
+        return $this->only(['id', 'print_log_id', 'success', 'error_message'])->append('id', 'require');
     }
     public function sceneWeightTodos() { return $this->only(['status']); }
     public function sceneResolveWeight()

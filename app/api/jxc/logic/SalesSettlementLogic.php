@@ -13,6 +13,7 @@ final class SalesSettlementLogic extends BaseLogic
 {
     private const QUANTITY_SCALE = 4;
     private const MONEY_SCALE = 2;
+    private const PRINT_RECEIPT_TIMEOUT_SECONDS = 600;
 
     /** @return array<string,mixed>|false */
     public static function detail(array $params): array|false
@@ -28,6 +29,232 @@ final class SalesSettlementLogic extends BaseLogic
             return false;
         }
         return self::detailById($orderId);
+    }
+
+    /** @return array<string,mixed>|false */
+    public static function preparePrint(array $params): array|false
+    {
+        self::clearError();
+        if (!WorkforceLogic::requirePermission('settlement.view')) {
+            self::setError(WorkforceLogic::getError());
+            return false;
+        }
+        $orderId = self::positiveInteger($params['id'] ?? null);
+        $expectedVersion = self::positiveInteger($params['expected_version'] ?? null);
+        $idempotencyKey = trim((string)($params['idempotency_key'] ?? ''));
+        if ($orderId === false || $expectedVersion === false
+            || $idempotencyKey === '' || strlen($idempotencyKey) > 96) {
+            self::setError('销售单打印参数不正确');
+            return false;
+        }
+
+        for ($attempt = 0; $attempt < 3; $attempt++) {
+            try {
+                return Db::transaction(static function () use ($orderId, $expectedVersion, $idempotencyKey) {
+                    $order = Db::name('sales_order')->where('tenant_id', self::tenantId())
+                        ->where('id', $orderId)->lock(true)->find();
+                    if (!$order || (string)($order['source_type'] ?? '') !== 'customer_report') {
+                        self::setError('销售单不存在');
+                        return false;
+                    }
+                    $currentVersion = (int)($order['settlement_version'] ?? 0);
+                    if ((string)($order['settlement_status'] ?? '') !== 'formal' || $currentVersion <= 0) {
+                        self::setError('销售单当前不可打印');
+                        return false;
+                    }
+                    $existing = Db::name('customer_sales_print_log')->where('tenant_id', self::tenantId())
+                        ->where('idempotency_key', $idempotencyKey)->find();
+                    if ($existing) {
+                        if ((int)$existing['order_id'] !== $orderId || (int)$existing['version'] !== $expectedVersion) {
+                            self::setError('同一打印幂等键不能用于不同销售单或版本');
+                            return false;
+                        }
+                        $successfulCopies = (int)Db::name('customer_sales_print_log')
+                            ->where('tenant_id', self::tenantId())->where('order_id', $orderId)
+                            ->where('status', 'success')->count();
+                        return self::printPreparationResult($order, $existing, $successfulCopies);
+                    }
+                    if ($currentVersion !== $expectedVersion) {
+                        self::setError('销售单版本已变化，请重新加载后再打印');
+                        return false;
+                    }
+                    // The sales-order row already serializes preparation for one order. Keep this
+                    // derived-row lookup non-locking so a missing pending row never creates a gap lock.
+                    $pending = Db::name('customer_sales_print_log')->where('tenant_id', self::tenantId())
+                        ->where('order_id', $orderId)->where('status', 'pending')
+                        ->order('id', 'desc')->find();
+                    if ($pending) {
+                        $pendingTime = max((int)$pending['create_time'], (int)$pending['update_time']);
+                        if ($pendingTime > time() - self::PRINT_RECEIPT_TIMEOUT_SECONDS) {
+                            self::setError('上一张销售单的打印回执尚未确认');
+                            return false;
+                        }
+                    }
+                    $successfulCopies = (int)Db::name('customer_sales_print_log')
+                        ->where('tenant_id', self::tenantId())->where('order_id', $orderId)
+                        ->where('status', 'success')->count();
+                    // Reserve a monotonically increasing physical-copy number. A stale pending
+                    // receipt may still arrive as success, so its number must never be reused.
+                    $lastReservedCopy = (int)Db::name('customer_sales_print_log')
+                        ->where('tenant_id', self::tenantId())->where('order_id', $orderId)
+                        ->whereIn('status', ['pending', 'success'])
+                        ->max('copy_no');
+                    $copyNo = $lastReservedCopy + 1;
+                    $now = time();
+                    $logId = (int)Db::name('customer_sales_print_log')->insertGetId([
+                        'tenant_id' => self::tenantId(),
+                        'order_id' => $orderId,
+                        'version' => $currentVersion,
+                        'copy_no' => $copyNo,
+                        'idempotency_key' => $idempotencyKey,
+                        'status' => 'pending',
+                        'error_message' => '',
+                        'operator_id' => self::operatorId(),
+                        'create_time' => $now,
+                        'update_time' => $now,
+                        'printed_time' => 0,
+                    ]);
+                    if ($logId <= 0) {
+                        throw new \RuntimeException('customer_sales_print_log_insert_failed');
+                    }
+                    return self::printPreparationResult($order, [
+                        'id' => $logId,
+                        'version' => $currentVersion,
+                        'copy_no' => $copyNo,
+                        'idempotency_key' => $idempotencyKey,
+                        'status' => 'pending',
+                        'create_time' => $now,
+                    ], $successfulCopies);
+                });
+            } catch (\Throwable $exception) {
+                $replayed = self::replayPrintPreparation($idempotencyKey, $orderId, $expectedVersion);
+                if (is_array($replayed)) {
+                    self::clearError();
+                    return $replayed;
+                }
+                if ($replayed === false) {
+                    return false;
+                }
+                if (self::isLockRetryable($exception) && $attempt < 2) {
+                    self::clearError();
+                    usleep(20_000 * ($attempt + 1));
+                    continue;
+                }
+                if (!self::hasError()) {
+                    self::setError(isset($_SERVER['JXC_PHPUNIT_ENV'])
+                        ? '销售单打印准备失败：' . $exception->getMessage()
+                        : '销售单打印准备失败');
+                }
+                return false;
+            }
+        }
+        self::setError('销售单打印准备失败');
+        return false;
+    }
+
+    /** @return array<string,mixed>|false|null */
+    private static function replayPrintPreparation(string $idempotencyKey, int $orderId, int $expectedVersion): array|false|null
+    {
+        $log = Db::name('customer_sales_print_log')->where('tenant_id', self::tenantId())
+            ->where('idempotency_key', $idempotencyKey)->find();
+        if (!$log) {
+            return null;
+        }
+        $order = Db::name('sales_order')->where('tenant_id', self::tenantId())->where('id', $orderId)->find();
+        if (!$order || (int)$log['order_id'] !== $orderId || (int)$log['version'] !== $expectedVersion) {
+            self::setError('同一打印幂等键不能用于不同销售单或版本');
+            return false;
+        }
+        $successfulCopies = (int)Db::name('customer_sales_print_log')
+            ->where('tenant_id', self::tenantId())->where('order_id', $orderId)
+            ->where('status', 'success')->count();
+        return self::printPreparationResult($order, $log, $successfulCopies);
+    }
+
+    /** @param array<string,mixed> $order @param array<string,mixed> $log @return array<string,mixed> */
+    private static function printPreparationResult(array $order, array $log, int $successfulCopies): array
+    {
+        $copyNo = (int)$log['copy_no'];
+        return [
+            'print_log_id' => (int)$log['id'],
+            'idempotency_key' => (string)$log['idempotency_key'],
+            'order_id' => (int)$order['id'],
+            'order_sn' => (string)$order['order_sn'],
+            'version' => (int)$log['version'],
+            'copy_no' => $copyNo,
+            'successful_print_count' => $successfulCopies,
+            'reprint_count' => max(0, $copyNo - 1),
+            'is_reprint' => $copyNo > 1,
+            'status' => (string)$log['status'],
+            'print_requested_time' => (int)$log['create_time'],
+        ];
+    }
+
+    /** @return array<string,mixed>|false */
+    public static function printResult(array $params): array|false
+    {
+        self::clearError();
+        if (!WorkforceLogic::requirePermission('settlement.view')) {
+            self::setError(WorkforceLogic::getError());
+            return false;
+        }
+        $orderId = self::positiveInteger($params['id'] ?? null);
+        $logId = self::positiveInteger($params['print_log_id'] ?? null);
+        $success = (int)($params['success'] ?? -1);
+        $errorMessage = mb_substr(trim((string)($params['error_message'] ?? '')), 0, 255);
+        if ($orderId === false || $logId === false || !in_array($success, [0, 1], true)) {
+            self::setError('销售单打印回执参数不正确');
+            return false;
+        }
+        $wanted = $success === 1 ? 'success' : 'failed';
+
+        for ($attempt = 0; $attempt < 3; $attempt++) {
+            try {
+                return Db::transaction(static function () use ($orderId, $logId, $success, $errorMessage, $wanted) {
+                    $order = Db::name('sales_order')->where('tenant_id', self::tenantId())
+                        ->where('id', $orderId)->lock(true)->find();
+                    $log = Db::name('customer_sales_print_log')->where('tenant_id', self::tenantId())
+                        ->where('id', $logId)->where('order_id', $orderId)->lock(true)->find();
+                    if (!$order || !$log || (string)($order['source_type'] ?? '') !== 'customer_report') {
+                        self::setError('销售单打印回执无效');
+                        return false;
+                    }
+                    if ((string)$log['status'] !== 'pending') {
+                        if ((string)$log['status'] === $wanted) {
+                            return self::detailById($orderId);
+                        }
+                        self::setError('销售单打印回执结果与已保存结果冲突');
+                        return false;
+                    }
+                    $now = time();
+                    $updated = Db::name('customer_sales_print_log')->where('tenant_id', self::tenantId())
+                        ->where('id', $logId)->where('status', 'pending')->update([
+                            'status' => $wanted,
+                            'error_message' => $success === 1 ? '' : $errorMessage,
+                            'printed_time' => $success === 1 ? $now : 0,
+                            'update_time' => $now,
+                        ]);
+                    if ($updated !== 1) {
+                        throw new \RuntimeException('customer_sales_print_log_update_failed');
+                    }
+                    return self::detailById($orderId);
+                });
+            } catch (\Throwable $exception) {
+                if (self::isLockRetryable($exception) && $attempt < 2) {
+                    self::clearError();
+                    usleep(20_000 * ($attempt + 1));
+                    continue;
+                }
+                if (!self::hasError()) {
+                    self::setError(isset($_SERVER['JXC_PHPUNIT_ENV'])
+                        ? '销售单打印回执保存失败：' . $exception->getMessage()
+                        : '销售单打印回执保存失败');
+                }
+                return false;
+            }
+        }
+        self::setError('销售单打印回执保存失败');
+        return false;
     }
 
     /** @return array{lists:array<int,array<string,mixed>>,count:int}|false */
@@ -59,11 +286,17 @@ final class SalesSettlementLogic extends BaseLogic
         }
         $count = (int)(clone $query)->count();
         $rows = $query->order('id', 'desc')->select()->toArray();
+        $identities = self::customerIdentitiesForOrders($rows);
         $lists = array_map(static fn(array $row): array => [
             'order_id' => (int)$row['id'],
             'order_sn' => (string)$row['order_sn'],
             'customer_id' => (int)$row['customer_id'],
             'customer_name' => (string)$row['customer_name'],
+            ...($identities[(int)$row['id']] ?? self::customerIdentity(
+                (int)$row['customer_id'],
+                (string)$row['customer_name'],
+                null,
+            )),
             'warehouse_id' => (int)$row['warehouse_id'],
             'source_report_id' => (int)($row['source_id'] ?? 0),
             'settlement_status' => (string)($row['settlement_status'] ?? 'formal'),
@@ -93,11 +326,17 @@ final class SalesSettlementLogic extends BaseLogic
         if ($status !== 'all') {
             $query->where('t.status', $status);
         }
-        $rows = $query->field(['t.*', 'o.order_sn', 'o.customer_name'])->order('t.id', 'desc')->select()->toArray();
+        $rows = $query->field(['t.*', 'o.order_sn', 'o.customer_id', 'o.customer_name'])->order('t.id', 'desc')->select()->toArray();
+        $identities = self::customerIdentitiesForOrders(array_map(static fn(array $row): array => [
+            'id' => (int)($row['order_id'] ?? 0),
+            'customer_id' => (int)($row['customer_id'] ?? 0),
+            'customer_name' => (string)($row['customer_name'] ?? ''),
+        ], $rows));
         foreach ($rows as &$row) {
             $row['id'] = (int)$row['id'];
             $row['order_id'] = (int)$row['order_id'];
             $row['target_version'] = (int)$row['target_version'];
+            $row = array_merge($row, $identities[$row['order_id']] ?? []);
             $row['differences'] = json_decode((string)$row['differences_json'], true) ?: [];
             unset($row['differences_json']);
         }
@@ -496,7 +735,6 @@ final class SalesSettlementLogic extends BaseLogic
         if ($updated === false) {
             throw new \RuntimeException('sales_settlement_order_update_failed');
         }
-
         $versionSnapshot = $snapshot;
         $versionSnapshot['version'] = $targetVersion;
         $versionSnapshot['debt_after_order'] = $debtAfter;
@@ -976,6 +1214,22 @@ final class SalesSettlementLogic extends BaseLogic
             $line['amount'] = self::money((string)$line['amount']);
         }
         unset($line);
+        $mainCustomerId = (int)$order['customer_id'];
+        $mainCustomerName = (string)$order['customer_name'];
+        $sourceLineIds = array_values(array_unique(array_filter(array_map(
+            static fn(array $line): int => (string)($line['source_line_type'] ?? '') === 'customer_report_item'
+                ? (int)($line['source_line_id'] ?? 0)
+                : 0,
+            $lines
+        ))));
+        $reportItems = self::firstValidCustomerReportItemsForOrderSources([
+            $orderId => $sourceLineIds,
+        ]);
+        $customerIdentity = self::customerIdentity(
+            $mainCustomerId,
+            $mainCustomerName,
+            $reportItems[$orderId] ?? null,
+        );
         $pendingProposal = null;
         $pendingAction = Db::name('sales_settlement_action')->where('tenant_id', self::tenantId())
             ->where('order_id', $orderId)->where('status', 'pending_weight_review')->order('id', 'desc')->find();
@@ -988,11 +1242,15 @@ final class SalesSettlementLogic extends BaseLogic
                 ->where('customer_id', (int)$order['customer_id'])->value('show_cumulative_debt');
             $showDebt = $preference === null ? 0 : (int)$preference;
         }
+        $successfulPrintCount = (int)Db::name('customer_sales_print_log')
+            ->where('tenant_id', self::tenantId())->where('order_id', $orderId)
+            ->where('status', 'success')->count();
         return [
             'order_id' => (int)$order['id'],
             'order_sn' => (string)$order['order_sn'],
             'customer_id' => (int)$order['customer_id'],
             'customer_name' => (string)$order['customer_name'],
+            ...$customerIdentity,
             'warehouse_id' => (int)$order['warehouse_id'],
             'settlement_status' => (string)($order['settlement_status'] ?? 'formal'),
             'version' => (int)($order['settlement_version'] ?? 0),
@@ -1001,11 +1259,120 @@ final class SalesSettlementLogic extends BaseLogic
             'order_money' => self::money((string)$order['order_money']),
             'debt_after_order' => self::money((string)($order['debt_after_order'] ?? '0')),
             'show_cumulative_debt' => $showDebt === 1,
+            'successful_print_count' => $successfulPrintCount,
+            'reprint_count' => max(0, $successfulPrintCount - 1),
             'can_print' => (string)($order['settlement_status'] ?? '') === 'formal'
                 && (int)($order['settlement_version'] ?? 0) > 0,
             'profit_status' => (string)($order['profit_status'] ?? 'pending_settlement'),
             'pending_proposal' => is_array($pendingProposal) ? $pendingProposal : null,
             'lines' => $lines,
+        ];
+    }
+
+    /** @param array<int,array<string,mixed>> $orders @return array<int,array<string,int|string>> */
+    private static function customerIdentitiesForOrders(array $orders): array
+    {
+        $identities = [];
+        $orderIds = [];
+        foreach ($orders as $order) {
+            $orderId = (int)($order['id'] ?? 0);
+            if ($orderId <= 0) {
+                continue;
+            }
+            $orderIds[] = $orderId;
+            $identities[$orderId] = self::customerIdentity(
+                (int)($order['customer_id'] ?? 0),
+                (string)($order['customer_name'] ?? ''),
+                null,
+            );
+        }
+        if ($orderIds === []) {
+            return $identities;
+        }
+        $sourceRows = Db::name('order_goods')->where('tenant_id', self::tenantId())
+            ->whereIn('order_id', $orderIds)->where('order_type', 'sales')
+            ->where('source_line_type', 'customer_report_item')
+            ->field(['order_id', 'source_line_id'])->select()->toArray();
+        $sourceItemIdsByOrder = [];
+        foreach ($sourceRows as $sourceRow) {
+            $orderId = (int)($sourceRow['order_id'] ?? 0);
+            $sourceItemId = (int)($sourceRow['source_line_id'] ?? 0);
+            if ($orderId > 0 && $sourceItemId > 0) {
+                $sourceItemIdsByOrder[$orderId][] = $sourceItemId;
+            }
+        }
+        if ($sourceItemIdsByOrder === []) {
+            return $identities;
+        }
+        $reportItems = self::firstValidCustomerReportItemsForOrderSources($sourceItemIdsByOrder);
+        foreach ($reportItems as $orderId => $reportItem) {
+            $identity = $identities[$orderId] ?? null;
+            if ($identity === null) {
+                continue;
+            }
+            $identities[$orderId] = self::customerIdentity(
+                (int)$identity['main_customer_id'],
+                (string)$identity['main_customer_name'],
+                $reportItem,
+            );
+        }
+        return $identities;
+    }
+
+    /**
+     * Use the smallest valid customer_report_item ID for each sales order everywhere
+     * customer identity is shown. This remains stable even when order_goods insertion
+     * order differs from report item ID order or an earlier source item is soft-deleted.
+     *
+     * @param array<int,array<int,int>> $sourceItemIdsByOrder
+     * @return array<int,array<string,mixed>>
+     */
+    private static function firstValidCustomerReportItemsForOrderSources(array $sourceItemIdsByOrder): array
+    {
+        $orderIdsBySourceItem = [];
+        foreach ($sourceItemIdsByOrder as $orderId => $sourceItemIds) {
+            foreach (array_unique($sourceItemIds) as $sourceItemId) {
+                $sourceItemId = (int)$sourceItemId;
+                if ($sourceItemId > 0) {
+                    $orderIdsBySourceItem[$sourceItemId][] = (int)$orderId;
+                }
+            }
+        }
+        if ($orderIdsBySourceItem === []) {
+            return [];
+        }
+        $reportItems = Db::name('customer_report_item')->where('tenant_id', self::tenantId())
+            ->whereIn('id', array_keys($orderIdsBySourceItem))->whereNull('delete_time')
+            ->field(['id', 'delivery_customer_id', 'delivery_customer_name'])
+            ->order('id', 'asc')->select()->toArray();
+        $firstByOrder = [];
+        foreach ($reportItems as $reportItem) {
+            foreach ($orderIdsBySourceItem[(int)$reportItem['id']] ?? [] as $orderId) {
+                if (!isset($firstByOrder[$orderId])) {
+                    $firstByOrder[$orderId] = $reportItem;
+                }
+            }
+        }
+        return $firstByOrder;
+    }
+
+    /** @param array<string,mixed>|null $reportItem @return array<string,int|string> */
+    private static function customerIdentity(int $mainCustomerId, string $mainCustomerName, ?array $reportItem): array
+    {
+        $deliveryCustomerId = $mainCustomerId;
+        $deliveryCustomerName = $mainCustomerName;
+        $snapshotDeliveryCustomerId = (int)($reportItem['delivery_customer_id'] ?? 0);
+        $snapshotDeliveryCustomerName = trim((string)($reportItem['delivery_customer_name'] ?? ''));
+        if ($snapshotDeliveryCustomerId > 0 && $snapshotDeliveryCustomerName !== '') {
+            $deliveryCustomerId = $snapshotDeliveryCustomerId;
+            $deliveryCustomerName = $snapshotDeliveryCustomerName;
+        }
+        return [
+            'main_customer_id' => $mainCustomerId,
+            'main_customer_name' => $mainCustomerName,
+            'delivery_customer_id' => $deliveryCustomerId,
+            'delivery_customer_name' => $deliveryCustomerName,
+            'sub_customer_name' => $deliveryCustomerId !== $mainCustomerId ? $deliveryCustomerName : '',
         ];
     }
 

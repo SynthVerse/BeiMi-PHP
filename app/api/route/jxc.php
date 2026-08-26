@@ -198,6 +198,8 @@ Route::group('', function () {
     Route::get('jxc/sales_settlement/lists', 'jxc.SalesSettlement/lists');
     Route::get('jxc/sales_settlement/detail', 'jxc.SalesSettlement/detail');
     Route::post('jxc/sales_settlement/submit', 'jxc.SalesSettlement/submit');
+    Route::post('jxc/sales_settlement/print_prepare', 'jxc.SalesSettlement/preparePrint');
+    Route::post('jxc/sales_settlement/print_result', 'jxc.SalesSettlement/printResult');
     Route::get('jxc/sales_settlement/weight_todos', 'jxc.SalesSettlement/weightTodos');
     Route::post('jxc/sales_settlement/weight_resolve', 'jxc.SalesSettlement/resolveWeight');
 

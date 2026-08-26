@@ -32,6 +32,24 @@ class SalesSettlementController extends BaseJxcController
             : $this->success('销售结算保存成功', $result, 1, 1);
     }
 
+    public function preparePrint()
+    {
+        $params = (new SalesSettlementValidate())->post()->goCheck('preparePrint');
+        $result = SalesSettlementLogic::preparePrint($params);
+        return $result === false
+            ? $this->fail(SalesSettlementLogic::getError())
+            : $this->success('销售单打印准备成功', $result, 1, 1);
+    }
+
+    public function printResult()
+    {
+        $params = (new SalesSettlementValidate())->post()->goCheck('printResult');
+        $result = SalesSettlementLogic::printResult($params);
+        return $result === false
+            ? $this->fail(SalesSettlementLogic::getError())
+            : $this->success('销售单打印回执保存成功', $result, 1, 1);
+    }
+
     public function weightTodos()
     {
         $params = (new SalesSettlementValidate())->get()->goCheck('weightTodos');
