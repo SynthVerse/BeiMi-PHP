@@ -13,6 +13,7 @@ class AuditService
     const MODULE_SUPPLY_ORDER   = 'supply_order';
     const MODULE_RETURN_ORDER   = 'return_order';
     const MODULE_PURCHASE_RETURN_ORDER = 'purchase_return_order';
+    const MODULE_PURCHASE_BATCH = 'purchase_batch';
     const MODULE_CUSTOMER_REPORT = 'customer_report';
     const MODULE_CUSTOMER_REPORT_BATCH = 'customer_report_batch';
 

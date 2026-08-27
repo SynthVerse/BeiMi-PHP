@@ -36,6 +36,9 @@ class GoodsSupplierMatrixLogic extends BaseLogic
         if ($supplierId > 0) {
             $query->where('gs.supplier_id', $supplierId);
         }
+        if ((int)($params['available_for_purchase'] ?? 0) === 1) {
+            $query->where('gs.status', 1)->where('v.is_disabled', 0);
+        }
         if (isset($params['status']) && $params['status'] !== '') {
             $query->where('gs.status', (int)$params['status']);
         }

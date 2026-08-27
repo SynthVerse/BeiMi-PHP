@@ -8,6 +8,7 @@ use app\common\model\jxc\Goods;
 use app\common\model\jxc\GoodsSkuSpecValue;
 use app\common\model\jxc\OrderGoods;
 use app\common\model\jxc\PurchaseReturnOrderDetail;
+use app\common\model\jxc\PurchaseBatch;
 use app\common\model\jxc\SupplyOrder;
 use app\common\model\jxc\Warehouse;
 use app\common\service\goods\GoodsSkuSelectionService;
@@ -56,64 +57,23 @@ class SupplyOrderLogic extends BaseLogic
                 }
             }
 
-            $built = self::buildOrderData($params);
-            if ($built === false) {
+            $created = self::publishWithinTransaction($params, false);
+            if ($created === false) {
                 Db::rollback();
                 return false;
             }
-            $order = SupplyOrder::create($built['order']);
-            $createdGoods = self::replaceGoods((int)$order->id, $built['goods']);
-            $createdGoods = PurchaseArrivalService::rebuildForSupplyOrder(array_merge($built['order'], [
-                'id' => (int)$order->id,
-            ]), $createdGoods);
-
-            // === 库存入库 ===
-            usort($createdGoods, static fn(array $left, array $right): int =>
-                [(int)$left['sku_id'], (int)$left['goods_id']] <=> [(int)$right['sku_id'], (int)$right['goods_id']]
-            );
-            foreach ($createdGoods as $row) {
-                if (!StockService::inbound(
-                    (int)$built['order']['warehouse_id'],
-                    (int)$row['goods_id'],
-                    (string)$row['number'],
-                    (int)$order->id,
-                    'supply',
-                    $built['order']['order_sn'],
-                    '采购入库-' . (string)($row['sku_name'] ?: $row['name']),
-                    (int)($row['sku_id'] ?? 0),
-                    (int)($row['batch_id'] ?? 0)
-                )) {
-                    throw new BusinessException('库存处理失败');
-                }
-            }
-            // === 应付增加 ===
-            $arrearsMoney = (string)$built['order']['order_arrears_money'];
-            if (bccomp($arrearsMoney, '0', 2) > 0) {
-                if (!FinanceService::addPayable(
-                    (int)$built['order']['supplier_id'],
-                    $arrearsMoney,
-                    (int)$order->id,
-                    'supply',
-                    $built['order']['order_sn']
-                )) {
-                    throw new BusinessException('应付处理失败');
-                }
-            }
-
             Db::commit();
-
             AuditService::log(
                 AuditService::MODULE_SUPPLY_ORDER,
                 AuditService::ACTION_CREATE,
-                (int)$order->id,
-                (string)$order->order_sn,
+                (int)$created['id'],
+                (string)$created['order_sn'],
                 null,
-                $built['order']
+                self::detail(['id' => (int)$created['id']])
             );
-
             return [
-                'id' => (int)$order->id,
-                'order_sn' => (string)$order->order_sn,
+                'id' => (int)$created['id'],
+                'order_sn' => (string)$created['order_sn'],
             ];
         } catch (BusinessException $e) {
             Db::rollback();
@@ -129,6 +89,75 @@ class SupplyOrderLogic extends BaseLogic
             self::setError('操作失败，请稍后重试');
             return false;
         }
+    }
+
+    /**
+     * 在调用方已持有的数据库事务中创建一张供应商进货单。
+     *
+     * 采购批次需要把多个供应商子单与库存、到货、应付和审计作为一个原子单元提交；
+     * 这个方法因此不自行开启或提交事务。既有单供应商 API 仍通过 publish() 使用。
+     */
+    public static function publishWithinTransaction(array $params, bool $auditWithinTransaction = true): array|false
+    {
+        $built = self::buildOrderData($params);
+        if ($built === false) {
+            return false;
+        }
+
+        $order = SupplyOrder::create($built['order']);
+        $createdGoods = self::replaceGoods((int)$order->id, $built['goods']);
+        $createdGoods = PurchaseArrivalService::rebuildForSupplyOrder(array_merge($built['order'], [
+            'id' => (int)$order->id,
+        ]), $createdGoods);
+
+        usort($createdGoods, static fn(array $left, array $right): int =>
+            [(int)$left['sku_id'], (int)$left['goods_id']] <=> [(int)$right['sku_id'], (int)$right['goods_id']]
+        );
+        foreach ($createdGoods as $row) {
+            if (!StockService::inbound(
+                (int)$built['order']['warehouse_id'],
+                (int)$row['goods_id'],
+                (string)$row['number'],
+                (int)$order->id,
+                self::ORDER_TYPE,
+                (string)$built['order']['order_sn'],
+                '采购入库-' . (string)($row['sku_name'] ?: $row['name']),
+                (int)($row['sku_id'] ?? 0),
+                (int)($row['batch_id'] ?? 0)
+            )) {
+                throw new BusinessException('库存处理失败');
+            }
+        }
+
+        $arrearsMoney = (string)$built['order']['order_arrears_money'];
+        if (bccomp($arrearsMoney, '0', 2) > 0 && !FinanceService::addPayable(
+            (int)$built['order']['supplier_id'],
+            $arrearsMoney,
+            (int)$order->id,
+            self::ORDER_TYPE,
+            (string)$built['order']['order_sn']
+        )) {
+            throw new BusinessException('应付处理失败');
+        }
+
+        if ($auditWithinTransaction) {
+            AuditService::logWithinTransaction(
+                AuditService::MODULE_SUPPLY_ORDER,
+                AuditService::ACTION_CREATE,
+                (int)$order->id,
+                (string)$order->order_sn,
+                null,
+                $built['order']
+            );
+        }
+
+        return [
+            'id' => (int)$order->id,
+            'order_sn' => (string)$order->order_sn,
+            'supplier_id' => (int)$built['order']['supplier_id'],
+            'supplier_name' => (string)$built['order']['supplier_name'],
+            'order_money' => (string)$built['order']['order_money'],
+        ];
     }
 
     public static function edit(array $params): array|false
@@ -212,6 +241,10 @@ class SupplyOrderLogic extends BaseLogic
                 }
             }
 
+            if ((int)($order->purchase_batch_id ?? 0) > 0) {
+                PurchaseBatchLogic::refreshSummaryWithinTransaction((int)$order->purchase_batch_id);
+            }
+
             Db::commit();
 
             $result = self::detail(['id' => (int)$order->id]);
@@ -261,6 +294,9 @@ class SupplyOrderLogic extends BaseLogic
                 ->findOrEmpty();
             if ($order->isEmpty()) {
                 throw new BusinessException('进货单不存在');
+            }
+            if ((int)($order->purchase_batch_id ?? 0) > 0) {
+                throw new BusinessException('采购批次子进货单不可删除，请编辑单据或办理采购退货');
             }
             // === 回滚库存和应付 ===
             if (!StockService::rollback((int)$order->id, 'supply')) {
@@ -322,6 +358,16 @@ class SupplyOrderLogic extends BaseLogic
         }
 
         $item = self::formatItem($order->toArray(), true);
+        $purchaseBatchId = (int)($item['purchase_batch_id'] ?? 0);
+        if ($purchaseBatchId > 0) {
+            $purchaseBatch = PurchaseBatch::field(['id', 'batch_no'])
+                ->where('id', $purchaseBatchId)
+                ->where('tenant_id', $tenantId)
+                ->findOrEmpty();
+            if (!$purchaseBatch->isEmpty()) {
+                $item['purchase_batch'] = $purchaseBatch->toArray();
+            }
+        }
         $goodsRows = OrderGoods::where('order_id', (int)$order->id)
             ->where('order_type', self::ORDER_TYPE)
             ->where('tenant_id', $tenantId)
@@ -433,6 +479,7 @@ class SupplyOrderLogic extends BaseLogic
             'return_status_label' => SupplyOrder::returnStatusLabel((int)($item['return_status'] ?? 0)),
             'purpose' => self::DEFAULT_PURPOSE,
             'purpose_type' => (string)($item['purpose_type'] ?? self::DEFAULT_PURPOSE_TYPE),
+            'purchase_batch_id' => (int)($item['purchase_batch_id'] ?? 0),
             'remarks' => (string)($item['remarks'] ?? ''),
             'remark' => (string)($item['remarks'] ?? ''),
             'admin_id' => (int)($item['admin_id'] ?? 0),
@@ -443,6 +490,11 @@ class SupplyOrderLogic extends BaseLogic
 
     protected static function buildOrderData(array $params, array $current = []): array|false
     {
+        $currentBatchId = (int)($current['purchase_batch_id'] ?? 0);
+        if ($currentBatchId > 0 && isset($params['supplier_id']) && (int)$params['supplier_id'] !== (int)($current['supplier_id'] ?? 0)) {
+            self::setError('采购批次子进货单不可变更供应商');
+            return false;
+        }
         $vendor = Vendor::where('id', (int)$params['supplier_id'])
             ->where('tenant_id', (int)(request()->tenantId ?? 0))
             ->findOrEmpty();
@@ -464,6 +516,25 @@ class SupplyOrderLogic extends BaseLogic
         $warehouse = self::resolveWarehouse($params['warehouse_id'] ?? 0);
         if (!$warehouse) {
             return false;
+        }
+
+        $remarks = trim((string)($params['remarks'] ?? $params['remark'] ?? ($current['remarks'] ?? '')));
+        if ($currentBatchId > 0) {
+            $batch = PurchaseBatch::where('id', $currentBatchId)
+                ->where('tenant_id', $tenantId)
+                ->findOrEmpty();
+            if ($batch->isEmpty()) {
+                self::setError('采购批次不存在');
+                return false;
+            }
+            if (
+                (int)$warehouse->id !== (int)$batch->warehouse_id ||
+                $datetimesingle !== (int)$batch->datetimesingle ||
+                $remarks !== (string)$batch->remarks
+            ) {
+                self::setError('采购批次子进货单的仓库、采购日期和总备注由采购批次统一维护，不能在子单修改');
+                return false;
+            }
         }
 
         $goodsRows = self::buildGoodsRows($params['goods'] ?? [], (int)$vendor->id, $datetimesingle);
@@ -493,7 +564,10 @@ class SupplyOrderLogic extends BaseLogic
                 'datetimesingle' => $datetimesingle,
                 'status' => (int)($current['status'] ?? 1),
                 'purpose_type' => trim((string)($params['purpose_type'] ?? $params['purpose'] ?? ($current['purpose_type'] ?? self::DEFAULT_PURPOSE_TYPE))),
-                'remarks' => trim((string)($params['remarks'] ?? $params['remark'] ?? ($current['remarks'] ?? ''))),
+                'purchase_batch_id' => $current === []
+                    ? (int)($params['purchase_batch_id'] ?? 0)
+                    : $currentBatchId,
+                'remarks' => $remarks,
                 'admin_id' => $adminId,
                 'idempotent_key' => $idempotentKey,
             ],

@@ -137,6 +137,11 @@ Route::group('', function () {
     Route::get('supply/details',    'jxc.SupplyOrder/detail');
     Route::get('supply/statistics', 'jxc.SupplyOrder/statistics');
 
+    // === 采购批次（按供应商生成独立进货子单）===
+    Route::get('purchase-batch/lists',   'jxc.PurchaseBatch/lists');
+    Route::get('purchase-batch/details', 'jxc.PurchaseBatch/detail');
+    Route::post('purchase-batch/publish','jxc.PurchaseBatch/publish');
+
     // === 销售退货单 ===
     Route::get('return/lists',      'jxc.SalesReturnOrder/lists');
     Route::post('return/publish',   'jxc.SalesReturnOrder/publish');
