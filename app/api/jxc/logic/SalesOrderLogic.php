@@ -23,6 +23,22 @@ class SalesOrderLogic extends BaseLogic
     private const ORDER_TYPE = 'sales';
     private const DEFAULT_PURPOSE = '销售出库';
     private const DEFAULT_PURPOSE_TYPE = 'sales';
+    public const DOCUMENT_KIND_DIRECT_RECEIPT = 'direct_receipt';
+    public const DOCUMENT_KIND_CUSTOMER_SETTLEMENT = 'customer_settlement';
+
+    /**
+     * Return a read-only presentation identity without changing the underlying
+     * sales-order business identity. Only customer-report orders can be opened
+     * by the settlement detail because that endpoint owns version/debt facts.
+     *
+     * @param array<string,mixed> $item
+     */
+    public static function salesDocumentKind(array $item): string
+    {
+        return self::isCustomerReportSource($item)
+            ? self::DOCUMENT_KIND_CUSTOMER_SETTLEMENT
+            : self::DOCUMENT_KIND_DIRECT_RECEIPT;
+    }
 
     public static function publish(array $params): array|false
     {
@@ -599,6 +615,7 @@ class SalesOrderLogic extends BaseLogic
             'source_type' => (string)($item['source_type'] ?? ''),
             'source_id' => (int)($item['source_id'] ?? 0),
             'source_version' => (int)($item['source_version'] ?? 0),
+            'document_kind' => self::salesDocumentKind($item),
             'settlement_status' => (string)($item['settlement_status'] ?? 'formal'),
             'cost_status' => (string)($item['cost_status'] ?? 'confirmed'),
             'profit_status' => (string)($item['profit_status'] ?? 'accurate'),

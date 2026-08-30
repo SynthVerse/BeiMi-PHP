@@ -645,6 +645,8 @@ class CustomerLogic extends BaseLogic
                 'created_at' => $datetimeInt > 0 ? date('Y-m-d', $datetimeInt) : '',
                 'createdate' => $datetimeInt > 0 ? date('Y-m-d', $datetimeInt) : '',
                 'status' => (int)($item['status'] ?? 1),
+                'source_type' => (string)($item['source_type'] ?? ''),
+                'document_kind' => SalesOrderLogic::salesDocumentKind($item),
                 'remarks' => (string)($item['remarks'] ?? ''),
                 'goods' => $goodsMap[(int)$item['id']] ?? [],
             ];
