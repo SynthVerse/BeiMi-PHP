@@ -1171,3 +1171,96 @@ pending，权威明细和金额却已经发生了副作用。代码缺少“草�
 | 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
 |---|---|---|---|
 | 2026-08-26 | BeiMi-ERP#11 终审 | 多子客户销售单在不同入口显示不同身份 | 原有打印回执测试保护版本累计，不覆盖来源排序与软删除回退。 |
+
+## PIT-0029：沙箱内命令不可见被误判为 Codegraph 安装缺失
+
+- 状态：防护中
+- 首次发生：2026-08-27
+- 最近发生：2026-08-27
+- 复发次数：0
+- 适用范围：Codex 受限终端中对 `BeiMi-PHP`、`BeiMi-uniapp` 的 Codegraph 增量同步与新符号验证
+- 相关问题：无
+
+### 触发场景
+
+Codegraph MCP 可以读取旧索引，但新增 `PurchaseBatchLogic` 尚未进入索引。受限终端执行
+`where codegraph` 和 `Get-Command codegraph` 均无结果，于是错误判断本机没有安装
+Codegraph，未继续尝试宿主机权限下的同步命令。
+
+### 根因
+
+Codegraph 0.9.7 及其 npm 命令垫片实际存在于用户级 `%APPDATA%\npm`，但 Codex
+工作区沙箱不能读取该目录；沙箱内的命令解析结果只反映当前权限视图，不能证明宿主机
+未安装工具。当前 MCP 配置只启动 `codegraph serve --mcp`，没有固定 `--path`；服务按
+客户端 `rootUri` 运行在未初始化的项目族根目录，而两个既有索引位于子项目目录。通过
+`projectPath` 可以查询这些子索引，但不能据此证明当前服务已为每个子索引建立文件监听；
+Codegraph 文档也明确把沙箱环境列为需要手动同步的场景。因此原监听器没有消费本次
+子项目变更，需要显式执行增量同步。Vue2
+Options API 对象方法（例如 `savePurchaseBatch`）不会被当前解析器展开为方法节点，也
+不能单独作为索引新鲜度探针。
+
+### 错误做法
+
+仅根据沙箱内 `where`／`Get-Command` 失败就声明 Codegraph 未安装；或者只用 Vue2
+Options API 对象方法是否可搜索判断整个前端索引是否陈旧。
+
+### 正确做法
+
+先用 `codegraph_status` 和只读 SQLite 探针确认索引库健康、目标文件是否存在及
+`modified_at` 是否与磁盘一致。沙箱内命令不可见时，在明确授权下以提升后的宿主机
+权限运行 `codegraph --version`，再对已初始化项目执行 `codegraph sync .` 和
+`codegraph status .`；不得因此重复 `codegraph init`。PHP 使用新增类或方法验证，
+Vue2 使用新文件、组件或顶层常量验证，不以 Options API 对象方法作为唯一探针。
+
+### 防线
+
+- 可重复探针：只读查询 `.codegraph/codegraph.db` 的 `files`／`nodes` 表，要求 PHP 新类进入节点；前端目标文件的索引 `modified_at` 与磁盘时间一致、`errors` 为空，并能检索新增顶层常量或组件。
+- 运行防线：沙箱内解析不到用户级 CLI 时，先验证宿主机 `%APPDATA%\npm` 命令垫片，再在授权下进入每个已初始化子项目运行 `codegraph sync .`；全局 MCP 未固定该子项目 `--path` 时，不把无 pending 的查询结果等同于文件监听已覆盖该索引。禁止把权限隔离误报成安装丢失或擅自重建索引。
+- 自动化限制：仓库测试不能自行取得 Codex 沙箱外权限，当前无法把宿主机 CLI 可见性变成无人值守测试，因此本 PIT 保持“防护中”。
+- 决策与知识：本记录及用户级 `C:\Users\ASUS\.codex\AGENTS.md` 的 Codegraph 增量同步规则。
+- 验证结果：两个索引库 `quick_check=ok`；同步后 PHP 可检索 `PurchaseBatchLogic`，前端可检索 `purchaseBatchAPI` 及三个采购批次组件，目标 Vue 文件索引时间晚于修改时间且无解析错误。
+
+### 发生记录
+
+| 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-08-27 | 采购批次与供应商子进货单 | 提交后检查 Codegraph 增量同步 | 原规则要求检查状态，但没有区分沙箱命令可见性与宿主机安装状态，也没有说明 Vue2 Options API 方法不是可靠的新鲜度探针。 |
+
+## PIT-0030：新建保存场景继承更新 ID 的正数校验
+
+- 状态：已防护
+- 首次发生：2026-08-29
+- 最近发生：2026-08-29
+- 复发次数：1
+- 适用范围：`BeiMi-PHP` 员工档案新建与 `POST /jxc/workforce/employee/save`
+- 相关问题：无
+
+### 触发场景
+
+小程序新增一个启用的纸质员工，填写姓名、测试手机号和“杀鱼”工序能力，并按保存。前端按既定新建语义提交 `id: 0`。
+
+### 根因
+
+`WorkforceValidate` 的全局 `id` 规则为 `require|integer|gt:0`。ThinkPHP 在执行验证规则时先把 `gt:0` 标准化为规则类型 `gt`，再以该类型匹配 `remove()` 项；因此 `remove('id', 'require|gt:0')` 中的 `gt:0` 不会命中，旧的 `gt` 规则仍会在控制器进入 `WorkforceLogic::saveEmployee()` 之前拒绝 `id: 0`。逻辑层实际已把 `id <= 0` 作为插入分支，前后契约不一致。
+
+### 错误做法
+
+为可新建也可编辑的保存场景只移除 ID 的必填规则；或误以为 `remove()` 可以按带参数的 `gt:0` 删除规则；或把前端的 `id: 0` 改成伪造的正数 ID。
+
+### 正确做法
+
+保存场景以规则类型移除 `require|gt`，再追加 `egt:0`，使 ID 成为“可缺省或为非负整数”：`0` 表示新建，正数表示编辑，负数仍被拒绝。保持现有读取和状态切换入口的正数 ID 约束不变。
+
+### 防线
+
+- 自动化防线：`tests/unit/WorkforceValidateSaveEmployeeTest.php` 覆盖 `id: 0` 的纸质员工新建校验、正数 ID 的编辑校验和负数 ID 拒绝。
+- 架构防线：`WorkforceValidate::sceneSaveEmployee()` 按 ThinkPHP 规则类型显式移除继承的 `require|gt`，并追加 `egt:0`，与 `WorkforceLogic::saveEmployee()` 的新增／编辑分支一致。
+- 决策与知识：根目录 `CONTEXT.md` 中“员工档案”“员工工序能力”和“员工电子权限”的独立定义。
+- 验证结果：修正前用 `D:\xampp\php\php.exe vendor\bin\phpunit tests\unit\WorkforceValidateSaveEmployeeTest.php --colors=never` 稳定复现 3 例中的 `id: 0` 失败；修正后同一聚焦命令通过（3 tests, 3 assertions）。本机可使用 `D:\xampp\php\php.exe`；完整 PHPUnit 因等待外部依赖而在约 9 分钟、CPU 约 0.64 秒后被终止，未完成且不得写成通过。真实微信开发者工具回归仍待部署后完成。
+
+### 发生记录
+
+| 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-08-29 | 冻结 V1 真实数据验收 / 员工工序能力配置 | 新增只具备“杀鱼”能力的纸质员工被保存接口拒绝 | 既有履约测试直接调用逻辑层，绕过控制器校验；没有覆盖小程序实际提交的 `id: 0` 保存契约。 |
+| 2026-08-29 | 新增员工保存校验回归 | 首版候选补丁写为 `remove('id', 'require|gt:0')`，聚焦 PHPUnit 仍拒绝 `id: 0` | 当时未使用可用的 `D:\xampp\php\php.exe` 执行聚焦测试，未暴露 ThinkPHP `remove()` 只按标准化规则类型匹配的细节。 |
