@@ -55,6 +55,7 @@ class PurchaseBatchLogic extends BaseLogic
         for ($attempt = 0; $attempt < 3; $attempt++) {
             try {
                 $result = Db::transaction(static function () use ($params, $tenantId, $idempotencyKey, $fingerprint) {
+                    FinanceIntegration::lock();
                     $existing = PurchaseBatch::where('tenant_id', $tenantId)
                         ->where('idempotency_key', $idempotencyKey)
                         ->findOrEmpty();

@@ -93,7 +93,7 @@ final class FulfillmentChangeLogic extends BaseLogic
                 $releaseWanted = bcadd($unprocessed, bccomp($consume, '0.00', self::SCALE) === 0 ? $processed : '0.00', self::SCALE);
                 $release = bccomp($releaseWanted, bcsub($activeReserved, $consume, self::SCALE), self::SCALE) > 0
                     ? bcsub($activeReserved, $consume, self::SCALE) : $releaseWanted;
-                self::applyReservationMovement($item, $reservation, $release, $consume);
+                self::applyReservationMovement($item, $reservation, $release, $consume, $disposition);
 
                 $newReserved = bcsub($activeReserved, bcadd($release, $consume, self::SCALE), self::SCALE);
                 $newShortage = bcsub($target, $newReserved, self::SCALE);
@@ -237,6 +237,7 @@ final class FulfillmentChangeLogic extends BaseLogic
     /** @return array{0:array<string,mixed>|false,1:array<string,mixed>,2:array<string,mixed>} */
     private static function lockedContext(int $itemId): array
     {
+        FinanceIntegration::lock();
         $itemRef = Db::name('customer_report_item')->where('tenant_id', self::tenantId())->where('id', $itemId)->field('report_id')->find();
         if (!$itemRef) {
             self::setError('报货明细不存在');
@@ -254,7 +255,7 @@ final class FulfillmentChangeLogic extends BaseLogic
     }
 
     /** @param array<string,mixed> $item @param array<string,mixed> $reservation */
-    private static function applyReservationMovement(array $item, array $reservation, string $release, string $consume): void
+    private static function applyReservationMovement(array $item, array $reservation, string $release, string $consume, string $disposition = ''): void
     {
         $warehouseId = (int)$item['warehouse_id'];
         $skuId = (int)$item['sku_id'];
@@ -262,9 +263,13 @@ final class FulfillmentChangeLogic extends BaseLogic
             && WarehouseSkuBalanceService::releaseWithinTransaction($warehouseId, $skuId, $release) === false) {
             throw new \RuntimeException('release_reserved_failed');
         }
-        if (bccomp($consume, '0.00', self::SCALE) > 0
-            && WarehouseSkuBalanceService::consumeReservedWithinTransaction($warehouseId, $skuId, $consume) === false) {
-            throw new \RuntimeException('consume_reserved_failed');
+        if (bccomp($consume, '0.00', self::SCALE) > 0) {
+            $movement = FinanceIntegration::active()
+                ? StockService::outboundReservedWithinTransaction($warehouseId, (int)$item['goods_id'], $consume, (int)$item['id'],
+                    $disposition === 'internal_loss' ? 'fulfillment_internal_loss' : 'fulfillment_pending', 'FULFILLMENT-LOSS-' . $item['id'],
+                    $disposition === 'internal_loss' ? '已加工减量的内部损耗' : '已加工减量的其他消耗，成本去向待核实', $skuId)
+                : WarehouseSkuBalanceService::consumeReservedWithinTransaction($warehouseId, $skuId, $consume);
+            if ($movement === false) { throw new \RuntimeException('consume_reserved_failed'); }
         }
         $released = bcadd((string)$reservation['released_base_qty'], $release, self::SCALE);
         $consumed = bcadd((string)$reservation['consumed_base_qty'], $consume, self::SCALE);

@@ -91,6 +91,7 @@ final class NegativeInventoryLogic extends BaseLogic
                 $costStatus,
                 $fingerprint
             ) {
+                FinanceIntegration::lock();
                 $existing = Db::name('negative_inventory_action')->where('tenant_id', self::tenantId())
                     ->where('idempotency_key', $idempotencyKey)->find();
                 if ($existing) {
@@ -155,7 +156,8 @@ final class NegativeInventoryLogic extends BaseLogic
                         $quantity,
                         $id,
                         $action,
-                        $reason
+                        $reason,
+                        $costStatus === 'confirmed' ? $amount : null
                     );
                     if ($movement === false) {
                         throw new \RuntimeException('negative_inventory_adjustment_failed');

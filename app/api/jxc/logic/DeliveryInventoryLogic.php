@@ -140,6 +140,7 @@ final class DeliveryInventoryLogic extends BaseLogic
                     $actualHandoffPackages,
                     $actualHandoffTime
                 ) {
+                    FinanceIntegration::lock();
                     $existing = Db::name('fulfillment_delivery_event')->where('tenant_id', self::tenantId())
                         ->where('idempotency_key', $idempotencyKey)->find();
                     if ($existing) {

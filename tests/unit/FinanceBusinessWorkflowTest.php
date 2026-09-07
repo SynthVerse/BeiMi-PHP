@@ -34,6 +34,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000011_finance_sales_precision.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000012_finance_sales_coverage.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000013_finance_sales_output.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000014_finance_cost.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -42,6 +43,202 @@ final class FinanceBusinessWorkflowTest extends TestCase
     {
         $this->prepareCustomerReportRequestContext(); $this->clean();
         Config::set(['activation_tenant_ids' => []], 'finance');
+    }
+
+    public function test_cost_events_survive_reload_replay_once_and_roll_back_with_business_transaction(): void
+    {
+        $this->activate();
+        $cost = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID);
+        $event = ['reference' => 'test-arrival:1', 'type' => 'receive', 'sku_id' => 20, 'warehouse_id' => 10,
+            'business_date' => date('Y-m-d'), 'origin' => 'test-arrival:1', 'quantity' => '100', 'amount' => '1000.00', 'snapshot' => ['basis' => '双方约定']];
+        $first = Db::transaction(fn() => $cost->recordWithinTransaction($event));
+        self::assertSame($first, Db::transaction(fn() => $cost->recordWithinTransaction($event)));
+        self::assertSame('1000.000000', $cost->balance(10, 20)['value']);
+        $sale = ['reference' => 'test-delivery:1', 'type' => 'issue', 'sku_id' => 20, 'warehouse_id' => 10,
+            'business_date' => date('Y-m-d'), 'quantity' => '25', 'bucket' => 'sale', 'target_reference' => 'test-delivery:1'];
+        Db::transaction(fn() => $cost->recordWithinTransaction($sale));
+        $reloaded = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID);
+        self::assertSame('750.000000', $reloaded->balance(10, 20)['value']);
+        $adjustment = ['reference' => 'test-cost-confirm:1', 'type' => 'adjust', 'sku_id' => 20, 'warehouse_id' => 10,
+            'business_date' => date('Y-m-d'), 'origin' => 'test-arrival:1', 'amount' => '1200.00'];
+        $adjusted = Db::transaction(fn() => $reloaded->recordWithinTransaction($adjustment));
+        self::assertSame('50.000000', $adjusted['changes']['sale']);
+        self::assertSame('900.000000', $cost->balance(10, 20)['value']);
+        self::assertSame('300.000000', $cost->destination(10, 20, 'sale', 'test-delivery:1')['cost']);
+        self::assertSame(3, count($cost->events(20)));
+        try { Db::transaction(function () use ($cost, $sale): void { $sale['reference'] = 'rollback-sale'; $cost->recordWithinTransaction($sale); throw new \DomainException('后续业务失败'); }); }
+        catch (\DomainException $e) { self::assertSame('后续业务失败', $e->getMessage()); }
+        self::assertSame('900.000000', $cost->balance(10, 20)['value']); self::assertCount(3, $cost->events(20));
+        $event['amount'] = '1001.00';
+        $this->expectException(\DomainException::class);
+        Db::transaction(fn() => $cost->recordWithinTransaction($event));
+    }
+
+    public function test_negative_sale_cost_confirmation_keeps_original_date_and_posts_only_to_current_open_month(): void
+    {
+        $originalDate = date('Y-m-01', strtotime('first day of last month'));
+        $this->activate('cash', $originalDate);
+        $cost = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID);
+        Db::transaction(fn() => $cost->recordWithinTransaction(['reference' => 'old-negative-sale', 'type' => 'issue', 'sku_id' => 20, 'warehouse_id' => 10,
+            'business_date' => $originalDate, 'quantity' => '30', 'bucket' => 'sale', 'target_reference' => 'old-negative-sale']));
+        self::assertNull($cost->destination(10, 20, 'sale', 'old-negative-sale')['cost']);
+        Db::name('finance_period')->insert(['tenant_id' => self::TENANT_ID, 'month' => substr($originalDate, 0, 7), 'status' => 'closed', 'snapshot' => '{}', 'closed_by' => '{}', 'closed_at' => time()]);
+        Db::transaction(fn() => $cost->recordWithinTransaction(['reference' => 'new-arrival', 'type' => 'receive', 'sku_id' => 20, 'warehouse_id' => 10,
+            'business_date' => date('Y-m-d'), 'quantity' => '100', 'origin' => 'new-arrival', 'amount' => '1000.00']));
+        self::assertSame('300.000000', $cost->destination(10, 20, 'sale', 'old-negative-sale')['cost']);
+        $posts = array_values(array_filter($cost->postings(20), static fn(array $row): bool => $row['bucket'] === 'sale' && $row['value_delta'] === '300.000000'));
+        self::assertCount(1, $posts); self::assertSame($originalDate, $posts[0]['business_date']); self::assertSame(date('Y-m'), $posts[0]['posting_month']);
+        self::assertSame('700.000000', $cost->balance(10, 20)['value']);
+        $this->prepareCustomerReportRequestContext(self::OTHER_TENANT_ID);
+        self::assertSame([], (new \app\api\jxc\logic\FinanceCostLedger(self::OTHER_TENANT_ID))->events(20));
+    }
+
+    public function test_cost_book_carries_confirmed_opening_once_including_zero_inventory_without_new_stock(): void
+    {
+        $warehouse = $this->createCustomerReportWarehouse('期初成本仓库');
+        $skuIds = [];
+        self::assertNotFalse(FinanceSetupLogic::savePreparation($this->command(0) + ['activation_date' => date('Y-m-01'),
+            'inventory_cost_reviewed' => 1, 'legacy_settlement_reviewed' => 1, 'excluded_business_reviewed' => 1]));
+        foreach ([['10', '100'], ['0', '0']] as [$quantity, $amount]) {
+            $goods = $this->createCustomerReportGoods('期初成本商品' . $quantity, 'COST-OPEN-' . $quantity); $sku = $this->customerReportSkuId($goods); $skuIds[] = $sku;
+            $stock = (int)Db::name('warehouse_sku_balance')->insertGetId(['tenant_id' => self::TENANT_ID, 'warehouse_id' => $warehouse,
+                'goods_id' => $goods, 'sku_id' => $sku, 'on_hand_qty' => $quantity, 'available_qty' => $quantity]);
+            $this->opening('item', ['category' => 'inventory', 'subject_id' => $stock, 'amount' => $amount, 'historical_date' => null, 'due_date' => null,
+                'source_mode' => 'detail', 'source_reference' => '截点库存' . $quantity, 'evidence' => '盘点核实', 'details' => ['quantity' => $quantity, 'origin_reference' => '成本核对']]);
+        }
+        foreach (FinanceSetupLogic::opening()['categories'] as $category) { $this->opening('review', ['category' => $category['key'], 'state' => $category['count'] ? 'complete' : 'none', 'evidence' => '逐类核实']); }
+        $this->opening('submit'); $this->opening('confirm');
+        $cost = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID);
+        self::assertSame('100.000000', $cost->balance($warehouse, $skuIds[0])['value']);
+        self::assertSame('0.000000', $cost->balance($warehouse, $skuIds[1])['value']);
+        $result = Db::transaction(fn() => $cost->recordWithinTransaction(['reference' => 'opening-sale', 'type' => 'issue', 'sku_id' => $skuIds[0], 'warehouse_id' => $warehouse,
+            'business_date' => date('Y-m-d'), 'quantity' => '4', 'bucket' => 'sale', 'target_reference' => 'opening-sale']));
+        self::assertSame('40.000000', $result['cost']); self::assertSame('60.000000', $cost->balance($warehouse, $skuIds[0])['value']);
+        self::assertSame('10.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $skuIds[0]));
+    }
+
+    public function test_real_stock_flows_carry_cost_through_sale_transfer_and_actual_delivery_correction(): void
+    {
+        $this->activate();
+        $warehouse = $this->createCustomerReportWarehouse('成本实物仓库'); $target = $this->createCustomerReportWarehouse('成本调入仓库');
+        $goods = $this->createCustomerReportGoods('成本实物商品', 'COST-PHYSICAL'); $sku = $this->customerReportSkuId($goods);
+        self::assertTrue(\app\api\jxc\logic\StockService::inbound($warehouse, $goods, '10', 71, 'supply', 'COST-P71', '', $sku));
+        $cost = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID);
+        self::assertNull($cost->balance($warehouse, $sku)['value']);
+        $events = $cost->events($sku); self::assertCount(1, $events);
+        Db::transaction(fn() => $cost->recordWithinTransaction(['reference' => 'physical-price-confirm', 'type' => 'adjust', 'sku_id' => $sku, 'warehouse_id' => $warehouse,
+            'business_date' => date('Y-m-d'), 'origin' => $events[0]['snapshot']['origin'], 'amount' => '200.00']));
+        self::assertTrue(\app\api\jxc\logic\StockService::outbound($warehouse, $goods, '4', 77, 'sales', 'COST-S77', '', $sku));
+        self::assertSame('80.000000', $cost->destination($warehouse, $sku, 'sale', 'sales_order:77')['cost']);
+        self::assertTrue(\app\api\jxc\logic\StockService::transfer($warehouse, $target, $goods, '2', 88, 'warehouse_transfer', 'COST-T88', '', $sku));
+        self::assertSame('40.000000', $cost->balance($target, $sku)['value']);
+        self::assertNotFalse(Db::transaction(fn() => \app\api\jxc\logic\StockService::inboundDeliveryCorrectionWithinTransaction($warehouse, $goods, $sku, '1', 77, 'COST-S77', 777, 888)));
+        self::assertSame('60.000000', $cost->destination($warehouse, $sku, 'sale', 'sales_order:77')['cost']);
+        self::assertSame('100.000000', $cost->balance($warehouse, $sku)['value']);
+        self::assertSame('5.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $sku));
+        self::assertSame('2.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($target, $sku));
+    }
+
+    public function test_cost_confirmation_reloads_committed_facts_after_an_outer_transaction_created_an_older_snapshot(): void
+    {
+        $this->activate(); $cost = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID);
+        Db::transaction(fn() => $cost->recordWithinTransaction(['reference' => 'snapshot-arrival', 'type' => 'receive', 'sku_id' => 20, 'warehouse_id' => 10,
+            'business_date' => date('Y-m-d'), 'quantity' => '10', 'origin' => 'snapshot-arrival', 'amount' => '100.00']));
+        $event = ['reference' => 'snapshot-worker-sale', 'type' => 'issue', 'sku_id' => 20, 'warehouse_id' => 10,
+            'business_date' => date('Y-m-d'), 'quantity' => '2', 'bucket' => 'sale', 'target_reference' => 'worker-sale'];
+        $input = tempnam(sys_get_temp_dir(), 'cost-in-'); $output = tempnam(sys_get_temp_dir(), 'cost-out-');
+        file_put_contents($input, json_encode(['tenant_id' => self::TENANT_ID, 'admin_id' => self::ADMIN_ID, 'event' => $event], JSON_THROW_ON_ERROR));
+        Db::execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ'); Db::startTrans();
+        try {
+            Db::name('finance_cost_origin')->where('tenant_id', self::TENANT_ID)->select();
+            $process = proc_open([PHP_BINARY, dirname(__DIR__) . '/fixtures/finance_cost_worker.php', $input, $output],
+                [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, dirname(__DIR__, 2), null, ['bypass_shell' => true]);
+            self::assertIsResource($process); fclose($pipes[0]); $stdout = stream_get_contents($pipes[1]); $stderr = stream_get_contents($pipes[2]); fclose($pipes[1]); fclose($pipes[2]);
+            self::assertSame(0, proc_close($process), $stdout . $stderr);
+            self::assertSame('20.000000', json_decode(file_get_contents($output), true, 512, JSON_THROW_ON_ERROR)['cost']);
+            $event['reference'] = 'snapshot-parent-sale'; $event['quantity'] = '3'; $event['target_reference'] = 'parent-sale';
+            $cost->recordWithinTransaction($event); Db::commit();
+            self::assertSame('50.000000', $cost->balance(10, 20)['value']);
+            self::assertSame('20.000000', $cost->destination(10, 20, 'sale', 'worker-sale')['cost']);
+            self::assertSame('30.000000', $cost->destination(10, 20, 'sale', 'parent-sale')['cost']);
+        } finally {
+            if (Db::connect()->getPdo()->inTransaction()) { Db::rollback(); }
+            unlink($input); unlink($output);
+        }
+    }
+
+    public function test_unpriced_cross_warehouse_return_survives_reload_and_partial_cost_funding(): void
+    {
+        $this->activate(); $cost = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID);
+        $record = fn(array $event): array => Db::transaction(fn() => $cost->recordWithinTransaction($event + ['sku_id' => 20, 'warehouse_id' => 10, 'business_date' => date('Y-m-d')]));
+        $record(['reference' => 'cross-sale', 'type' => 'issue', 'quantity' => '10', 'bucket' => 'sale', 'target_reference' => 'cross-sale']);
+        $record(['reference' => 'cross-return', 'type' => 'restore', 'to_warehouse_id' => 11, 'quantity' => '4', 'bucket' => 'sale', 'target_reference' => 'cross-sale']);
+        $record(['reference' => 'cross-resale', 'type' => 'issue', 'warehouse_id' => 11, 'quantity' => '2', 'bucket' => 'sale', 'target_reference' => 'cross-resale']);
+        $record(['reference' => 'cross-arrival-1', 'type' => 'receive', 'origin' => 'cross-arrival-1', 'quantity' => '8', 'amount' => '80.00']);
+        self::assertTrue($cost->balance(11, 20)['pending']); self::assertSame('10.000000', $cost->balance(11, 20)['known_value']);
+        self::assertNull($cost->destination(11, 20, 'sale', 'cross-resale')['cost']);
+        $record(['reference' => 'cross-arrival-2', 'type' => 'receive', 'origin' => 'cross-arrival-2', 'quantity' => '2', 'amount' => '40.00']);
+        self::assertSame('30.000000', $cost->balance(11, 20)['value']);
+        self::assertSame('30.000000', $cost->destination(11, 20, 'sale', 'cross-resale')['cost']);
+        self::assertSame('60.000000', $cost->destination(10, 20, 'sale', 'cross-sale')['cost']);
+        self::assertSame('0.000000000000', $cost->balance(10, 20)['quantity']);
+    }
+
+    public function test_cost_confirmation_cannot_ignore_a_month_closed_after_outer_transaction_snapshot(): void
+    {
+        $this->activate(); $cost = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID);
+        $config = config('database.connections.mysql');
+        $other = new \PDO('mysql:host=' . $config['hostname'] . ';port=' . $config['hostport'] . ';dbname=' . $config['database'], $config['username'], $config['password'], [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION]);
+        Db::execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ'); Db::startTrans();
+        try {
+            Db::name('finance_period')->where('tenant_id', self::TENANT_ID)->select();
+            $other->beginTransaction();
+            $lock = $other->prepare('SELECT tenant_id FROM ' . Db::name('finance_preparation')->getTable() . ' WHERE tenant_id=? FOR UPDATE'); $lock->execute([self::TENANT_ID]);
+            $close = $other->prepare('INSERT INTO ' . Db::name('finance_period')->getTable() . ' (tenant_id,month,status,snapshot,closed_by,closed_at) VALUES (?, ?, ?, ?, ?, ?)');
+            $close->execute([self::TENANT_ID, date('Y-m'), 'closed', '{}', '{}', time()]); $other->commit();
+            $this->expectException(\DomainException::class); $this->expectExceptionMessage('当前自然月已结账');
+            $cost->recordWithinTransaction(['reference' => 'closed-snapshot-arrival', 'type' => 'receive', 'sku_id' => 20, 'warehouse_id' => 10,
+                'business_date' => date('Y-m-d'), 'quantity' => '1', 'origin' => 'closed-snapshot-arrival', 'amount' => '10.00']);
+        } finally { Db::rollback(); }
+    }
+
+    public function test_loss_only_event_uses_exception_time_and_missing_inbound_amount_supplies_its_cost(): void
+    {
+        $this->activate(); $warehouse = $this->createCustomerReportWarehouse('损耗成本仓');
+        $goods = $this->createCustomerReportGoods('损耗成本商品', 'LOSS-COST'); $sku = $this->customerReportSkuId($goods);
+        $event = (int)Db::name('fulfillment_delivery_event')->insertGetId(['tenant_id' => self::TENANT_ID, 'idempotency_key' => 'loss-only-cost-event',
+            'event_type' => 'delivery_exception', 'delivered_time' => 0, 'actual_handoff_time' => 0, 'create_time' => time()]);
+        self::assertNotFalse(Db::transaction(fn() => \app\api\jxc\logic\StockService::outboundTransportLossWithinTransaction($warehouse, $goods, $sku, '2', '0', $event)));
+        $cost = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID);
+        self::assertSame(date('Y-m-d'), $cost->events($sku)[0]['business_date']);
+        self::assertNull($cost->destination($warehouse, $sku, 'loss', 'delivery_loss:' . $event)['cost']);
+        self::assertNotFalse(Db::transaction(fn() => \app\api\jxc\logic\StockService::adjustNegativeWithinTransaction($warehouse, $goods, $sku, '2', 17,
+            'record_missing_inbound', '核实遗漏进货金额', '50.00')));
+        self::assertSame('50.000000', $cost->destination($warehouse, $sku, 'loss', 'delivery_loss:' . $event)['cost']);
+        self::assertSame('0.000000000000', $cost->balance($warehouse, $sku)['quantity']);
+    }
+
+    public function test_processed_reduction_records_internal_loss_cost_but_keeps_other_consumption_unclassified(): void
+    {
+        $this->activate();
+        foreach (['internal_loss' => 'loss', 'other' => 'pending'] as $disposition => $bucket) {
+            $warehouse = $this->createCustomerReportWarehouse('加工成本仓' . $disposition); $goods = $this->createCustomerReportGoods('加工成本商品' . $disposition, 'PROCESS-COST-' . $disposition);
+            $sku = $this->customerReportSkuId($goods); $cost = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID);
+            self::assertTrue(\app\api\jxc\logic\StockService::inbound($warehouse, $goods, '6', 72, 'supply', 'PROCESS-COST', '', $sku));
+            $origin = $cost->events($sku)[0]['snapshot']['origin'];
+            Db::transaction(fn() => $cost->recordWithinTransaction(['reference' => 'process-price-' . $disposition, 'type' => 'adjust', 'sku_id' => $sku,
+                'warehouse_id' => $warehouse, 'business_date' => date('Y-m-d'), 'origin' => $origin, 'amount' => '120.00']));
+            $report = \app\api\jxc\logic\CustomerReportLogic::submit(['main_customer_id' => $this->customerId, 'delivery_date' => date('Y-m-d'), 'is_supplement' => 0,
+                'idempotency_key' => 'process-report-' . $disposition, 'items' => [['goods_id' => $goods, 'warehouse_id' => $warehouse, 'unit_id' => 0, 'unit_name' => '件',
+                    'order_qty' => '5', 'piece_weight_confirmed' => 1, 'piece_weight_min' => '1.00', 'piece_weight_max' => '1.00', 'price_status' => 'unpriced', 'processing_requirement' => '杀好']]]);
+            self::assertNotFalse($report, \app\api\jxc\logic\CustomerReportLogic::getError()); $item = (int)$report['items'][0]['id'];
+            $reduced = \app\api\jxc\logic\FulfillmentChangeLogic::reduceItem(['report_item_id' => $item, 'new_expected_base_qty' => '3', 'processed_reduction_qty' => '1',
+                'processed_disposition' => $disposition, 'other_inventory_action' => 'consume', 'reason' => '记录已加工部分的真实去向', 'idempotency_key' => 'process-reduce-' . $disposition]);
+            self::assertNotFalse($reduced, \app\api\jxc\logic\FulfillmentChangeLogic::getError());
+            self::assertSame('100.000000', $cost->balance($warehouse, $sku)['value']);
+            self::assertSame('20.000000', $cost->destination($warehouse, $sku, $bucket, 'fulfillment_loss:' . $item)['cost']);
+            if ($bucket === 'pending') { self::assertSame('0.000000', $cost->destination($warehouse, $sku, 'loss', 'fulfillment_loss:' . $item)['cost']); }
+        }
     }
 
     public function test_receipt_allocates_opening_debt_and_explicit_excess_once_without_new_revenue(): void
@@ -1330,15 +1527,18 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $event = (int)Db::name('fulfillment_delivery_event')->insertGetId(['tenant_id' => self::TENANT_ID, 'idempotency_key' => 'finance-delivery-' . uniqid(), 'delivered_time' => $now]);
         Db::name('fulfillment_delivery_item')->insert(['tenant_id' => self::TENANT_ID, 'delivery_event_id' => $event, 'sales_order_id' => $order,
             'report_item_id' => Db::name('order_goods')->where('id', $line)->value('source_line_id'), 'warehouse_id' => $warehouse, 'goods_id' => $goods, 'sku_id' => $sku, 'actual_delivery_weight' => '2.0000']);
+        Db::transaction(fn() => (new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID))->recordWithinTransaction([
+            'reference' => 'fixture-delivery:' . $event, 'type' => 'issue', 'sku_id' => $sku, 'warehouse_id' => $warehouse,
+            'business_date' => date('Y-m-d', $now), 'quantity' => '2', 'bucket' => 'sale', 'target_reference' => 'sales_order:' . $order]));
         return ['order_id' => $order, 'line_id' => $line, 'unit_id' => $unit, 'event_id' => $event];
     }
 
-    private function activate(string $accountType = 'cash'): void
+    private function activate(string $accountType = 'cash', ?string $activationDate = null): void
     {
         $account = FinanceSetupLogic::saveAccount($this->command(0) + ['name' => '经营账户', 'account_type' => $accountType]);
         self::assertNotFalse($account); $this->accountId = (int)$account['id'];
         $this->customerId = $this->createCustomer('收款主客户');
-        self::assertNotFalse(FinanceSetupLogic::savePreparation($this->command(0) + ['activation_date' => date('Y-m-01'),
+        self::assertNotFalse(FinanceSetupLogic::savePreparation($this->command(0) + ['activation_date' => $activationDate ?? date('Y-m-01'),
             'inventory_cost_reviewed' => 1, 'legacy_settlement_reviewed' => 1, 'excluded_business_reviewed' => 1]));
         foreach ([['account', $this->accountId, '5000'], ['receivable', $this->customerId, '1000']] as [$category, $subjectId, $amount]) {
             $this->opening('item', ['category' => $category, 'subject_id' => $subjectId, 'amount' => $amount, 'historical_date' => null, 'due_date' => null,
@@ -1363,6 +1563,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
     private function clean(): void
     {
+        foreach (['finance_cost_effect', 'finance_cost_event', 'finance_cost_shortage', 'finance_cost_position', 'finance_cost_origin'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         Db::name('finance_sales_print')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_sales_coverage')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_sales_precision_rule')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();

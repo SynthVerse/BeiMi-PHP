@@ -36,6 +36,7 @@ class SupplyOrderLogic extends BaseLogic
 
         Db::startTrans();
         try {
+            FinanceIntegration::lock();
             $lockedTenantId = (int)Db::name('tenant')
                 ->where('id', $tenantId)
                 ->where('disable', 0)
@@ -179,6 +180,7 @@ class SupplyOrderLogic extends BaseLogic
 
         Db::startTrans();
         try {
+            FinanceIntegration::lock();
             $order = SupplyOrder::where('id', (int)$params['id'])
                 ->where('tenant_id', $tenantId)
                 ->lock(true)
@@ -288,6 +290,7 @@ class SupplyOrderLogic extends BaseLogic
 
         Db::startTrans();
         try {
+            FinanceIntegration::lock();
             $order = SupplyOrder::where('id', (int)$params['id'])
                 ->where('tenant_id', $tenantId)
                 ->lock(true)

@@ -636,9 +636,9 @@
 
 - 状态：已防护
 - 首次发生：2026-07-29
-- 最近发生：2026-09-07
-- 复发次数：7
-- 适用范围：`CustomerReportLogic`、`FulfillmentChangeLogic`、`FulfillmentTaskLogic`、`DeliveryInventoryLogic`、`DeliveryVariantLogic`、`LineVehicleLogic`、`NegativeInventoryLogic`、`SalesSettlementLogic`、`FinanceService` 等已开启业务事务后调用库存、财务原语或写入幂等事实的路径
+- 最近发生：2026-09-08
+- 复发次数：8
+- 适用范围：`CustomerReportLogic`、`FulfillmentChangeLogic`、`FulfillmentTaskLogic`、`DeliveryInventoryLogic`、`DeliveryVariantLogic`、`LineVehicleLogic`、`NegativeInventoryLogic`、`SalesSettlementLogic`、`FinanceService`、`FinanceCostLedger` 等已开启业务事务后调用库存、财务原语或写入幂等事实的路径
 - 相关问题：PIT-0022
 
 ### 触发场景
@@ -658,6 +658,9 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 外层业务事务应调用库存服务的 `*WithinTransaction` 同事务入口，并通过 `Db::name(...)->insert()` 写入报货主从表；只有没有外层事务的调用者才使用服务的独立事务入口。多商品操作必须以库存原语的实际取锁顺序排序。幂等键先以普通查询判断，依靠唯一键兜底；客户商品偏好以唯一键上的原子 upsert 写入，不先锁不存在记录；写状态转换先锁定稳定来源实体，再复查幂等事实，对 MySQL `1213`/`1205` 做有界重试，并在事务结束后按请求指纹读取已提交的追加动作。只有追加动作已经可见时才能向调用者返回成功。
 
 ### 防线
+
+- 2026-09-08 财务成本扩展：成本原语在外层事务内先取得稳定的门店准备行锁，再对成本来源、份额和待补数量使用当前读，避免沿外层已创建的 RR 快照覆盖其他事务已提交的成本。`FinanceBusinessWorkflowTest::test_cost_confirmation_reloads_committed_facts_after_an_outer_transaction_created_an_older_snapshot` 与 `tests/fixtures/finance_cost_worker.php` 用两个真实 PHP 连接固定先建快照、另一个事务出库 2、原事务再出库 3 的交错；修复前剩余成本错误为 70，修复后为 50，且两次销售成本分别为 20 和 30。此次只更新同根因记录；来源为 Matt Pocock / implement、tdd、code-review、diagnosing-bugs、prevent-repeat-pitfalls，完成后返回财务一期成本与采购接线。
+- 同批期间边界：`FinanceLedger::lockBook` 与 `postingMonth` 同样采用当前读；`test_cost_confirmation_cannot_ignore_a_month_closed_after_outer_transaction_snapshot` 用第二连接在快照创建后关闭当前月，修复前成本确认未抛异常，修复后明确拒绝已结账月份。此为同一 RR 旧快照根因的边界扩展，不另记复发次数。
 
 - 2026-09-07 财务第十批扩展：`FinanceOverdue` 拆分独立事务包装与 `captureWithinTransaction`，财务确认和销售确认只调用同事务原语。`test_overdue_finance_write_paths_use_existing_transaction_primitive` 保护调用边界，`test_overdue_preview_failure_and_permission_revocation_do_not_leave_or_expose_observations` 验证预览与失败不留下观察。来源为 Matt Pocock / implement、tdd、code-review、prevent-repeat-pitfalls；完成防护后继续财务一期。
 

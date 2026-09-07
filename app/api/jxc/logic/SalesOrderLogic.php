@@ -199,6 +199,7 @@ class SalesOrderLogic extends BaseLogic
             Db::startTrans();
         }
         try {
+            FinanceIntegration::lock();
             $lockedTenantId = (int)Db::name('tenant')
                 ->where('id', $tenantId)
                 ->where('disable', 0)
@@ -348,6 +349,7 @@ class SalesOrderLogic extends BaseLogic
 
         Db::startTrans();
         try {
+            FinanceIntegration::lock();
             $order = SalesOrder::where('id', (int)$params['id'])
                 ->where('tenant_id', $tenantId)
                 ->lock(true)
@@ -447,6 +449,7 @@ class SalesOrderLogic extends BaseLogic
 
         Db::startTrans();
         try {
+            FinanceIntegration::lock();
             $order = SalesOrder::where('id', (int)$params['id'])
                 ->where('tenant_id', $tenantId)
                 ->lock(true)

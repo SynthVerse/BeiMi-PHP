@@ -193,6 +193,7 @@ class CustomerReportLogic extends BaseLogic
         $version = (int)($params['version'] ?? 0);
         try {
             return self::transactionWithRetry(static function () use ($reportId, $version) {
+                FinanceIntegration::lock();
                 $report = CustomerReport::where('tenant_id', self::tenantId())->where('id', $reportId)->lock(true)->find();
                 if (!$report) { self::setError('报货单不存在、版本冲突或不可转销售'); return false; }
                 $existing = self::salesOrdersByReport($reportId, true);

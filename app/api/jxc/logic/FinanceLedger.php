@@ -14,7 +14,7 @@ final class FinanceLedger
     public function lockBook(): array
     {
         Db::name('finance_preparation')->where('tenant_id', $this->tenantId)->lock(true)->find();
-        $book = Db::name('finance_opening_book')->where('tenant_id', $this->tenantId)->find();
+        $book = Db::name('finance_opening_book')->where('tenant_id', $this->tenantId)->lock(true)->find();
         if (!$book || $book['status'] !== 'active') { throw new \DomainException('请先完成财务期初启用，再确认正式财务业务'); }
         return FinanceValue::decode($book['confirmed_snapshot']);
     }
@@ -22,12 +22,12 @@ final class FinanceLedger
     public function postingMonth(string $businessDate): string
     {
         $date = FinanceValue::date($businessDate);
-        $activation = Db::name('finance_preparation')->where('tenant_id', $this->tenantId)->value('activation_date');
+        $activation = Db::name('finance_preparation')->where('tenant_id', $this->tenantId)->lock(true)->value('activation_date');
         if (!$activation || $date < $activation) { throw new \DomainException('启用前业务应使用合法期初来源，不能重复登记新业务'); }
         if ($date > date('Y-m-d')) { throw new \DomainException('不能确认尚未发生的未来业务'); }
         $month = substr($date, 0, 7);
-        if (Db::name('finance_period')->where('tenant_id', $this->tenantId)->where('month', $month)->count()) { $month = date('Y-m'); }
-        if (Db::name('finance_period')->where('tenant_id', $this->tenantId)->where('month', $month)->count()) { throw new \DomainException('当前自然月已结账，不能写入或任意选择其他月份'); }
+        if (Db::name('finance_period')->where('tenant_id', $this->tenantId)->where('month', $month)->lock(true)->find()) { $month = date('Y-m'); }
+        if (Db::name('finance_period')->where('tenant_id', $this->tenantId)->where('month', $month)->lock(true)->find()) { throw new \DomainException('当前自然月已结账，不能写入或任意选择其他月份'); }
         return $month;
     }
 

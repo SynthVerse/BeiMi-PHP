@@ -35,6 +35,7 @@ class SalesReturnOrderLogic extends BaseLogic
 
         Db::startTrans();
         try {
+            if (FinanceIntegration::lock()) { self::throwFailure('已启用财务，请从客户往来登记关联退货，分别确认实物、贷项和退款', 'RETURN_FINANCE_WORKFLOW_REQUIRED'); }
             $lockedTenantId = (int)Db::name('tenant')
                 ->where('id', $tenantId)
                 ->where('disable', 0)
@@ -161,6 +162,7 @@ class SalesReturnOrderLogic extends BaseLogic
 
         Db::startTrans();
         try {
+            if (FinanceIntegration::lock()) { self::throwFailure('财务已启用，历史退货不能直接覆盖或删除，请登记关联更正', 'RETURN_FINANCE_WORKFLOW_REQUIRED'); }
             $lockedTenantId = (int)Db::name('tenant')
                 ->where('id', $tenantId)
                 ->where('disable', 0)
@@ -298,6 +300,7 @@ class SalesReturnOrderLogic extends BaseLogic
 
         Db::startTrans();
         try {
+            if (FinanceIntegration::lock()) { self::throwFailure('财务已启用，历史退货不能直接覆盖或删除，请登记关联更正', 'RETURN_FINANCE_WORKFLOW_REQUIRED'); }
             $lockedTenantId = (int)Db::name('tenant')
                 ->where('id', $tenantId)
                 ->where('disable', 0)

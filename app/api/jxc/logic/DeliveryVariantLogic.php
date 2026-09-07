@@ -111,6 +111,7 @@ final class DeliveryVariantLogic extends BaseLogic
                     $handoffTime, $handoffNote, $exceptionReason, $secondConfirmed,
                     $idempotencyKey, $fingerprint, $items, $hasActualDelivery
                 ) {
+                    FinanceIntegration::lock();
                     $existing = Db::name('fulfillment_delivery_event')->where('tenant_id', self::tenantId())
                         ->where('idempotency_key', $idempotencyKey)->find();
                     if ($existing) {

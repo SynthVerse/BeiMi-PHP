@@ -29,6 +29,7 @@ class StockService
         for ($attempt = 0; $attempt < 3; $attempt++) {
             try {
                 return Db::transaction(static function () use ($warehouseId, $goodsId, $quantity, $orderId, $orderType, $orderSn, $remark, $skuId, $batchId) {
+                    FinanceIntegration::lock();
                     $movement = WarehouseSkuBalanceService::inboundWithinTransaction($warehouseId, $skuId, $quantity);
                     if ($movement === false) {
                         throw new \RuntimeException('Unable to receive warehouse stock.');
@@ -80,6 +81,7 @@ class StockService
         int $sourceLineId,
         int $settlementActionId
     ): array|false {
+        FinanceIntegration::lock();
         $movement = WarehouseSkuBalanceService::inboundWithinTransaction($warehouseId, $skuId, $quantity);
         if ($movement === false) {
             return false;
@@ -124,6 +126,7 @@ class StockService
     ): bool {
         try {
             return Db::transaction(static function () use ($warehouseId, $goodsId, $quantity, $orderId, $orderType, $orderSn, $remark, $skuId, $batchId) {
+                FinanceIntegration::lock();
                 $movement = WarehouseSkuBalanceService::outbound($warehouseId, $skuId, $quantity);
                 if ($movement === false) {
                     throw new \RuntimeException('Unable to issue warehouse stock.');
@@ -168,6 +171,7 @@ class StockService
         int $batchId = 0
     ): bool {
         try {
+            FinanceIntegration::lock();
             $movement = WarehouseSkuBalanceService::consumeReservedWithinTransaction(
                 $warehouseId,
                 $skuId,
@@ -210,6 +214,7 @@ class StockService
         string $salesOrderSn,
         int $deliveryEventId
     ): array|false {
+        FinanceIntegration::lock();
         $movement = WarehouseSkuBalanceService::deliverAttributedWithinTransaction(
             $warehouseId,
             $skuId,
@@ -230,7 +235,7 @@ class StockService
             'flow_type' => StockFlow::FLOW_OUT,
             'quantity' => $actualQuantity,
             'remark' => '实际交付出库-事件' . $deliveryEventId,
-        ], $movement);
+        ], $movement, ['delivery_event_id' => $deliveryEventId]);
         NegativeInventoryLogic::autoOffsetDeliveryReleaseWithinTransaction(
             $warehouseId,
             $skuId,
@@ -251,6 +256,7 @@ class StockService
         string $reservationQuantity,
         int $deliveryEventId
     ): array|false {
+        FinanceIntegration::lock();
         $movement = WarehouseSkuBalanceService::deliverAttributedWithinTransaction(
             $warehouseId,
             $skuId,
@@ -271,7 +277,7 @@ class StockService
             'flow_type' => StockFlow::FLOW_OUT,
             'quantity' => $lossQuantity,
             'remark' => '运输损耗出库-交付事件' . $deliveryEventId,
-        ], $movement);
+        ], $movement, ['delivery_event_id' => $deliveryEventId]);
         NegativeInventoryLogic::autoOffsetDeliveryReleaseWithinTransaction(
             $warehouseId,
             $skuId,
@@ -315,8 +321,10 @@ class StockService
         string $quantity,
         int $attributionId,
         string $actionType,
-        string $reason
+        string $reason,
+        ?string $confirmedAmount = null
     ): array|false {
+        FinanceIntegration::lock();
         $movement = WarehouseSkuBalanceService::inboundWithinTransaction($warehouseId, $skuId, $quantity);
         if ($movement === false) {
             return false;
@@ -332,7 +340,7 @@ class StockService
             'flow_type' => StockFlow::FLOW_IN,
             'quantity' => $quantity,
             'remark' => $actionType . '-' . $reason,
-        ], $movement);
+        ], $movement, ['amount' => $confirmedAmount, 'cost_basis' => $actionType . '：' . $reason]);
         return $movement;
     }
 
@@ -350,6 +358,7 @@ class StockService
     ): bool {
         try {
             return Db::transaction(static function () use ($fromWarehouseId, $toWarehouseId, $goodsId, $quantity, $orderId, $orderType, $orderSn, $remark, $skuId, $batchId) {
+                FinanceIntegration::lock();
                 $movements = WarehouseSkuBalanceService::transfer($fromWarehouseId, $toWarehouseId, $skuId, $quantity);
                 if ($movements === false) {
                     throw new \RuntimeException('Unable to transfer warehouse SKU stock.');
@@ -363,16 +372,17 @@ class StockService
                     'order_sn' => $orderSn,
                     'quantity' => $quantity,
                 ];
-                self::writeFlow($common + [
+                $outboundFlow = self::writeFlow($common + [
                     'warehouse_id' => $fromWarehouseId,
                     'flow_type' => StockFlow::FLOW_OUT,
                     'remark' => $remark ?: '调拨出库-' . $orderType,
-                ], $movements['outbound']);
-                self::writeFlow($common + [
+                ], $movements['outbound'], ['paired_transfer' => true]);
+                $inboundFlow = self::writeFlow($common + [
                     'warehouse_id' => $toWarehouseId,
                     'flow_type' => StockFlow::FLOW_IN,
                     'remark' => $remark ?: '调拨入库-' . $orderType,
-                ], $movements['inbound']);
+                ], $movements['inbound'], ['paired_transfer' => true]);
+                FinanceStockCosts::transferWithinTransaction($outboundFlow, $inboundFlow, $fromWarehouseId, $toWarehouseId, $skuId, $quantity);
                 return true;
             });
         } catch (\Throwable) {
@@ -392,6 +402,7 @@ class StockService
 
         try {
             return Db::transaction(static function () use ($tenantId, $orderId, $orderType) {
+                if (FinanceIntegration::lock()) { throw new \DomainException('财务启用后不能按旧单回滚库存，请登记关联实物更正或退货'); }
                 $flows = StockFlow::where('order_id', $orderId)
                     ->where('order_type', $orderType)
                     ->where('tenant_id', $tenantId)
@@ -495,23 +506,26 @@ class StockService
         }
     }
 
-    private static function writeFlow(array $attributes, array $movement): void
+    private static function writeFlow(array $attributes, array $movement, array $costContext = []): int
     {
         if ((int)($attributes['goods_id'] ?? 0) !== (int)($movement['goods_id'] ?? 0)
             || (int)($attributes['sku_id'] ?? 0) !== (int)($movement['sku_id'] ?? 0)
         ) {
             throw new \RuntimeException('Stock flow goods and SKU do not match the authoritative balance.');
         }
-        $inserted = Db::name('stock_flow')->insert(array_merge([
+        $row = array_merge([
             'tenant_id' => (int)(request()->tenantId ?? 0),
             'before_stock' => $movement['before_on_hand_qty'],
             'after_stock' => $movement['after_on_hand_qty'],
             'admin_id' => (int)(request()->adminId ?? 0),
             'create_time' => time(),
-        ], $attributes));
-        if ($inserted !== 1) {
+        ], $attributes);
+        $id = (int)Db::name('stock_flow')->insertGetId($row);
+        if ($id <= 0) {
             throw new \RuntimeException('Unable to write stock flow.');
         }
+        if (empty($costContext['paired_transfer'])) { FinanceStockCosts::flowWithinTransaction($id, $row, $costContext); }
+        return $id;
     }
 
     private static function isLockRetryable(\Throwable $exception): bool
