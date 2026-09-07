@@ -32,6 +32,8 @@ final class FinanceBusinessLogic extends BaseLogic
                     FinanceDocumentPolicy::authorize($result['type'], in_array($action, ['confirm', 'record', 'correct', 'reverse_duplicate', 'reverse'], true));
                     if ($result['type'] === 'sales_batch' && $result['status'] === 'confirmed') { FinanceSalesBatches::reauthorize($result['confirmed_result']); }
                     if (!hash_equals($existing['fingerprint'], $fingerprint)) { throw new \DomainException('同一提交标识不能用于不同内容或操作人'); }
+                    unset($result['output']);
+                    if ($result['type'] === 'sales_batch' && $result['status'] === 'confirmed' && FinanceAccess::has('settlement.view')) { $result['output'] = FinanceSalesOutput::document(['id' => $result['id']]) + ['offline_generation_allowed' => true]; }
                     return $result;
                 }
                 $document = $id ? Db::name('finance_document')->where('tenant_id', $tenantId)->where('id', $id)->find() : null;
@@ -79,6 +81,7 @@ final class FinanceBusinessLogic extends BaseLogic
                 Db::name('finance_document')->where('tenant_id', $tenantId)->where('id', $document['id'])->update($document);
                 if (!empty($affectedCustomers)) { FinanceOverdue::captureWithinTransaction($tenantId, $affectedCustomers, (int)$document['id']); }
                 $result = self::present($document);
+                if (isset($result['output'])) { $result['output']['offline_generation_allowed'] = true; }
                 Db::name('finance_command')->insert(['tenant_id' => $tenantId, 'idempotency_key' => $key, 'fingerprint' => $fingerprint,
                     'document_id' => $document['id'], 'action' => $action, 'actor' => FinanceValue::json(FinanceAccess::actor()),
                     'result' => FinanceValue::json($result), 'create_time' => time()]);
@@ -93,7 +96,7 @@ final class FinanceBusinessLogic extends BaseLogic
         try {
             $document = Db::name('finance_document')->where('tenant_id', FinanceAccess::tenant())->where('id', FinanceValue::id($params['id'] ?? 0))->find();
             if (!$document) { throw new \DomainException('单据不存在或不属于当前门店'); }
-            $policy = FinanceDocumentPolicy::authorize($document['type']);
+            $policy = FinanceDocumentPolicy::read($document['type']);
             if (in_array($document['type'], ['receivable_due', 'payable_due'], true) && $document['status'] !== 'confirmed') {
                 $payload = FinanceValue::decode($document['payload']);
                 if (!empty($payload['source'])) {
@@ -110,7 +113,7 @@ final class FinanceBusinessLogic extends BaseLogic
     {
         self::clearError();
         try {
-            $type = FinanceValue::text($params['type'] ?? '', 40); $policy = FinanceDocumentPolicy::authorize($type);
+            $type = FinanceValue::text($params['type'] ?? '', 40); $policy = FinanceDocumentPolicy::read($type);
             $ledger = new FinanceLedger(FinanceAccess::tenant());
             $accounts = Db::name('finance_account')->where('tenant_id', FinanceAccess::tenant())->where('is_enabled', 1)->order('id')->field('id,name,account_type')->select()->toArray();
             $subjectId = FinanceValue::id($params['subject_id'] ?? 0, true);
@@ -144,6 +147,7 @@ final class FinanceBusinessLogic extends BaseLogic
             return ['tenant_id' => FinanceAccess::tenant(), 'type' => $type, 'policy' => $policy,
                 'active' => Db::name('finance_opening_book')->where('tenant_id', FinanceAccess::tenant())->value('status') === 'active',
                 'can_confirm' => FinanceAccess::owner() || (!$policy['owner'] && FinanceAccess::has($policy['confirm'])),
+                'can_prepare' => $type !== 'sales_batch' || FinanceAccess::has('settlement.bill'),
                 'can_return_receipt' => $type === 'receipt' && FinanceAccess::has('finance.refund.prepare'),
                 'accounts' => $accounts] + $sources;
         } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
@@ -153,6 +157,7 @@ final class FinanceBusinessLogic extends BaseLogic
     {
         foreach (['payload', 'confirmed_result', 'created_by', 'last_modified_by', 'confirmed_by'] as $key) { $document[$key] = FinanceValue::decode($document[$key]); }
         $document['id'] = (int)$document['id']; $document['version'] = (int)$document['version'];
+        if ($document['type'] === 'sales_batch' && $document['status'] === 'confirmed' && FinanceAccess::has('settlement.view')) { $document['output'] = FinanceSalesOutput::document(['id' => $document['id']]); }
         return $document;
     }
 
@@ -160,7 +165,7 @@ final class FinanceBusinessLogic extends BaseLogic
     {
         $types = [];
         foreach (FinanceDocumentPolicy::TYPES as $type => $policy) {
-            try { FinanceDocumentPolicy::authorize($type); $types[] = ['type' => $type, 'title' => $policy['title'], 'subject' => $policy['subject']]; }
+            try { FinanceDocumentPolicy::read($type); $types[] = ['type' => $type, 'title' => $policy['title'], 'subject' => $policy['subject'], 'can_prepare' => $type !== 'sales_batch' || FinanceAccess::has('settlement.bill')]; }
             catch (\DomainException) { continue; }
         }
         return ['tenant_id' => FinanceAccess::tenant(), 'types' => $types,
@@ -171,7 +176,7 @@ final class FinanceBusinessLogic extends BaseLogic
     {
         self::clearError();
         try {
-            $type = FinanceValue::text($params['type'] ?? '', 40); FinanceDocumentPolicy::authorize($type);
+            $type = FinanceValue::text($params['type'] ?? '', 40); FinanceDocumentPolicy::read($type);
             $page = FinanceValue::id($params['page'] ?? 1);
             $query = Db::name('finance_document')->where('tenant_id', FinanceAccess::tenant())->where('type', $type);
             if (!empty($params['subject_id'])) { $query->whereRaw("CAST(JSON_UNQUOTE(JSON_EXTRACT(payload,'$.subject_id')) AS UNSIGNED)=?", [FinanceValue::id($params['subject_id'])]); }
@@ -184,7 +189,7 @@ final class FinanceBusinessLogic extends BaseLogic
     {
         self::clearError();
         try {
-            $policy = FinanceDocumentPolicy::authorize(FinanceValue::text($params['type'] ?? '', 40));
+            $policy = FinanceDocumentPolicy::read(FinanceValue::text($params['type'] ?? '', 40));
             $column = ['customer' => 'customer_name', 'vendor' => 'supplier_name', 'employee' => 'name'][$policy['subject']];
             $query = Db::name($policy['subject'])->where('tenant_id', FinanceAccess::tenant());
             if ($policy['subject'] === 'customer') { $query->where('parent_id', 0); }

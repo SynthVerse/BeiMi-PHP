@@ -11,7 +11,7 @@ final class FinanceSalesBatches
 {
     public static function options(int $customer, string $from, string $to): array
     {
-        FinanceDocumentPolicy::authorize('sales_batch');
+        FinanceDocumentPolicy::read('sales_batch');
         if ($from > $to || $to > date('Y-m-d')) { throw new \DomainException('交付日期范围无效或包含尚未发生的日期'); }
         $rows = $customer ? FinanceDeliveries::rows($customer, $from, $to) : [];
         $rule = FinanceSalesRules::terms($customer, $from);
@@ -19,6 +19,7 @@ final class FinanceSalesBatches
         return ['tenant_id' => FinanceAccess::tenant(), 'deliveries' => $rows, 'precision_rules' => FinanceSalesPrecision::rules($customer),
             'can_override_precision' => FinanceAccess::has('finance.sales.precision_override'), 'can_round_sales' => FinanceAccess::has('finance.sales.rounding'),
             'can_override_due' => FinanceAccess::has('finance.sales.due_override'), 'can_confirm_difference' => FinanceAccess::owner(),
+            'default_show_cumulative_debt' => (int)Db::name('customer_sales_preference')->where('tenant_id', FinanceAccess::tenant())->where('customer_id', $customer)->value('show_cumulative_debt'),
             'overdue' => $customer ? FinanceCustomers::overdue($customer) : ['amount' => '0.00']];
     }
 
@@ -40,6 +41,9 @@ final class FinanceSalesBatches
         $name = Db::name('customer')->where('tenant_id', $tenant)->where('id', $customer)->where('parent_id', 0)->value('customer_name');
         if ($name === null) { throw new \DomainException('请选择本店主客户'); }
         $reason = FinanceValue::text($data['reason'] ?? '', 1000);
+        $showDebt = isset($data['show_cumulative_debt']) ? FinanceValue::id($data['show_cumulative_debt'], true)
+            : (int)Db::name('customer_sales_preference')->where('tenant_id', $tenant)->where('customer_id', $customer)->value('show_cumulative_debt');
+        if (!in_array($showDebt, [0, 1], true)) { throw new \DomainException('累计欠款打印偏好无效'); }
         $previous = $original ? FinanceValue::decode($original['confirmed_result']) : null;
         if ($original) {
             $correctionReason = FinanceValue::text($correctionReason, 1000);
@@ -118,10 +122,12 @@ final class FinanceSalesBatches
         }
         if ($credits) { self::allocateCredits($ledger, $id, $customer, $credits, $data); }
         if ($original) { Db::name('finance_correction')->insert(['tenant_id' => $tenant, 'original_document_id' => $original['id'], 'replacement_document_id' => $id, 'reason' => $correctionReason, 'actor' => FinanceValue::json(FinanceAccess::actor()), 'create_time' => time()]); }
+        Db::name('customer_sales_preference')->duplicate(['show_cumulative_debt' => $showDebt, 'operator_id' => FinanceAccess::operator(), 'update_time' => time()])
+            ->insert(['tenant_id' => $tenant, 'customer_id' => $customer, 'show_cumulative_debt' => $showDebt, 'operator_id' => FinanceAccess::operator(), 'create_time' => time(), 'update_time' => time()]);
         return ['subject_id' => $customer, 'subject_name' => $name, 'lines' => array_values($after), 'goods_amount' => $goods, 'amount' => bcsub($goods, $rounding, 2),
             'precision' => $precision, 'automatic_rounding_difference' => $automatic, 'rounding_amount' => $rounding,
             'rounding_allocation' => '按行金额比例分摊，分位差依来源顺序补齐', 'created_sources' => $created, 'posting_months' => array_values(array_unique($months)),
-            'debt_after_order' => $ledger->categoryBalance('receivable', $customer), 'overdue_at_confirmation' => $overdue,
+            'debt_after_order' => $ledger->categoryBalance('receivable', $customer), 'show_cumulative_debt' => (bool)$showDebt, 'overdue_at_confirmation' => $overdue,
             'corrects_document_id' => (int)($original['id'] ?? 0)];
     }
 

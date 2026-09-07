@@ -33,6 +33,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000009_finance_overdue.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000011_finance_sales_precision.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000012_finance_sales_coverage.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000013_finance_sales_output.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -1187,6 +1188,66 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertSame($due, (new FinanceLedger(self::TENANT_ID))->source($again['confirmed_result']['created_sources'][0])['due_date']);
     }
 
+    public function test_sales_batch_output_keeps_original_amount_debt_snapshot_and_server_print_numbers_across_corrections(): void
+    {
+        $this->activate(); $sale = $this->deliveredSale();
+        $delivery = (int)Db::name('fulfillment_delivery_item')->where('delivery_event_id', $sale['event_id'])->value('id');
+        $payload = ['subject_id' => $this->customerId, 'show_cumulative_debt' => 1, 'reason' => '输出确认凭证', 'lines' => [
+            ['delivery_item_id' => $delivery, 'covered_weight' => '2', 'settlement_weight' => '2', 'price' => '50']]];
+        $record = $this->command(0) + ['type' => 'sales_batch', 'payload' => $payload];
+        $original = FinanceBusinessLogic::action('record', $record); self::assertNotFalse($original);
+        $output = \app\api\jxc\logic\FinanceSalesOutput::document(['id' => $original['id']]);
+        self::assertSame('100.00', $output['order_money']); self::assertSame('1100.00', $output['debt_after_order']); self::assertTrue($output['show_cumulative_debt']);
+        self::assertTrue($original['output']['offline_generation_allowed']); self::assertArrayNotHasKey('offline_generation_allowed', $output);
+        $print = $this->command(1) + ['id' => $original['id']];
+        $prepared = \app\api\jxc\logic\FinanceSalesOutput::prepare($print);
+        self::assertSame(1, $prepared['copy_no']); self::assertSame($prepared, \app\api\jxc\logic\FinanceSalesOutput::prepare($print));
+        $receipt = ['expected_tenant_id' => self::TENANT_ID, 'id' => $original['id'], 'print_log_id' => $prepared['print_log_id'], 'success' => 1];
+        self::assertSame(1, \app\api\jxc\logic\FinanceSalesOutput::receipt($receipt)['successful_print_count']);
+        self::assertSame(1, \app\api\jxc\logic\FinanceSalesOutput::receipt($receipt)['successful_print_count']);
+        $payload['lines'][0]['price'] = '60';
+        $corrected = FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $original['id'], 'payload' => $payload, 'correction_reason' => '核实新单价']); self::assertNotFalse($corrected);
+        $old = \app\api\jxc\logic\FinanceSalesOutput::document(['id' => $original['id']]); $new = \app\api\jxc\logic\FinanceSalesOutput::document(['id' => $corrected['id']]);
+        self::assertSame('100.00', $old['order_money']); self::assertSame('1100.00', $old['debt_after_order']); self::assertStringContainsString('已被', $old['invalidation_notice']);
+        self::assertSame($old['order_sn'], $new['order_sn']); self::assertSame(2, $new['version']); self::assertSame('120.00', $new['order_money']);
+        $again = \app\api\jxc\logic\FinanceSalesOutput::prepare($this->command(1) + ['id' => $corrected['id']]); self::assertSame(2, $again['copy_no']);
+        self::assertStringContainsString('已被', \app\api\jxc\logic\FinanceSalesOutput::prepare($print)['document']['invalidation_notice']);
+        self::assertStringContainsString('已被', FinanceBusinessLogic::action('record', $record)['output']['invalidation_notice']);
+        self::assertSame($again['print_log_id'], (int)\app\api\jxc\logic\FinanceSalesOutput::document(['id' => $original['id']])['pending_print']['id']);
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $this->receipt('10', '10')]));
+        self::assertSame('1100.00', \app\api\jxc\logic\FinanceSalesOutput::document(['id' => $original['id']])['debt_after_order']);
+    }
+
+    public function test_sales_batch_output_viewer_can_read_and_print_but_cannot_change_sales_or_other_actor_receipts(): void
+    {
+        $this->activate(); $sale = $this->deliveredSale();
+        $delivery = (int)Db::name('fulfillment_delivery_item')->where('delivery_event_id', $sale['event_id'])->value('id');
+        $payload = ['subject_id' => $this->customerId, 'reason' => '只读打印验收', 'lines' => [['delivery_item_id' => $delivery, 'covered_weight' => '2', 'settlement_weight' => '2', 'price' => '50']]];
+        $draft = FinanceBusinessLogic::action('save', $this->command(0) + ['type' => 'sales_batch', 'payload' => $payload]);
+        try { \app\api\jxc\logic\FinanceSalesOutput::document(['id' => $draft['id']]); self::fail('草稿不得输出'); } catch (\DomainException $error) { self::assertStringContainsString('已确认', $error->getMessage()); }
+        $formal = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'sales_batch', 'payload' => $payload]); self::assertNotFalse($formal);
+        $ownerPrint = $this->command(1) + ['id' => $formal['id']]; $prepared = \app\api\jxc\logic\FinanceSalesOutput::prepare($ownerPrint);
+        $employee = WorkforceLogic::saveEmployee(['name' => '只读打印员', 'mobile' => '13800009939', 'bind_user_id' => 996939,
+            'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['settlement.view']]); self::assertNotFalse($employee);
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996939; request()->adminId = 0;
+        $detail = FinanceBusinessLogic::detail(['id' => $formal['id']]); self::assertNotFalse($detail);
+        self::assertFalse($detail['output']['can_share']); self::assertFalse($detail['output']['pending_print']['can_resolve']);
+        $options = FinanceBusinessLogic::options(['type' => 'sales_batch', 'subject_id' => $this->customerId]); self::assertNotFalse($options); self::assertFalse($options['can_confirm']); self::assertFalse($options['can_prepare']);
+        self::assertFalse(FinanceBusinessLogic::action('save', $this->command(0) + ['type' => 'sales_batch', 'payload' => $payload]));
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'sales_batch', 'payload' => $payload]));
+        try { \app\api\jxc\logic\FinanceSalesOutput::prepare($ownerPrint); self::fail('不可复用其他人员标识'); } catch (\DomainException $error) { self::assertStringContainsString('操作人', $error->getMessage()); }
+        $receipt = ['expected_tenant_id' => self::TENANT_ID, 'id' => $formal['id'], 'print_log_id' => $prepared['print_log_id'], 'success' => 1];
+        try { \app\api\jxc\logic\FinanceSalesOutput::receipt($receipt); self::fail('不可核实其他人员出纸'); } catch (\DomainException $error) { self::assertStringContainsString('原打印人员', $error->getMessage()); }
+        $this->prepareCustomerReportRequestContext();
+        \app\api\jxc\logic\FinanceSalesOutput::receipt($receipt);
+        try { \app\api\jxc\logic\FinanceSalesOutput::receipt(array_replace($receipt, ['success' => 0])); self::fail('不可反向回执'); } catch (\DomainException $error) { self::assertStringContainsString('冲突', $error->getMessage()); }
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996939; request()->adminId = 0;
+        $own = \app\api\jxc\logic\FinanceSalesOutput::prepare($this->command(1) + ['id' => $formal['id']]); self::assertSame(2, $own['copy_no']);
+        self::assertSame(1, \app\api\jxc\logic\FinanceSalesOutput::receipt(['expected_tenant_id' => self::TENANT_ID, 'id' => $formal['id'], 'print_log_id' => $own['print_log_id'], 'success' => 0])['successful_print_count']);
+        $status = \app\api\jxc\logic\FinanceSalesOutput::status(['expected_tenant_id' => self::TENANT_ID, 'id' => $formal['id'], 'print_log_id' => $own['print_log_id']]); self::assertSame('failed', $status['status']);
+        $next = \app\api\jxc\logic\FinanceSalesOutput::prepare($this->command(1) + ['id' => $formal['id']]); self::assertSame(3, $next['copy_no']); self::assertSame(1, $next['reprint_count'], '失败尝试占流水号，但不增加重打次数');
+    }
+
     private function deliveredSale(): array
     {
         $unit = $this->createCustomerReportUnit('斤');
@@ -1241,6 +1302,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
     private function clean(): void
     {
+        Db::name('finance_sales_print')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_sales_coverage')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_sales_precision_rule')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_overdue_event')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();

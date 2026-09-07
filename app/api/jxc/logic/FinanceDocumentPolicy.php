@@ -40,4 +40,10 @@ final class FinanceDocumentPolicy
         elseif (!FinanceAccess::has($policy['prepare']) && !($policy['confirm'] && FinanceAccess::has($policy['confirm']))) { FinanceAccess::require($policy['prepare']); }
         return $policy;
     }
+
+    public static function read(string $type): array
+    {
+        if ($type === 'sales_batch' && FinanceAccess::has('settlement.view')) { return self::type($type); }
+        return self::authorize($type);
+    }
 }
