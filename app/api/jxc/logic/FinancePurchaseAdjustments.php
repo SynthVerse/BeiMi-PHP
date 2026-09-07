@@ -53,23 +53,14 @@ final class FinancePurchaseAdjustments
             'source_reference' => '采购结算明细 ' . $lineId . ' 价款调整', 'actual_date' => $date, 'reason' => $reason, 'supplier_confirmation' => $confirmation,
             'before_amount' => $original['current_amount'], 'new_amount' => $amount, 'amount_change' => $delta, 'previous_adjustment_id' => $original['expected_adjustment_id'],
             'confirmed_by' => FinanceAccess::actor(), 'confirmed_at' => time()];
-        $created = []; $creditUsed = '0.00';
-        if (bccomp($delta, '0', 2) > 0) {
-            if (!empty($data['credit_allocations'])) { throw new \DomainException('采购调增不使用贷项，请移除原冲抵组成后核对'); }
-            $due = $row['payable_source'] ? $ledger->source($row['payable_source'])['due_date'] : ($line['due_date'] ?? null);
-            $created[] = $ledger->createSource($id, 'payable', $vendor, $delta, $date, $due, $snapshot);
-        } else {
-            if (($data['credit_reviewed'] ?? null) !== 1 || !is_array($data['credit_allocations'] ?? null)) { throw new \DomainException('采购调减须明确核对贷项冲抵组成及剩余应退款'); }
-            $credit = $ledger->createSource($id, 'supplier_refund', $vendor, bcsub('0', $delta, 2), $date, null, $snapshot + ['credit_kind' => 'purchase_reduction']);
-            $creditUsed = FinanceSupplierCredits::allocate($ledger, $id, $vendor, $credit, $data['credit_allocations'], $date); $created[] = $credit;
-        }
+        $due = $row['payable_source'] ? $ledger->source($row['payable_source'])['due_date'] : ($line['due_date'] ?? null);
+        $financial = FinanceSupplierCredits::recognizeChange($ledger, $id, 'payable', $delta, $due, $snapshot, $data);
         $adjustmentId = (int)Db::name('finance_purchase_cost_change')->insertGetId(['tenant_id' => $tenant, 'document_id' => $id,
             'arrival_line_id' => $arrival['id'], 'settlement_line_id' => $lineId, 'kind' => 'settlement_adjustment', 'amount' => $delta,
-            'snapshot' => FinanceValue::json($snapshot + ['created_sources' => $created, 'credit_allocations' => $data['credit_allocations'] ?? []]), 'create_time' => time()]);
+            'snapshot' => FinanceValue::json($snapshot + $financial + ['credit_allocations' => $data['credit_allocations'] ?? []]), 'create_time' => time()]);
         $cost = FinancePurchaseCosts::revalue($arrival, $document, $snapshot);
         $costLine = array_merge(FinanceValue::decode($arrival['snapshot']), $cost, ['arrival_line_id' => (int)$arrival['id'], 'amount' => $delta, 'actual_date' => $date]);
-        return $snapshot + ['adjustment_id' => $adjustmentId, 'created_sources' => $created, 'credit_used' => $creditUsed,
-            'refund_remaining' => bccomp($delta, '0', 2) < 0 ? bcsub(bcsub('0', $delta, 2), $creditUsed, 2) : '0.00',
+        return $snapshot + $financial + ['adjustment_id' => $adjustmentId,
             'lines' => [$costLine], 'posting_months' => [$month]];
     }
 }

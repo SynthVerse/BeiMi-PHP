@@ -119,8 +119,11 @@ final class FinanceBusinessLogic extends BaseLogic
             $accounts = Db::name('finance_account')->where('tenant_id', FinanceAccess::tenant())->where('is_enabled', 1)->order('id')->field('id,name,account_type')->select()->toArray();
             $subjectId = FinanceValue::id($params['subject_id'] ?? 0, true);
             $categories = $type === 'advance_allocate' && ($params['role'] ?? '') === 'fund' ? ['advance'] : $policy['sources'];
+            if ($type === 'supplier_credit_allocate' && ($params['role'] ?? '') === 'fund') { $categories = ['supplier_refund']; }
             $page = max(1, FinanceValue::id($params['page'] ?? 1));
             $sources = match ($type) {
+                'purchase_extra_adjustment' => ($params['role'] ?? '') === 'credit' ? $ledger->sourcePage($categories, $subjectId, $page)
+                    : (($params['role'] ?? '') === 'arrival' ? FinancePurchaseExtraCosts::options($params) : FinancePurchaseExtraAdjustments::options($subjectId, $params)),
                 'purchase_extra_cost' => FinancePurchaseExtraCosts::options($params),
                 'purchase_adjustment' => ($params['role'] ?? '') === 'credit' ? $ledger->sourcePage($categories, $subjectId, $page) : FinancePurchaseAdjustments::options($subjectId, $params),
                 'purchase_arrival' => FinancePurchaseArrivals::options($subjectId, $params),

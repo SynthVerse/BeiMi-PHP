@@ -39,6 +39,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000016_finance_purchase_settlement.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000017_finance_purchase_rules.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000018_finance_purchase_cost_change.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000019_finance_purchase_cost_revision.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -311,6 +312,104 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertSame('126.000000', $cost->balance($warehouse, $sku)['value']);
         self::assertSame('200.00', $ledger->categoryBalance('payable', $vendor));
         self::assertSame('20.00', $ledger->categoryBalance('supplier_refund', $vendor));
+        self::assertSame(2, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
+    public function test_supplier_refund_credit_can_offset_later_payable_and_reverse_without_cash_or_second_cost(): void
+    {
+        $oldDate = date('Y-m-01', strtotime('first day of last month')); $this->activate('cash', $oldDate);
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '后续抵扣供应商']);
+        $ledger = new FinanceLedger(self::TENANT_ID);
+        $credit = $ledger->createSource(2001, 'supplier_refund', $vendor, '50', $oldDate, null, ['subject_name' => '后续抵扣供应商']);
+        $payable = $ledger->createSource(2002, 'payable', $vendor, '100', date('Y-m-d'), null, ['subject_name' => '后续抵扣供应商']);
+        Db::name('finance_period')->insert(['tenant_id' => self::TENANT_ID, 'month' => substr($oldDate, 0, 7), 'status' => 'closed', 'snapshot' => '{}', 'closed_by' => '{}', 'closed_at' => time()]);
+        $payload = ['subject_id' => $vendor, 'credit_source' => $credit, 'reason' => '双方确认使用原应退款抵扣后续采购', 'allocations' => [['source' => $payable, 'amount' => '30']]];
+        $command = $this->command(0) + ['type' => 'supplier_credit_allocate', 'payload' => $payload];
+        $applied = FinanceBusinessLogic::action('record', $command);
+        self::assertNotFalse($applied, FinanceBusinessLogic::getError()); self::assertSame($applied, FinanceBusinessLogic::action('record', $command));
+        self::assertSame('20.00', $ledger->source($credit)['balance']); self::assertSame('70.00', $ledger->source($payable)['balance']);
+        $entries = Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('document_id', $applied['id'])->select()->toArray();
+        self::assertCount(2, $entries); self::assertSame([date('Y-m')], array_values(array_unique(array_column($entries, 'posting_month'))));
+        self::assertSame([date('Y-m-d')], array_values(array_unique(array_column($entries, 'effective_date'))));
+        $reversed = FinanceBusinessLogic::action('reverse', $this->command($applied['version']) + ['id' => $applied['id'], 'correction_reason' => '双方取消本次抵扣，恢复原未结项']);
+        self::assertNotFalse($reversed, FinanceBusinessLogic::getError());
+        self::assertSame('50.00', $ledger->source($credit)['balance']); self::assertSame('100.00', $ledger->source($payable)['balance']);
+        self::assertSame('5000.00', $ledger->account($this->accountId)['balance']);
+        self::assertSame(0, Db::name('finance_money_transaction')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
+    public function test_unknown_date_opening_supplier_credit_uses_target_month_and_rejects_foreign_or_excess_allocation(): void
+    {
+        $oldDate = date('Y-m-01', strtotime('first day of last month')); $this->activate('cash', $oldDate);
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '期初贷项供应商']);
+        $creditId = (int)Db::name('finance_opening_source')->insertGetId(['tenant_id' => self::TENANT_ID, 'opening_item_id' => 990010,
+            'category' => 'supplier_refund', 'subject_id' => $vendor, 'amount' => '50.00', 'activation_date' => $oldDate,
+            'source_snapshot' => json_encode(['historical_date' => null, 'subject_name' => '期初贷项供应商', 'source_reference' => '已核实期初应退款']), 'create_time' => time()]);
+        $credit = 'o:' . $creditId; $ledger = new FinanceLedger(self::TENANT_ID);
+        $payable = $ledger->createSource(2011, 'expense_payable', $vendor, '100', date('Y-m-d'), null, []);
+        $foreign = $ledger->createSource(2012, 'payable', $vendor + 1, '100', date('Y-m-d'), null, []);
+        $payload = ['subject_id' => $vendor, 'credit_source' => $credit, 'reason' => '明确使用核实的期初应退款', 'allocations' => [['source' => $foreign, 'amount' => '30']]];
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'supplier_credit_allocate', 'payload' => $payload]));
+        $payload['allocations'] = [['source' => $payable, 'amount' => '60']];
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'supplier_credit_allocate', 'payload' => $payload]));
+        self::assertSame('100.00', $ledger->source($payable)['balance']); self::assertSame('50.00', $ledger->source($credit)['balance']);
+        $payload['allocations'][0]['amount'] = '30';
+        $result = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'supplier_credit_allocate', 'payload' => $payload]);
+        self::assertNotFalse($result, FinanceBusinessLogic::getError());
+        $entries = Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('document_id', $result['id'])->select()->toArray();
+        self::assertCount(2, $entries);
+        foreach ($entries as $entry) { self::assertSame(date('Y-m'), $entry['posting_month']); self::assertNull($entry['effective_date']); }
+        $options = FinanceBusinessLogic::options(['type' => 'supplier_credit_allocate', 'subject_id' => $vendor, 'role' => 'fund']);
+        self::assertNotFalse($options, FinanceBusinessLogic::getError()); self::assertSame($credit, $options['sources'][0]['reference']); self::assertSame('20.00', $options['sources'][0]['balance']);
+        $reverse = FinanceBusinessLogic::action('reverse', $this->command($result['version']) + ['id' => $result['id'], 'correction_reason' => '撤销本次抵扣，恢复待退款']);
+        self::assertNotFalse($reverse, FinanceBusinessLogic::getError());
+        $reversals = Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('document_id', $reverse['id'])->select()->toArray();
+        self::assertCount(2, $reversals);
+        foreach ($reversals as $entry) { self::assertSame(date('Y-m'), $entry['posting_month']); self::assertNull($entry['effective_date']); }
+        self::assertSame('50.00', $ledger->source($credit)['balance']); self::assertSame('100.00', $ledger->source($payable)['balance']);
+    }
+
+    public function test_paid_purchase_overhead_reduction_revalues_cost_and_creates_refund_without_reopening_paid_bill(): void
+    {
+        $this->activate(); $warehouse = $this->createCustomerReportWarehouse('附加成本更正仓');
+        $goods = $this->createCustomerReportGoods('附加成本更正商品', 'FIN-EXTRA-REV'); $sku = $this->customerReportSkuId($goods);
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '附加成本服务方']);
+        $arrival = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival', 'payload' => ['subject_id' => $vendor,
+            'warehouse_id' => $warehouse, 'actual_date' => date('Y-m-d'), 'source_reference' => 'ARR-EXTRA-REV', 'reason' => '实际入库',
+            'lines' => [['sku_id' => $sku, 'actual_quantity' => '100', 'agreed_price' => '2.00']]]]);
+        self::assertNotFalse($arrival, FinanceBusinessLogic::getError()); $line = $arrival['confirmed_result']['lines'][0]['arrival_line_id'];
+        $extra = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_extra_cost', 'payload' => ['subject_id' => $vendor,
+            'actual_date' => date('Y-m-d'), 'amount' => '20.00', 'cost_kind' => 'loading', 'source_reference' => 'LOAD-REV-1',
+            'reason' => '入库必要装卸', 'attribution_basis' => '全部归属该批', 'necessary_confirmed' => 1, 'lines' => [['arrival_line_id' => $line, 'amount' => '20.00']]]]);
+        self::assertNotFalse($extra, FinanceBusinessLogic::getError()); $payable = $extra['confirmed_result']['created_sources'][0];
+        self::assertTrue(\app\api\jxc\logic\StockService::outbound($warehouse, $goods, '30', 904, 'sales', 'SALE-EXTRA-REV', '', $sku));
+        $paid = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'supplier_payment', 'payload' => ['subject_id' => $vendor,
+            'account_id' => $this->accountId, 'actual_date' => date('Y-m-d'), 'amount' => '20.00', 'reason' => '实际支付装卸费用', 'allocations' => [['source' => $payable, 'amount' => '20.00']]]]);
+        self::assertNotFalse($paid, FinanceBusinessLogic::getError());
+        $payload = ['subject_id' => $vendor, 'original_cost_document_id' => $extra['id'], 'expected_revision_id' => 0, 'new_amount' => '10.00',
+            'reason' => '装卸数量核对后减费', 'supplier_confirmation' => '服务方明确退还差额', 'supplier_confirmed' => 1,
+            'attribution_basis' => '仍归属同一批入库', 'lines' => [['arrival_line_id' => $line, 'amount' => '10.00']], 'credit_reviewed' => 1, 'credit_allocations' => []];
+        $command = $this->command(0) + ['type' => 'purchase_extra_adjustment', 'payload' => $payload];
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($command + ['action' => 'record']);
+        self::assertSame('-10.00', $preview['purchase']['amount_change']); self::assertNotEmpty($preview['cost_impacts']);
+        self::assertSame(0, Db::name('finance_purchase_cost_revision')->where('tenant_id', self::TENANT_ID)->count());
+        $adjusted = FinanceBusinessLogic::action('record', $command);
+        self::assertNotFalse($adjusted, FinanceBusinessLogic::getError()); self::assertSame($adjusted, FinanceBusinessLogic::action('record', $command));
+        $ledger = new FinanceLedger(self::TENANT_ID); $cost = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID);
+        self::assertSame('0.00', $ledger->source($payable)['balance']); self::assertSame('10.00', $ledger->categoryBalance('supplier_refund', $vendor));
+        self::assertSame('147.000000', $cost->balance($warehouse, $sku)['value']); self::assertSame('63.000000', $cost->destination($warehouse, $sku, 'sale', 'sales_order:904')['cost']);
+        self::assertSame('4980.00', $ledger->account($this->accountId)['balance']);
+        self::assertSame('20.00', Db::name('finance_purchase_cost_bill')->where('tenant_id', self::TENANT_ID)->where('document_id', $extra['id'])->value('amount'));
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_extra_adjustment', 'payload' => $payload]));
+        $options = FinanceBusinessLogic::options(['type' => 'purchase_extra_adjustment', 'subject_id' => $vendor]);
+        self::assertNotFalse($options, FinanceBusinessLogic::getError()); self::assertSame('10.00', $options['bills'][0]['current_amount']);
+        self::assertSame($adjusted['confirmed_result']['revision_id'], $options['bills'][0]['expected_revision_id']);
+        $payload['expected_revision_id'] = $adjusted['confirmed_result']['revision_id']; $payload['new_amount'] = '0.00'; $payload['lines'] = [];
+        $cancelled = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_extra_adjustment', 'payload' => $payload]);
+        self::assertNotFalse($cancelled, FinanceBusinessLogic::getError());
+        self::assertSame('140.000000', $cost->balance($warehouse, $sku)['value']);
+        self::assertSame('20.00', $ledger->categoryBalance('supplier_refund', $vendor));
+        self::assertSame([], FinanceBusinessLogic::options(['type' => 'purchase_extra_adjustment', 'subject_id' => $vendor])['bills'][0]['lines']);
         self::assertSame(2, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->count());
     }
 
@@ -1858,7 +1957,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
     private function clean(): void
     {
-        foreach (['finance_purchase_cost_change', 'finance_purchase_cost_bill'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
+        foreach (['finance_purchase_cost_revision', 'finance_purchase_cost_change', 'finance_purchase_cost_bill'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         foreach (['finance_supplier_terms', 'finance_purchase_difference_rule', 'finance_purchase_settlement_line', 'finance_purchase_arrival_line', 'finance_purchase_price'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         foreach (['finance_cost_effect', 'finance_cost_event', 'finance_cost_shortage', 'finance_cost_position', 'finance_cost_origin'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         Db::name('finance_sales_print')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();

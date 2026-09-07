@@ -17,6 +17,7 @@ final class FinanceCorrections
         if ($original['type'] === 'purchase_arrival') { throw new \DomainException('已验收入库不能直接覆盖或撤销，请从原到货明细关联实物更正或采购退货'); }
         if ($original['type'] === 'purchase_settlement') { throw new \DomainException('供应商结算请关联采购金额调整，不能直接撤销已处理的实收量'); }
         if ($original['type'] === 'purchase_extra_cost') { throw new \DomainException('已确认附加成本请关联费用金额调整，不能撤销已分配成本后重复登记'); }
+        if ($original['type'] === 'purchase_extra_adjustment') { throw new \DomainException('附加成本调整请从原账单读取当前版本后再次关联调整'); }
         if ($original['type'] === 'purchase_adjustment') { throw new \DomainException('采购调整请从原结算读取当前金额后追加下一次调整'); }
         if ($original['type'] === 'purchase_rules') { throw new \DomainException('请以当前采购规则版本保存新规则，历史规则不能撤销覆盖'); }
         if ($reverseOnly && $policy['direction'] !== 'none') { throw new \DomainException('实际收付款不能按无资金业务直接撤销，请区分录入更正、退款或到账失效'); }
@@ -47,7 +48,8 @@ final class FinanceCorrections
             ->whereNotIn('purpose', ['correction_reversal', 'correction_source', 'advance_revision'])->order('id', 'desc')->select()->toArray();
         $activation = (string)Db::name('finance_preparation')->where('tenant_id', $this->tenantId)->value('activation_date');
         foreach ($entries as $entry) {
-            $month = $this->ledger->postingMonth(max($entry['effective_date'] ?: $entry['business_date'], $activation));
+            // 冲销沿用原分录的实际入账期；未知业务日期不能把后月核销退回启用月。
+            $month = $this->ledger->postingMonth(max($entry['posting_month'] . '-01', $activation));
             $this->ledger->add((int)$replacement['id'], $entry['metric'], (int)$entry['subject_id'], bcsub('0', $entry['amount'], 2),
                 $entry['business_date'], $month, 'correction_reversal', $entry['source_ref'], $entry['effective_date'],
                 ['original_entry_id' => (int)$entry['id'], 'original_document_id' => (int)$original['id'], 'reason' => $reason]);
