@@ -21,6 +21,7 @@ final class FinanceSetupWorkflowTest extends TestCase
         $this->ensureCustomerReportTables();
         $this->runStatements($this->migration());
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000002_finance_opening.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000003_finance_opening_details.sql')));
         $this->clean();
     }
 
@@ -160,7 +161,7 @@ final class FinanceSetupWorkflowTest extends TestCase
 
     private function clean(): void
     {
-        foreach (['finance_opening_source', 'finance_opening_item', 'finance_opening_book', 'finance_setup_action', 'finance_account', 'finance_preparation'] as $table) {
+        foreach (['finance_opening_item_detail', 'finance_opening_source', 'finance_opening_item', 'finance_opening_book', 'finance_setup_action', 'finance_account', 'finance_preparation'] as $table) {
             Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         }
         $this->cleanCustomerReportData();

@@ -50,6 +50,8 @@ final class WorkforceLogic extends BaseLogic
         ],
         '财务准备' => [
             ['key' => 'finance.opening.prepare', 'name' => '录入财务启用准备草稿（不含正式确认）'],
+            ['key' => 'finance.salary.view', 'name' => '查看工资明细（不含导出或付款确认）'],
+            ['key' => 'finance.opening.salary.prepare', 'name' => '准备期初工资草稿（另需工资明细查看权）'],
         ],
         '设置' => [
             ['key' => 'employee.manage', 'name' => '管理员工'],

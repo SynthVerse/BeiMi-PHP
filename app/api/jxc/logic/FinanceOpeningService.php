@@ -17,12 +17,6 @@ final class FinanceOpeningService
         'transit' => '账户互转在途', 'unclaimed' => '待认领收款', 'inventory' => '库存数量与价值',
         'recovery' => '坏账追偿备查', 'equipment' => '设备剩余付款额度', 'excluded' => '本期范围外业务',
     ];
-    private const SUBJECTS = [
-        'account' => ['finance_account', 'name'],
-        'receivable' => ['customer', 'customer_name'],
-        'payable' => ['vendor', 'supplier_name'],
-    ];
-
     public function __construct(private readonly int $tenantId, private readonly array $actor) {}
 
     public function snapshot(): array
@@ -43,7 +37,7 @@ final class FinanceOpeningService
                 if ($row['amount'] === null) { $unknown++; } else { $total = bcadd($total, $row['amount'], 2); }
             }
             $categories[] = [
-                'key' => $key, 'title' => $title, 'supported' => isset(self::SUBJECTS[$key]),
+                'key' => $key, 'title' => $title, 'supported' => FinanceOpeningCategory::supported($key),
                 'review' => $reviews[$key] ?? ['state' => 'unknown', 'evidence' => ''],
                 'count' => count($rows), 'total' => $unknown ? null : $total, 'unknown_count' => $unknown,
             ];
@@ -65,10 +59,10 @@ final class FinanceOpeningService
     public function subjects(array $params): array
     {
         $category = self::text($params['category'] ?? '', 32);
-        if (!isset(self::SUBJECTS[$category])) { throw new \DomainException('该类别暂不支持明细录入'); }
-        [$table, $name] = self::SUBJECTS[$category];
+        if (!FinanceOpeningCategory::supported($category)) { throw new \DomainException('该类别暂不支持明细录入'); }
+        [$table, $name] = FinanceOpeningCategory::subject($category);
         $query = Db::name($table)->where('tenant_id', $this->tenantId);
-        if ($category === 'receivable') { $query->where('parent_id', 0); }
+        if ($table === 'customer') { $query->where('parent_id', 0); }
         $keyword = self::text($params['keyword'] ?? '', 60);
         if ($keyword !== '') { $query->whereLike($name, '%' . addcslashes($keyword, '%_\\') . '%'); }
         $page = max(1, self::id($params['page'] ?? 1));
@@ -98,6 +92,7 @@ final class FinanceOpeningService
                 if (!Db::name('finance_opening_item')->where('tenant_id', $this->tenantId)->where('id', $id)->delete()) {
                     throw new \DomainException('期初明细不存在或不属于当前门店');
                 }
+                Db::name('finance_opening_item_detail')->where('tenant_id', $this->tenantId)->where('opening_item_id', $id)->delete();
                 $reviews = json_decode($book['reviews'], true);
                 unset($reviews[$removed['category']]);
                 $book['reviews'] = self::json($reviews);
@@ -105,7 +100,7 @@ final class FinanceOpeningService
             case 'review':
                 $key = self::text($data['category'] ?? '', 32);
                 $state = self::text($data['state'] ?? '', 16);
-                $allowed = isset(self::SUBJECTS[$key]) ? ['unknown', 'none', 'complete'] : ['unknown', 'none', 'unresolved'];
+                $allowed = FinanceOpeningCategory::supported($key) ? ['unknown', 'none', 'complete'] : ['unknown', 'none', 'unresolved'];
                 if (!isset(self::CATEGORIES[$key]) || !in_array($state, $allowed, true)) {
                     throw new \DomainException('请选择有效的类别核对状态');
                 }
@@ -162,7 +157,7 @@ final class FinanceOpeningService
     private function saveItem(array $data): void
     {
         $category = self::text($data['category'] ?? '', 32);
-        if (!isset(self::SUBJECTS[$category])) { throw new \DomainException('该类别的非零期初承接尚未开放，请记录为待解决事项'); }
+        if (!FinanceOpeningCategory::supported($category)) { throw new \DomainException('该类别的非零期初承接尚未开放，请记录为待解决事项'); }
         $id = self::id($data['id'] ?? 0);
         $subjectId = self::id($data['subject_id'] ?? 0);
         if (!$this->subject($category, $subjectId)) { throw new \DomainException('对象不存在、不属于当前门店或不是主客户'); }
@@ -172,10 +167,14 @@ final class FinanceOpeningService
                 throw new \DomainException('金额须为非负数，最多两位小数；未知金额请留空');
             }
             $amount = bcadd($amount, '0', 2);
-            if ($category !== 'account' && bccomp($amount, '0', 2) <= 0) { throw new \DomainException('欠款明细金额必须大于零，无欠款请在类别核对中说明'); }
+            if ($category !== 'account' && bccomp($amount, '0', 2) <= 0) { throw new \DomainException('剩余余额必须大于零，无余额请在类别核对中说明'); }
         } else { $amount = null; }
         $mode = self::text($data['source_mode'] ?? '', 16);
         if (!in_array($mode, ['detail', 'summary'], true)) { throw new \DomainException('请标明历史明细或核实汇总'); }
+        if ($mode === 'summary' && !FinanceOpeningCategory::allowsSummary($category)) {
+            throw new \DomainException('该类型须保留逐笔合法来源，不支持汇总期初');
+        }
+        $details = FinanceOpeningCategory::normalizeDetails($category, $data['details'] ?? []);
         $reference = self::text($data['source_reference'] ?? '', 200);
         $evidence = self::text($data['evidence'] ?? '', 1000);
         if ($reference === '' || $evidence === '') { throw new \DomainException('请填写期初来源标识和核对依据，不补造历史交易'); }
@@ -192,17 +191,23 @@ final class FinanceOpeningService
         if ($category !== 'account') { $duplicate->where('source_reference', $reference); }
         if ($duplicate->count()) { throw new \DomainException('该账户或同一对象的期初来源已存在，请修改原明细'); }
         if ($category !== 'account') {
-            $other = Db::name('finance_opening_item')->where('tenant_id', $this->tenantId)->where('category', $category)
-                ->where('subject_id', $subjectId)->where('id', '<>', $id);
-            if ($mode === 'summary' ? $other->count() : $other->where('source_mode', 'summary')->count()) {
-                throw new \DomainException('同一对象不能混用汇总期初和其他明细，请核对后保留一种承接方式');
+            foreach ($this->items() as $other) {
+                if ($other['category'] !== $category || (int)$other['subject_id'] !== $subjectId || (int)$other['id'] === $id) { continue; }
+                if (FinanceOpeningCategory::hasBenefitMonth($category) && ($other['details']['benefit_month'] ?? '') !== ($details['benefit_month'] ?? '')) { continue; }
+                if ($mode === 'summary' || $other['source_mode'] === 'summary') {
+                    throw new \DomainException('同一对象及受益月份不能混用汇总期初和其他明细，请核对后保留一种承接方式');
+                }
             }
         }
         if ($id > 0) {
             $existing = Db::name('finance_opening_item')->where('tenant_id', $this->tenantId)->where('id', $id)->find();
             if (!$existing || $existing['category'] !== $category) { throw new \DomainException('期初明细不存在或类别不匹配'); }
             Db::name('finance_opening_item')->where('tenant_id', $this->tenantId)->where('id', $id)->update($row);
-        } else { Db::name('finance_opening_item')->insert($row); }
+        } else { $id = (int)Db::name('finance_opening_item')->insertGetId($row); }
+        Db::name('finance_opening_item_detail')->where('tenant_id', $this->tenantId)->where('opening_item_id', $id)->delete();
+        if ($details) {
+            Db::name('finance_opening_item_detail')->insert(['tenant_id' => $this->tenantId, 'opening_item_id' => $id, 'details' => self::json($details)]);
+        }
     }
 
     private function blockers(array $preparation, array $categories, array $items): array
@@ -224,6 +229,13 @@ final class FinanceOpeningService
             if ($item['amount'] === null) { $errors[] = $label . '金额尚未核实'; }
             if (!$item['subject_name']) { $errors[] = $label . '对象已失效'; }
             if ($date && $item['historical_date'] && $item['historical_date'] >= $date) { $errors[] = $label . '历史日期必须早于启用日期'; }
+            foreach (FinanceOpeningCategory::metadata($item['category'])['detail_fields'] as $field) {
+                $value = $item['details'][$field['key']] ?? '';
+                if ($value === '') { $errors[] = $label . $field['label'] . '尚未核实'; }
+                if ($field['type'] === 'month' && $value !== '' && $date && $value > (new \DateTimeImmutable($date))->modify('-1 day')->format('Y-m')) {
+                    $errors[] = $label . '原受益月份不能晚于期初截点';
+                }
+            }
         }
         $accountIds = array_column(array_filter($items, static fn(array $item): bool => $item['category'] === 'account'), 'subject_id');
         foreach (Db::name('finance_account')->where('tenant_id', $this->tenantId)->column('id') as $id) {
@@ -238,19 +250,21 @@ final class FinanceOpeningService
     private function items(): array
     {
         $items = Db::name('finance_opening_item')->where('tenant_id', $this->tenantId)->order('id')->select()->toArray();
+        $details = Db::name('finance_opening_item_detail')->where('tenant_id', $this->tenantId)->column('details', 'opening_item_id');
         foreach ($items as &$item) {
             $subject = $this->subject($item['category'], (int)$item['subject_id']);
             $item['subject_name'] = $subject['name'] ?? null;
             $item['subject_snapshot'] = $subject;
+            $item['details'] = isset($details[$item['id']]) ? json_decode($details[$item['id']], true, 512, JSON_THROW_ON_ERROR) : [];
         }
         return $items;
     }
 
     private function subject(string $category, int $id): ?array
     {
-        [$table, $name] = self::SUBJECTS[$category];
+        [$table, $name] = FinanceOpeningCategory::subject($category);
         $query = Db::name($table)->where('tenant_id', $this->tenantId)->where('id', $id);
-        if ($category === 'receivable') { $query->where('parent_id', 0); }
+        if ($table === 'customer') { $query->where('parent_id', 0); }
         $fields = 'id,' . $name . ' AS name';
         if ($category === 'account') { $fields .= ',version,is_enabled,account_type'; }
         return $query->field($fields)->find();

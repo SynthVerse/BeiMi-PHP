@@ -27,6 +27,8 @@ final class FinanceSetupLogic extends BaseLogic
             'capabilities' => [
                 'manage_accounts' => $owner,
                 'confirm_opening' => $owner,
+                'view_opening_salary' => self::salaryAccess()['view'],
+                'prepare_opening_salary' => self::salaryAccess()['prepare'],
                 'prepare_opening' => $owner || (self::isUserIdentity() && WorkforceLogic::hasPermission('finance.opening.prepare')),
                 'view_settlement' => $owner || (self::isUserIdentity() && WorkforceLogic::hasPermission('settlement.view')),
             ],
@@ -149,7 +151,14 @@ final class FinanceSetupLogic extends BaseLogic
                 Db::name('finance_preparation')->duplicate(['tenant_id'])->insert(['tenant_id' => self::tenantId()]);
                 self::preparationRow(true);
                 $service = new FinanceOpeningService(self::tenantId(), self::actor());
-                return $subjects ? $service->subjects($params) : $service->snapshot();
+                $access = self::salaryAccess();
+                if ($subjects) {
+                    if (is_string($params['category'] ?? null) && trim($params['category']) === 'salary' && !$access['view']) {
+                        throw new \DomainException('没有工资明细查看权限');
+                    }
+                    return $service->subjects($params);
+                }
+                return FinanceOpeningCategory::visibleSnapshot($service->snapshot(), $access);
             });
         } catch (\DomainException $e) { self::setError($e->getMessage()); return false; }
     }
@@ -163,10 +172,42 @@ final class FinanceSetupLogic extends BaseLogic
         try {
             $data = $params;
             unset($data['expected_tenant_id'], $data['expected_version'], $data['idempotency_key']);
-            return self::mutate('opening.' . $action, $params, $data, static function (int $version) use ($action, $data): array {
+            $result = self::mutate('opening.' . $action, $params, $data, static function (int $version) use ($action, $data): array {
                 return (new FinanceOpeningService(self::tenantId(), self::actor()))->execute($action, $data, $version);
-            });
-        } catch (\DomainException $e) { self::setError($e->getMessage()); return false; }
+            }, static fn(?array $existing) => self::authorizeOpeningSalary($action, $data, $existing));
+            return FinanceOpeningCategory::visibleSnapshot($result, self::salaryAccess());
+        } catch (\DomainException $e) {
+            self::setError(self::salaryAccess()['view'] ? $e->getMessage() : FinanceOpeningCategory::restrictedError($e->getMessage()));
+            return false;
+        }
+    }
+
+    private static function salaryAccess(): array
+    {
+        $owner = self::isOwner();
+        $view = $owner || (self::isUserIdentity() && WorkforceLogic::hasPermission('finance.salary.view'));
+        return ['view' => $view, 'prepare' => $owner || ($view && self::isUserIdentity() && WorkforceLogic::hasPermission('finance.opening.salary.prepare'))];
+    }
+
+    /** 在门店锁内校验原对象和旧幂等操作；不能用伪造类别或权限撤销后的重放绕过工资权限。 */
+    private static function authorizeOpeningSalary(string $action, array $data, ?array $existing): void
+    {
+        if (!in_array($action, ['item', 'remove', 'review'], true)) { return; }
+        $category = is_string($data['category'] ?? null) ? trim($data['category']) : '';
+        $salary = $category === 'salary';
+        if (in_array($action, ['item', 'remove'], true)) {
+            $id = self::integer($data['id'] ?? 0);
+            if ($id > 0) {
+                $salary = $salary || Db::name('finance_opening_item')->where('tenant_id', self::tenantId())->where('id', $id)->value('category') === 'salary';
+                if ($existing) {
+                    $before = json_decode($existing['before_data'], true, 512, JSON_THROW_ON_ERROR);
+                    foreach ($before['items'] ?? [] as $item) {
+                        if ((int)$item['id'] === $id && $item['category'] === 'salary') { $salary = true; break; }
+                    }
+                }
+            }
+        }
+        if ($salary && !self::salaryAccess()['prepare']) { throw new \DomainException('需要工资明细查看及期初工资准备权限'); }
     }
 
     private static function actor(): array
@@ -176,7 +217,7 @@ final class FinanceSetupLogic extends BaseLogic
     }
 
     /** 同一门店串行修改准备资料；幂等结果与档案修改在同一个事务内提交。 */
-    private static function mutate(string $action, array $params, array $data, callable $write): array
+    private static function mutate(string $action, array $params, array $data, callable $write, ?callable $authorize = null): array
     {
         if (self::integer($params['expected_tenant_id'] ?? 0) !== self::tenantId()) {
             throw new \DomainException('当前门店已变化，请返回后重新进入');
@@ -187,11 +228,12 @@ final class FinanceSetupLogic extends BaseLogic
             throw new \DomainException('提交标识无效，请重新进入页面');
         }
         $fingerprint = hash('sha256', self::json([$action, $data, $version, self::operatorId(), self::isUserIdentity()]));
-        return Db::transaction(static function () use ($action, $version, $key, $fingerprint, $write): array {
+        return Db::transaction(static function () use ($action, $version, $key, $fingerprint, $write, $authorize): array {
             // 唯一主键行同时解决首次创建竞争；不依赖不存在的行上的间隙锁。
             Db::name('finance_preparation')->duplicate(['tenant_id'])->insert(['tenant_id' => self::tenantId()]);
             Db::name('finance_preparation')->where('tenant_id', self::tenantId())->lock(true)->find();
             $existing = Db::name('finance_setup_action')->where('tenant_id', self::tenantId())->where('idempotency_key', $key)->find();
+            if ($authorize) { $authorize($existing); }
             if ($existing) {
                 if (!hash_equals($existing['fingerprint'], $fingerprint)) {
                     throw new \DomainException('同一提交标识不能用于不同内容');

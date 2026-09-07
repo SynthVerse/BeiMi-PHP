@@ -22,7 +22,7 @@ final class FinanceOpeningWorkflowTest extends TestCase
     {
         $this->prepareCustomerReportRequestContext();
         $this->ensureCustomerReportTables();
-        foreach (['20260907_000001_finance_preparation.sql', '20260907_000002_finance_opening.sql'] as $migration) {
+        foreach (['20260907_000001_finance_preparation.sql', '20260907_000002_finance_opening.sql', '20260907_000003_finance_opening_details.sql'] as $migration) {
             $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/' . $migration)));
         }
         Db::execute('CREATE TABLE IF NOT EXISTS la_vendor (id int unsigned AUTO_INCREMENT PRIMARY KEY, tenant_id int unsigned NOT NULL, supplier_name varchar(100) NOT NULL) ENGINE=InnoDB');
@@ -167,7 +167,7 @@ final class FinanceOpeningWorkflowTest extends TestCase
     {
         $result = $this->action('review', ['category' => 'excluded', 'state' => 'unresolved', 'evidence' => '有供应商预付款需要承接']);
         self::assertStringContainsString('范围外业务', implode('；', $result['blockers']));
-        self::assertFalse(FinanceSetupLogic::openingAction('item', $this->command(1) + $this->item('advance', 1, '10')));
+        self::assertFalse(FinanceSetupLogic::openingAction('item', $this->command(1) + $this->item('inventory', 1, '10')));
         $customer = $this->createCustomer('日期客户');
         $this->prepare();
         $data = $this->item('receivable', $customer, '10');
@@ -185,6 +185,170 @@ final class FinanceOpeningWorkflowTest extends TestCase
             $this->action('review', ['category' => $category['key'], 'state' => $category['count'] ? 'complete' : 'none', 'evidence' => '按统一截点核对账本与真实流水']);
         }
         return $this->action('submit');
+    }
+
+    public function test_nonzero_legacy_balances_keep_their_source_type_and_do_not_recreate_income_or_expenses(): void
+    {
+        $customer = $this->createCustomer('往来客户');
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '费用与采购往来方']);
+        $employee = $this->openingEmployee();
+        $entries = [
+            ['advance', $customer, '600.00'], ['customer_refund', $customer, '100.00'], ['recovery', $customer, '1000.00'],
+            ['supplier_refund', $vendor, '200.00'], ['expense_refund', $vendor, '300.00'], ['expense_payable', $vendor, '400.00'],
+            ['salary', (int)$employee['id'], '5000.00'], ['reimbursement', (int)$employee['id'], '800.00'],
+        ];
+        foreach ($entries as [$category, $subject, $amount]) {
+            $this->action('item', $this->extendedItem($category, $subject, $amount));
+        }
+        $this->ready();
+        Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
+        $active = $this->action('confirm');
+        self::assertCount(8, $active['items']);
+        self::assertSame(0, Db::name('sales_order')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame(0, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame('0.00', Db::name('customer')->where('id', $customer)->value('order_receivable'));
+        foreach ($entries as [$category, $subject, $amount]) {
+            $source = Db::name('finance_opening_source')->where('tenant_id', self::TENANT_ID)->where('category', $category)->find();
+            self::assertSame($amount, $source['amount']);
+            $snapshot = json_decode($source['source_snapshot'], true);
+            self::assertSame('原合法来源-' . $category, $snapshot['details']['origin_reference']);
+            if (in_array($category, ['salary', 'reimbursement'], true)) { self::assertSame('2026-08', $snapshot['details']['benefit_month']); }
+        }
+        self::assertSame(0, Db::name('finance_opening_source')->where('tenant_id', self::TENANT_ID)->where('category', 'account')->count());
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000003_finance_opening_details.sql')));
+        self::assertSame($active, FinanceSetupLogic::opening());
+    }
+
+    public function test_missing_or_future_benefit_month_and_missing_legal_sources_block_confirmation(): void
+    {
+        $employee = $this->openingEmployee();
+        $data = $this->extendedItem('salary', (int)$employee['id'], '5000.00');
+        $data['details'] = ['benefit_month' => '', 'origin_reference' => ''];
+        $first = $this->action('item', $data);
+        self::assertStringContainsString('原受益月份尚未核实', implode('；', $first['blockers']));
+        self::assertStringContainsString('原工资确认或工资表尚未核实', implode('；', $first['blockers']));
+        $this->prepare();
+        $data['id'] = $first['items'][0]['id']; $data['details'] = ['benefit_month' => '2026-09', 'origin_reference' => '原工资表'];
+        $result = $this->action('item', $data);
+        self::assertStringContainsString('不能晚于期初截点', implode('；', $result['blockers']));
+        $data['details']['benefit_month'] = '2026-13';
+        self::assertFalse(FinanceSetupLogic::openingAction('item', $this->command((int)$result['version']) + $data));
+        $data['details']['benefit_month'] = '2026-08';
+        $result = $this->action('item', $data);
+        $this->action('remove', ['id' => $data['id']]);
+        self::assertSame(0, Db::name('finance_opening_item_detail')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
+    public function test_employee_months_can_be_separate_summaries_but_same_month_cannot_mix_with_details(): void
+    {
+        $employee = $this->openingEmployee();
+        $data = $this->extendedItem('salary', (int)$employee['id'], '5000.00');
+        $data['source_mode'] = 'summary'; $data['source_reference'] = '8月工资汇总';
+        $this->action('item', $data);
+        $data['source_reference'] = '7月工资汇总'; $data['details']['benefit_month'] = '2026-07';
+        $result = $this->action('item', $data);
+        self::assertCount(2, $result['items']);
+        $data['source_reference'] = '7月补录明细'; $data['source_mode'] = 'detail';
+        self::assertFalse(FinanceSetupLogic::openingAction('item', $this->command((int)$result['version']) + $data));
+        self::assertStringContainsString('不能混用', FinanceSetupLogic::getError());
+    }
+
+    public function test_customer_refund_and_recovery_require_primary_customer_and_detail_sources(): void
+    {
+        $customer = $this->createCustomer('往来主客户');
+        $child = $this->createCustomer('收货点', $customer);
+        foreach (['advance', 'customer_refund', 'recovery'] as $category) {
+            self::assertFalse(FinanceSetupLogic::openingAction('item', $this->command(0) + $this->extendedItem($category, $child, '10')));
+            $data = $this->extendedItem($category, $customer, '10'); $data['source_mode'] = 'summary';
+            self::assertFalse(FinanceSetupLogic::openingAction('item', $this->command(0) + $data));
+            self::assertStringContainsString('逐笔合法来源', FinanceSetupLogic::getError());
+            $subjects = FinanceSetupLogic::opening(['category' => $category], true)['lists'];
+            self::assertCount(1, $subjects); self::assertSame($customer, (int)$subjects[0]['id']);
+        }
+        $data = $this->extendedItem('recovery', $customer, '1000'); $data['details']['receivable_reference'] = '';
+        self::assertStringContainsString('原应收凭据尚未核实', implode('；', $this->action('item', $data)['blockers']));
+    }
+
+    public function test_general_preparer_cannot_read_write_review_or_spoof_salary_rows(): void
+    {
+        $employee = $this->openingEmployee(['finance.opening.prepare']);
+        $salary = $this->action('item', $this->extendedItem('salary', (int)$employee['id'], '5678.91'));
+        $id = $salary['items'][0]['id'];
+        $this->action('review', ['category' => 'salary', 'state' => 'complete', 'evidence' => '工资私密依据5678.91']);
+        $this->asOpeningEmployee();
+        $view = FinanceSetupLogic::opening();
+        self::assertSame([], $view['items']);
+        self::assertStringNotContainsString('5678.91', json_encode($view));
+        $category = array_values(array_filter($view['categories'], static fn(array $row): bool => $row['key'] === 'salary'))[0];
+        self::assertFalse($category['can_view']); self::assertNull($category['count']); self::assertNull($category['total']);
+        self::assertSame('restricted', $category['review']['state']);
+        self::assertFalse(FinanceSetupLogic::opening(['category' => 'salary'], true));
+        foreach ([['review', ['category' => 'salary', 'state' => 'none', 'evidence' => '伪造核对']],
+            ['item', $this->extendedItem('salary', (int)$employee['id'], '100')], ['remove', ['id' => $id]],
+            ['item', ['id' => $id, 'category' => 'reimbursement']]] as [$action, $data]) {
+            self::assertFalse(FinanceSetupLogic::openingAction($action, $this->command((int)$view['version']) + $data));
+            self::assertStringContainsString('工资', FinanceSetupLogic::getError());
+        }
+        $this->action('item', $this->extendedItem('reimbursement', (int)$employee['id'], '800'));
+        $result = FinanceSetupLogic::opening();
+        self::assertCount(1, $result['items']); self::assertSame('reimbursement', $result['items'][0]['category']);
+    }
+
+    public function test_salary_permissions_are_independent_and_revocation_filters_old_replays_and_active_snapshots(): void
+    {
+        $employee = $this->openingEmployee(['finance.opening.prepare', 'finance.salary.view', 'finance.opening.salary.prepare']);
+        $this->asOpeningEmployee();
+        $data = $this->extendedItem('salary', (int)$employee['id'], '5678.91');
+        $salaryCommand = $this->command(0) + $data;
+        $salary = FinanceSetupLogic::openingAction('item', $salaryCommand);
+        self::assertNotFalse($salary);
+        $normalCommand = $this->command((int)$salary['version']) + $this->extendedItem('reimbursement', (int)$employee['id'], '800');
+        $normal = FinanceSetupLogic::openingAction('item', $normalCommand);
+        self::assertCount(2, $normal['items']);
+        Db::name('employee_permission')->where('tenant_id', self::TENANT_ID)->where('employee_id', $employee['id'])->where('permission_key', 'finance.salary.view')->delete();
+        self::assertFalse(FinanceSetupLogic::openingAction('item', $salaryCommand));
+        $replay = FinanceSetupLogic::openingAction('item', $normalCommand);
+        self::assertCount(1, $replay['items']); self::assertStringNotContainsString('5678.91', json_encode($replay));
+        $this->prepareCustomerReportRequestContext(); $this->ready();
+        Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance'); $this->action('confirm');
+        $this->asOpeningEmployee();
+        $active = FinanceSetupLogic::opening();
+        self::assertSame('active', $active['status']); self::assertCount(1, $active['items']);
+        self::assertStringNotContainsString('5678.91', json_encode($active));
+        Db::name('employee_permission')->insert(['tenant_id' => self::TENANT_ID, 'employee_id' => $employee['id'], 'permission_key' => 'finance.salary.view', 'create_time' => time()]);
+        self::assertCount(2, FinanceSetupLogic::opening()['items']);
+    }
+
+    public function test_view_only_salary_permission_does_not_allow_preparation_or_deleted_row_replay(): void
+    {
+        $employee = $this->openingEmployee(['finance.opening.prepare', 'finance.salary.view', 'finance.opening.salary.prepare']);
+        $this->asOpeningEmployee();
+        $salary = $this->action('item', $this->extendedItem('salary', (int)$employee['id'], '5000'));
+        $command = $this->command((int)$salary['version']) + ['id' => $salary['items'][0]['id']];
+        self::assertNotFalse(FinanceSetupLogic::openingAction('remove', $command));
+        Db::name('employee_permission')->where('tenant_id', self::TENANT_ID)->where('employee_id', $employee['id'])->where('permission_key', 'finance.opening.salary.prepare')->delete();
+        self::assertFalse(FinanceSetupLogic::openingAction('remove', $command), '工资记录已消失，重放仍需依据原审计判断类别');
+        self::assertFalse(FinanceSetupLogic::openingAction('review', $this->command((int)$salary['version'] + 1) + ['category' => 'salary', 'state' => 'none', 'evidence' => '只读者不应修改']));
+        self::assertNotFalse(FinanceSetupLogic::opening(['category' => 'salary'], true));
+        self::assertFalse(FinanceSetupLogic::workbench()['capabilities']['prepare_opening_salary']);
+    }
+
+    private function openingEmployee(array $permissions = []): array
+    {
+        $employee = WorkforceLogic::saveEmployee(['name' => '期初员工', 'mobile' => '13800009928', 'bind_user_id' => 996928,
+            'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => $permissions]);
+        self::assertNotFalse($employee, WorkforceLogic::getError());
+        return $employee;
+    }
+    private function asOpeningEmployee(): void
+    {
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID];
+        request()->jxcFromUserToken = true; request()->userId = 996928; request()->adminId = 0;
+    }
+    private function extendedItem(string $category, int $subject, string $amount): array
+    {
+        return $this->item($category, $subject, $amount) + ['details' => ['benefit_month' => '2026-08',
+            'origin_reference' => '原合法来源-' . $category, 'receivable_reference' => '原已核销应收']];
     }
 
     public function test_account_change_after_submit_requires_recheck_and_zero_balance_is_explicit(): void
@@ -247,7 +411,7 @@ final class FinanceOpeningWorkflowTest extends TestCase
     }
     private function clean(): void
     {
-        foreach (['finance_opening_source', 'finance_opening_item', 'finance_opening_book', 'finance_setup_action', 'finance_account', 'finance_preparation', 'vendor'] as $table) {
+        foreach (['finance_opening_item_detail', 'finance_opening_source', 'finance_opening_item', 'finance_opening_book', 'finance_setup_action', 'finance_account', 'finance_preparation', 'vendor'] as $table) {
             Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         }
         $this->cleanCustomerReportData();
