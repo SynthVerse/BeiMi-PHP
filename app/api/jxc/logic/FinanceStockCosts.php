@@ -22,6 +22,10 @@ final class FinanceStockCosts
         }
         $event = ['reference' => $reference, 'sku_id' => (int)$flow['sku_id'], 'warehouse_id' => (int)$flow['warehouse_id'],
             'business_date' => $date, 'quantity' => (string)$flow['quantity'], 'snapshot' => ['stock_flow_id' => $id, 'order_type' => $flow['order_type'], 'order_id' => (int)$flow['order_id']]];
+        if ($flow['order_type'] === 'finance_purchase_arrival') {
+            $event['business_date'] = FinanceValue::date($context['business_date'] ?? null);
+            $event['document_id'] = FinanceValue::id($context['document_id'] ?? null);
+        }
         if ($flow['order_type'] === 'sales_delivery_correction') {
             $event += ['type' => (int)$flow['flow_type'] === 1 ? 'restore' : 'issue', 'bucket' => 'sale', 'target_reference' => 'sales_order:' . $flow['order_id']];
         } elseif ($flow['order_type'] === 'sales-return') {
@@ -31,7 +35,7 @@ final class FinanceStockCosts
             $event['to_warehouse_id'] = $event['warehouse_id']; $event['warehouse_id'] = (int)$source['warehouse_id'];
             $event += ['type' => 'restore', 'bucket' => 'sale', 'target_reference' => 'sales_order:' . $source['id']];
         } elseif ((int)$flow['flow_type'] === 1) {
-            $event += ['type' => 'receive', 'origin' => $reference, 'amount' => $context['amount'] ?? null];
+            $event += ['type' => 'receive', 'origin' => $context['origin'] ?? $reference, 'amount' => $context['amount'] ?? null];
             $event['snapshot']['cost_basis'] = $context['cost_basis'] ?? '';
         } else {
             [$bucket, $destination] = match ($flow['order_type']) {

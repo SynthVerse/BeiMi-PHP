@@ -14,6 +14,7 @@ final class FinanceCorrections
     public function replace(array $original, array $replacement, string $reason, int $duplicateOf = 0, bool $reverseOnly = false): array
     {
         $policy = FinanceDocumentPolicy::authorize($original['type'], true);
+        if ($original['type'] === 'purchase_arrival') { throw new \DomainException('已验收入库不能直接覆盖或撤销，请从原到货明细关联实物更正或采购退货'); }
         if ($reverseOnly && $policy['direction'] !== 'none') { throw new \DomainException('实际收付款不能按无资金业务直接撤销，请区分录入更正、退款或到账失效'); }
         if (in_array($original['type'], ['receivable_due', 'payable_due'], true)) { throw new \DomainException('付款日请从原未结明细再次调整，新的调整会关联当前日期版本并保留历史'); }
         if ($original['status'] !== 'confirmed') { throw new \DomainException('仅已确认记录可关联更正'); }

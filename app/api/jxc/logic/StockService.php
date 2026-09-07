@@ -70,6 +70,22 @@ class StockService
         return false;
     }
 
+    /** 财务到货入口；调用方持有财务单据事务，不在这里另开事务。 */
+    public static function inboundFinancePurchaseWithinTransaction(int $warehouseId, int $goodsId, int $skuId, string $quantity,
+        int $documentId, int $arrivalLineId, string $date, ?string $amount, array $basis): int
+    {
+        FinanceIntegration::lock();
+        $movement = WarehouseSkuBalanceService::inboundWithinTransaction($warehouseId, $skuId, $quantity);
+        if ($movement === false) { throw new \DomainException('采购到货入库失败，请核对仓库与商品规格'); }
+        $sn = 'FIN-ARR-' . $documentId;
+        $flow = self::writeFlow(['warehouse_id' => $warehouseId, 'goods_id' => $goodsId, 'sku_id' => $skuId, 'batch_id' => 0,
+            'order_id' => $documentId, 'order_type' => 'finance_purchase_arrival', 'order_sn' => $sn, 'flow_type' => StockFlow::FLOW_IN,
+            'quantity' => $quantity, 'remark' => '采购实际到货'], $movement,
+            ['origin' => 'purchase-arrival:' . $arrivalLineId, 'business_date' => $date, 'document_id' => $documentId, 'amount' => $amount, 'cost_basis' => $basis]);
+        NegativeInventoryLogic::autoOffsetWithinTransaction($warehouseId, $skuId, $movement, $documentId, 'finance_purchase_arrival', $sn);
+        return $flow;
+    }
+
     /** 销售单实际交付重量更正入库；调用方持有销售结算事务。 */
     public static function inboundDeliveryCorrectionWithinTransaction(
         int $warehouseId,

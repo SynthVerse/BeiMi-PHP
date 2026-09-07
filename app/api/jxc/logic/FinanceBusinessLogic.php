@@ -119,7 +119,7 @@ final class FinanceBusinessLogic extends BaseLogic
             $subjectId = FinanceValue::id($params['subject_id'] ?? 0, true);
             $categories = $type === 'advance_allocate' && ($params['role'] ?? '') === 'fund' ? ['advance'] : $policy['sources'];
             $page = max(1, FinanceValue::id($params['page'] ?? 1));
-            $sources = $ledger->sourcePage($categories, $subjectId, $page);
+            $sources = $type === 'purchase_arrival' ? FinancePurchaseArrivals::options($subjectId, $params) : $ledger->sourcePage($categories, $subjectId, $page);
             if ($type === 'sales_batch' && ($params['role'] ?? '') !== 'credit') {
                 $sources += FinanceSalesBatches::options($subjectId, FinanceValue::date($params['date_from'] ?? date('Y-m-01')), FinanceValue::date($params['date_to'] ?? date('Y-m-d')));
             }

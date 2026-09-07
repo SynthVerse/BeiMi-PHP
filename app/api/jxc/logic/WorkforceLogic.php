@@ -54,6 +54,8 @@ final class WorkforceLogic extends BaseLogic
             ['key' => 'finance.opening.salary.prepare', 'name' => '准备期初工资草稿（另需工资明细查看权）'],
         ],
         '财务收付款' => [
+            ['key' => 'finance.purchase.prepare', 'name' => '准备采购到货与供应商结算草稿'],
+            ['key' => 'finance.purchase.receive', 'name' => '确认采购实际到货与暂估成本'],
             ['key' => 'finance.receipt.prepare', 'name' => '准备客户收款草稿'],
             ['key' => 'finance.receivable.prepare', 'name' => '准备应收调整与坏账草稿（不含确认）'],
             ['key' => 'finance.receivable.view', 'name' => '查看本门店客户往来与欠款明细'],

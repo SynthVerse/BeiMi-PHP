@@ -39,9 +39,30 @@ final class FinancePreview
             }
             $months = array_values(array_unique(array_column($entries, 'posting_month')));
             if (!$months && isset($document['confirmed_result']['posting_month'])) { $months[] = $document['confirmed_result']['posting_month']; }
+            $costImpacts = [];
+            if ($document['type'] === 'purchase_arrival') {
+                $pendingSkus = [];
+                foreach ($document['confirmed_result']['lines'] as $line) { if ($line['cost_pending']) { $pendingSkus[(int)$line['sku_id']] = true; } }
+                $costEvents = Db::name('finance_cost_event')->where('tenant_id', $tenant)->where('document_id', $document['id'])->column('id');
+                if ($costEvents) {
+                    $costImpacts = Db::name('finance_cost_effect')->where('tenant_id', $tenant)->whereIn('event_id', $costEvents)
+                        ->field('warehouse_id,sku_id,bucket,posting_month,SUM(quantity_delta) AS quantity_delta,SUM(value_delta) AS value_delta')
+                        ->group('warehouse_id,sku_id,bucket,posting_month')->order('posting_month,warehouse_id,sku_id,bucket')->select()->toArray();
+                    foreach ($costImpacts as &$impact) {
+                        $impact['warehouse_id'] = (int)$impact['warehouse_id']; $impact['sku_id'] = (int)$impact['sku_id'];
+                        $impact['quantity_delta'] = bcadd((string)$impact['quantity_delta'], '0', 12);
+                        $impact['value_delta'] = $impact['value_delta'] === null ? null : bcadd((string)$impact['value_delta'], '0', 6);
+                        $impact['cost_pending'] = isset($pendingSkus[$impact['sku_id']]);
+                        $impact['known_value_delta'] = $impact['value_delta'];
+                        if ($impact['cost_pending']) { $impact['value_delta'] = null; }
+                    } unset($impact);
+                    $months = array_values(array_unique(array_merge($months, array_column($costImpacts, 'posting_month')))); sort($months);
+                }
+            }
             $result = $document['confirmed_result'];
             return ['tenant_id' => $tenant, 'balances' => $balances, 'impacts' => array_values($periods), 'posting_months' => $months,
                 ...($document['type'] === 'sales_batch' ? ['sales' => $result] : []),
+                ...($document['type'] === 'purchase_arrival' ? ['purchase' => $result, 'cost_impacts' => $costImpacts] : []),
                 'old_due_date' => $result['old_due_date'] ?? null, 'new_due_date' => $result['new_due_date'] ?? null];
         } finally { Db::rollback(); }
     }

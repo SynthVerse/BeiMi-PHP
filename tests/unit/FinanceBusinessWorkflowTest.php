@@ -35,6 +35,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000012_finance_sales_coverage.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000013_finance_sales_output.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000014_finance_cost.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000015_finance_purchase_arrival.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -72,6 +73,118 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $event['amount'] = '1001.00';
         $this->expectException(\DomainException::class);
         Db::transaction(fn() => $cost->recordWithinTransaction($event));
+    }
+
+    public function test_purchase_arrival_preview_rolls_back_stock_and_unknown_cost_and_rejects_invalid_later_line(): void
+    {
+        $this->activate();
+        $warehouse = $this->createCustomerReportWarehouse('预览到货仓');
+        $goods = $this->createCustomerReportGoods('预览到货商品', 'FIN-ARR-PREVIEW'); $sku = $this->customerReportSkuId($goods);
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '待确认价格供应商']);
+        $payload = ['subject_id' => $vendor, 'warehouse_id' => $warehouse, 'actual_date' => date('Y-m-d'),
+            'source_reference' => '验收记录 ARR-002', 'reason' => '实际已到货，未取得可靠报价', 'lines' => [['sku_id' => $sku, 'actual_quantity' => '10']]];
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($this->command(0) + ['action' => 'record', 'type' => 'purchase_arrival', 'payload' => $payload]);
+        self::assertTrue($preview['purchase']['cost_pending']);
+        self::assertNull($preview['purchase']['lines'][0]['estimated_amount']);
+        self::assertTrue($preview['cost_impacts'][0]['cost_pending']);
+        self::assertNull($preview['cost_impacts'][0]['value_delta']);
+        self::assertSame('0.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $sku));
+        self::assertCount(0, (new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID))->events($sku));
+        $payload['lines'][] = ['sku_id' => 999999999, 'actual_quantity' => '2'];
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival', 'payload' => $payload]));
+        self::assertSame('0.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $sku));
+        self::assertSame(0, Db::name('finance_purchase_arrival_line')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
+    public function test_purchase_arrival_options_page_real_skus_and_keep_supplier_last_price_separate(): void
+    {
+        $this->activate();
+        $warehouse = $this->createCustomerReportWarehouse('采购选择仓');
+        $goods = $this->createCustomerReportGoods('采购选择商品', 'FIN-ARR-OPTIONS'); $sku = $this->customerReportSkuId($goods);
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '有历史结算供应商']);
+        Db::name('finance_purchase_price')->insert(['tenant_id' => self::TENANT_ID, 'vendor_id' => $vendor, 'sku_id' => $sku,
+            'document_id' => 901, 'price' => '3.00', 'business_date' => date('Y-m-d'), 'create_time' => time()]);
+        $options = FinanceBusinessLogic::options(['type' => 'purchase_arrival', 'subject_id' => $vendor, 'keyword' => '采购选择商品']);
+        self::assertNotFalse($options, FinanceBusinessLogic::getError());
+        self::assertContains($warehouse, array_column($options['warehouses'], 'id'));
+        self::assertSame($sku, $options['sku_choices'][0]['sku_id']);
+        self::assertSame('3.00', $options['sku_choices'][0]['last_formal_price']['price']);
+        self::assertSame([], $options['sources']);
+        self::assertTrue($options['can_prepare']);
+    }
+
+    public function test_purchase_arrival_prepare_permission_cannot_receive_and_revocation_blocks_cached_draft(): void
+    {
+        $this->activate();
+        $employee = WorkforceLogic::saveEmployee(['name' => '到货经办', 'mobile' => '13800009928', 'bind_user_id' => 996928,
+            'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['finance.purchase.prepare']]);
+        self::assertNotFalse($employee, WorkforceLogic::getError());
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996928; request()->adminId = 0;
+        $command = $this->command(0) + ['type' => 'purchase_arrival', 'payload' => []];
+        self::assertFalse(FinanceBusinessLogic::action('record', $command));
+        self::assertNotFalse(FinanceBusinessLogic::action('prepare', $command), FinanceBusinessLogic::getError());
+        self::assertFalse(FinanceBusinessLogic::options(['type' => 'purchase_arrival'])['can_confirm']);
+        Db::name('employee_permission')->where('tenant_id', self::TENANT_ID)->where('employee_id', $employee['id'])->delete();
+        self::assertFalse(FinanceBusinessLogic::action('prepare', $command));
+        self::assertSame(0, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
+    public function test_purchase_arrival_preview_includes_cost_of_negative_sales_in_an_earlier_open_month(): void
+    {
+        $date = date('Y-m-01', strtotime('first day of last month')); $this->activate('cash', $date);
+        $warehouse = $this->createCustomerReportWarehouse('补负库存仓');
+        $goods = $this->createCustomerReportGoods('补负库存商品', 'FIN-ARR-NEGATIVE'); $sku = $this->customerReportSkuId($goods);
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '补负库存供应商']);
+        $cost = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID);
+        Db::transaction(fn() => $cost->recordWithinTransaction(['reference' => 'prior-open-negative-sale', 'type' => 'issue',
+            'sku_id' => $sku, 'warehouse_id' => $warehouse, 'business_date' => $date, 'quantity' => '3', 'bucket' => 'sale', 'target_reference' => 'prior-sale']));
+        $payload = ['subject_id' => $vendor, 'warehouse_id' => $warehouse, 'actual_date' => date('Y-m-d'), 'source_reference' => 'ARR-NEG',
+            'reason' => '取得可靠到货报价并补缺', 'lines' => [['sku_id' => $sku, 'actual_quantity' => '10', 'agreed_price' => '2.00']]];
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($this->command(0) + ['action' => 'record', 'type' => 'purchase_arrival', 'payload' => $payload]);
+        self::assertContains(substr($date, 0, 7), $preview['posting_months']);
+        self::assertContains(date('Y-m'), $preview['posting_months']);
+        $sales = array_values(array_filter($preview['cost_impacts'], static fn(array $row): bool => $row['bucket'] === 'sale'));
+        self::assertCount(1, $sales); self::assertSame('6.000000', $sales[0]['value_delta']);
+        self::assertSame(substr($date, 0, 7), $sales[0]['posting_month']);
+        self::assertNull($cost->destination($warehouse, $sku, 'sale', 'prior-sale')['cost']);
+    }
+
+    public function test_multi_sku_arrival_preserves_document_order_and_stock_when_lock_order_differs(): void
+    {
+        $this->activate(); $warehouse = $this->createCustomerReportWarehouse('多商品到货仓');
+        $firstGoods = $this->createCustomerReportGoods('先建商品', 'FIN-ARR-FIRST'); $firstSku = $this->customerReportSkuId($firstGoods);
+        $secondGoods = $this->createCustomerReportGoods('后建商品', 'FIN-ARR-SECOND'); $secondSku = $this->customerReportSkuId($secondGoods);
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '多商品到货供应商']);
+        $payload = ['subject_id' => $vendor, 'warehouse_id' => $warehouse, 'actual_date' => date('Y-m-d'), 'source_reference' => 'ARR-MULTI', 'reason' => '按送货单顺序核实',
+            'lines' => [['sku_id' => $secondSku, 'actual_quantity' => '20', 'agreed_price' => '3.00'], ['sku_id' => $firstSku, 'actual_quantity' => '10', 'agreed_price' => '2.00']]];
+        $result = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival', 'payload' => $payload]);
+        self::assertNotFalse($result, FinanceBusinessLogic::getError());
+        self::assertSame([$secondSku, $firstSku], array_column($result['confirmed_result']['lines'], 'sku_id'));
+        self::assertSame('10.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $firstSku));
+        self::assertSame('20.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $secondSku));
+        self::assertFalse(FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $result['id'], 'payload' => $payload, 'correction_reason' => '试图覆盖实物记录']));
+        self::assertSame('20.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $secondSku));
+    }
+
+    public function test_purchase_arrival_records_actual_stock_and_estimate_once_without_formal_payable(): void
+    {
+        $this->activate();
+        $warehouse = $this->createCustomerReportWarehouse('采购到货仓');
+        $goods = $this->createCustomerReportGoods('采购到货商品', 'FIN-ARRIVAL'); $sku = $this->customerReportSkuId($goods);
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '采购到货供应商']);
+        $payload = ['subject_id' => $vendor, 'warehouse_id' => $warehouse, 'actual_date' => date('Y-m-d'),
+            'source_reference' => '供应商送货单 ARR-001', 'reason' => '已过磅验收入库',
+            'lines' => [['sku_id' => $sku, 'actual_quantity' => '100', 'reported_quantity' => '101', 'agreed_price' => '2.50']]];
+        $command = $this->command(0) + ['type' => 'purchase_arrival', 'payload' => $payload];
+        $first = FinanceBusinessLogic::action('record', $command);
+        self::assertNotFalse($first, FinanceBusinessLogic::getError());
+        self::assertSame($first, FinanceBusinessLogic::action('record', $command));
+        self::assertSame('100.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $sku));
+        self::assertSame('252.500000', (new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID))->balance($warehouse, $sku)['value']);
+        self::assertSame('101.0000', $first['confirmed_result']['lines'][0]['estimated_quantity']);
+        self::assertSame('100.0000', $first['confirmed_result']['lines'][0]['pending_quantity']);
+        self::assertSame([], (new FinanceLedger(self::TENANT_ID))->sources('payable', $vendor));
+        self::assertSame(1, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->count());
     }
 
     public function test_negative_sale_cost_confirmation_keeps_original_date_and_posts_only_to_current_open_month(): void
@@ -1563,6 +1676,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
     private function clean(): void
     {
+        foreach (['finance_purchase_arrival_line', 'finance_purchase_price'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         foreach (['finance_cost_effect', 'finance_cost_event', 'finance_cost_shortage', 'finance_cost_position', 'finance_cost_origin'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         Db::name('finance_sales_print')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_sales_coverage')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();

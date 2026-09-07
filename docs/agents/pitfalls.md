@@ -637,8 +637,8 @@
 - 状态：已防护
 - 首次发生：2026-07-29
 - 最近发生：2026-09-08
-- 复发次数：8
-- 适用范围：`CustomerReportLogic`、`FulfillmentChangeLogic`、`FulfillmentTaskLogic`、`DeliveryInventoryLogic`、`DeliveryVariantLogic`、`LineVehicleLogic`、`NegativeInventoryLogic`、`SalesSettlementLogic`、`FinanceService`、`FinanceCostLedger` 等已开启业务事务后调用库存、财务原语或写入幂等事实的路径
+- 复发次数：9
+- 适用范围：`CustomerReportLogic`、`FulfillmentChangeLogic`、`FulfillmentTaskLogic`、`DeliveryInventoryLogic`、`DeliveryVariantLogic`、`LineVehicleLogic`、`NegativeInventoryLogic`、`SalesSettlementLogic`、`FinanceService`、`FinanceCostLedger`、`FinancePurchaseArrivals` 等已开启业务事务后调用库存、财务原语或写入幂等事实的路径
 - 相关问题：PIT-0022
 
 ### 触发场景
@@ -661,6 +661,7 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 
 - 2026-09-08 财务成本扩展：成本原语在外层事务内先取得稳定的门店准备行锁，再对成本来源、份额和待补数量使用当前读，避免沿外层已创建的 RR 快照覆盖其他事务已提交的成本。`FinanceBusinessWorkflowTest::test_cost_confirmation_reloads_committed_facts_after_an_outer_transaction_created_an_older_snapshot` 与 `tests/fixtures/finance_cost_worker.php` 用两个真实 PHP 连接固定先建快照、另一个事务出库 2、原事务再出库 3 的交错；修复前剩余成本错误为 70，修复后为 50，且两次销售成本分别为 20 和 30。此次只更新同根因记录；来源为 Matt Pocock / implement、tdd、code-review、diagnosing-bugs、prevent-repeat-pitfalls，完成后返回财务一期成本与采购接线。
 - 同批期间边界：`FinanceLedger::lockBook` 与 `postingMonth` 同样采用当前读；`test_cost_confirmation_cannot_ignore_a_month_closed_after_outer_transaction_snapshot` 用第二连接在快照创建后关闭当前月，修复前成本确认未抛异常，修复后明确拒绝已结账月份。此为同一 RR 旧快照根因的边界扩展，不另记复发次数。
+- 2026-09-08 采购到货扩展：审查发现多商品到货按客户端行序取库存锁，与报货预留的 SKU 升序相反，存在交叉等待路径。`FinancePurchaseArrivals` 现在先去重并按 SKU 升序调用既有 `lockBalanceWithinTransaction`，再按原单据行序追加到货和成本快照；单一收货仓下 SKU 唯一决定商品维度。`test_multi_sku_arrival_preserves_document_order_and_stock_when_lock_order_differs` 核对反向输入时各商品实收量、展示顺序及禁止覆盖实物记录。尚未进行此场景的双进程压力复现，不能把顺序检查当作并发验收。来源为 Matt Pocock / implement、tdd、code-review、diagnosing-bugs、prevent-repeat-pitfalls；后续继续供应商正式结算，并在整体并发验收中覆盖到货与报货交错。
 
 - 2026-09-07 财务第十批扩展：`FinanceOverdue` 拆分独立事务包装与 `captureWithinTransaction`，财务确认和销售确认只调用同事务原语。`test_overdue_finance_write_paths_use_existing_transaction_primitive` 保护调用边界，`test_overdue_preview_failure_and_permission_revocation_do_not_leave_or_expose_observations` 验证预览与失败不留下观察。来源为 Matt Pocock / implement、tdd、code-review、prevent-repeat-pitfalls；完成防护后继续财务一期。
 

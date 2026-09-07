@@ -15,6 +15,7 @@ final class FinancePayments
     {
         $type = $document['type']; $policy = FinanceDocumentPolicy::authorize($type, true);
         $data = FinanceValue::decode($document['payload']);
+        if ($type === 'purchase_arrival') { return FinancePurchaseArrivals::confirm($this->ledger, $document, $data); }
         if ($type === 'receipt_return') { return (new FinanceReceiptReturns($this->tenantId, $this->ledger))->confirm($document, $data, $originalTransaction, $correctingDocument); }
         if (in_array($type, ['receivable_due', 'payable_due'], true)) { return FinanceDueDates::confirm($this->ledger, $document, $data); }
         if (in_array($type, ['bad_debt', 'recovery_termination'], true)) { return (new FinanceReceivableActions($this->tenantId, $this->ledger))->confirm($document, $data); }
