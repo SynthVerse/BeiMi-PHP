@@ -45,6 +45,14 @@ Route::group('', function () {
     Route::post('finance/opening/submit', 'jxc.FinanceSetup/submitOpening');
     Route::post('finance/opening/reopen', 'jxc.FinanceSetup/reopenOpening');
     Route::post('finance/opening/confirm', 'jxc.FinanceSetup/confirmOpening');
+    Route::get('finance/business/catalog', 'jxc.FinanceBusiness/catalog');
+    Route::get('finance/business/lists', 'jxc.FinanceBusiness/lists');
+    Route::get('finance/business/detail', 'jxc.FinanceBusiness/detail');
+    Route::get('finance/business/options', 'jxc.FinanceBusiness/options');
+    Route::get('finance/business/subjects', 'jxc.FinanceBusiness/subjects');
+    Route::post('finance/business/action', 'jxc.FinanceBusiness/action');
+    Route::post('finance/business/evidence', 'jxc.FinanceBusiness/evidence');
+    Route::get('finance/business/evidenceContent', 'jxc.FinanceBusiness/evidenceContent');
 
     // === 单位管理 ===
     Route::get('units/index', 'jxc.GoodsUnit/lists');

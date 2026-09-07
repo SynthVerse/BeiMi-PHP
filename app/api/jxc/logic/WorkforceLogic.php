@@ -53,6 +53,16 @@ final class WorkforceLogic extends BaseLogic
             ['key' => 'finance.salary.view', 'name' => '查看工资明细（不含导出或付款确认）'],
             ['key' => 'finance.opening.salary.prepare', 'name' => '准备期初工资草稿（另需工资明细查看权）'],
         ],
+        '财务收付款' => [
+            ['key' => 'finance.receipt.prepare', 'name' => '准备客户收款草稿'],
+            ['key' => 'finance.receipt.confirm', 'name' => '确认本门店客户收款'],
+            ['key' => 'finance.payment.prepare', 'name' => '准备供应商与费用付款（不含确认）'],
+            ['key' => 'finance.salary.prepare', 'name' => '准备工资与发放草稿（另需工资明细权）'],
+            ['key' => 'finance.reimbursement.prepare', 'name' => '准备员工垫付报销（不含付款确认）'],
+            ['key' => 'finance.equipment.prepare', 'name' => '准备设备业务（不含确认）'],
+            ['key' => 'finance.refund.prepare', 'name' => '准备退款业务（不含确认）'],
+            ['key' => 'finance.recovery.prepare', 'name' => '准备坏账追偿收回（不含确认）'],
+        ],
         '设置' => [
             ['key' => 'employee.manage', 'name' => '管理员工'],
             ['key' => 'process.manage', 'name' => '管理工序'],

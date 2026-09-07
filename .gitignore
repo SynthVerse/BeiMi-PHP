@@ -16,3 +16,4 @@ composer.phar
 
 # 原始数据库恢复归档可能包含业务数据和认证元数据，禁止提交。
 /storage/backups/*.zip
+/storage/finance-evidence/

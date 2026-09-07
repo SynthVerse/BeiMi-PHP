@@ -1,0 +1,74 @@
+<?php
+
+declare(strict_types=1);
+
+namespace app\api\jxc\logic;
+
+use think\facade\Db;
+
+/** 对明确来源执行实际收付；不接受直接改余额或“其他”收付。 */
+final class FinancePayments
+{
+    public function __construct(private readonly int $tenantId, private readonly FinanceLedger $ledger) {}
+
+    public function confirm(array $document, ?array $originalTransaction = null): array
+    {
+        $type = $document['type']; $policy = FinanceDocumentPolicy::authorize($type, true);
+        $data = FinanceValue::decode($document['payload']);
+        if ($type === 'advance_allocate') { return $this->advance($document, $data); }
+        $date = FinanceValue::date($data['actual_date'] ?? null);
+        $month = $this->ledger->postingMonth($date);
+        $amount = FinanceValue::money($data['amount'] ?? null);
+        $subjectId = FinanceValue::id($data['subject_id'] ?? 0);
+        $nameColumn = ['customer' => 'customer_name', 'vendor' => 'supplier_name', 'employee' => 'name'][$policy['subject']];
+        $query = Db::name($policy['subject'])->where('tenant_id', $this->tenantId)->where('id', $subjectId);
+        if ($policy['subject'] === 'customer') { $query->where('parent_id', 0); }
+        $subject = $query->field('id,' . $nameColumn . ' AS name')->find();
+        if (!$subject) { throw new \DomainException('往来对象不存在、不属于本门店或不是主客户'); }
+        $reason = FinanceValue::text($data['reason'] ?? '', 1000);
+        $lines = $data['allocations'] ?? [];
+        if (!is_array($lines)) { throw new \DomainException('请核对所选来源组成'); }
+        $total = $this->ledger->allocate((int)$document['id'], $lines, $policy['sources'], $subjectId, $date, $month);
+        $advance = '0.00';
+        if ($type === 'receipt') {
+            $advance = FinanceValue::money($data['advance_amount'] ?? '0', true);
+            if (bccomp(bcadd($total, $advance, 2), $amount, 2) !== 0) { throw new \DomainException('到账须等于所选欠款核销合计加明确转入的预收金额'); }
+        } elseif (bccomp($total, $amount, 2) !== 0) { throw new \DomainException('本次金额必须等于所选来源的处理合计，不能超付或转为预付款'); }
+        $money = (new FinanceMoney($this->tenantId, $this->ledger))->record((int)$document['id'], $type, $data, $policy['direction'], $date, $amount, $month, $originalTransaction);
+        $created = [];
+        if (bccomp($advance, '0', 2) > 0) {
+            $created[] = $this->ledger->createSource((int)$document['id'], 'advance', $subjectId, $advance, $date, null,
+                ['subject_name' => $subject['name'], 'reason' => $reason, 'transaction_id' => $money['transaction_id']]);
+        }
+        if (in_array($type, ['equipment_payment', 'equipment_refund'], true)) {
+            $this->ledger->add((int)$document['id'], 'expense', $subjectId, ($type === 'equipment_refund' ? '-' : '') . $amount,
+                $date, $month, 'equipment', '', null, ['category' => 'equipment', 'type' => $type]);
+        }
+        if ($type === 'recovery_receipt') { $this->ledger->add((int)$document['id'], 'recovery_income', $subjectId, $amount, $date, $month, 'bad_debt_recovery'); }
+        return ['type' => $type, 'subject_id' => $subjectId, 'subject_name' => $subject['name'], 'reason' => $reason,
+            'allocated_amount' => $total, 'advance_amount' => $advance, 'created_sources' => $created, 'money' => $money];
+    }
+
+    private function advance(array $document, array $data): array
+    {
+        $subjectId = FinanceValue::id($data['subject_id'] ?? 0);
+        $source = $this->ledger->source(FinanceValue::text($data['advance_source'] ?? '', 40));
+        if ($source['category'] !== 'advance' || $source['subject_id'] !== $subjectId) { throw new \DomainException('请选择本客户的合法预收来源'); }
+        $reason = FinanceValue::text($data['reason'] ?? '', 1000);
+        $lines = $data['allocations'] ?? [];
+        if (!is_array($lines) || !$lines) { throw new \DomainException('请明确选择本次抵扣的应收与金额'); }
+        $date = $source['business_date'];
+        $activation = (string)Db::name('finance_preparation')->where('tenant_id', $this->tenantId)->value('activation_date');
+        $postingDate = max($date ?? $activation, $activation);
+        $month = $this->ledger->postingMonth($postingDate);
+        $total = $this->ledger->allocate((int)$document['id'], $lines, ['receivable'], $subjectId, $date ?? $postingDate, $month, $date === null);
+        $allocations = Db::name('finance_entry')->where('tenant_id', $this->tenantId)->where('document_id', $document['id'])
+            ->where('purpose', 'allocation')->order('id')->select()->toArray();
+        foreach ($allocations as $allocation) {
+            $this->ledger->add((int)$document['id'], 'balance', $subjectId, $allocation['amount'], $allocation['business_date'], $allocation['posting_month'],
+                'advance_use', $source['reference'], $allocation['effective_date'], ['reason' => $reason, 'allocation_entry_id' => (int)$allocation['id']]);
+        }
+        return ['type' => 'advance_allocate', 'subject_id' => $subjectId, 'subject_name' => $source['subject_name'],
+            'allocated_amount' => $total, 'advance_source' => $source['reference'], 'reason' => $reason, 'created_sources' => []];
+    }
+}
