@@ -29,6 +29,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         foreach (['20260907_000001_finance_preparation.sql', '20260907_000002_finance_opening.sql', '20260907_000003_finance_opening_details.sql', '20260907_000004_finance_business.sql', '20260907_000005_finance_sales.sql', '20260907_000006_finance_receivables.sql', '20260907_000007_finance_advance_revisions.sql'] as $file) {
             $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/' . $file)));
         }
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000008_finance_statements.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -786,6 +787,115 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertSame([], \app\api\jxc\logic\FinanceCustomerBalances::lists(['filter' => 'overdue'])['lists']);
     }
 
+    public function test_statement_is_immutable_and_regeneration_links_old_snapshot_without_confirming_customer(): void
+    {
+        $this->activate();
+        $request = $this->command(0) + ['customer_id' => $this->customerId, 'date_from' => date('Y-m-01'), 'date_to' => date('Y-m-d')];
+        $first = \app\api\jxc\logic\FinanceStatements::action('generate', $request);
+        self::assertSame('unanswered', $first['state']);
+        self::assertSame('1000.00', $first['snapshot']['balances']['receivable']['opening']);
+        self::assertSame($first, \app\api\jxc\logic\FinanceStatements::action('generate', $request));
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $this->receipt('100', '100')]));
+        $old = \app\api\jxc\logic\FinanceStatements::detail(['id' => $first['id']]);
+        self::assertSame('1000.00', $old['snapshot']['balances']['receivable']['closing']);
+        $second = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['customer_id' => $this->customerId,
+            'date_from' => date('Y-m-01'), 'date_to' => date('Y-m-d'), 'previous_id' => $first['id']]);
+        self::assertSame($first['id'], $second['previous_id']);
+        self::assertSame('900.00', $second['snapshot']['balances']['receivable']['closing']);
+        self::assertSame('-100.00', $second['snapshot']['balances']['receivable']['change']);
+        self::assertSame('100.00', $second['snapshot']['actual_money'][0]['amount']);
+        self::assertSame('receipt', $second['snapshot']['actual_money'][0]['type']);
+        self::assertSame('unanswered', $second['state']);
+    }
+
+    public function test_statement_dispute_does_not_reduce_debt_and_blocks_bad_debt_until_resolved(): void
+    {
+        $this->activate();
+        $statement = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['customer_id' => $this->customerId]);
+        $reply = \app\api\jxc\logic\FinanceStatements::action('reply', $this->command(0) + ['id' => $statement['id'],
+            'response' => 'disputed', 'respondent' => '客户负责人张先生', 'response_date' => date('Y-m-d'), 'evidence' => '当面对账，客户认为重量不符',
+            'items' => [['source' => $this->receivable, 'amount' => '100', 'reason' => '重量需核实', 'ledger_uncertain' => true]]]);
+        self::assertSame('disputed', $reply['state']);
+        self::assertSame('1000.00', (new FinanceLedger(self::TENANT_ID))->source($this->receivable)['balance']);
+        self::assertCount(1, \app\api\jxc\logic\FinanceStatements::openDisputes([$this->receivable]));
+        $bad = $this->command(0) + ['type' => 'bad_debt', 'payload' => ['subject_id' => $this->customerId, 'actual_date' => date('Y-m-d'),
+            'amount' => '100', 'allocations' => [['source' => $this->receivable, 'amount' => '100']], 'reason' => '确认无法收回', 'basis' => '有核实依据', 'debt_verified' => 1, 'undisputed' => 1]];
+        self::assertFalse(FinanceBusinessLogic::action('record', $bad));
+        self::assertStringContainsString('争议', FinanceBusinessLogic::getError());
+        $dispute = \app\api\jxc\logic\FinanceStatements::openDisputes([$this->receivable])[0];
+        \app\api\jxc\logic\FinanceStatements::action('resolve', $this->command(1) + ['id' => $statement['id'], 'dispute_id' => $dispute['id'], 'resolution' => 'ledger_verified', 'reason' => '逐笔复核交付记录，账内无误，客户异议保留']);
+        self::assertFalse(\app\api\jxc\logic\FinanceStatements::openDisputes([$this->receivable])[0]['ledger_uncertain']);
+        self::assertFalse(FinanceBusinessLogic::action('record', $bad), '账内核实无误不等于客户争议消失');
+        \app\api\jxc\logic\FinanceStatements::action('resolve', $this->command(2) + ['id' => $statement['id'], 'dispute_id' => $dispute['id'], 'resolution' => 'resolved', 'reason' => '客户已复核并撤回异议，留存对账回复']);
+        self::assertSame([], \app\api\jxc\logic\FinanceStatements::openDisputes([$this->receivable]));
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $bad), FinanceBusinessLogic::getError());
+    }
+
+    public function test_statement_appendix_uses_actual_weight_and_only_formally_confirmed_coverage(): void
+    {
+        $this->activate(); $sale = $this->deliveredSale();
+        $first = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['customer_id' => $this->customerId]);
+        self::assertCount(1, $first['snapshot']['pending_deliveries']);
+        self::assertSame('2.0000', $first['snapshot']['pending_deliveries'][0]['pending_weight']);
+        self::assertSame('1000.00', $first['snapshot']['balances']['receivable']['closing']);
+        $confirmed = SalesSettlementLogic::submit($this->command(0) + ['order_id' => $sale['order_id'],
+            'lines' => [['order_goods_id' => $sale['line_id'], 'customer_settlement_weight' => '2', 'pricing_unit_id' => $sale['unit_id'], 'price' => '10']]]);
+        self::assertNotFalse($confirmed, SalesSettlementLogic::getError());
+        $second = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['customer_id' => $this->customerId]);
+        self::assertSame([], $second['snapshot']['pending_deliveries']);
+        self::assertSame('1020.00', $second['snapshot']['balances']['receivable']['closing']);
+        self::assertCount(1, \app\api\jxc\logic\FinanceStatements::detail(['id' => $first['id']])['snapshot']['pending_deliveries']);
+    }
+
+    public function test_statement_keeps_each_partial_delivery_on_its_actual_day(): void
+    {
+        $this->activate(); $sale = $this->deliveredSale();
+        $firstDay = date('Y-m-01'); $secondDay = date('Y-m-02');
+        Db::name('sales_order')->where('id', $sale['order_id'])->update(['datetimesingle' => strtotime($firstDay)]);
+        Db::name('fulfillment_delivery_event')->where('id', $sale['event_id'])->update(['delivered_time' => strtotime($firstDay)]);
+        $delivery = Db::name('fulfillment_delivery_item')->where('delivery_event_id', $sale['event_id'])->find();
+        $event = Db::name('fulfillment_delivery_event')->where('id', $sale['event_id'])->find(); unset($event['id']);
+        $event['idempotency_key'] = 'second-' . uniqid(); $event['delivered_time'] = strtotime($secondDay);
+        $eventId = Db::name('fulfillment_delivery_event')->insertGetId($event);
+        unset($delivery['id']); $delivery['delivery_event_id'] = $eventId; $delivery['actual_delivery_weight'] = '3.0000';
+        Db::name('fulfillment_delivery_item')->insert($delivery); Db::name('order_goods')->where('id', $sale['line_id'])->update(['base_quantity' => '5']);
+        $statement = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['customer_id' => $this->customerId, 'date_from' => $secondDay, 'date_to' => $secondDay]);
+        self::assertCount(1, $statement['snapshot']['pending_deliveries']);
+        self::assertSame($secondDay, $statement['snapshot']['pending_deliveries'][0]['date']);
+        self::assertSame('3.0000', $statement['snapshot']['pending_deliveries'][0]['actual_weight']);
+    }
+
+    public function test_statement_allows_dispute_on_already_paid_source_and_rejects_cross_actor_replay(): void
+    {
+        $this->activate(); self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $this->receipt('1000', '1000')]));
+        $statement = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['customer_id' => $this->customerId]);
+        $command = $this->command(0) + ['id' => $statement['id'], 'response' => 'disputed', 'respondent' => '客户负责人', 'response_date' => date('Y-m-d'), 'evidence' => '客户复核已付款项目仍存在差异',
+            'items' => [['source' => $this->receivable, 'amount' => '100', 'reason' => '已付款不等于认可重量', 'ledger_uncertain' => false]]];
+        self::assertSame('disputed', \app\api\jxc\logic\FinanceStatements::action('reply', $command)['state']);
+        request()->adminId = self::ADMIN_ID + 1;
+        $this->expectException(\DomainException::class); $this->expectExceptionMessage('同一提交标识');
+        \app\api\jxc\logic\FinanceStatements::action('reply', $command);
+    }
+
+    public function test_statement_regeneration_projects_corrected_advance_date_without_duplicating_revision_amount(): void
+    {
+        $this->activate(); $payload = $this->receipt('100', '0', '100'); $payload['allocations'] = []; $payload['actual_date'] = date('Y-m-02');
+        $receipt = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $payload]); self::assertNotFalse($receipt, FinanceBusinessLogic::getError());
+        $advance = $receipt['confirmed_result']['created_sources'][0];
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt_return', 'payload' => ['subject_id' => $this->customerId,
+            'receipt_id' => $receipt['id'], 'account_id' => $this->accountId, 'actual_date' => date('Y-m-d'), 'amount' => '20', 'allocations' => [['source' => $advance, 'amount' => '20']], 'reason' => '实际退回20']]), FinanceBusinessLogic::getError());
+        $before = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['customer_id' => $this->customerId, 'date_from' => date('Y-m-01'), 'date_to' => date('Y-m-01')]);
+        self::assertSame('0.00', $before['snapshot']['balances']['advance']['closing']);
+        $payload['actual_date'] = date('Y-m-01'); $payload['amount'] = '120'; $payload['advance_amount'] = '120';
+        self::assertNotFalse(FinanceBusinessLogic::action('correct', $this->command($receipt['version']) + ['id' => $receipt['id'], 'payload' => $payload, 'correction_reason' => '原款实际早一天到账且为120元']), FinanceBusinessLogic::getError());
+        $after = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['customer_id' => $this->customerId, 'date_from' => date('Y-m-01'), 'date_to' => date('Y-m-01'), 'previous_id' => $before['id']]);
+        self::assertSame('120.00', $after['snapshot']['balances']['advance']['closing']);
+        $current = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['customer_id' => $this->customerId]);
+        self::assertSame('100.00', $current['snapshot']['balances']['advance']['closing']);
+        self::assertSame(['120.00', '-20.00'], array_column($current['snapshot']['actual_money'], 'amount'));
+        self::assertSame('0.00', \app\api\jxc\logic\FinanceStatements::detail(['id' => $before['id']])['snapshot']['balances']['advance']['closing']);
+    }
+
     private function deliveredSale(): array
     {
         $unit = $this->createCustomerReportUnit('斤');
@@ -804,7 +914,10 @@ final class FinanceBusinessWorkflowTest extends TestCase
             'sku_id' => $sku, 'sku_name' => '默认规格', 'supplier_relation_id' => 0, 'name' => '已交付商品', 'units' => '斤', 'number' => '2', 'base_quantity' => '2',
             'price' => '0', 'amount' => '0', 'pricing_unit_id' => 0, 'source_line_type' => 'customer_report_item', 'source_line_id' => random_int(100000, 900000),
             'remark' => '', 'sort' => 1, 'create_time' => $now, 'update_time' => $now]);
-        return ['order_id' => $order, 'line_id' => $line, 'unit_id' => $unit];
+        $event = (int)Db::name('fulfillment_delivery_event')->insertGetId(['tenant_id' => self::TENANT_ID, 'idempotency_key' => 'finance-delivery-' . uniqid(), 'delivered_time' => $now]);
+        Db::name('fulfillment_delivery_item')->insert(['tenant_id' => self::TENANT_ID, 'delivery_event_id' => $event, 'sales_order_id' => $order,
+            'report_item_id' => Db::name('order_goods')->where('id', $line)->value('source_line_id'), 'warehouse_id' => $warehouse, 'goods_id' => $goods, 'sku_id' => $sku, 'actual_delivery_weight' => '2.0000']);
+        return ['order_id' => $order, 'line_id' => $line, 'unit_id' => $unit, 'event_id' => $event];
     }
 
     private function activate(string $accountType = 'cash'): void
@@ -837,6 +950,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
     private function clean(): void
     {
+        foreach (['finance_statement_resolution', 'finance_statement_dispute', 'finance_statement_event', 'finance_statement'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         Db::name('finance_advance_revision')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_due_adjustment')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_customer_terms')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();

@@ -55,6 +55,9 @@ Route::group('', function () {
     Route::get('finance/business/customerBalances', 'jxc.FinanceBusiness/customerBalances');
     Route::get('finance/business/customerBalanceDetail', 'jxc.FinanceBusiness/customerBalanceDetail');
     Route::get('finance/business/customerSource', 'jxc.FinanceBusiness/customerSource');
+    Route::get('finance/business/statements', 'jxc.FinanceBusiness/statements');
+    Route::get('finance/business/statementDetail', 'jxc.FinanceBusiness/statementDetail');
+    Route::post('finance/business/statementAction', 'jxc.FinanceBusiness/statementAction');
     Route::post('finance/business/action', 'jxc.FinanceBusiness/action');
     Route::post('finance/business/preview', 'jxc.FinanceBusiness/preview');
     Route::post('finance/business/evidence', 'jxc.FinanceBusiness/evidence');

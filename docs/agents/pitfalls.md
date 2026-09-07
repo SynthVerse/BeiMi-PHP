@@ -2,6 +2,46 @@
 
 按根因去重。每条记录必须指向实际防线；仅有“不要这样做”的提醒不算已防护。
 
+## PIT-0042：用订单首次日期代替分次实际交付日期
+
+- 状态：已防护
+- 首次发生：2026-09-07
+- 最近发生：2026-09-07
+- 复发次数：0
+- 适用范围：客户对账交付附表、按期间汇总的交付查询
+- 相关问题：PIT-0028（来源身份选择）
+
+### 触发场景
+
+同一订单同一商品在两天分别交付 2 斤和 3 斤，查询第二天的对账交付附表。
+
+### 根因
+
+履约会复用销售订单并累计销售行实重，但订单日期仍为首次交付。按订单日期筛选累计数量无法表达每次交付的时间。
+
+### 错误做法
+
+使用 `sales_order.datetimesingle` 与 `order_goods.base_quantity` 直接生成按日交付附表。
+
+### 正确做法
+
+按 `fulfillment_delivery_event.delivered_time` 和 `fulfillment_delivery_item` 保存实际日期、重量及来源，先关联正式版本覆盖，再筛对账期间；实重纠错使用独立纠错记录。
+
+### 防线
+
+- 自动化防线：`FinanceBusinessWorkflowTest::test_statement_keeps_each_partial_delivery_on_its_actual_day`；首次执行实际返回 0 项而预期 1 项，修正后返回第二天 3 斤。
+- 架构防线：`FinanceStatementSnapshot::pendingDeliveries` 从交付事件读取，不从销售累计行推测日期。
+- 已验证：上述隔离数据库回归完成红绿验证；本批前端来源标识使用真实交付明细 ID。
+- 尚未验证：生产迁移和微信真机显示。
+- 后续建议：采购与履约报表也应先明确事件粒度，再按期间汇总。
+- 本次来源：`Matt Pocock / implement`、`Matt Pocock / tdd`、`Matt Pocock / code-review`、`Matt Pocock / prevent-repeat-pitfalls`、`Matt Pocock / diagnosing-bugs`；本记录依照防重复工作流保存，完成后继续财务对账开发。
+
+### 发生记录
+
+| 日期 | 任务 | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-09-07 | 财务第九批 | 跨日追加交付在对账期间丢失 | 首轮用例只有一次交付，未覆盖订单身份复用后的事件日期。 |
+
 ## PIT-0041：已消费预收整笔替换导致合法纠错无路可走
 
 - 状态：已防护

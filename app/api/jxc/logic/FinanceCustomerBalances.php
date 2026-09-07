@@ -61,7 +61,7 @@ final class FinanceCustomerBalances
         foreach (['receipt', 'receipt_return', 'advance_allocate', 'customer_refund', 'advance_refund', 'bad_debt', 'recovery_receipt', 'recovery_termination', 'receivable_due'] as $type) {
             try { $policy = FinanceDocumentPolicy::authorize($type); $actions[] = ['type' => $type, 'title' => $policy['title']]; } catch (\DomainException) { continue; }
         }
-        return ['tenant_id' => $tenant, 'customer' => $customer, 'balances' => $balances, 'category' => $category, 'overdue' => FinanceCustomers::overdue($id), 'actions' => $actions, 'as_of' => date('Y-m-d H:i:s')] + $page;
+        return ['tenant_id' => $tenant, 'customer' => $customer, 'balances' => $balances, 'category' => $category, 'overdue' => FinanceCustomers::overdue($id), 'actions' => $actions, 'can_statement' => FinanceAccess::has('finance.receivable.view'), 'as_of' => date('Y-m-d H:i:s')] + $page;
     }
 
     public static function source(array $params): array

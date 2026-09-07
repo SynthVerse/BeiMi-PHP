@@ -26,6 +26,7 @@ final class FinanceReceivableActions
             $source = $this->ledger->source(FinanceValue::text($line['source'] ?? '', 40));
             if (!in_array($source['category'], $policy['sources'], true) || $source['subject_id'] !== $subject || isset($seen[$source['reference']])) { throw new \DomainException('必须选择本客户不重复的对应业务来源'); }
             $seen[$source['reference']] = true; $name = $source['subject_name'];
+            if ($document['type'] === 'bad_debt' && FinanceStatements::openDisputes([$source['reference']])) { throw new \DomainException('该来源仍有未解决对账争议，不能确认为无争议坏账'); }
             if ($source['business_date'] && $date < $source['business_date']) { throw new \DomainException('处理日期不能早于原债权业务日期'); }
             $value = FinanceValue::money($line['amount'] ?? null); $total = bcadd($total, $value, 2);
             $details = ['basis' => $basis, 'reason' => $reason, 'original_source' => $source['reference']];
