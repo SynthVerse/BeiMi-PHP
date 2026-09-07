@@ -11,10 +11,8 @@ final class FinancePurchaseCosts
 {
     public static function value(array $arrival, string $newCoverage = '0', string $newFormal = '0'): array
     {
-        $covered = $newCoverage; $formal = $newFormal; $extra = '0.00';
-        foreach (Db::name('finance_purchase_settlement_line')->where('tenant_id', FinanceAccess::tenant())->where('arrival_line_id', $arrival['id'])->order('id')->lock(true)->select()->toArray() as $row) {
-            $covered = bcadd($covered, $row['covered_quantity'], 4); $formal = bcadd($formal, $row['amount'], 2);
-        }
+        $coverage = FinancePurchaseCoverage::totals((int)$arrival['id']);
+        $covered = bcadd($newCoverage, $coverage['covered_quantity'], 4); $formal = bcadd($newFormal, $coverage['formal_amount'], 2); $extra = '0.00';
         foreach (Db::name('finance_purchase_cost_change')->where('tenant_id', FinanceAccess::tenant())->where('arrival_line_id', $arrival['id'])->order('id')->lock(true)->select()->toArray() as $row) {
             $extra = bcadd($extra, $row['amount'], 2);
         }

@@ -104,11 +104,10 @@ final class FinanceStatementSnapshot
     public static function pendingArrivals(int $vendor, string $to): array
     {
         $tenant = FinanceAccess::tenant();
-        $covered = Db::name('finance_purchase_settlement_line')->where('tenant_id', $tenant)
-            ->field('arrival_line_id,SUM(covered_quantity) AS covered')->group('arrival_line_id')->buildSql();
+        $covered = FinancePurchaseCoverage::sql($to);
         $rows = Db::name('finance_purchase_arrival_line')->alias('a')->leftJoin([$covered => 's'], 's.arrival_line_id=a.id')
             ->where('a.tenant_id', $tenant)->where('a.vendor_id', $vendor)->where('a.business_date', '<=', $to)
-            ->whereRaw('a.actual_quantity>COALESCE(s.covered,0)')->field('a.*,COALESCE(s.covered,0) AS covered_quantity')->order('a.business_date,a.id')->limit(5001)->select()->toArray();
+            ->whereRaw('a.actual_quantity>COALESCE(s.quantity,0)')->field('a.*,COALESCE(s.quantity,0) AS covered_quantity')->order('a.business_date,a.id')->limit(5001)->select()->toArray();
         if (count($rows) > 5000) { throw new \DomainException('待结算到货超过单次对账容量，请联系管理员处理'); }
         foreach ($rows as &$row) {
             $row['snapshot'] = FinanceValue::decode($row['snapshot']);

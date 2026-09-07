@@ -42,6 +42,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000019_finance_purchase_cost_revision.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000020_finance_supplier_statements.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000021_finance_purchase_return.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000022_finance_purchase_return_resolution.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -79,6 +80,77 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $event['amount'] = '1001.00';
         $this->expectException(\DomainException::class);
         Db::transaction(fn() => $cost->recordWithinTransaction($event));
+    }
+
+    public function test_supplier_return_acceptance_closes_unsettled_quantity_and_explicitly_credits_settled_remainder(): void
+    {
+        $day = date('Y-m-d', strtotime('-1 day')); $this->activate('cash', date('Y-m-01', strtotime('-1 month')));
+        $warehouse = $this->createCustomerReportWarehouse('退货认可仓');
+        $goods = $this->createCustomerReportGoods('供方部分认可商品', 'FIN-RETURN-ACCEPT'); $sku = $this->customerReportSkuId($goods);
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '退货认可供应商']);
+        $arrival = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival', 'payload' => ['subject_id' => $vendor,
+            'warehouse_id' => $warehouse, 'actual_date' => $day, 'source_reference' => 'ACCEPT-ARRIVAL', 'reason' => '真实到货暂无价格',
+            'lines' => [['sku_id' => $sku, 'actual_quantity' => '100']]]]);
+        self::assertNotFalse($arrival, FinanceBusinessLogic::getError()); $arrivalId = $arrival['confirmed_result']['lines'][0]['arrival_line_id'];
+        $return = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_return_actual', 'payload' => ['subject_id' => $vendor,
+            'warehouse_id' => $warehouse, 'actual_date' => $day, 'source_reference' => 'ACCEPT-RETURN', 'reason' => '已实际退离等待供方核实',
+            'lines' => [['arrival_line_id' => $arrivalId, 'quantity' => '10']]]]);
+        self::assertNotFalse($return, FinanceBusinessLogic::getError()); $returnId = $return['confirmed_result']['lines'][0]['return_line_id'];
+        $payload = ['subject_id' => $vendor, 'return_line_id' => $returnId, 'expected_resolution_id' => 0,
+            'accepted_quantity' => '8', 'unsettled_quantity' => '8', 'unsettled_amount' => '16.00', 'credit_amount' => '0.00',
+            'actual_date' => date('Y-m-d'), 'supplier_confirmed' => 1, 'supplier_confirmation' => '供方回执确认八单位、余二待查',
+            'credit_reviewed' => 1, 'credit_allocations' => [], 'reason' => '按供方实际认可登记'];
+        $command = $this->command(0) + ['type' => 'purchase_return_acceptance', 'payload' => $payload];
+        $accepted = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($accepted, FinanceBusinessLogic::getError());
+        self::assertSame($accepted, FinanceBusinessLogic::action('record', $command));
+        self::assertSame('2.0000', $accepted['confirmed_result']['disputed_quantity']);
+        $ledger = new FinanceLedger(self::TENANT_ID); self::assertSame('0.00', $ledger->categoryBalance('payable', $vendor));
+        $options = FinanceBusinessLogic::options(['type' => 'purchase_settlement', 'subject_id' => $vendor]); self::assertSame('92.0000', $options['arrivals'][0]['pending_quantity']);
+        $old = \app\api\jxc\logic\FinanceStatementSnapshot::pendingArrivals($vendor, $day); self::assertSame('100.0000', $old[0]['pending_quantity']);
+        $current = \app\api\jxc\logic\FinanceStatementSnapshot::pendingArrivals($vendor, date('Y-m-d')); self::assertSame('92.0000', $current[0]['pending_quantity']);
+        $bad = $payload; $bad['expected_resolution_id'] = $accepted['confirmed_result']['resolution_id']; $bad['accepted_quantity'] = '3'; $bad['unsettled_quantity'] = '3';
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_return_acceptance', 'payload' => $bad]));
+        $settled = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_settlement', 'payload' => ['subject_id' => $vendor,
+            'reason' => '剩余到货结算', 'supplier_confirmation' => '供方确认剩余九十二单位', 'supplier_confirmed' => 1,
+            'lines' => [['arrival_line_id' => $arrivalId, 'covered_quantity' => '92', 'settlement_quantity' => '92', 'price' => '2.00']]]]);
+        self::assertNotFalse($settled, FinanceBusinessLogic::getError()); self::assertSame('184.00', $ledger->categoryBalance('payable', $vendor));
+        $payload['expected_resolution_id'] = $accepted['confirmed_result']['resolution_id']; $payload['accepted_quantity'] = '2';
+        $payload['unsettled_quantity'] = '0'; $payload['unsettled_amount'] = '0.00'; $payload['credit_amount'] = '4.00';
+        $payload['credit_allocations'] = [['source' => $settled['confirmed_result']['created_sources'][0], 'amount' => '4.00']];
+        $last = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_return_acceptance', 'payload' => $payload]); self::assertNotFalse($last, FinanceBusinessLogic::getError());
+        self::assertSame('0.0000', $last['confirmed_result']['disputed_quantity']);
+        self::assertSame('180.00', $ledger->categoryBalance('payable', $vendor)); self::assertSame('0.00', $ledger->categoryBalance('supplier_refund', $vendor));
+        self::assertSame('90.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $sku));
+        $cost = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID); self::assertSame('180.000000', $cost->balance($warehouse, $sku)['value']);
+        self::assertFalse($cost->balance($warehouse, $sku)['pending']);
+        self::assertSame('20.000000', $cost->destination($warehouse, $sku, 'return', 'purchase-return:' . $returnId)['cost']);
+        $paid = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'supplier_payment', 'payload' => ['subject_id' => $vendor,
+            'account_id' => $this->accountId, 'actual_date' => date('Y-m-d'), 'amount' => '180.00', 'reason' => '支付已确认未付采购',
+            'allocations' => [['source' => $settled['confirmed_result']['created_sources'][0], 'amount' => '180.00']]]]);
+        self::assertNotFalse($paid, FinanceBusinessLogic::getError());
+        $extra = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_return_actual', 'payload' => ['subject_id' => $vendor,
+            'warehouse_id' => $warehouse, 'actual_date' => date('Y-m-d'), 'source_reference' => 'ACCEPT-EXTRA', 'reason' => '另两单位已真实退离',
+            'lines' => [['arrival_line_id' => $arrivalId, 'quantity' => '2']]]]); self::assertNotFalse($extra, FinanceBusinessLogic::getError());
+        $payload['return_line_id'] = $extra['confirmed_result']['lines'][0]['return_line_id']; $payload['expected_resolution_id'] = 0;
+        $payload['credit_allocations'] = []; $payload['accepted_quantity'] = '0'; $payload['credit_amount'] = '0.00';
+        $rejected = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_return_acceptance', 'payload' => $payload]); self::assertNotFalse($rejected, FinanceBusinessLogic::getError());
+        self::assertSame('2.0000', $rejected['confirmed_result']['disputed_quantity']); self::assertSame([], $rejected['confirmed_result']['created_sources']);
+        $payload['accepted_quantity'] = '2'; $payload['credit_amount'] = '4.00'; $payload['expected_resolution_id'] = $rejected['confirmed_result']['resolution_id'];
+        $foreign = $payload; $foreign['subject_id'] = $vendor + 1;
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_return_acceptance', 'payload' => $foreign]));
+        $refundCommand = $this->command(0) + ['type' => 'purchase_return_acceptance', 'payload' => $payload];
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($refundCommand + ['action' => 'record']); self::assertSame('4.00', $preview['purchase']['refund_remaining']);
+        self::assertSame('0.00', $ledger->categoryBalance('supplier_refund', $vendor));
+        $refund = FinanceBusinessLogic::action('record', $refundCommand); self::assertNotFalse($refund, FinanceBusinessLogic::getError());
+        self::assertSame('4.00', $ledger->categoryBalance('supplier_refund', $vendor)); self::assertSame('0.00', $ledger->categoryBalance('payable', $vendor));
+        self::assertSame('4820.00', $ledger->account($this->accountId)['balance']);
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_return_acceptance', 'payload' => $payload]));
+        self::assertStringContainsString('后续处理', FinanceBusinessLogic::getError());
+        $employee = WorkforceLogic::saveEmployee(['name' => '退货经办', 'mobile' => '13800009928', 'bind_user_id' => 996928,
+            'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['finance.purchase.prepare']]); self::assertNotFalse($employee);
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996928; request()->adminId = 0;
+        self::assertFalse(FinanceBusinessLogic::action('record', $refundCommand));
+        self::assertFalse(FinanceBusinessLogic::options(['type' => 'purchase_return_acceptance', 'subject_id' => $vendor])['can_confirm']);
     }
 
     public function test_physical_purchase_return_uses_warehouse_average_cost_without_reducing_payable_and_preview_rolls_back(): void
@@ -2196,6 +2268,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         foreach (['finance_statement_resolution', 'finance_statement_dispute', 'finance_statement_event', 'finance_statement'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         foreach (['finance_supplier_statement_resolution', 'finance_supplier_statement_dispute', 'finance_supplier_statement_event', 'finance_supplier_statement'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         Db::name('finance_purchase_return_line')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
+        Db::name('finance_purchase_return_resolution')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_advance_revision')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_due_adjustment')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_customer_terms')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();

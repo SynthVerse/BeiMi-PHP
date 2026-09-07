@@ -14,7 +14,7 @@ final class FinancePurchaseBatches
         $tenant = FinanceAccess::tenant(); $page = max(1, FinanceValue::id($params['page'] ?? 1));
         $from = FinanceValue::date($params['date_from'] ?? '1900-01-01'); $to = FinanceValue::date($params['date_to'] ?? date('Y-m-d'));
         if ($from > $to || $to > date('Y-m-d')) { throw new \DomainException('到货日期范围无效'); }
-        $coverage = Db::name('finance_purchase_settlement_line')->where('tenant_id', $tenant)->field('arrival_line_id,SUM(covered_quantity) AS quantity')->group('arrival_line_id')->buildSql();
+        $coverage = FinancePurchaseCoverage::sql();
         $query = Db::name('finance_purchase_arrival_line')->alias('a')->leftJoin([$coverage => 'c'], 'c.arrival_line_id=a.id')
             ->where('a.tenant_id', $tenant)->where('a.vendor_id', $vendor)->whereBetween('a.business_date', [$from, $to])
             ->whereRaw('a.actual_quantity>COALESCE(c.quantity,0)');
