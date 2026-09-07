@@ -48,6 +48,9 @@ final class WorkforceLogic extends BaseLogic
         '商品' => [
             ['key' => 'goods.maintain', 'name' => '商品维护'],
         ],
+        '财务准备' => [
+            ['key' => 'finance.opening.prepare', 'name' => '录入财务启用准备草稿（不含正式确认）'],
+        ],
         '设置' => [
             ['key' => 'employee.manage', 'name' => '管理员工'],
             ['key' => 'process.manage', 'name' => '管理工序'],

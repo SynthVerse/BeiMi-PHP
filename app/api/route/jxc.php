@@ -32,6 +32,12 @@ Route::group('', function () {
 
 // JXC 业务接口 —— 使用 JxcLoginMiddleware（双 Token 查询）
 Route::group('', function () {
+    Route::get('finance/workbench', 'jxc.FinanceSetup/workbench');
+    Route::get('finance/preparation', 'jxc.FinanceSetup/preparation');
+    Route::post('finance/preparation/save', 'jxc.FinanceSetup/savePreparation');
+    Route::get('finance/accounts', 'jxc.FinanceSetup/accounts');
+    Route::post('finance/accounts/save', 'jxc.FinanceSetup/saveAccount');
+
     // === 单位管理 ===
     Route::get('units/index', 'jxc.GoodsUnit/lists');
     Route::get('units/detail', 'jxc.GoodsUnit/detail');
