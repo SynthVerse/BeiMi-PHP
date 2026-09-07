@@ -30,6 +30,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
             $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/' . $file)));
         }
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000008_finance_statements.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000009_finance_overdue.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -896,6 +897,103 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertSame('0.00', \app\api\jxc\logic\FinanceStatements::detail(['id' => $before['id']])['snapshot']['balances']['advance']['closing']);
     }
 
+    public function test_overdue_todo_updates_partial_balance_and_closes_without_erasing_observed_history(): void
+    {
+        $this->activate();
+        Db::name('finance_opening_source')->where('tenant_id', self::TENANT_ID)->where('category', 'receivable')->update(['source_snapshot' => json_encode(['subject_name' => '收款主客户', 'historical_date' => date('Y-m-01'), 'due_date' => date('Y-m-01')])]);
+        $first = \app\api\jxc\logic\FinanceOverdue::lists(['customer_id' => $this->customerId]);
+        self::assertCount(1, $first['lists']); self::assertSame('1000.00', $first['lists'][0]['balance']);
+        $originalId = $first['lists'][0]['id'];
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $this->receipt('200', '200')]));
+        $partial = \app\api\jxc\logic\FinanceOverdue::lists(['customer_id' => $this->customerId]);
+        self::assertSame('800.00', $partial['lists'][0]['balance']);
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $this->receipt('800', '800')]));
+        self::assertSame([], \app\api\jxc\logic\FinanceOverdue::lists(['customer_id' => $this->customerId])['lists']);
+        $history = \app\api\jxc\logic\FinanceOverdue::history(['source' => $this->receivable]);
+        self::assertCount(3, $history['lists']); self::assertSame('closed', $history['lists'][0]['state']);
+        self::assertSame($originalId, $history['lists'][2]['id']); self::assertSame('1000.00', $history['lists'][2]['balance']);
+        self::assertSame('receipt', $history['lists'][0]['document_type']);
+    }
+
+    public function test_overdue_todo_preserves_late_recording_explanation_and_due_change_closes_current_case(): void
+    {
+        $this->activate();
+        Db::name('finance_opening_source')->where('tenant_id', self::TENANT_ID)->where('category', 'receivable')->update(['source_snapshot' => json_encode(['subject_name' => '收款主客户', 'historical_date' => date('Y-m-01'), 'due_date' => date('Y-m-01')])]);
+        \app\api\jxc\logic\FinanceOverdue::lists(['customer_id' => $this->customerId]);
+        $receipt = $this->receipt('200', '200'); $receipt['actual_date'] = date('Y-m-01');
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $receipt]));
+        $history = \app\api\jxc\logic\FinanceOverdue::history(['source' => $this->receivable]);
+        self::assertSame(date('Y-m-01'), $history['lists'][0]['timing'][0]['effective_date']);
+        self::assertSame('200.00', $history['lists'][0]['timing'][0]['amount']);
+        $due = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receivable_due', 'payload' => ['subject_id' => $this->customerId, 'source' => $this->receivable,
+            'new_due_date' => null, 'expected_due_revision' => 0, 'reason' => '双方重新商定，付款日暂未约定']]);
+        self::assertNotFalse($due, FinanceBusinessLogic::getError());
+        self::assertSame([], \app\api\jxc\logic\FinanceOverdue::lists(['customer_id' => $this->customerId])['lists']);
+        $closed = \app\api\jxc\logic\FinanceOverdue::history(['source' => $this->receivable])['lists'][0];
+        self::assertSame('closed', $closed['state']); self::assertSame('800.00', $closed['balance']); self::assertNull($closed['due_date']);
+        $count = Db::name('finance_overdue_event')->where('tenant_id', self::TENANT_ID)->count();
+        \app\api\jxc\logic\FinanceOverdue::capture(self::TENANT_ID);
+        self::assertSame($count, Db::name('finance_overdue_event')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
+    public function test_overdue_preview_failure_and_permission_revocation_do_not_leave_or_expose_observations(): void
+    {
+        $this->activate();
+        Db::name('finance_opening_source')->where('tenant_id', self::TENANT_ID)->where('category', 'receivable')->update(['source_snapshot' => json_encode(['subject_name' => '收款主客户', 'historical_date' => date('Y-m-01'), 'due_date' => date('Y-m-01')])]);
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($this->command(0) + ['action' => 'record', 'type' => 'receipt', 'payload' => $this->receipt('100', '100')]);
+        self::assertNotEmpty($preview);
+        self::assertSame(0, Db::name('finance_overdue_event')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $this->receipt('1500', '1500')]));
+        self::assertSame(0, Db::name('finance_overdue_event')->where('tenant_id', self::TENANT_ID)->count());
+        \app\api\jxc\logic\FinanceOverdue::capture(self::TENANT_ID);
+        self::assertSame(1, Db::name('finance_overdue_event')->where('tenant_id', self::TENANT_ID)->count());
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID];
+        $this->expectException(\DomainException::class); $this->expectExceptionMessage('权限');
+        \app\api\jxc\logic\FinanceOverdue::history(['source' => $this->receivable]);
+    }
+
+    public function test_overdue_schedule_migration_replays_without_overriding_stopped_task(): void
+    {
+        $install = file_get_contents(dirname(__DIR__, 2) . '/public/install/db/like.sql');
+        preg_match('/CREATE TABLE `\{\{prefix\}\}dev_crontab`[\s\S]*?;/u', $install, $match);
+        $this->runStatements($this->prepareMigration(str_replace('CREATE TABLE ', 'CREATE TABLE IF NOT EXISTS ', $match[0])));
+        $sql = $this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000010_finance_overdue_schedule.sql'));
+        Db::name('dev_crontab')->where('command', 'finance:refresh-overdue')->delete();
+        try {
+            $this->runStatements($sql); Db::name('dev_crontab')->where('command', 'finance:refresh-overdue')->update(['status' => 2]); $this->runStatements($sql);
+            self::assertSame(1, Db::name('dev_crontab')->where('command', 'finance:refresh-overdue')->count());
+            self::assertSame(2, (int)Db::name('dev_crontab')->where('command', 'finance:refresh-overdue')->value('status'));
+        } finally { Db::name('dev_crontab')->where('command', 'finance:refresh-overdue')->delete(); }
+    }
+
+    public function test_overdue_finance_write_paths_use_existing_transaction_primitive(): void
+    {
+        foreach (['FinanceBusinessLogic.php', 'FinanceSales.php'] as $file) {
+            $source = file_get_contents(dirname(__DIR__, 2) . '/app/api/jxc/logic/' . $file);
+            self::assertStringNotContainsString('FinanceOverdue::capture(', $source);
+            self::assertStringContainsString('FinanceOverdue::captureWithinTransaction(', $source);
+        }
+        $method = new \ReflectionMethod(\app\api\jxc\logic\FinanceOverdue::class, 'captureWithinTransaction');
+        $source = implode('', array_slice(file($method->getFileName()), $method->getStartLine() - 1, $method->getEndLine() - $method->getStartLine() + 1));
+        self::assertStringNotContainsString('Db::transaction(', $source);
+    }
+
+    public function test_overdue_scheduler_isolates_bad_tenant_and_keeps_retryable_failure_visible(): void
+    {
+        $this->activate();
+        Db::name('finance_opening_source')->where('tenant_id', self::TENANT_ID)->where('category', 'receivable')->update(['source_snapshot' => json_encode(['subject_name' => '收款主客户', 'historical_date' => date('Y-m-01'), 'due_date' => date('Y-m-01')])]);
+        $badBook = Db::name('finance_opening_book')->where('tenant_id', self::TENANT_ID)->find(); $badBook['tenant_id'] = self::OTHER_TENANT_ID; $badBook['confirmed_snapshot'] = '{invalid';
+        Db::name('finance_opening_book')->insert($badBook);
+        $command = new \app\common\command\FinanceRefreshOverdue();
+        $output = new \think\console\Output('buffer');
+        $method = new \ReflectionMethod($command, 'execute');
+        self::assertSame(1, $method->invoke($command, new \think\console\Input([]), $output));
+        self::assertSame(1, Db::name('finance_overdue_event')->where('tenant_id', self::TENANT_ID)->count());
+        Db::name('finance_opening_book')->where('tenant_id', self::OTHER_TENANT_ID)->delete();
+        self::assertSame(0, $method->invoke($command, new \think\console\Input([]), $output));
+        self::assertSame(1, Db::name('finance_overdue_event')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
     private function deliveredSale(): array
     {
         $unit = $this->createCustomerReportUnit('斤');
@@ -950,6 +1048,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
     private function clean(): void
     {
+        Db::name('finance_overdue_event')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         foreach (['finance_statement_resolution', 'finance_statement_dispute', 'finance_statement_event', 'finance_statement'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         Db::name('finance_advance_revision')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_due_adjustment')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();

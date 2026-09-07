@@ -592,8 +592,8 @@
 
 - 状态：已防护
 - 首次发生：2026-07-29
-- 最近发生：2026-08-19
-- 复发次数：6
+- 最近发生：2026-09-07
+- 复发次数：7
 - 适用范围：`CustomerReportLogic`、`FulfillmentChangeLogic`、`FulfillmentTaskLogic`、`DeliveryInventoryLogic`、`DeliveryVariantLogic`、`LineVehicleLogic`、`NegativeInventoryLogic`、`SalesSettlementLogic`、`FinanceService` 等已开启业务事务后调用库存、财务原语或写入幂等事实的路径
 - 相关问题：PIT-0022
 
@@ -614,6 +614,8 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 外层业务事务应调用库存服务的 `*WithinTransaction` 同事务入口，并通过 `Db::name(...)->insert()` 写入报货主从表；只有没有外层事务的调用者才使用服务的独立事务入口。多商品操作必须以库存原语的实际取锁顺序排序。幂等键先以普通查询判断，依靠唯一键兜底；客户商品偏好以唯一键上的原子 upsert 写入，不先锁不存在记录；写状态转换先锁定稳定来源实体，再复查幂等事实，对 MySQL `1213`/`1205` 做有界重试，并在事务结束后按请求指纹读取已提交的追加动作。只有追加动作已经可见时才能向调用者返回成功。
 
 ### 防线
+
+- 2026-09-07 财务第十批扩展：`FinanceOverdue` 拆分独立事务包装与 `captureWithinTransaction`，财务确认和销售确认只调用同事务原语。`test_overdue_finance_write_paths_use_existing_transaction_primitive` 保护调用边界，`test_overdue_preview_failure_and_permission_revocation_do_not_leave_or_expose_observations` 验证预览与失败不留下观察。来源为 Matt Pocock / implement、tdd、code-review、prevent-repeat-pitfalls；完成防护后继续财务一期。
 
 - 2026-07-30 扩展：跨仓转换在创建任何销售单前，按 `goods_id` 升序预锁本次涉及的全部商品；销售单、订单商品、库存流水和应收／应付在外层事务中统一使用 Query Builder 写入，禁止重新引入 ORM 隐式事务。
 - 自动化防线扩展：`tests/unit/CustomerReportWorkflowTest.php` 的多仓后置计价失败用例断言销售单、库存流水、应收及报货状态整体回滚；`tests/unit/CustomerReportRouteContractTest.php` 禁止外层事务路径重新引入 `Model::create()`，并断言商品预锁早于任何标准销售单发布。
@@ -638,6 +640,7 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 | 2026-08-19 | BeiMi-PHP #10 第三方与部分交付 | 变体交付和返回门店在稳定业务锁后重新对缺失幂等键执行 `FOR UPDATE`，返回门店唯一键竞争异常也没有事务后重放 | #8 防线只覆盖旧 `DeliveryInventoryLogic` 和负库存入口，新增写入口没有自动继承“缺失键普通查询 + 唯一键兜底 + 事务后重放”的结构契约。 |
 | 2026-08-19 | BeiMi-PHP #11 销售结算与版本快照 | 结算外层事务直接调用使用 ORM 锁定/更新客户的普通应收方法 | 原结构契约只枚举报货、履约、交付和负库存事务入口，没有要求新增结算模块必须使用显式 `*WithinTransaction` 财务原语。 |
 | 2026-08-19 | BeiMi-PHP #11 → BeiMi-ERP #11 接口接线 | 记账完成新增 report→task 写事务，但首次实现遇到 `1213`/`1205` 直接失败 | 原防线覆盖了交付、结算与财务写入口，却没有把新迁移职责后的 `FulfillmentTaskLogic::bill()` 纳入有界重试结构与可恢复锁等待行为测试。 |
+| 2026-09-07 | 财务第十批 | 逾期待办观察服务被外层确认事务调用 | 旧结构防线未包含新接入的财务观察服务，独立读取入口与确认原语未拆分。 |
 
 ## PIT-0005：迁移静态探针替换前缀但真实执行器保留占位符
 

@@ -38,7 +38,7 @@ final class FinanceCustomerBalances
             ->order('c.id')->limit(($page - 1) * 20, 21)->select()->toArray();
         $more = count($rows) > 20; $rows = array_slice($rows, 0, 20);
         foreach ($rows as &$row) { $row['id'] = (int)$row['id']; if (!self::canViewRecovery()) { $row['recovery'] = null; } }
-        return ['tenant_id' => $tenant, 'active' => true, 'lists' => $rows, 'has_more' => $more, 'as_of' => date('Y-m-d H:i:s')];
+        return ['tenant_id' => $tenant, 'active' => true, 'lists' => $rows, 'has_more' => $more, 'can_overdue' => FinanceAccess::has('finance.receivable.view'), 'as_of' => date('Y-m-d H:i:s')];
     }
 
     public static function detail(array $params): array
@@ -79,7 +79,7 @@ final class FinanceCustomerBalances
         $revisions = Db::name('finance_advance_revision')->where('tenant_id', $tenant)->where('source_ref', $source['reference'])->order('id', 'desc')->limit(($page - 1) * 20, 21)->select()->toArray();
         $more = $more || count($revisions) > 20; $revisions = array_slice($revisions, 0, 20);
         foreach ($revisions as &$revision) { $revision['actor'] = FinanceValue::decode($revision['actor']); $revision['confirmed_at'] = date('Y-m-d H:i:s', (int)$revision['create_time']); }
-        return ['tenant_id' => $tenant, 'source' => $source, 'entries' => $rows, 'has_more' => $more, 'due_history' => $dates, 'advance_history' => $revisions];
+        return ['tenant_id' => $tenant, 'source' => $source, 'entries' => $rows, 'has_more' => $more, 'due_history' => $dates, 'advance_history' => $revisions, 'can_overdue' => FinanceAccess::has('finance.receivable.view')];
     }
 
     private static function canViewRecovery(): bool { return FinanceAccess::has('finance.receivable.view') || FinanceAccess::has('finance.recovery.prepare'); }

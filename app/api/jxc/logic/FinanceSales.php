@@ -12,6 +12,7 @@ final class FinanceSales
     public static function post(array $order, array $snapshot, int $actionId): array
     {
         $tenant = FinanceAccess::tenant(); $ledger = new FinanceLedger($tenant); $ledger->lockBook();
+        FinanceOverdue::captureWithinTransaction($tenant, [(int)$order['customer_id']]);
         $version = (int)($order['settlement_version'] ?? 0);
         $previous = $version ? Db::name('finance_sales_version')->where('tenant_id', $tenant)->where('order_id', $order['id'])->where('version', $version)->find() : null;
         $activation = (string)Db::name('finance_preparation')->where('tenant_id', $tenant)->value('activation_date');
@@ -80,6 +81,7 @@ final class FinanceSales
         Db::name('finance_document')->where('id', $documentId)->where('tenant_id', $tenant)->update(['confirmed_result' => FinanceValue::json($result)]);
         Db::name('finance_sales_version')->insert(['tenant_id' => $tenant, 'order_id' => $order['id'], 'version' => $version + 1, 'document_id' => $documentId,
             'source_ref' => $reference, 'business_date' => $date, 'due_date' => $dueDate, 'create_time' => $now]);
+        FinanceOverdue::captureWithinTransaction($tenant, [$subject], $documentId);
         return $result;
     }
 }

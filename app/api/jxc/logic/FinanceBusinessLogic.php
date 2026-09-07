@@ -61,6 +61,12 @@ final class FinanceBusinessLogic extends BaseLogic
                 if (in_array($action, ['confirm', 'record', 'correct', 'reverse_duplicate', 'reverse'], true)) {
                     if ($document['status'] !== 'pending') { throw new \DomainException('请先提交草稿再确认'); }
                     $ledger = new FinanceLedger($tenantId); $ledger->lockBook();
+                    $affectedCustomers = [];
+                    if (FinanceDocumentPolicy::TYPES[$type]['subject'] === 'customer') {
+                        foreach ([$document, $original] as $affected) { if ($affected) { $customerId = (int)(FinanceValue::decode($affected['payload'])['subject_id'] ?? 0); if ($customerId > 0) { $affectedCustomers[] = $customerId; } } }
+                        $affectedCustomers = array_values(array_unique($affectedCustomers));
+                        if ($affectedCustomers) { FinanceOverdue::captureWithinTransaction($tenantId, $affectedCustomers); }
+                    }
                     $result = $original ? (new FinanceCorrections($tenantId, $ledger))->replace($original, $document, (string)($params['correction_reason'] ?? ''),
                         $action === 'reverse_duplicate' ? FinanceValue::id($params['duplicate_of'] ?? 0) : 0, $action === 'reverse')
                         : (new FinancePayments($tenantId, $ledger))->confirm($document);
@@ -69,6 +75,7 @@ final class FinanceBusinessLogic extends BaseLogic
                 }
                 $document['version'] = $original ? 1 : $version + 1; $document['last_modified_by'] = FinanceValue::json(FinanceAccess::actor()); $document['update_time'] = time();
                 Db::name('finance_document')->where('tenant_id', $tenantId)->where('id', $document['id'])->update($document);
+                if (!empty($affectedCustomers)) { FinanceOverdue::captureWithinTransaction($tenantId, $affectedCustomers, (int)$document['id']); }
                 $result = self::present($document);
                 Db::name('finance_command')->insert(['tenant_id' => $tenantId, 'idempotency_key' => $key, 'fingerprint' => $fingerprint,
                     'document_id' => $document['id'], 'action' => $action, 'actor' => FinanceValue::json(FinanceAccess::actor()),
