@@ -37,6 +37,14 @@ Route::group('', function () {
     Route::post('finance/preparation/save', 'jxc.FinanceSetup/savePreparation');
     Route::get('finance/accounts', 'jxc.FinanceSetup/accounts');
     Route::post('finance/accounts/save', 'jxc.FinanceSetup/saveAccount');
+    Route::get('finance/opening', 'jxc.FinanceSetup/opening');
+    Route::get('finance/opening/subjects', 'jxc.FinanceSetup/openingSubjects');
+    Route::post('finance/opening/item/save', 'jxc.FinanceSetup/saveOpeningItem');
+    Route::post('finance/opening/item/remove', 'jxc.FinanceSetup/removeOpeningItem');
+    Route::post('finance/opening/review/save', 'jxc.FinanceSetup/saveOpeningReview');
+    Route::post('finance/opening/submit', 'jxc.FinanceSetup/submitOpening');
+    Route::post('finance/opening/reopen', 'jxc.FinanceSetup/reopenOpening');
+    Route::post('finance/opening/confirm', 'jxc.FinanceSetup/confirmOpening');
 
     // === 单位管理 ===
     Route::get('units/index', 'jxc.GoodsUnit/lists');

@@ -26,6 +26,7 @@ final class FinanceSetupLogic extends BaseLogic
             'operator_id' => self::operatorId(),
             'capabilities' => [
                 'manage_accounts' => $owner,
+                'confirm_opening' => $owner,
                 'prepare_opening' => $owner || (self::isUserIdentity() && WorkforceLogic::hasPermission('finance.opening.prepare')),
                 'view_settlement' => $owner || (self::isUserIdentity() && WorkforceLogic::hasPermission('settlement.view')),
             ],
@@ -140,6 +141,40 @@ final class FinanceSetupLogic extends BaseLogic
         }
     }
 
+    public static function opening(array $params = [], bool $subjects = false): array|false
+    {
+        if (!self::authorize(false)) { return false; }
+        try {
+            return Db::transaction(static function () use ($params, $subjects): array {
+                Db::name('finance_preparation')->duplicate(['tenant_id'])->insert(['tenant_id' => self::tenantId()]);
+                self::preparationRow(true);
+                $service = new FinanceOpeningService(self::tenantId(), self::actor());
+                return $subjects ? $service->subjects($params) : $service->snapshot();
+            });
+        } catch (\DomainException $e) { self::setError($e->getMessage()); return false; }
+    }
+
+    public static function openingAction(string $action, array $params): array|false
+    {
+        if (!self::authorize(false)) { return false; }
+        if ($action === 'confirm' && !self::isOwner()) {
+            self::setError('仅门店最高权限人员可最终确认期初'); return false;
+        }
+        try {
+            $data = $params;
+            unset($data['expected_tenant_id'], $data['expected_version'], $data['idempotency_key']);
+            return self::mutate('opening.' . $action, $params, $data, static function (int $version) use ($action, $data): array {
+                return (new FinanceOpeningService(self::tenantId(), self::actor()))->execute($action, $data, $version);
+            });
+        } catch (\DomainException $e) { self::setError($e->getMessage()); return false; }
+    }
+
+    private static function actor(): array
+    {
+        return ['id' => self::operatorId(), 'type' => self::isUserIdentity() ? 'user' : 'tenant_admin',
+            'name' => (string)(request()->adminInfo['name'] ?? '') ?: '操作人 #' . self::operatorId()];
+    }
+
     /** 同一门店串行修改准备资料；幂等结果与档案修改在同一个事务内提交。 */
     private static function mutate(string $action, array $params, array $data, callable $write): array
     {
@@ -151,7 +186,7 @@ final class FinanceSetupLogic extends BaseLogic
         if (!preg_match('/^[a-zA-Z0-9_-]{16,96}$/D', $key)) {
             throw new \DomainException('提交标识无效，请重新进入页面');
         }
-        $fingerprint = hash('sha256', self::json([$action, $data, $version, self::operatorId()]));
+        $fingerprint = hash('sha256', self::json([$action, $data, $version, self::operatorId(), self::isUserIdentity()]));
         return Db::transaction(static function () use ($action, $version, $key, $fingerprint, $write): array {
             // 唯一主键行同时解决首次创建竞争；不依赖不存在的行上的间隙锁。
             Db::name('finance_preparation')->duplicate(['tenant_id'])->insert(['tenant_id' => self::tenantId()]);
@@ -162,6 +197,9 @@ final class FinanceSetupLogic extends BaseLogic
                     throw new \DomainException('同一提交标识不能用于不同内容');
                 }
                 return json_decode($existing['result_data'], true, 512, JSON_THROW_ON_ERROR);
+            }
+            if ($action === 'preparation.save' && Db::name('finance_opening_book')->where('tenant_id', self::tenantId())->value('status') === 'active') {
+                throw new \DomainException('财务已启用，不能覆盖启用日期和期初准备历史');
             }
             [$before, $result] = $write($version);
             Db::name('finance_setup_action')->insert([
@@ -192,11 +230,10 @@ final class FinanceSetupLogic extends BaseLogic
         $row['created_by'] = $firstResult['created_by'] ?? ($first ? ['id' => (int)$first['operator_id'], 'name' => '操作人 #' . $first['operator_id']] : $actor);
         $row['created_time'] = (int)($first['create_time'] ?? ($actor ? $row['update_time'] : 0));
         $row['last_modified_by'] = $actor ?? ($lastResult['last_modified_by'] ?? ($last ? ['id' => (int)$last['operator_id'], 'name' => '操作人 #' . $last['operator_id']] : null));
-        $row['status'] = 'draft';
+        $row['status'] = Db::name('finance_opening_book')->where('tenant_id', self::tenantId())->value('status') ?: 'draft';
         $row['cutoff_date'] = $row['activation_date']
             ? (new \DateTimeImmutable($row['activation_date']))->modify('-1 day')->format('Y-m-d') : null;
-        // 准备声明不能替代逐项期初凭据确认或迁移验收。此批次没有正式启用接口。
-        $row['notice'] = '准备资料仅保存为草稿。期初余额逐项确认、历史接入核对完成后，才能正式启用。';
+        $row['notice'] = $row['status'] === 'active' ? '财务已启用，期初历史只读。' : '准备声明不能替代逐项期初凭据与迁移验收，请进入期初明细完成核对。';
         return $row;
     }
 
