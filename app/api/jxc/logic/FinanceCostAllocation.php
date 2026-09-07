@@ -32,6 +32,40 @@ final class FinanceCostAllocation
         return self::move($state, $from, $to, $sku, self::quantity($quantity), 'inventory', '', false);
     }
 
+    /** 已离库商品的争议转损失，只改成本去向；未知来源及负量保持待确认。 */
+    public static function reclassify(array $state, int $warehouse, int $sku, string $quantity, string $fromBucket, string $fromReference, string $toBucket, string $toReference): array
+    {
+        self::dimension($warehouse, $sku); $quantity = self::quantity($quantity);
+        if ($fromBucket !== 'return' || $toBucket !== 'loss') { throw new \DomainException('本次仅支持将采购退货争议确认为门店损失'); }
+        FinanceValue::text($fromReference, 160); FinanceValue::text($toReference, 160);
+        $weights = []; $total = '0.000000000000';
+        foreach ($state['positions'] as $key => $row) {
+            if ($row['warehouse_id'] === $warehouse && $row['sku_id'] === $sku && $row['bucket'] === $fromBucket && $row['reference'] === $fromReference && bccomp($row['quantity'], '0', 12) > 0) {
+                $weights[$key] = $row['quantity']; $total = bcadd($total, $row['quantity'], 12);
+            }
+        }
+        $shortageKey = FinanceValue::json([$warehouse, $sku, $fromBucket, $fromReference]); $shortage = $state['shortages'][$shortageKey]['quantity'] ?? '0';
+        if (bccomp($shortage, '0', 12) > 0) { $weights['shortage'] = $shortage; $total = bcadd($total, $shortage, 12); }
+        if (bccomp($quantity, $total, 12) > 0) { throw new \DomainException('处理数量超过原退货剩余成本去向'); }
+        $parts = self::quantityShares($quantity, $weights, $total); $cost = '0.000000'; $pending = false;
+        foreach ($parts as $key => $take) {
+            if (bccomp($take, '0', 12) === 0) { continue; }
+            if ($key === 'shortage') {
+                $pending = true; $state['shortages'][$shortageKey]['quantity'] = bcsub($shortage, $take, 12);
+                if (bccomp($state['shortages'][$shortageKey]['quantity'], '0', 12) === 0) { unset($state['shortages'][$shortageKey]); }
+                $target = FinanceValue::json([$warehouse, $sku, $toBucket, $toReference]);
+                $state['shortages'][$target] = ['warehouse_id' => $warehouse, 'sku_id' => $sku, 'bucket' => $toBucket, 'reference' => $toReference,
+                    'quantity' => bcadd($state['shortages'][$target]['quantity'] ?? '0', $take, 12)];
+            } else {
+                $row = $state['positions'][$key]; $value = self::takeValue($row['value'], $take, $row['quantity']);
+                $state['positions'][$key]['quantity'] = bcsub($row['quantity'], $take, 12); $state['positions'][$key]['value'] = bcsub($row['value'], $value, 6);
+                self::put($state, $row['origin'], $warehouse, $sku, $toBucket, $toReference, $take, $value);
+                $cost = bcadd($cost, $value, 6); $pending = $pending || $state['origins'][$row['origin']]['amount'] === null;
+            }
+        }
+        return ['state' => $state, 'known_cost' => $cost, 'cost' => $pending ? null : $cost, 'pending' => $pending];
+    }
+
     /** 真实退回或实交更正按原去向还原；不使用退回当天的新平均价。 */
     public static function restore(array $state, int $warehouse, int $sku, string $quantity, string $bucket, string $reference, ?int $toWarehouse = null): array
     {

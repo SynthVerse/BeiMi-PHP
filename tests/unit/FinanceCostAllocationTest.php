@@ -9,6 +9,26 @@ use PHPUnit\Framework\TestCase;
 
 final class FinanceCostAllocationTest extends TestCase
 {
+    public function test_reclassifying_return_dispute_to_loss_preserves_stock_and_unknown_origin_cost(): void
+    {
+        $state = FinanceCostAllocation::receive(FinanceCostAllocation::empty(), 'arrival', 10, 20, '100', '200.00')['state'];
+        $state = FinanceCostAllocation::issue($state, 10, 20, '10', 'return', 'returned')['state'];
+        $loss = FinanceCostAllocation::reclassify($state, 10, 20, '2', 'return', 'returned', 'loss', 'resolution');
+        self::assertSame('4.000000', $loss['cost']);
+        self::assertSame(FinanceCostAllocation::balance($state, 10, 20), FinanceCostAllocation::balance($loss['state'], 10, 20));
+        $adjusted = FinanceCostAllocation::adjust($loss['state'], 'arrival', '300.00');
+        self::assertSame('2.000000', $adjusted['changes']['loss']); self::assertSame('8.000000', $adjusted['changes']['return']);
+        $negative = FinanceCostAllocation::issue(FinanceCostAllocation::empty(), 10, 20, '10', 'return', 'unknown')['state'];
+        $pending = FinanceCostAllocation::reclassify($negative, 10, 20, '2', 'return', 'unknown', 'loss', 'pending-loss');
+        self::assertNull($pending['cost']); self::assertTrue($pending['pending']);
+        self::assertSame('-10.000000000000', FinanceCostAllocation::balance($pending['state'], 10, 20)['quantity']);
+        $funded = FinanceCostAllocation::receive($pending['state'], 'late-arrival', 10, 20, '10', '20.00');
+        self::assertSame('0.000000', FinanceCostAllocation::balance($funded['state'], 10, 20)['value']);
+        self::assertSame('2.000000', FinanceCostAllocation::adjust($funded['state'], 'late-arrival', '30.00')['changes']['loss']);
+        $this->expectException(\DomainException::class);
+        FinanceCostAllocation::reclassify($loss['state'], 10, 20, '9', 'return', 'returned', 'loss', 'excess');
+    }
+
     public function test_partial_supplier_cost_keeps_unpriced_remainder_pending_and_final_cost_follows_existing_sale(): void
     {
         $state = \app\api\jxc\logic\FinanceCostAllocation::receive(\app\api\jxc\logic\FinanceCostAllocation::empty(), 'arrival-partial', 10, 20, '100', null)['state'];

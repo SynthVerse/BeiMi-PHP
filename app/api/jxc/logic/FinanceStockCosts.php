@@ -22,11 +22,14 @@ final class FinanceStockCosts
         }
         $event = ['reference' => $reference, 'sku_id' => (int)$flow['sku_id'], 'warehouse_id' => (int)$flow['warehouse_id'],
             'business_date' => $date, 'quantity' => (string)$flow['quantity'], 'snapshot' => ['stock_flow_id' => $id, 'order_type' => $flow['order_type'], 'order_id' => (int)$flow['order_id']]];
-        if (in_array($flow['order_type'], ['finance_purchase_arrival', 'finance_purchase_return'], true)) {
+        if (in_array($flow['order_type'], ['finance_purchase_arrival', 'finance_purchase_return', 'finance_purchase_return_back'], true)) {
             $event['business_date'] = FinanceValue::date($context['business_date'] ?? null);
             $event['document_id'] = FinanceValue::id($context['document_id'] ?? null);
         }
-        if ($flow['order_type'] === 'sales_delivery_correction') {
+        if ($flow['order_type'] === 'finance_purchase_return_back') {
+            $event['to_warehouse_id'] = $event['warehouse_id']; $event['warehouse_id'] = FinanceValue::id($context['original_warehouse_id'] ?? null);
+            $event += ['type' => 'restore', 'bucket' => 'return', 'target_reference' => 'purchase-return:' . FinanceValue::id($context['return_line_id'] ?? null)];
+        } elseif ($flow['order_type'] === 'sales_delivery_correction') {
             $event += ['type' => (int)$flow['flow_type'] === 1 ? 'restore' : 'issue', 'bucket' => 'sale', 'target_reference' => 'sales_order:' . $flow['order_id']];
         } elseif ($flow['order_type'] === 'sales-return') {
             $return = Db::name('sales_return_order')->where('tenant_id', FinanceAccess::tenant())->where('id', $flow['order_id'])->find();

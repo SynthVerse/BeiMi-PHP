@@ -101,6 +101,27 @@ class StockService
         return $movement;
     }
 
+    /** 供应商退货争议的实际返回入库，恢复原退离成本而非新仓当日均价。 */
+    public static function inboundFinancePurchaseReturnWithinTransaction(int $warehouse, int $goods, int $sku, string $quantity, int $document, array $returned, string $date): int
+    {
+        FinanceIntegration::lock(); $movement = WarehouseSkuBalanceService::inboundWithinTransaction($warehouse, $sku, $quantity);
+        if ($movement === false) { throw new \DomainException('采购退货实际返回入库失败'); }
+        $flow = self::writeFlow(['warehouse_id' => $warehouse, 'goods_id' => $goods, 'sku_id' => $sku, 'batch_id' => 0, 'order_id' => $document,
+            'order_type' => 'finance_purchase_return_back', 'order_sn' => 'FIN-BACK-' . $document, 'flow_type' => StockFlow::FLOW_IN,
+            'quantity' => $quantity, 'remark' => '采购退货争议实际返回-明细' . $returned['id']], $movement,
+            ['business_date' => $date, 'document_id' => $document, 'return_line_id' => (int)$returned['id'], 'original_warehouse_id' => (int)$returned['warehouse_id']]);
+        $attribution = 0;
+        if ($warehouse === (int)$returned['warehouse_id']) {
+            $original = Db::name('finance_document')->where('tenant_id', FinanceAccess::tenant())->where('id', $returned['document_id'])->value('confirmed_result');
+            foreach (FinanceValue::decode($original)['lines'] ?? [] as $line) {
+                if ((int)$line['return_line_id'] === (int)$returned['id']) { $attribution = (int)($line['negative_attribution_id'] ?? 0); break; }
+            }
+        }
+        if ($attribution > 0) { NegativeInventoryLogic::autoOffsetPurchaseReturnWithinTransaction($warehouse, $sku, $movement, $document, $attribution); }
+        else { NegativeInventoryLogic::autoOffsetWithinTransaction($warehouse, $sku, $movement, $document, 'finance_purchase_return_back', 'FIN-BACK-' . $document); }
+        return $flow;
+    }
+
     /** 销售单实际交付重量更正入库；调用方持有销售结算事务。 */
     public static function inboundDeliveryCorrectionWithinTransaction(
         int $warehouseId,

@@ -12,7 +12,9 @@ final class FinancePurchaseReturns
     public static function options(int $vendor, array $params): array
     {
         $tenant = FinanceAccess::tenant(); $page = FinanceValue::id($params['page'] ?? 1);
-        $returned = Db::name('finance_purchase_return_line')->where('tenant_id', $tenant)->field('arrival_line_id,SUM(quantity) AS quantity')->group('arrival_line_id')->buildSql();
+        $out = Db::name('finance_purchase_return_line')->where('tenant_id', $tenant)->field('arrival_line_id,quantity')->buildSql(false);
+        $back = Db::name('finance_purchase_return_resolution')->where('tenant_id', $tenant)->where('kind', 'returned')->field('arrival_line_id,-quantity AS quantity')->buildSql(false);
+        $returned = '(SELECT arrival_line_id,SUM(quantity) AS quantity FROM (' . $out . ' UNION ALL ' . $back . ') AS actual_returns GROUP BY arrival_line_id)';
         $query = Db::name('finance_purchase_arrival_line')->alias('a')->leftJoin([$returned => 'r'], 'r.arrival_line_id=a.id')
             ->where('a.tenant_id', $tenant)->where('a.vendor_id', $vendor)->whereRaw('a.actual_quantity>COALESCE(r.quantity,0)');
         $keyword = FinanceValue::text($params['keyword'] ?? '', 60, false);
@@ -46,6 +48,7 @@ final class FinancePurchaseReturns
             if (!$arrival || $date < $arrival['business_date']) { throw new \DomainException('原到货不属于本供应商或退货日期早于实际到货'); }
             $quantity = FinancePurchaseSettlement::quantity($item['quantity'] ?? null); $previous = '0.0000';
             foreach (Db::name('finance_purchase_return_line')->where('tenant_id', $tenant)->where('arrival_line_id', $arrivalId)->lock(true)->select()->toArray() as $returned) { $previous = bcadd($previous, $returned['quantity'], 4); }
+            foreach (Db::name('finance_purchase_return_resolution')->where('tenant_id', $tenant)->where('arrival_line_id', $arrivalId)->where('kind', 'returned')->lock(true)->select()->toArray() as $back) { $previous = bcsub($previous, $back['quantity'], 4); }
             if (bccomp(bcadd($previous, $quantity, 4), $arrival['actual_quantity'], 4) > 0) { throw new \DomainException('累计实际退货数量不能超过原实际到货数量'); }
             $prepared[] = [$arrival, $quantity]; $skuIds[] = (int)$arrival['sku_id'];
         }

@@ -7,6 +7,7 @@ namespace app\api\jxc\logic;
 final class FinanceDocumentPolicy
 {
     public const TYPES = [
+        'purchase_return_resolution' => ['title' => '退货争议返回与门店损失', 'prepare' => 'finance.purchase.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],
         'purchase_return_acceptance' => ['title' => '供应商退货认可与贷项', 'prepare' => 'finance.purchase.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => ['payable', 'expense_payable'], 'direction' => 'none'],
         'purchase_return_actual' => ['title' => '采购实际退货', 'prepare' => 'finance.purchase.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],
         'purchase_extra_adjustment' => ['title' => '采购附加成本关联调整', 'prepare' => 'finance.purchase.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => ['payable', 'expense_payable'], 'direction' => 'none'],

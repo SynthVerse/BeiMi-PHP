@@ -345,6 +345,14 @@ final class NegativeInventoryLogic extends BaseLogic
         );
     }
 
+    public static function autoOffsetPurchaseReturnWithinTransaction(int $warehouse, int $sku, array $movement, int $document, int $attribution): void
+    {
+        // 采购实际退离按负现存量归因；实际运回时只冲回本次真正恢复的负现存量。
+        $movement['before_available_qty'] = $movement['before_on_hand_qty']; $movement['after_available_qty'] = $movement['after_on_hand_qty'];
+        self::allocateHealedAvailabilityWithinTransaction($warehouse, $sku, $movement, $document, 'finance_purchase_return_back', 'FIN-BACK-' . $document,
+            ['open', 'waiting_inbound', 'retained'], 'purchase_return_back_offset', '采购退货实际运回定向补平', 0, 0, $document, $attribution);
+    }
+
     /**
      * @param array<string,mixed> $movement
      * @param array<int,string> $eligibleStatuses
@@ -361,7 +369,8 @@ final class NegativeInventoryLogic extends BaseLogic
         string $reasonPrefix,
         int $preferredSalesOrderId = 0,
         int $preferredReportItemId = 0,
-        int $businessActionId = 0
+        int $businessActionId = 0,
+        int $preferredAttributionId = 0
     ): void {
         $beforeNegative = bccomp((string)$movement['before_available_qty'], '0.0000', self::SCALE) < 0
             ? ltrim((string)$movement['before_available_qty'], '-') : '0.0000';
@@ -375,9 +384,10 @@ final class NegativeInventoryLogic extends BaseLogic
             ->where('warehouse_id', $warehouseId)->where('sku_id', $skuId)
             ->whereIn('resolution_status', $eligibleStatuses)->where('remaining_qty', '>', 0)
             ->order(['occurred_time' => 'asc', 'id' => 'asc'])->lock(true)->select()->toArray();
-        if ($preferredSalesOrderId > 0) {
-            usort($sources, static function (array $left, array $right) use ($preferredSalesOrderId, $preferredReportItemId): int {
-                $priority = static function (array $source) use ($preferredSalesOrderId, $preferredReportItemId): int {
+        if ($preferredSalesOrderId > 0 || $preferredAttributionId > 0) {
+            usort($sources, static function (array $left, array $right) use ($preferredSalesOrderId, $preferredReportItemId, $preferredAttributionId): int {
+                $priority = static function (array $source) use ($preferredSalesOrderId, $preferredReportItemId, $preferredAttributionId): int {
+                    if ($preferredAttributionId > 0) { return (int)$source['id'] === $preferredAttributionId ? -1 : 2; }
                     if ((int)$source['sales_order_id'] === $preferredSalesOrderId
                         && $preferredReportItemId > 0
                         && (int)$source['report_item_id'] === $preferredReportItemId) {

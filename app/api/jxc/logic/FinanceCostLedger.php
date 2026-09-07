@@ -32,7 +32,7 @@ final class FinanceCostLedger
         $stored = $this->load($sku); $before = $this->withOpening($stored, $sku);
         $this->persist($stored, $before, []);
         $replayed = !in_array($event['type'], ['adjust', 'reestimate'], true)
-            && $this->query('finance_cost_event')->where('sku_id', $sku)->whereIn('event_type', ['receive', 'issue', 'restore', 'transfer'])
+            && $this->query('finance_cost_event')->where('sku_id', $sku)->whereIn('event_type', ['receive', 'issue', 'restore', 'transfer', 'reclassify'])
                 ->where('business_date', '>', $date)->lock(true)->find();
         $result = $replayed ? $this->replay($sku, $event) : $this->applyEvent($before, $event);
         $effectTotals = $result['effect_totals'] ?? null; unset($result['effect_totals']);
@@ -52,6 +52,7 @@ final class FinanceCostLedger
     {
         $sku = FinanceValue::id($event['sku_id']); $warehouse = FinanceValue::id($event['warehouse_id']);
         return match ($event['type'] ?? '') {
+            'reclassify' => FinanceCostAllocation::reclassify($before, $warehouse, $sku, $event['quantity'] ?? '', $event['bucket'] ?? '', $event['target_reference'] ?? '', $event['to_bucket'] ?? '', $event['to_reference'] ?? ''),
             'receive' => FinanceCostAllocation::receive($before, FinanceValue::text($event['origin'] ?? null, 160), $warehouse, $sku, $event['quantity'] ?? '', $event['amount'] ?? null),
             'issue' => FinanceCostAllocation::issue($before, $warehouse, $sku, $event['quantity'] ?? '', $event['bucket'] ?? '', $event['target_reference'] ?? ''),
             'restore' => FinanceCostAllocation::restore($before, $warehouse, $sku, $event['quantity'] ?? '', $event['bucket'] ?? '', $event['target_reference'] ?? '',

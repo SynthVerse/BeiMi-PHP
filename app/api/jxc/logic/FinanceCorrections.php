@@ -15,6 +15,7 @@ final class FinanceCorrections
     {
         $policy = FinanceDocumentPolicy::authorize($original['type'], true);
         if ($original['type'] === 'purchase_return_actual') { throw new \DomainException('已实际退离不能直接覆盖或撤销，请关联退货返回入库或供应商认可处理'); }
+        if ($original['type'] === 'purchase_return_resolution') { throw new \DomainException('已确认返回或门店损失须保留实际来源，请通过关联实物或成本调整纠正'); }
         if ($original['type'] === 'purchase_return_acceptance') { throw new \DomainException('已确认退货认可须保留来源，请追加剩余争议处理或关联价格调整'); }
         if ($original['type'] === 'purchase_arrival') { throw new \DomainException('已验收入库不能直接覆盖或撤销，请从原到货明细关联实物更正或采购退货'); }
         if ($original['type'] === 'purchase_settlement') { throw new \DomainException('供应商结算请关联采购金额调整，不能直接撤销已处理的实收量'); }
