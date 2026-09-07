@@ -510,6 +510,11 @@ class CustomerLogic extends BaseLogic
 
         Db::startTrans();
         try {
+            if (FinanceIntegration::lock()) {
+                self::setError('财务已启用，请通过财务收付款选择账户、日期与核销组成');
+                Db::rollback();
+                return false;
+            }
             $model = Customer::where('id', $customerId)
                 ->where('tenant_id', $tenantId)
                 ->lock(true)

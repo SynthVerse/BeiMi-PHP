@@ -50,6 +50,8 @@ Route::group('', function () {
     Route::get('finance/business/detail', 'jxc.FinanceBusiness/detail');
     Route::get('finance/business/options', 'jxc.FinanceBusiness/options');
     Route::get('finance/business/subjects', 'jxc.FinanceBusiness/subjects');
+    Route::get('finance/business/salesSources', 'jxc.FinanceBusiness/salesSources');
+    Route::post('finance/business/saveSalesTerms', 'jxc.FinanceBusiness/saveSalesTerms');
     Route::post('finance/business/action', 'jxc.FinanceBusiness/action');
     Route::post('finance/business/evidence', 'jxc.FinanceBusiness/evidence');
     Route::get('finance/business/evidenceContent', 'jxc.FinanceBusiness/evidenceContent');

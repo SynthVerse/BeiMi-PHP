@@ -8,6 +8,7 @@ use app\api\jxc\logic\FinanceBusinessLogic;
 use app\api\jxc\logic\FinanceLedger;
 use app\api\jxc\logic\FinanceSetupLogic;
 use app\api\jxc\logic\WorkforceLogic;
+use app\api\jxc\logic\SalesSettlementLogic;
 use PHPUnit\Framework\TestCase;
 use think\facade\Config;
 use think\facade\Db;
@@ -25,7 +26,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     protected function setUp(): void
     {
         $this->prepareCustomerReportRequestContext(); $this->ensureCustomerReportTables();
-        foreach (['20260907_000001_finance_preparation.sql', '20260907_000002_finance_opening.sql', '20260907_000003_finance_opening_details.sql', '20260907_000004_finance_business.sql'] as $file) {
+        foreach (['20260907_000001_finance_preparation.sql', '20260907_000002_finance_opening.sql', '20260907_000003_finance_opening_details.sql', '20260907_000004_finance_business.sql', '20260907_000005_finance_sales.sql'] as $file) {
             $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/' . $file)));
         }
         $this->clean();
@@ -353,6 +354,212 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $last = FinanceBusinessLogic::options(['type' => 'receipt', 'subject_id' => $this->customerId, 'page' => 2]); self::assertCount(5, $last['sources']);
     }
 
+    public function test_confirmed_sale_creates_receivable_and_revenue_once_and_receipt_uses_that_source(): void
+    {
+        $this->activate(); $fixture = $this->deliveredSale();
+        $command = ['order_id' => $fixture['order_id'], 'expected_version' => 0, 'idempotency_key' => 'finance-sales-first-confirm',
+            'due_date' => date('Y-m-d'), 'lines' => [['order_goods_id' => $fixture['line_id'], 'customer_settlement_weight' => '2', 'pricing_unit_id' => $fixture['unit_id'], 'price' => '10']]];
+        $sale = SalesSettlementLogic::submit($command);
+        self::assertNotFalse($sale, SalesSettlementLogic::getError());
+        self::assertSame($sale, SalesSettlementLogic::submit($command));
+        $ledger = new FinanceLedger(self::TENANT_ID);
+        $sources = array_values(array_filter($ledger->sources('receivable', $this->customerId), static fn(array $row): bool => str_starts_with($row['reference'], 'n:')));
+        self::assertCount(1, $sources); self::assertSame('20.00', $sources[0]['balance']); self::assertSame(date('Y-m-d'), $sources[0]['due_date']);
+        self::assertSame('1020.00', $sale['debt_after_order']);
+        self::assertEquals(20, Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('metric', 'revenue')->sum('amount'));
+        $payload = $this->receipt('20', '20'); $payload['allocations'][0]['source'] = $sources[0]['reference'];
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $payload]));
+        self::assertSame('0.00', $ledger->source($sources[0]['reference'])['balance']);
+        self::assertSame('5020.00', $ledger->account($this->accountId)['balance']);
+        self::assertEquals(20, Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('metric', 'revenue')->sum('amount'));
+        self::assertSame(0, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->count(), '金额确认不再次出库');
+    }
+
+    public function test_active_finance_blocks_legacy_manual_receipt_without_changing_balance(): void
+    {
+        $this->activate();
+        Db::name('customer')->where('tenant_id', self::TENANT_ID)->where('id', $this->customerId)->update(['order_receivable' => '1000']);
+        self::assertFalse(\app\api\jxc\logic\CustomerLogic::paymoney(['customer_id' => $this->customerId, 'money' => '100']));
+        self::assertStringContainsString('财务收付款', \app\api\jxc\logic\CustomerLogic::getError());
+        self::assertSame('1000.00', (new FinanceLedger(self::TENANT_ID))->source($this->receivable)['balance']);
+        self::assertSame('1000.00', Db::name('customer')->where('id', $this->customerId)->value('order_receivable'));
+    }
+
+    public function test_sales_reduction_after_partial_collection_keeps_credit_refund_and_original_history(): void
+    {
+        $this->activate(); $fixture = $this->deliveredSale();
+        $command = ['due_date_reviewed' => 1, 'due_override_reason' => '经核实本笔未约定付款日', 'order_id' => $fixture['order_id'], 'expected_version' => 0, 'idempotency_key' => 'finance-sales-credit-first',
+            'lines' => [['order_goods_id' => $fixture['line_id'], 'customer_settlement_weight' => '2', 'pricing_unit_id' => $fixture['unit_id'], 'price' => '10']]];
+        $first = SalesSettlementLogic::submit($command); self::assertNotFalse($first, SalesSettlementLogic::getError());
+        $source = $first['finance']['source_ref'];
+        $payload = $this->receipt('12', '12'); $payload['allocations'][0]['source'] = $source;
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $payload]));
+        $command['expected_version'] = 1; $command['idempotency_key'] = 'finance-sales-credit-second';
+        $command['lines'][0]['price'] = '5'; $command['edit_reason'] = '按真实成交价格更正，贷项先抵本单剩余';
+        $command['credit_reviewed'] = 1; $command['credit_allocations'] = [['source' => $source, 'amount' => '8']];
+        $second = SalesSettlementLogic::submit($command); self::assertNotFalse($second, SalesSettlementLogic::getError());
+        $ledger = new FinanceLedger(self::TENANT_ID);
+        self::assertSame('0.00', $ledger->source($source)['balance']);
+        self::assertSame('2.00', $ledger->source($second['finance']['customer_refund_ref'])['balance']);
+        self::assertSame('5012.00', $ledger->account($this->accountId)['balance']);
+        self::assertEquals(10, Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('metric', 'revenue')->sum('amount'));
+        self::assertSame('20.00', Db::name('sales_order_version')->where('tenant_id', self::TENANT_ID)->where('order_id', $fixture['order_id'])->where('version', 1)->value('order_money'));
+        self::assertSame($second, SalesSettlementLogic::submit($command));
+    }
+
+    public function test_overdue_acknowledgement_is_required_and_partial_receipt_keeps_original_due_date(): void
+    {
+        $this->activate(); $ledger = new FinanceLedger(self::TENANT_ID);
+        $due = date('Y-m-d', strtotime('-1 day'));
+        $overdueSource = $ledger->createSource(900, 'receivable', $this->customerId, '100', date('Y-m-01'), $due, []);
+        $fixture = $this->deliveredSale();
+        $command = ['due_date_reviewed' => 1, 'due_override_reason' => '经核实本笔未约定付款日', 'order_id' => $fixture['order_id'], 'expected_version' => 0, 'idempotency_key' => 'finance-overdue-new-sale',
+            'lines' => [['order_goods_id' => $fixture['line_id'], 'customer_settlement_weight' => '2', 'pricing_unit_id' => $fixture['unit_id'], 'price' => '10']]];
+        self::assertFalse(SalesSettlementLogic::submit($command));
+        self::assertStringContainsString('逾期', SalesSettlementLogic::getError());
+        self::assertSame(0, Db::name('finance_sales_version')->where('tenant_id', self::TENANT_ID)->count());
+        $detail = SalesSettlementLogic::detail(['id' => $fixture['order_id']]);
+        self::assertSame('100.00', $detail['finance']['overdue']['amount']);
+        self::assertSame(1, $detail['finance']['overdue']['days']);
+        $command['overdue_acknowledged'] = 1;
+        self::assertNotFalse(SalesSettlementLogic::submit($command), SalesSettlementLogic::getError());
+        $payload = $this->receipt('40', '40'); $payload['allocations'][0]['source'] = $overdueSource;
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $payload]));
+        self::assertSame('60.00', \app\api\jxc\logic\FinanceCustomers::overdue($this->customerId)['amount']);
+        self::assertSame($due, $ledger->source($overdueSource)['due_date']);
+    }
+
+    public function test_historical_sale_adjustment_requires_explicit_opening_link_and_only_posts_delta(): void
+    {
+        $this->activate(); $fixture = $this->deliveredSale();
+        Db::name('sales_order')->where('id', $fixture['order_id'])->update(['settlement_version' => 1, 'settlement_status' => 'formal',
+            'order_money' => '20', 'goods_amount' => '20', 'datetimesingle' => strtotime(date('Y-m-01') . ' -1 day')]);
+        $command = ['order_id' => $fixture['order_id'], 'expected_version' => 1, 'idempotency_key' => 'finance-historical-sale-link', 'edit_reason' => '原销售已包含期初汇总，核对成交价后调增',
+            'lines' => [['order_goods_id' => $fixture['line_id'], 'customer_settlement_weight' => '2', 'pricing_unit_id' => $fixture['unit_id'], 'price' => '15']]];
+        self::assertFalse(SalesSettlementLogic::submit($command));
+        self::assertStringContainsString('期初', SalesSettlementLogic::getError());
+        $command += ['opening_link_reviewed' => 1, 'opening_source' => $this->receivable];
+        $result = SalesSettlementLogic::submit($command); self::assertNotFalse($result, SalesSettlementLogic::getError());
+        self::assertSame('10.00', $result['finance']['amount_change']);
+        self::assertSame('1010.00', (new FinanceLedger(self::TENANT_ID))->source($this->receivable)['balance']);
+        self::assertSame(0, Db::name('finance_source')->where('tenant_id', self::TENANT_ID)->where('category', 'receivable')->count());
+        self::assertEquals(10, Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('metric', 'revenue')->sum('amount'));
+        self::assertSame($result, SalesSettlementLogic::submit($command));
+    }
+
+    public function test_sales_credit_over_allocation_rolls_back_order_version_sources_and_entries(): void
+    {
+        $this->activate(); $fixture = $this->deliveredSale();
+        $command = ['due_date_reviewed' => 1, 'due_override_reason' => '经核实本笔未约定付款日', 'order_id' => $fixture['order_id'], 'expected_version' => 0, 'idempotency_key' => 'finance-credit-over-first',
+            'lines' => [['order_goods_id' => $fixture['line_id'], 'customer_settlement_weight' => '2', 'pricing_unit_id' => $fixture['unit_id'], 'price' => '10']]];
+        $first = SalesSettlementLogic::submit($command); self::assertNotFalse($first, SalesSettlementLogic::getError());
+        $command['expected_version'] = 1; $command['idempotency_key'] = 'finance-credit-over-second'; $command['edit_reason'] = '核实成交价更正';
+        $command['lines'][0]['price'] = '5'; $command['credit_reviewed'] = 1;
+        $command['credit_allocations'] = [['source' => $first['finance']['source_ref'], 'amount' => '11']];
+        self::assertFalse(SalesSettlementLogic::submit($command));
+        self::assertStringContainsString('超过', SalesSettlementLogic::getError());
+        self::assertSame('20.00', (new FinanceLedger(self::TENANT_ID))->source($first['finance']['source_ref'])['balance']);
+        self::assertSame(0, Db::name('finance_source')->where('tenant_id', self::TENANT_ID)->where('category', 'customer_refund')->count());
+        self::assertSame(1, (int)Db::name('sales_order')->where('id', $fixture['order_id'])->value('settlement_version'));
+    }
+
+    public function test_customer_due_rules_are_versioned_and_single_sale_override_keeps_default_and_reason(): void
+    {
+        $this->activate(); $fixture = $this->deliveredSale();
+        $command = $this->command(0) + ['customer_id' => $this->customerId, 'mode' => 'days_after', 'days' => '7', 'reason' => '客户约定交付后一周付款'];
+        $rule = \app\api\jxc\logic\FinanceSalesRules::save($command);
+        request()->adminInfo = array_merge((array)request()->adminInfo, ['name' => '更改后的显示名称']);
+        self::assertSame($rule, \app\api\jxc\logic\FinanceSalesRules::save($command));
+        $saleCommand = ['order_id' => $fixture['order_id'], 'expected_version' => 0, 'idempotency_key' => 'finance-rule-default-sale',
+            'lines' => [['order_goods_id' => $fixture['line_id'], 'customer_settlement_weight' => '2', 'pricing_unit_id' => $fixture['unit_id'], 'price' => '10']]];
+        $sale = SalesSettlementLogic::submit($saleCommand); self::assertNotFalse($sale, SalesSettlementLogic::getError());
+        $ledger = new FinanceLedger(self::TENANT_ID); $source = $ledger->source($sale['finance']['source_ref']);
+        self::assertSame(date('Y-m-d', strtotime('+7 days')), $source['due_date']);
+        \app\api\jxc\logic\FinanceSalesRules::save($this->command(1) + ['customer_id' => $this->customerId, 'mode' => 'delivery', 'reason' => '以后现结']);
+        self::assertSame($source['due_date'], $ledger->source($source['reference'])['due_date']);
+        self::assertSame(2, Db::name('finance_customer_terms')->where('tenant_id', self::TENANT_ID)->count());
+        $fixture2 = $this->deliveredSale(); $saleCommand['order_id'] = $fixture2['order_id']; $saleCommand['lines'][0]['order_goods_id'] = $fixture2['line_id'];
+        $saleCommand['lines'][0]['pricing_unit_id'] = $fixture2['unit_id']; $saleCommand['idempotency_key'] = 'finance-rule-override-sale';
+        $saleCommand['due_date_reviewed'] = 1; $saleCommand['due_date'] = null;
+        self::assertFalse(SalesSettlementLogic::submit($saleCommand), '覆盖为未约定仍需依据');
+        $saleCommand['due_override_reason'] = '本次待客户内部核对后再约定';
+        $sale = SalesSettlementLogic::submit($saleCommand); self::assertNotFalse($sale, SalesSettlementLogic::getError());
+        $source = $ledger->source($sale['finance']['source_ref']);
+        self::assertNull($source['due_date']); self::assertSame(date('Y-m-d'), $source['snapshot']['due_terms']['default_due_date']);
+        self::assertSame($saleCommand['due_override_reason'], $source['snapshot']['due_override_reason']);
+    }
+
+    public function test_weight_approval_requires_its_own_current_overdue_acknowledgement(): void
+    {
+        $this->activate(); $fixture = $this->deliveredSale();
+        $command = ['order_id' => $fixture['order_id'], 'expected_version' => 0, 'idempotency_key' => 'finance-weight-pending',
+            'lines' => [['order_goods_id' => $fixture['line_id'], 'customer_settlement_weight' => '1.5', 'pricing_unit_id' => $fixture['unit_id'], 'price' => '10']]];
+        $pending = SalesSettlementLogic::submit($command); self::assertNotFalse($pending, SalesSettlementLogic::getError());
+        self::assertSame(0, Db::name('finance_sales_version')->where('tenant_id', self::TENANT_ID)->count());
+        (new FinanceLedger(self::TENANT_ID))->createSource(900, 'receivable', $this->customerId, '100', date('Y-m-01'), date('Y-m-d', strtotime('-1 day')), []);
+        $todo = Db::name('sales_weight_difference_todo')->where('tenant_id', self::TENANT_ID)->where('order_id', $fixture['order_id'])->value('id');
+        $approve = ['id' => $todo, 'decision' => 'approve', 'reason' => '与客户核对实际按1.5斤计价', 'idempotency_key' => 'finance-weight-approve'];
+        self::assertFalse(SalesSettlementLogic::resolveWeightDifference($approve)); self::assertStringContainsString('逾期', SalesSettlementLogic::getError());
+        $approve['overdue_acknowledged'] = 1;
+        $result = SalesSettlementLogic::resolveWeightDifference($approve); self::assertNotFalse($result, SalesSettlementLogic::getError());
+        self::assertSame($result, SalesSettlementLogic::resolveWeightDifference($approve));
+        $snapshot = json_decode(Db::name('sales_settlement_action')->where('tenant_id', self::TENANT_ID)->where('idempotency_key', $approve['idempotency_key'])->value('snapshot_json'), true);
+        self::assertTrue($snapshot['overdue_acknowledged']);
+    }
+
+    public function test_historical_sales_credit_posts_both_sides_in_confirmation_month_even_when_activation_month_open(): void
+    {
+        $this->activate(); $fixture = $this->deliveredSale();
+        $activation = date('Y-m-01', strtotime('first day of previous month'));
+        Db::name('finance_preparation')->where('tenant_id', self::TENANT_ID)->update(['activation_date' => $activation]);
+        Db::name('sales_order')->where('id', $fixture['order_id'])->update(['settlement_version' => 1, 'settlement_status' => 'formal',
+            'order_money' => '20', 'goods_amount' => '20', 'datetimesingle' => strtotime($activation . ' -1 day')]);
+        $command = ['order_id' => $fixture['order_id'], 'expected_version' => 1, 'idempotency_key' => 'finance-historical-credit-month', 'edit_reason' => '按凭据调减已承接旧销售',
+            'opening_link_reviewed' => 1, 'opening_source' => $this->receivable, 'credit_reviewed' => 1, 'credit_allocations' => [['source' => $this->receivable, 'amount' => '10']],
+            'lines' => [['order_goods_id' => $fixture['line_id'], 'customer_settlement_weight' => '2', 'pricing_unit_id' => $fixture['unit_id'], 'price' => '5']]];
+        $result = SalesSettlementLogic::submit($command); self::assertNotFalse($result, SalesSettlementLogic::getError());
+        $months = Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('document_id', $result['finance']['document_id'])->column('posting_month');
+        self::assertCount(3, $months); self::assertSame([date('Y-m')], array_values(array_unique($months)));
+    }
+
+    public function test_sales_billing_permission_does_not_grant_due_date_override_or_customer_rule_changes(): void
+    {
+        $this->activate(); $fixture = $this->deliveredSale();
+        $employee = WorkforceLogic::saveEmployee(['name' => '仅销售结算', 'mobile' => '13800009929', 'bind_user_id' => 996929,
+            'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['settlement.view', 'settlement.bill']]);
+        self::assertNotFalse($employee, WorkforceLogic::getError());
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996929; request()->adminId = 0;
+        $command = ['order_id' => $fixture['order_id'], 'expected_version' => 0, 'idempotency_key' => 'finance-employee-due-override',
+            'due_date' => date('Y-m-d', strtotime('+1 day')), 'due_override_reason' => '希望延后一天',
+            'lines' => [['order_goods_id' => $fixture['line_id'], 'customer_settlement_weight' => '2', 'pricing_unit_id' => $fixture['unit_id'], 'price' => '10']]];
+        self::assertFalse(SalesSettlementLogic::submit($command)); self::assertStringContainsString('权限', SalesSettlementLogic::getError());
+        unset($command['due_date'], $command['due_override_reason']);
+        self::assertNotFalse(SalesSettlementLogic::submit($command), SalesSettlementLogic::getError());
+        $this->expectException(\DomainException::class); $this->expectExceptionMessage('最高权限');
+        \app\api\jxc\logic\FinanceSalesRules::save($this->command(0) + ['customer_id' => $this->customerId, 'mode' => 'unagreed', 'reason' => '试图修改规则']);
+    }
+
+    private function deliveredSale(): array
+    {
+        $unit = $this->createCustomerReportUnit('斤');
+        $warehouse = $this->createCustomerReportWarehouse('已交付核算仓');
+        $goods = $this->createCustomerReportGoods('已交付商品', 'FINANCE-SALE', '斤');
+        $sku = $this->customerReportSkuId($goods); $now = time();
+        Db::name('goods')->where('id', $goods)->update(['unit_id' => $unit]);
+        Db::name('goods_sku')->where('id', $sku)->update(['base_unit_id' => $unit, 'base_unit_name' => '斤']);
+        Db::name('goods_units_binding')->insert(['tenant_id' => self::TENANT_ID, 'goods_id' => $goods, 'unit_id' => $unit, 'unit_name' => '斤', 'is_base_unit' => 1, 'sort' => 0, 'status' => 1, 'create_time' => $now, 'update_time' => $now]);
+        $order = (int)Db::name('sales_order')->insertGetId(['tenant_id' => self::TENANT_ID, 'order_sn' => 'FINANCE-SALE-' . uniqid(), 'customer_id' => $this->customerId,
+            'customer_name' => '收款主客户', 'warehouse_id' => $warehouse, 'order_money' => '0', 'order_pay_money' => '0', 'order_arrears_money' => '0',
+            'datetimesingle' => $now, 'source_type' => 'customer_report', 'source_id' => random_int(100000, 900000), 'source_version' => 1,
+            'settlement_status' => 'pending', 'cost_status' => 'pending', 'profit_status' => 'pending_settlement', 'status' => 1,
+            'purpose_type' => 'sales', 'remarks' => '', 'admin_id' => self::ADMIN_ID, 'idempotent_key' => '', 'create_time' => $now, 'update_time' => $now]);
+        $line = (int)Db::name('order_goods')->insertGetId(['tenant_id' => self::TENANT_ID, 'order_id' => $order, 'order_type' => 'sales', 'goods_id' => $goods,
+            'sku_id' => $sku, 'sku_name' => '默认规格', 'supplier_relation_id' => 0, 'name' => '已交付商品', 'units' => '斤', 'number' => '2', 'base_quantity' => '2',
+            'price' => '0', 'amount' => '0', 'pricing_unit_id' => 0, 'source_line_type' => 'customer_report_item', 'source_line_id' => random_int(100000, 900000),
+            'remark' => '', 'sort' => 1, 'create_time' => $now, 'update_time' => $now]);
+        return ['order_id' => $order, 'line_id' => $line, 'unit_id' => $unit];
+    }
+
     private function activate(string $accountType = 'cash'): void
     {
         $account = FinanceSetupLogic::saveAccount($this->command(0) + ['name' => '经营账户', 'account_type' => $accountType]);
@@ -383,6 +590,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
     private function clean(): void
     {
+        Db::name('finance_customer_terms')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         foreach (Db::name('finance_evidence')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->select()->toArray() as $proof) {
             $snapshot = json_decode($proof['snapshot'], true); $key = $snapshot['storage_key'] ?? '';
             if (preg_match('/^[a-f0-9]{48}\.(png|jpg|webp)$/D', $key)) {
@@ -390,7 +598,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
                 if (is_file($file)) { unlink($file); }
             }
         }
-        foreach (['finance_transaction_identity', 'finance_correction', 'finance_evidence', 'finance_period', 'finance_money_transaction', 'finance_entry', 'finance_source', 'finance_command', 'finance_document',
+        foreach (['finance_sales_version', 'finance_transaction_identity', 'finance_correction', 'finance_evidence', 'finance_period', 'finance_money_transaction', 'finance_entry', 'finance_source', 'finance_command', 'finance_document',
             'finance_opening_item_detail', 'finance_opening_source', 'finance_opening_item', 'finance_opening_book', 'finance_setup_action', 'finance_account', 'finance_preparation'] as $table) {
             Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         }

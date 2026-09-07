@@ -369,6 +369,7 @@ final class SalesSettlementLogic extends BaseLogic
         for ($attempt = 0; $attempt < 3; $attempt++) {
             try {
                 $result = Db::transaction(function () use ($request, $fingerprint) {
+                    FinanceIntegration::lock();
                     $order = Db::name('sales_order')->where('tenant_id', self::tenantId())
                         ->where('id', $request['order_id'])->lock(true)->find();
                     if (!$order || (string)($order['source_type'] ?? '') !== 'customer_report') {
@@ -474,9 +475,9 @@ final class SalesSettlementLogic extends BaseLogic
                     return $committed;
                 }
                 if (!self::hasError()) {
-                    self::setError(isset($_SERVER['JXC_PHPUNIT_ENV'])
+                    self::setError($exception instanceof \DomainException ? $exception->getMessage() : (isset($_SERVER['JXC_PHPUNIT_ENV'])
                         ? '销售结算失败，事务已回滚：' . $exception->getMessage()
-                        : '销售结算失败，事务已回滚');
+                        : '销售结算失败，事务已回滚'));
                 }
                 return false;
             }
@@ -498,6 +499,7 @@ final class SalesSettlementLogic extends BaseLogic
         $reason = trim((string)($params['reason'] ?? ''));
         $inventoryReason = trim((string)($params['inventory_exception_reason'] ?? ''));
         $inventoryConfirmed = (int)($params['inventory_second_confirmed'] ?? 0) === 1;
+        $overdueAcknowledged = (int)($params['overdue_acknowledged'] ?? 0) === 1;
         $key = trim((string)($params['idempotency_key'] ?? ''));
         if ($todoId === false || !in_array($decision, ['approve', 'reject'], true)
             || $reason === '' || mb_strlen($reason) > 500 || mb_strlen($inventoryReason) > 500
@@ -508,6 +510,7 @@ final class SalesSettlementLogic extends BaseLogic
         $canonical = ['todo_id' => $todoId, 'decision' => $decision, 'reason' => $reason,
             'inventory_exception_reason' => $inventoryReason,
             'inventory_second_confirmed' => $inventoryConfirmed];
+        if ($overdueAcknowledged) { $canonical['overdue_acknowledged'] = true; }
         $fingerprint = self::fingerprint($canonical);
         $existing = self::actionByKey($key);
         if ($existing) {
@@ -522,7 +525,8 @@ final class SalesSettlementLogic extends BaseLogic
 
         for ($attempt = 0; $attempt < 3; $attempt++) {
             try {
-                $result = Db::transaction(function () use ($located, $todoId, $decision, $reason, $inventoryReason, $inventoryConfirmed, $key, $fingerprint) {
+                $result = Db::transaction(function () use ($located, $todoId, $decision, $reason, $inventoryReason, $inventoryConfirmed, $overdueAcknowledged, $key, $fingerprint) {
+                    FinanceIntegration::lock();
                     $order = Db::name('sales_order')->where('tenant_id', self::tenantId())
                         ->where('id', (int)$located['order_id'])->lock(true)->find();
                     if (!$order) {
@@ -563,6 +567,8 @@ final class SalesSettlementLogic extends BaseLogic
                     if ($inventoryConfirmed) {
                         $snapshot['inventory_second_confirmed'] = true;
                     }
+                    // 审批人为真正确认人，不能继承经办人此前的逾期知晓。
+                    $snapshot['overdue_acknowledged'] = $overdueAcknowledged;
                     $now = time();
                     $actionId = (int)Db::name('sales_settlement_action')->insertGetId([
                         'tenant_id' => self::tenantId(),
@@ -573,7 +579,7 @@ final class SalesSettlementLogic extends BaseLogic
                         'expected_version' => (int)$proposal['expected_version'],
                         'target_version' => (int)$proposal['target_version'],
                         'status' => 'processing',
-                        'snapshot_json' => (string)$proposal['snapshot_json'],
+                        'snapshot_json' => self::json($snapshot),
                         'result_json' => null,
                         'operator_id' => self::operatorId(),
                         'create_time' => $now,
@@ -637,9 +643,9 @@ final class SalesSettlementLogic extends BaseLogic
                     return $committed;
                 }
                 if (!self::hasError()) {
-                    self::setError(isset($_SERVER['JXC_PHPUNIT_ENV'])
+                    self::setError($exception instanceof \DomainException ? $exception->getMessage() : (isset($_SERVER['JXC_PHPUNIT_ENV'])
                         ? '计费重量差处理失败，事务已回滚：' . $exception->getMessage()
-                        : '计费重量差处理失败，事务已回滚');
+                        : '计费重量差处理失败，事务已回滚'));
                 }
                 return false;
             }
@@ -675,7 +681,11 @@ final class SalesSettlementLogic extends BaseLogic
 
         $previousMoney = $currentVersion > 0 ? self::money((string)$order['order_money']) : '0.00';
         $delta = bcsub($snapshot['order_money'], $previousMoney, self::MONEY_SCALE);
-        if (bccomp($delta, '0.00', self::MONEY_SCALE) > 0) {
+        $finance = FinanceIntegration::active() ? FinanceSales::post($order, $snapshot, $actionId) : null;
+        if ($finance) {
+            Db::name('customer')->where('tenant_id', self::tenantId())->where('id', (int)$order['customer_id'])
+                ->update(['order_receivable' => $finance['debt_after_order'], 'update_time' => time()]);
+        } elseif (bccomp($delta, '0.00', self::MONEY_SCALE) > 0) {
             if (!FinanceService::addReceivableWithinTransaction(
                 (int)$order['customer_id'], $delta, (int)$order['id'], 'sales', (string)$order['order_sn'],
                 '销售结算V' . $targetVersion . '应收增加'
@@ -770,6 +780,7 @@ final class SalesSettlementLogic extends BaseLogic
             'order_id' => (int)$order['id'],
             'order_sn' => (string)$order['order_sn'],
             'settlement_status' => 'formal',
+            'finance' => $finance,
             'version' => $targetVersion,
             'goods_amount' => $snapshot['goods_amount'],
             'rounding_amount' => $snapshot['rounding_amount'],
@@ -1065,6 +1076,15 @@ final class SalesSettlementLogic extends BaseLogic
             'edit_reason' => $request['edit_reason'],
             'inventory_exception_reason' => $request['inventory_exception_reason'],
             'inventory_second_confirmed' => $request['inventory_second_confirmed'],
+            'due_date' => $request['due_date'] ?? null,
+            'due_terms' => FinanceIntegration::active() ? FinanceSalesRules::terms((int)$order['customer_id'], date('Y-m-d', (int)$order['datetimesingle'])) : null,
+            'due_date_reviewed' => $request['due_date_reviewed'] ?? false,
+            'due_override_reason' => $request['due_override_reason'] ?? '',
+            'credit_reviewed' => $request['credit_reviewed'] ?? false,
+            'overdue_acknowledged' => $request['overdue_acknowledged'] ?? false,
+            'opening_link_reviewed' => $request['opening_link_reviewed'] ?? false,
+            'opening_source' => $request['opening_source'] ?? '',
+            'credit_allocations' => $request['credit_allocations'] ?? [],
         ];
     }
 
@@ -1116,6 +1136,8 @@ final class SalesSettlementLogic extends BaseLogic
     /** @return array<string,mixed>|false */
     private static function normalizeSubmitRequest(array $params): array|false
     {
+        try { $dueDate = FinanceValue::date($params['due_date'] ?? null, true); }
+        catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
         $orderId = self::positiveInteger($params['order_id'] ?? null);
         $expectedVersion = self::nonNegativeInteger($params['expected_version'] ?? null);
         $key = trim((string)($params['idempotency_key'] ?? ''));
@@ -1191,6 +1213,16 @@ final class SalesSettlementLogic extends BaseLogic
             'edit_reason' => $editReason,
             'inventory_exception_reason' => $inventoryExceptionReason,
             'inventory_second_confirmed' => (int)($params['inventory_second_confirmed'] ?? 0) === 1,
+            ...array_filter([
+            'due_date' => $dueDate,
+            'due_date_reviewed' => (int)($params['due_date_reviewed'] ?? 0) === 1,
+            'due_override_reason' => $params['due_override_reason'] ?? '',
+            'credit_reviewed' => (int)($params['credit_reviewed'] ?? 0) === 1,
+            'overdue_acknowledged' => (int)($params['overdue_acknowledged'] ?? 0) === 1,
+            'opening_link_reviewed' => (int)($params['opening_link_reviewed'] ?? 0) === 1,
+            'opening_source' => is_string($params['opening_source'] ?? '') ? ($params['opening_source'] ?? '') : '',
+            'credit_allocations' => $params['credit_allocations'] ?? [],
+            ], static fn($value): bool => $value !== null && $value !== '' && $value !== false && $value !== []),
             'lines' => $lines,
         ];
     }
@@ -1250,6 +1282,7 @@ final class SalesSettlementLogic extends BaseLogic
             'order_sn' => (string)$order['order_sn'],
             'customer_id' => (int)$order['customer_id'],
             'customer_name' => (string)$order['customer_name'],
+            'finance' => FinanceCustomers::salesContext($order),
             ...$customerIdentity,
             'warehouse_id' => (int)$order['warehouse_id'],
             'settlement_status' => (string)($order['settlement_status'] ?? 'formal'),

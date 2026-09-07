@@ -144,6 +144,7 @@ final class FinanceBusinessLogic extends BaseLogic
             $column = ['customer' => 'customer_name', 'vendor' => 'supplier_name', 'employee' => 'name'][$policy['subject']];
             $query = Db::name($policy['subject'])->where('tenant_id', FinanceAccess::tenant());
             if ($policy['subject'] === 'customer') { $query->where('parent_id', 0); }
+            if (!empty($params['id'])) { $query->where('id', FinanceValue::id($params['id'])); }
             $keyword = FinanceValue::text($params['keyword'] ?? '', 60, false);
             if ($keyword !== '') { $query->whereLike($column, '%' . addcslashes($keyword, '%_\\') . '%'); }
             $page = FinanceValue::id($params['page'] ?? 1);

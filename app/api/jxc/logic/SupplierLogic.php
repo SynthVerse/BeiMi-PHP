@@ -240,6 +240,11 @@ class SupplierLogic extends BaseLogic
 
         Db::startTrans();
         try {
+            if (FinanceIntegration::lock()) {
+                self::setError('财务已启用，请通过财务收付款核对付款来源与账户');
+                Db::rollback();
+                return false;
+            }
             $model = Vendor::where('id', $supplierId)
                 ->where('tenant_id', $tenantId)
                 ->lock(true)

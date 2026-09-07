@@ -67,14 +67,16 @@ final class FinanceLedger
         return $account;
     }
 
-    public function sourcePage(array $categories, int $subjectId, int $page): array
+    public function sourcePage(array $categories, int $subjectId, int $page, bool $openingOnly = false): array
     {
         $changes = Db::name('finance_entry')->where('tenant_id', $this->tenantId)->where('metric', 'balance')
             ->field('source_ref,SUM(amount) AS delta')->group('source_ref')->buildSql();
         $parts = [];
         foreach (['o' => 'finance_opening_source', 'n' => 'finance_source'] as $kind => $table) {
+            if ($openingOnly && $kind !== 'o') { continue; }
             $query = Db::name($table)->alias('s')->leftJoin([$changes => 'b'], "b.source_ref=CONCAT('{$kind}:',s.id)")
-                ->where('s.tenant_id', $this->tenantId)->whereIn('s.category', $categories)->whereRaw('s.amount+COALESCE(b.delta,0)>0');
+                ->where('s.tenant_id', $this->tenantId)->whereIn('s.category', $categories);
+            if (!$openingOnly) { $query->whereRaw('s.amount+COALESCE(b.delta,0)>0'); }
             if ($subjectId) { $query->where('s.subject_id', $subjectId); }
             $parts[] = $query->field("'{$kind}' AS source_kind,s.id AS source_id,CONCAT('{$kind}:',s.id) AS reference,s.category,s.subject_id,s.amount AS confirmed_amount,s.amount+COALESCE(b.delta,0) AS balance," .
                 ($kind === 'o' ? 's.source_snapshot AS snapshot,NULL AS business_date,NULL AS due_date,NULL AS document_id' : 's.snapshot,s.business_date,s.due_date,s.document_id'))->buildSql();
@@ -88,6 +90,20 @@ final class FinanceLedger
             unset($row['source_kind'], $row['source_id']);
         }
         return ['sources' => $rows, 'has_more' => $more];
+    }
+
+    public function categoryBalance(string $category, int $subjectId): string
+    {
+        $changes = Db::name('finance_entry')->where('tenant_id', $this->tenantId)->where('metric', 'balance')
+            ->field('source_ref,SUM(amount) AS delta')->group('source_ref')->buildSql();
+        $total = '0.00';
+        foreach (['o' => 'finance_opening_source', 'n' => 'finance_source'] as $kind => $table) {
+            $row = Db::name($table)->alias('s')->leftJoin([$changes => 'b'], "b.source_ref=CONCAT('{$kind}:',s.id)")
+                ->where('s.tenant_id', $this->tenantId)->where('s.category', $category)->where('s.subject_id', $subjectId)
+                ->field('COALESCE(SUM(s.amount+COALESCE(b.delta,0)),0) AS balance')->find();
+            $total = bcadd($total, (string)$row['balance'], 2);
+        }
+        return $total;
     }
 
     public function createSource(int $documentId, string $category, int $subjectId, string $amount, ?string $date, ?string $dueDate, array $snapshot): string
@@ -114,6 +130,14 @@ final class FinanceLedger
     }
 
     /** 核销的日期与入账期间分开保存，期初日期未知时不伪造及时付款结论。 */
+    public function allocationTiming(array $source, ?string $receiptDate): array
+    {
+        $activation = (string)Db::name('finance_preparation')->where('tenant_id', $this->tenantId)->value('activation_date');
+        $effective = $receiptDate && $source['business_date'] ? max($receiptDate, $source['business_date']) : null;
+        $date = $receiptDate ?? $activation;
+        return ['date' => $date, 'effective_date' => $effective, 'month' => $this->postingMonth(max($effective ?? $date, $activation))];
+    }
+
     public function allocate(int $documentId, array $lines, array $categories, int $subjectId, string $date, string $month, bool $unknownReceiptDate = false): string
     {
         if (!array_is_list($lines) || count($lines) > 200) { throw new \DomainException('核销组成须为不超过200项的明细'); }
@@ -126,10 +150,8 @@ final class FinanceLedger
             $amount = FinanceValue::money($line['amount'] ?? null);
             $source = $this->source($reference);
             if (!in_array($source['category'], $categories, true) || $source['subject_id'] !== $subjectId) { throw new \DomainException('核销来源业务类型或往来主体不匹配'); }
-            $effective = !$unknownReceiptDate && $source['business_date'] ? max($date, $source['business_date']) : null;
-            $activation = (string)Db::name('finance_preparation')->where('tenant_id', $this->tenantId)->value('activation_date');
-            $allocationMonth = $this->postingMonth(max($effective ?? $date, $activation));
-            $this->add($documentId, 'balance', $subjectId, '-' . $amount, $date, $allocationMonth, 'allocation', $reference, $effective);
+            $timing = $this->allocationTiming($source, $unknownReceiptDate ? null : $date);
+            $this->add($documentId, 'balance', $subjectId, '-' . $amount, $timing['date'], $timing['month'], 'allocation', $reference, $timing['effective_date']);
             $total = bcadd($total, $amount, 2);
         }
         return $total;
