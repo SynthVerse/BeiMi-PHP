@@ -108,7 +108,23 @@ final class FinanceBusinessLogic extends BaseLogic
             $categories = $type === 'advance_allocate' && ($params['role'] ?? '') === 'fund' ? ['advance'] : $policy['sources'];
             $page = max(1, FinanceValue::id($params['page'] ?? 1));
             $sources = $ledger->sourcePage($categories, $subjectId, $page);
-            if (!empty($params['source'])) {
+            if ($type === 'receipt_return') {
+                $sources = ['sources' => [], 'has_more' => false, 'receipt_choices' => []];
+                if (!empty($params['receipt_id'])) {
+                    $returned = (new FinanceReceiptReturns(FinanceAccess::tenant(), $ledger))->options(FinanceValue::id($params['receipt_id']));
+                    if ($returned['subject_id'] !== $subjectId) { throw new \DomainException('原收款不属于所选客户'); }
+                    $sources += ['receipt' => $returned]; $sources['sources'] = $returned['sources'];
+                } elseif ($subjectId) {
+                    $replaced = Db::name('finance_correction')->where('tenant_id', FinanceAccess::tenant())->field('original_document_id')->buildSql();
+                    $receipts = Db::name('finance_document')->where('tenant_id', FinanceAccess::tenant())->where('type', 'receipt')->where('status', 'confirmed')
+                        ->whereRaw('id NOT IN ' . $replaced)->whereRaw("CAST(JSON_UNQUOTE(JSON_EXTRACT(payload,'$.subject_id')) AS UNSIGNED)=?", [$subjectId])
+                        ->whereRaw("JSON_EXTRACT(confirmed_result,'$.money.transaction_id') IS NOT NULL")
+                        ->order('id', 'desc')->limit(($page - 1) * 20, 21)->select()->toArray();
+                    $sources['has_more'] = count($receipts) > 20;
+                    foreach (array_slice($receipts, 0, 20) as $receipt) { $result = FinanceValue::decode($receipt['confirmed_result']); $sources['receipt_choices'][] = ['id' => (int)$receipt['id'], 'amount' => $result['money']['amount'], 'actual_date' => $result['money']['actual_date']]; }
+                }
+            }
+            if (!empty($params['source']) && $type !== 'receipt_return') {
                 $selected = $ledger->source(FinanceValue::text($params['source'], 40));
                 if (!in_array($selected['category'], $categories, true) || $selected['subject_id'] !== $subjectId || bccomp($selected['balance'], '0', 2) <= 0) { throw new \DomainException('指定来源已结清或不属于本对象和业务类型'); }
                 $sources['selected_source'] = $selected;
@@ -116,6 +132,7 @@ final class FinanceBusinessLogic extends BaseLogic
             return ['tenant_id' => FinanceAccess::tenant(), 'type' => $type, 'policy' => $policy,
                 'active' => Db::name('finance_opening_book')->where('tenant_id', FinanceAccess::tenant())->value('status') === 'active',
                 'can_confirm' => FinanceAccess::owner() || (!$policy['owner'] && FinanceAccess::has($policy['confirm'])),
+                'can_return_receipt' => $type === 'receipt' && FinanceAccess::has('finance.refund.prepare'),
                 'accounts' => $accounts] + $sources;
         } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
     }
@@ -145,7 +162,7 @@ final class FinanceBusinessLogic extends BaseLogic
             $type = FinanceValue::text($params['type'] ?? '', 40); FinanceDocumentPolicy::authorize($type);
             $page = FinanceValue::id($params['page'] ?? 1);
             $query = Db::name('finance_document')->where('tenant_id', FinanceAccess::tenant())->where('type', $type);
-            if (!empty($params['subject_id'])) { $query->whereRaw("JSON_EXTRACT(payload,'$.subject_id')=?", [FinanceValue::id($params['subject_id'])]); }
+            if (!empty($params['subject_id'])) { $query->whereRaw("CAST(JSON_UNQUOTE(JSON_EXTRACT(payload,'$.subject_id')) AS UNSIGNED)=?", [FinanceValue::id($params['subject_id'])]); }
             $rows = $query->order('id', 'desc')->page($page, 20)->select()->toArray();
             return ['tenant_id' => FinanceAccess::tenant(), 'lists' => array_map(self::present(...), $rows), 'page' => $page, 'has_more' => count($rows) === 20];
         } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }

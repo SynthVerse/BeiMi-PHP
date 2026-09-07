@@ -58,7 +58,7 @@ final class FinanceCustomerBalances
             $source['overdue_days'] = $category === 'receivable' && $source['due_date'] && $source['due_date'] < date('Y-m-d') ? (int)(new \DateTimeImmutable($source['due_date']))->diff(new \DateTimeImmutable(date('Y-m-d')))->days : 0;
         }
         $actions = [];
-        foreach (['receipt', 'advance_allocate', 'customer_refund', 'advance_refund', 'bad_debt', 'recovery_receipt', 'recovery_termination', 'receivable_due'] as $type) {
+        foreach (['receipt', 'receipt_return', 'advance_allocate', 'customer_refund', 'advance_refund', 'bad_debt', 'recovery_receipt', 'recovery_termination', 'receivable_due'] as $type) {
             try { $policy = FinanceDocumentPolicy::authorize($type); $actions[] = ['type' => $type, 'title' => $policy['title']]; } catch (\DomainException) { continue; }
         }
         return ['tenant_id' => $tenant, 'customer' => $customer, 'balances' => $balances, 'category' => $category, 'overdue' => FinanceCustomers::overdue($id), 'actions' => $actions, 'as_of' => date('Y-m-d H:i:s')] + $page;
@@ -76,7 +76,10 @@ final class FinanceCustomerBalances
         $dates = Db::name('finance_due_adjustment')->where('tenant_id', $tenant)->where('source_ref', $source['reference'])->order('id', 'desc')->limit(($page - 1) * 20, 21)->select()->toArray();
         $more = $more || count($dates) > 20; $dates = array_slice($dates, 0, 20);
         foreach ($dates as &$date) { $date['actor'] = FinanceValue::decode($date['actor']); $date['confirmed_at'] = date('Y-m-d H:i:s', (int)$date['create_time']); }
-        return ['tenant_id' => $tenant, 'source' => $source, 'entries' => $rows, 'has_more' => $more, 'due_history' => $dates];
+        $revisions = Db::name('finance_advance_revision')->where('tenant_id', $tenant)->where('source_ref', $source['reference'])->order('id', 'desc')->limit(($page - 1) * 20, 21)->select()->toArray();
+        $more = $more || count($revisions) > 20; $revisions = array_slice($revisions, 0, 20);
+        foreach ($revisions as &$revision) { $revision['actor'] = FinanceValue::decode($revision['actor']); $revision['confirmed_at'] = date('Y-m-d H:i:s', (int)$revision['create_time']); }
+        return ['tenant_id' => $tenant, 'source' => $source, 'entries' => $rows, 'has_more' => $more, 'due_history' => $dates, 'advance_history' => $revisions];
     }
 
     private static function canViewRecovery(): bool { return FinanceAccess::has('finance.receivable.view') || FinanceAccess::has('finance.recovery.prepare'); }

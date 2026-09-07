@@ -24,14 +24,22 @@ final class FinanceCorrections
         $originalResult = FinanceValue::decode($original['confirmed_result']);
         if (!empty($originalResult['duplicate_of']) || !empty($originalResult['reversal_of'])) { throw new \DomainException('反向凭据不是原业务，不能再次冲销或替代'); }
         if ($duplicateOf) { $this->validateDuplicate($original, $originalResult, $duplicateOf); }
+        $preservedAdvance = $original['type'] === 'receipt' && !$duplicateOf ? FinanceAdvanceRevisions::preserve($this->ledger, $original, FinanceValue::decode($replacement['payload'])) : null;
+        if ($preservedAdvance) { $preservedAdvance['revision_reason'] = $reason; }
+        (new FinanceReceiptReturns($this->tenantId, $this->ledger))->protectReceiptCorrection($original, $replacement, $duplicateOf);
         // 派生预收等已被其他业务消耗时，不能让更正形成负来源余额。
-        $created = Db::name('finance_source')->where('tenant_id', $this->tenantId)->where('document_id', $original['id'])->select()->toArray();
+        $created = [];
+        foreach ($originalResult['created_sources'] ?? [] as $reference) {
+            if ($reference === ($preservedAdvance['reference'] ?? '')) { continue; }
+            $source = $this->ledger->source($reference);
+            $created[] = ['id' => substr($reference, 2), 'amount' => $source['confirmed_amount'], 'subject_id' => $source['subject_id'], 'business_date' => $source['business_date']];
+        }
         foreach ($created as $row) {
             $source = $this->ledger->source('n:' . $row['id']);
             if (bccomp($source['balance'], $source['confirmed_amount'], 2) !== 0) { throw new \DomainException('原记录产生的余额已有后续处理，请先核对并更正关联业务'); }
         }
         $entries = Db::name('finance_entry')->where('tenant_id', $this->tenantId)->where('document_id', $original['id'])
-            ->whereNotIn('purpose', ['correction_reversal', 'correction_source'])->order('id', 'desc')->select()->toArray();
+            ->whereNotIn('purpose', ['correction_reversal', 'correction_source', 'advance_revision'])->order('id', 'desc')->select()->toArray();
         $activation = (string)Db::name('finance_preparation')->where('tenant_id', $this->tenantId)->value('activation_date');
         foreach ($entries as $entry) {
             $month = $this->ledger->postingMonth(max($entry['effective_date'] ?: $entry['business_date'], $activation));
@@ -52,7 +60,7 @@ final class FinanceCorrections
         }
         $result = $duplicateOf || $reverseOnly ? ['type' => $original['type'], 'subject_id' => $originalResult['subject_id'], 'subject_name' => $originalResult['subject_name'],
             'allocated_amount' => '0.00', 'created_sources' => [], 'duplicate_of' => $duplicateOf, 'reversal_of' => $reverseOnly ? (int)$original['id'] : null, 'reason' => $reason]
-            : (new FinancePayments($this->tenantId, $this->ledger))->confirm($replacement, $transaction);
+            : (new FinancePayments($this->tenantId, $this->ledger))->confirm($replacement, $transaction, (int)$original['id'], $preservedAdvance);
         Db::name('finance_correction')->insert(['tenant_id' => $this->tenantId, 'original_document_id' => $original['id'],
             'replacement_document_id' => $replacement['id'], 'reason' => $reason, 'actor' => FinanceValue::json(FinanceAccess::actor()), 'create_time' => time()]);
         return $result + ['corrects_document_id' => (int)$original['id'], 'correction_reason' => $reason];

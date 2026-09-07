@@ -41,9 +41,11 @@ final class FinanceLedger
         $change = (string)(Db::name('finance_entry')->where('tenant_id', $this->tenantId)->where('source_ref', $reference)->where('metric', 'balance')->sum('amount') ?: '0');
         $due = FinanceDueDates::forSources($this->tenantId, [$reference])[$reference] ?? null;
         $originalDue = $opening ? ($snapshot['due_date'] ?? null) : $row['due_date'];
+        $revision = $row['category'] === 'advance' ? (FinanceAdvanceRevisions::latest($this->tenantId, [$reference])[$reference] ?? null) : null;
+        $originalDate = $opening ? ($snapshot['historical_date'] ?? null) : $row['business_date'];
         return ['reference' => $reference, 'category' => $row['category'], 'subject_id' => (int)$row['subject_id'],
-            'subject_name' => $snapshot['subject_name'] ?? '', 'confirmed_amount' => $row['amount'],
-            'balance' => bcadd($row['amount'], $change, 2), 'business_date' => $opening ? ($snapshot['historical_date'] ?? null) : $row['business_date'],
+            'subject_name' => $snapshot['subject_name'] ?? '', 'confirmed_amount' => $revision['new_amount'] ?? $row['amount'], 'original_amount' => $row['amount'],
+            'balance' => bcadd($row['amount'], $change, 2), 'business_date' => $revision['new_business_date'] ?? $originalDate, 'original_business_date' => $originalDate, 'advance_revision' => (int)($revision['id'] ?? 0),
             'due_date' => $due ? $due['new_due_date'] : $originalDue, 'original_due_date' => $originalDue, 'due_revision' => (int)($due['id'] ?? 0), 'snapshot' => $snapshot,
             'document_id' => $opening ? null : (int)$row['document_id']];
     }
@@ -86,10 +88,13 @@ final class FinanceLedger
         $rows = Db::query(implode(' UNION ALL ', $parts) . ' ORDER BY source_kind,source_id LIMIT ' . (($page - 1) * 20) . ',21');
         $more = count($rows) > 20; $rows = array_slice($rows, 0, 20);
         $dueDates = FinanceDueDates::forSources($this->tenantId, array_column($rows, 'reference'));
+        $advanceRevisions = FinanceAdvanceRevisions::latest($this->tenantId, array_column($rows, 'reference'));
         foreach ($rows as &$row) {
             $row['snapshot'] = FinanceValue::decode($row['snapshot']); $row['subject_id'] = (int)$row['subject_id'];
             $row['subject_name'] = $row['snapshot']['subject_name'] ?? '';
             if ($row['source_kind'] === 'o') { $row['business_date'] = $row['snapshot']['historical_date'] ?? null; $row['due_date'] = $row['snapshot']['due_date'] ?? null; }
+            $row['original_business_date'] = $row['business_date']; $row['original_amount'] = $row['confirmed_amount'];
+            if (isset($advanceRevisions[$row['reference']])) { $row['business_date'] = $advanceRevisions[$row['reference']]['new_business_date']; $row['confirmed_amount'] = $advanceRevisions[$row['reference']]['new_amount']; }
             $row['original_due_date'] = $row['due_date']; $row['due_revision'] = (int)($dueDates[$row['reference']]['id'] ?? 0);
             if ($row['due_revision']) { $row['due_date'] = $dueDates[$row['reference']]['new_due_date']; }
             unset($row['source_kind'], $row['source_id']);

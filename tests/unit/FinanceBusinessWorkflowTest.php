@@ -26,7 +26,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     protected function setUp(): void
     {
         $this->prepareCustomerReportRequestContext(); $this->ensureCustomerReportTables();
-        foreach (['20260907_000001_finance_preparation.sql', '20260907_000002_finance_opening.sql', '20260907_000003_finance_opening_details.sql', '20260907_000004_finance_business.sql', '20260907_000005_finance_sales.sql', '20260907_000006_finance_receivables.sql'] as $file) {
+        foreach (['20260907_000001_finance_preparation.sql', '20260907_000002_finance_opening.sql', '20260907_000003_finance_opening_details.sql', '20260907_000004_finance_business.sql', '20260907_000005_finance_sales.sql', '20260907_000006_finance_receivables.sql', '20260907_000007_finance_advance_revisions.sql'] as $file) {
             $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/' . $file)));
         }
         $this->clean();
@@ -642,6 +642,112 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertStringContainsString('来源业务类型或往来主体', FinanceBusinessLogic::getError());
     }
 
+    public function test_partial_receipt_return_reopens_only_selected_debt_and_preserves_receipt_and_source_dates(): void
+    {
+        $this->activate();
+        $receipt = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $this->receipt('1000', '1000')]);
+        self::assertNotFalse($receipt, FinanceBusinessLogic::getError());
+        $payload = ['subject_id' => $this->customerId, 'receipt_id' => $receipt['id'], 'account_id' => $this->accountId,
+            'actual_date' => date('Y-m-d'), 'amount' => '200', 'allocations' => [['source' => $this->receivable, 'amount' => '200']], 'reason' => '银行已实际退回原到账的一部分'];
+        $command = $this->command(0) + ['type' => 'receipt_return', 'payload' => $payload];
+        $returned = FinanceBusinessLogic::action('record', $command);
+        self::assertNotFalse($returned, FinanceBusinessLogic::getError());
+        self::assertSame($returned, FinanceBusinessLogic::action('record', $command));
+        self::assertCount(1, FinanceBusinessLogic::lists(['type' => 'receipt_return', 'subject_id' => $this->customerId])['lists']);
+        self::assertSame([], FinanceBusinessLogic::lists(['type' => 'receipt_return', 'subject_id' => $this->customerId + 100000])['lists']);
+        $ledger = new FinanceLedger(self::TENANT_ID); $source = $ledger->source($this->receivable);
+        self::assertSame('200.00', $source['balance']); self::assertNull($source['business_date']); self::assertNull($source['due_date']);
+        self::assertSame('5800.00', $ledger->account($this->accountId)['balance']);
+        self::assertSame(2, Db::name('finance_money_transaction')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame(0, Db::name('finance_correction')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertEquals(0, Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('metric', 'revenue')->sum('amount'));
+        $payload['amount'] = '801'; $payload['allocations'][0]['amount'] = '801';
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt_return', 'payload' => $payload]));
+        self::assertStringContainsString('可退回', FinanceBusinessLogic::getError());
+        self::assertSame('200.00', $ledger->source($this->receivable)['balance']);
+        self::assertSame('5800.00', $ledger->account($this->accountId)['balance']);
+    }
+
+    public function test_receipt_return_and_its_correction_share_original_capacity_without_second_cash_transaction(): void
+    {
+        $this->activate();
+        $receipt = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $this->receipt('1200', '1000', '200')]);
+        self::assertNotFalse($receipt, FinanceBusinessLogic::getError()); $advance = $receipt['confirmed_result']['created_sources'][0];
+        $payload = ['subject_id' => $this->customerId, 'receipt_id' => $receipt['id'], 'account_id' => $this->accountId, 'actual_date' => date('Y-m-d'),
+            'amount' => '300', 'allocations' => [['source' => $this->receivable, 'amount' => '200'], ['source' => $advance, 'amount' => '100']], 'reason' => '原到账部分失效'];
+        $returned = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt_return', 'payload' => $payload]); self::assertNotFalse($returned, FinanceBusinessLogic::getError());
+        $ledger = new FinanceLedger(self::TENANT_ID);
+        self::assertSame('100.00', $ledger->source($advance)['balance']); self::assertSame('200.00', $ledger->source($this->receivable)['balance']);
+        $payload['amount'] = '350'; $payload['allocations'][0]['amount'] = '250';
+        $corrected = FinanceBusinessLogic::action('correct', $this->command($returned['version']) + ['id' => $returned['id'], 'payload' => $payload, 'correction_reason' => '核实实际失效350，原登记少计50']);
+        self::assertNotFalse($corrected, FinanceBusinessLogic::getError());
+        self::assertSame('250.00', $ledger->source($this->receivable)['balance']); self::assertSame('100.00', $ledger->source($advance)['balance']);
+        self::assertSame('5850.00', $ledger->account($this->accountId)['balance']);
+        self::assertSame(2, Db::name('finance_money_transaction')->where('tenant_id', self::TENANT_ID)->count());
+        $options = (new \app\api\jxc\logic\FinanceReceiptReturns(self::TENANT_ID, $ledger))->options($receipt['id']);
+        self::assertSame(['750.00', '100.00'], array_column($options['sources'], 'returnable'));
+        $invalid = $this->receipt('200', '200');
+        self::assertFalse(FinanceBusinessLogic::action('correct', $this->command($receipt['version']) + ['id' => $receipt['id'], 'payload' => $invalid, 'correction_reason' => '不得缩减已真实退回的原核销']));
+        self::assertStringContainsString('已使用或退回', FinanceBusinessLogic::getError());
+    }
+
+    public function test_receipt_correction_preserves_real_returns_and_options_follow_latest_receipt_version(): void
+    {
+        $this->activate();
+        $receipt = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $this->receipt('1000', '1000')]); self::assertNotFalse($receipt, FinanceBusinessLogic::getError());
+        $payload = ['subject_id' => $this->customerId, 'receipt_id' => $receipt['id'], 'account_id' => $this->accountId, 'actual_date' => date('Y-m-d'), 'amount' => '200', 'allocations' => [['source' => $this->receivable, 'amount' => '200']], 'reason' => '银行已退回200'];
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt_return', 'payload' => $payload]), FinanceBusinessLogic::getError());
+        $corrected = FinanceBusinessLogic::action('correct', $this->command($receipt['version']) + ['id' => $receipt['id'], 'payload' => $this->receipt('900', '900'), 'correction_reason' => '原到账实际900，已核实退回200不变']);
+        self::assertNotFalse($corrected, FinanceBusinessLogic::getError());
+        $ledger = new FinanceLedger(self::TENANT_ID);
+        self::assertSame('300.00', $ledger->source($this->receivable)['balance']); self::assertSame('5700.00', $ledger->account($this->accountId)['balance']);
+        $options = FinanceBusinessLogic::options(['type' => 'receipt_return', 'subject_id' => $this->customerId, 'receipt_id' => $receipt['id']]); self::assertNotFalse($options, FinanceBusinessLogic::getError());
+        self::assertSame($corrected['id'], $options['receipt']['receipt_id']); self::assertSame('700.00', $options['sources'][0]['returnable']);
+        $choices = FinanceBusinessLogic::options(['type' => 'receipt_return', 'subject_id' => $this->customerId]);
+        self::assertSame([$corrected['id']], array_column($choices['receipt_choices'], 'id'));
+        self::assertFalse(FinanceBusinessLogic::options(['type' => 'receipt_return', 'subject_id' => $this->customerId + 1, 'receipt_id' => $receipt['id']]));
+        self::assertStringContainsString('不属于', FinanceBusinessLogic::getError());
+    }
+
+    public function test_consumed_advance_keeps_its_reference_when_original_receipt_account_amount_or_date_is_corrected(): void
+    {
+        $this->activate(); $ledger = new FinanceLedger(self::TENANT_ID);
+        $otherAccount = FinanceSetupLogic::saveAccount($this->command(0) + ['name' => '实际收款现金账户', 'account_type' => 'cash']); self::assertNotFalse($otherAccount);
+        $payload = $this->receipt('100', '0', '100'); $payload['allocations'] = []; $payload['actual_date'] = date('Y-m-01');
+        $receipt = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $payload]); self::assertNotFalse($receipt, FinanceBusinessLogic::getError());
+        $advance = $receipt['confirmed_result']['created_sources'][0];
+        $returnPayload = ['subject_id' => $this->customerId, 'receipt_id' => $receipt['id'], 'account_id' => $this->accountId, 'actual_date' => date('Y-m-d'), 'amount' => '20', 'allocations' => [['source' => $advance, 'amount' => '20']], 'reason' => '原到账确实退回20'];
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt_return', 'payload' => $returnPayload]), FinanceBusinessLogic::getError());
+        $payload['account_id'] = $otherAccount['id']; $payload['amount'] = '120'; $payload['advance_amount'] = '120'; $payload['actual_date'] = date('Y-m-d');
+        $corrected = FinanceBusinessLogic::action('correct', $this->command($receipt['version']) + ['id' => $receipt['id'], 'payload' => $payload, 'correction_reason' => '核实到账账户、日期及金额，真实退回20保留']);
+        self::assertNotFalse($corrected, FinanceBusinessLogic::getError());
+        self::assertSame([$advance], $corrected['confirmed_result']['created_sources']);
+        self::assertSame('120.00', $ledger->source($advance)['confirmed_amount']); self::assertSame('100.00', $ledger->source($advance)['balance']);
+        self::assertSame(date('Y-m-d'), $ledger->source($advance)['business_date']); self::assertSame(date('Y-m-01'), $ledger->source($advance)['original_business_date']);
+        self::assertSame('4980.00', $ledger->account($this->accountId)['balance']); self::assertSame('120.00', $ledger->account((int)$otherAccount['id'])['balance']);
+        $payload['amount'] = '110'; $payload['advance_amount'] = '110';
+        $again = FinanceBusinessLogic::action('correct', $this->command($corrected['version']) + ['id' => $corrected['id'], 'payload' => $payload, 'correction_reason' => '再复核原金额110']); self::assertNotFalse($again, FinanceBusinessLogic::getError());
+        self::assertSame('90.00', $ledger->source($advance)['balance']); self::assertSame('110.00', $ledger->source($advance)['confirmed_amount']);
+        self::assertSame(2, Db::name('finance_money_transaction')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame('100.00', Db::name('finance_source')->where('id', substr($advance, 2))->value('amount'));
+        self::assertSame('90.00', FinanceBusinessLogic::options(['type' => 'receipt_return', 'subject_id' => $this->customerId, 'receipt_id' => $receipt['id']])['sources'][0]['returnable']);
+        $history = \app\api\jxc\logic\FinanceCustomerBalances::source(['source' => $advance]);
+        self::assertSame(['110.00', '120.00'], array_column($history['advance_history'], 'new_amount'));
+        self::assertSame('110.00', $ledger->sourcePage(['advance'], $this->customerId, 1)['sources'][0]['confirmed_amount']);
+    }
+
+    public function test_receipt_correction_cannot_move_actual_receipt_after_a_real_return(): void
+    {
+        $this->activate(); $payload = $this->receipt('1000', '1000'); $payload['actual_date'] = date('Y-m-01');
+        $receipt = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $payload]); self::assertNotFalse($receipt, FinanceBusinessLogic::getError());
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt_return', 'payload' => ['subject_id' => $this->customerId, 'receipt_id' => $receipt['id'], 'account_id' => $this->accountId,
+            'actual_date' => date('Y-m-01'), 'amount' => '200', 'allocations' => [['source' => $this->receivable, 'amount' => '200']], 'reason' => '到账当日部分被退回']]), FinanceBusinessLogic::getError());
+        $payload['actual_date'] = date('Y-m-02');
+        self::assertFalse(FinanceBusinessLogic::action('correct', $this->command($receipt['version']) + ['id' => $receipt['id'], 'payload' => $payload, 'correction_reason' => '不能破坏已有实际资金先后']));
+        self::assertStringContainsString('不能晚于已存在的真实退回日期', FinanceBusinessLogic::getError());
+        self::assertSame('5800.00', (new FinanceLedger(self::TENANT_ID))->account($this->accountId)['balance']);
+    }
+
     public function test_due_adjustment_updates_current_overdue_without_rewriting_original_source_or_amount(): void
     {
         $this->activate(); $ledger = new FinanceLedger(self::TENANT_ID); $date = date('Y-m-01'); $oldDue = date('Y-m-d', strtotime('-1 day'));
@@ -731,6 +837,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
     private function clean(): void
     {
+        Db::name('finance_advance_revision')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_due_adjustment')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_customer_terms')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         foreach (Db::name('finance_evidence')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->select()->toArray() as $proof) {

@@ -11,10 +11,11 @@ final class FinancePayments
 {
     public function __construct(private readonly int $tenantId, private readonly FinanceLedger $ledger) {}
 
-    public function confirm(array $document, ?array $originalTransaction = null): array
+    public function confirm(array $document, ?array $originalTransaction = null, int $correctingDocument = 0, ?array $preservedAdvance = null): array
     {
         $type = $document['type']; $policy = FinanceDocumentPolicy::authorize($type, true);
         $data = FinanceValue::decode($document['payload']);
+        if ($type === 'receipt_return') { return (new FinanceReceiptReturns($this->tenantId, $this->ledger))->confirm($document, $data, $originalTransaction, $correctingDocument); }
         if (in_array($type, ['receivable_due', 'payable_due'], true)) { return FinanceDueDates::confirm($this->ledger, $document, $data); }
         if (in_array($type, ['bad_debt', 'recovery_termination'], true)) { return (new FinanceReceivableActions($this->tenantId, $this->ledger))->confirm($document, $data); }
         if ($type === 'advance_allocate') { return $this->advance($document, $data); }
@@ -38,7 +39,10 @@ final class FinancePayments
         } elseif (bccomp($total, $amount, 2) !== 0) { throw new \DomainException('本次金额必须等于所选来源的处理合计，不能超付或转为预付款'); }
         $money = (new FinanceMoney($this->tenantId, $this->ledger))->record((int)$document['id'], $type, $data, $policy['direction'], $date, $amount, $month, $originalTransaction);
         $created = [];
-        if (bccomp($advance, '0', 2) > 0) {
+        if ($preservedAdvance) {
+            FinanceAdvanceRevisions::append($this->ledger, (int)$document['id'], $preservedAdvance, $advance, $date, $month, $preservedAdvance['revision_reason'] ?? $reason);
+            $created[] = $preservedAdvance['reference'];
+        } elseif (bccomp($advance, '0', 2) > 0) {
             $created[] = $this->ledger->createSource((int)$document['id'], 'advance', $subjectId, $advance, $date, null,
                 ['subject_name' => $subject['name'], 'reason' => $reason, 'transaction_id' => $money['transaction_id']]);
         }
