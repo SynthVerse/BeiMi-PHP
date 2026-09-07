@@ -59,11 +59,7 @@ final class FinancePurchaseBatches
             $price = FinanceValue::money($item['price'] ?? null, true);
             $lineAmount = FinanceValue::money(bcadd(bcmul($quantity, $price, 6), '0.005', 2), true);
             $zeroReason = bccomp($price, '0', 2) === 0 ? FinanceValue::text($item['zero_price_reason'] ?? null, 500) : '';
-            $beforeCovered = '0.0000'; $beforeAmount = '0.00';
-            foreach (Db::name('finance_purchase_settlement_line')->where('tenant_id', $tenant)->where('arrival_line_id', $arrivalId)->order('id')->lock(true)->select()->toArray() as $previous) {
-                $beforeCovered = bcadd($beforeCovered, $previous['covered_quantity'], 4); $beforeAmount = bcadd($beforeAmount, $previous['amount'], 2);
-            }
-            $costValue = FinancePurchaseSettlement::costValue($arrival['actual_quantity'], $arrival['estimated_amount'], bcadd($beforeCovered, $covered, 4), bcadd($beforeAmount, $lineAmount, 2));
+            $costValue = FinancePurchaseCosts::value($arrival, $covered, $lineAmount);
             $arrivalReview = self::difference($snapshot['arrival_difference'] ?? '0', $snapshot['reported_quantity'] ?? $arrival['actual_quantity'], $snapshot['difference_rule'] ?? null, $item, 'arrival_');
             $differenceRule = FinancePurchaseRuleBook::threshold($vendor, (int)$arrival['sku_id'], (int)($snapshot['category_id'] ?? 0));
             if (FinanceValue::id($item['difference_rule_id'] ?? 0, true) !== (int)($differenceRule['id'] ?? 0)) { throw new \DomainException('采购差异复核规则已变化，请重新核对本次结算'); }

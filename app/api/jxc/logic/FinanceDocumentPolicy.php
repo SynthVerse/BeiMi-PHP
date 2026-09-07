@@ -7,6 +7,8 @@ namespace app\api\jxc\logic;
 final class FinanceDocumentPolicy
 {
     public const TYPES = [
+        'purchase_adjustment' => ['title' => '采购结算金额调整', 'prepare' => 'finance.purchase.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => ['payable', 'expense_payable'], 'direction' => 'none'],
+        'purchase_extra_cost' => ['title' => '采购必要附加成本', 'prepare' => 'finance.purchase.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],
         'purchase_arrival' => ['title' => '采购实际到货与暂估', 'prepare' => 'finance.purchase.prepare', 'confirm' => 'finance.purchase.receive', 'owner' => false, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],
         'purchase_settlement' => ['title' => '供应商分次采购结算', 'prepare' => 'finance.purchase.prepare', 'confirm' => 'finance.purchase.confirm', 'owner' => false, 'subject' => 'vendor', 'sources' => ['payable'], 'direction' => 'none'],
         'purchase_rules' => ['title' => '采购复核与付款规则', 'prepare' => '', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],

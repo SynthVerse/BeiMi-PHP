@@ -121,6 +121,8 @@ final class FinanceBusinessLogic extends BaseLogic
             $categories = $type === 'advance_allocate' && ($params['role'] ?? '') === 'fund' ? ['advance'] : $policy['sources'];
             $page = max(1, FinanceValue::id($params['page'] ?? 1));
             $sources = match ($type) {
+                'purchase_extra_cost' => FinancePurchaseExtraCosts::options($params),
+                'purchase_adjustment' => ($params['role'] ?? '') === 'credit' ? $ledger->sourcePage($categories, $subjectId, $page) : FinancePurchaseAdjustments::options($subjectId, $params),
                 'purchase_arrival' => FinancePurchaseArrivals::options($subjectId, $params),
                 'purchase_settlement' => FinancePurchaseBatches::options($subjectId, $params),
                 'purchase_rules' => FinancePurchaseRuleBook::options($params),
