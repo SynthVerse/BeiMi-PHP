@@ -7,6 +7,7 @@ namespace app\api\jxc\logic;
 final class FinanceDocumentPolicy
 {
     public const TYPES = [
+        'sales_batch' => ['title' => '交付合并与分次销售结算', 'prepare' => 'settlement.bill', 'confirm' => 'settlement.bill', 'owner' => false, 'subject' => 'customer', 'sources' => ['receivable'], 'direction' => 'none'],
         'receipt_return' => ['title' => '客户原收款退回', 'prepare' => 'finance.refund.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'customer', 'sources' => ['receivable', 'advance'], 'direction' => 'out'],
         'receivable_due' => ['title' => '调整应收付款日', 'prepare' => 'finance.receivable.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'customer', 'sources' => ['receivable'], 'direction' => 'none'],
         'payable_due' => ['title' => '调整应付付款日', 'prepare' => 'finance.payment.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => ['payable', 'expense_payable'], 'direction' => 'none'],

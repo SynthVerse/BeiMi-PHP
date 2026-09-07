@@ -41,6 +41,7 @@ final class FinancePreview
             if (!$months && isset($document['confirmed_result']['posting_month'])) { $months[] = $document['confirmed_result']['posting_month']; }
             $result = $document['confirmed_result'];
             return ['tenant_id' => $tenant, 'balances' => $balances, 'impacts' => array_values($periods), 'posting_months' => $months,
+                ...($document['type'] === 'sales_batch' ? ['sales' => $result] : []),
                 'old_due_date' => $result['old_due_date'] ?? null, 'new_due_date' => $result['new_due_date'] ?? null];
         } finally { Db::rollback(); }
     }

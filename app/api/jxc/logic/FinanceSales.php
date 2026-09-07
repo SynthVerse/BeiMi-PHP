@@ -12,6 +12,7 @@ final class FinanceSales
     public static function post(array $order, array $snapshot, int $actionId): array
     {
         $tenant = FinanceAccess::tenant(); $ledger = new FinanceLedger($tenant); $ledger->lockBook();
+        if (Db::name('finance_sales_coverage')->where('tenant_id', $tenant)->where('order_id', $order['id'])->count()) { throw new \DomainException('该订单已按交付分次结算，请从对应结算记录更正，不能再按整单重复确认'); }
         FinanceOverdue::captureWithinTransaction($tenant, [(int)$order['customer_id']]);
         $version = (int)($order['settlement_version'] ?? 0);
         $previous = $version ? Db::name('finance_sales_version')->where('tenant_id', $tenant)->where('order_id', $order['id'])->where('version', $version)->find() : null;

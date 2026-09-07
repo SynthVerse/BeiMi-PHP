@@ -32,6 +32,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000008_finance_statements.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000009_finance_overdue.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000011_finance_sales_precision.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000012_finance_sales_coverage.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -1067,6 +1068,125 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertNotFalse(SalesSettlementLogic::submit($request), SalesSettlementLogic::getError());
     }
 
+    public function test_sales_batch_partially_covers_multiple_deliveries_on_each_real_day_without_touching_stock(): void
+    {
+        $this->activate(); $first = $this->deliveredSale(); $second = $this->deliveredSale();
+        $day = date('Y-m-01');
+        Db::name('fulfillment_delivery_event')->where('id', $first['event_id'])->update(['delivered_time' => strtotime($day . ' 10:00:00')]);
+        $firstItem = (int)Db::name('fulfillment_delivery_item')->where('delivery_event_id', $first['event_id'])->value('id');
+        $secondItem = (int)Db::name('fulfillment_delivery_item')->where('delivery_event_id', $second['event_id'])->value('id');
+        $payload = ['subject_id' => $this->customerId, 'reason' => '主客户两次交付合并部分确认', 'rounding_amount' => '0', 'precision_mode' => 'cents', 'lines' => [
+            ['delivery_item_id' => $firstItem, 'covered_weight' => '1', 'settlement_weight' => '1', 'price' => '10'],
+            ['delivery_item_id' => $secondItem, 'covered_weight' => '2', 'settlement_weight' => '2', 'price' => '20'],
+        ]];
+        $command = $this->command(0) + ['type' => 'sales_batch', 'payload' => $payload];
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($command + ['action' => 'record']);
+        self::assertSame('50.00', $preview['impacts'][0]['amount']);
+        $confirmed = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($confirmed, FinanceBusinessLogic::getError());
+        self::assertSame($confirmed, FinanceBusinessLogic::action('record', $command));
+        self::assertSame('50.00', $confirmed['confirmed_result']['amount']);
+        $dates = Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('document_id', $confirmed['id'])->where('metric', 'revenue')->order('id')->column('business_date');
+        self::assertSame([$day, date('Y-m-d')], $dates);
+        self::assertSame('0.00', Db::name('sales_order')->where('id', $first['order_id'])->value('order_money'));
+        $snapshot = \app\api\jxc\logic\FinanceStatementSnapshot::capture($this->customerId, $day, date('Y-m-d'));
+        self::assertCount(1, $snapshot['pending_deliveries']); self::assertSame('1.0000', $snapshot['pending_deliveries'][0]['pending_weight']);
+        $payload['lines'] = [$payload['lines'][0]]; $payload['overdue_acknowledged'] = 1;
+        $secondCommand = $this->command(0) + ['type' => 'sales_batch', 'payload' => $payload];
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $secondCommand), FinanceBusinessLogic::getError());
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'sales_batch', 'payload' => $payload]));
+        self::assertStringContainsString('覆盖量', FinanceBusinessLogic::getError());
+        self::assertSame('1060.00', (new FinanceLedger(self::TENANT_ID))->categoryBalance('receivable', $this->customerId));
+        self::assertSame(0, Db::name('finance_money_transaction')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
+    public function test_sales_batch_correction_keeps_history_and_allocates_paid_reduction_as_credit_and_refund(): void
+    {
+        $this->activate(); $sale = $this->deliveredSale();
+        $delivery = (int)Db::name('fulfillment_delivery_item')->where('delivery_event_id', $sale['event_id'])->value('id');
+        $payload = ['subject_id' => $this->customerId, 'reason' => '核实客户结算', 'lines' => [
+            ['delivery_item_id' => $delivery, 'covered_weight' => '2', 'settlement_weight' => '2', 'price' => '50']]];
+        $original = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'sales_batch', 'payload' => $payload]);
+        self::assertNotFalse($original, FinanceBusinessLogic::getError()); $source = $original['confirmed_result']['created_sources'][0];
+        $receipt = $this->receipt('80', '80'); $receipt['allocations'][0]['source'] = $source;
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $receipt]));
+        $payload['lines'][0]['price'] = '20';
+        $correction = $this->command(1) + ['id' => $original['id'], 'payload' => $payload, 'correction_reason' => '原单价录入错误'];
+        self::assertFalse(FinanceBusinessLogic::action('correct', $correction)); self::assertStringContainsString('调减须明确', FinanceBusinessLogic::getError());
+        self::assertSame(0, Db::name('finance_correction')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame(1, Db::name('finance_sales_coverage')->where('tenant_id', self::TENANT_ID)->count());
+        $tooMuch = $correction;
+        $tooMuch['payload'] += ['credit_reviewed' => 1, 'credit_allocations' => [['source' => $source, 'amount' => '60']]];
+        self::assertFalse(FinanceBusinessLogic::action('correct', $tooMuch)); self::assertStringContainsString('超过当前未结余额', FinanceBusinessLogic::getError());
+        self::assertSame('20.00', (new FinanceLedger(self::TENANT_ID))->source($source)['balance']);
+        $correction['payload'] += ['credit_reviewed' => 1, 'credit_allocations' => [['source' => $source, 'amount' => '20']]];
+        $corrected = FinanceBusinessLogic::action('correct', $correction); self::assertNotFalse($corrected, FinanceBusinessLogic::getError());
+        self::assertSame('40.00', $corrected['confirmed_result']['amount']);
+        self::assertSame($corrected, FinanceBusinessLogic::action('correct', $correction));
+        $ledger = new FinanceLedger(self::TENANT_ID); self::assertSame('0.00', $ledger->source($source)['balance']);
+        self::assertSame('40.00', $ledger->categoryBalance('customer_refund', $this->customerId));
+        self::assertSame('100.00', FinanceBusinessLogic::detail(['id' => $original['id']])['confirmed_result']['amount']);
+        self::assertSame('2.0000', (string)Db::name('finance_sales_coverage')->where('tenant_id', self::TENANT_ID)->field('SUM(covered_delta) AS covered')->find()['covered']);
+        self::assertSame(1, Db::name('finance_money_transaction')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
+    public function test_sales_batch_pending_rechecks_coverage_and_cannot_overlap_legacy_full_order_confirmation(): void
+    {
+        $this->activate(); $sale = $this->deliveredSale();
+        $delivery = (int)Db::name('fulfillment_delivery_item')->where('delivery_event_id', $sale['event_id'])->value('id');
+        $payload = ['subject_id' => $this->customerId, 'reason' => '确认一半实际交付', 'lines' => [
+            ['delivery_item_id' => $delivery, 'covered_weight' => '2', 'settlement_weight' => '2', 'price' => '10']]];
+        $draft = FinanceBusinessLogic::action('prepare', $this->command(0) + ['type' => 'sales_batch', 'payload' => $payload]);
+        self::assertNotFalse($draft); self::assertSame(0, Db::name('finance_sales_coverage')->where('tenant_id', self::TENANT_ID)->count());
+        $payload['lines'][0]['covered_weight'] = '1'; $payload['lines'][0]['settlement_weight'] = '1';
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'sales_batch', 'payload' => $payload]));
+        self::assertFalse(FinanceBusinessLogic::action('confirm', $this->command(1) + ['id' => $draft['id']]));
+        self::assertStringContainsString('覆盖量', FinanceBusinessLogic::getError());
+        self::assertSame('pending', FinanceBusinessLogic::detail(['id' => $draft['id']])['status']);
+        $full = $this->command(0) + ['order_id' => $sale['order_id'], 'lines' => [['order_goods_id' => $sale['line_id'], 'customer_settlement_weight' => '2', 'pricing_unit_id' => $sale['unit_id'], 'price' => '10']]];
+        self::assertFalse(SalesSettlementLogic::submit($full)); self::assertStringContainsString('分次结算', SalesSettlementLogic::getError());
+        self::assertSame(0, Db::name('sales_order_version')->where('tenant_id', self::TENANT_ID)->where('order_id', $sale['order_id'])->count());
+    }
+
+    public function test_sales_batch_rounding_preserves_each_delivery_share_and_requires_independent_permissions(): void
+    {
+        $this->activate(); $a = $this->deliveredSale(); $b = $this->deliveredSale();
+        $lines = [];
+        foreach ([$a, $b] as $sale) { $lines[] = ['delivery_item_id' => (int)Db::name('fulfillment_delivery_item')->where('delivery_event_id', $sale['event_id'])->value('id'), 'covered_weight' => '2', 'settlement_weight' => '2', 'price' => '1.26']; }
+        $employee = WorkforceLogic::saveEmployee(['name' => '销售经办', 'mobile' => '13800009929', 'bind_user_id' => 996929,
+            'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['settlement.bill', 'settlement.view']]);
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996929; request()->adminId = 0;
+        $payload = ['subject_id' => $this->customerId, 'reason' => '逐行整元且单独抹零', 'lines' => $lines, 'precision_mode' => 'integer', 'precision_override_reason' => '与客户约定', 'rounding_amount' => '0.01'];
+        $command = $this->command(0) + ['type' => 'sales_batch', 'payload' => $payload];
+        self::assertFalse(FinanceBusinessLogic::action('record', $command));
+        foreach (['finance.sales.precision_override', 'finance.sales.rounding'] as $permission) { Db::name('employee_permission')->insert(['tenant_id' => self::TENANT_ID, 'employee_id' => $employee['id'], 'permission_key' => $permission, 'create_time' => time()]); }
+        $result = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($result, FinanceBusinessLogic::getError());
+        self::assertSame('5.99', $result['confirmed_result']['amount']); self::assertSame(['2.99', '3.00'], array_column($result['confirmed_result']['lines'], 'net_amount'));
+        Db::name('employee_permission')->where('tenant_id', self::TENANT_ID)->where('employee_id', $employee['id'])->where('permission_key', 'finance.sales.rounding')->delete();
+        self::assertFalse(FinanceBusinessLogic::action('record', $command)); self::assertStringContainsString('权限', FinanceBusinessLogic::getError());
+    }
+
+    public function test_sales_batch_positive_correction_inherits_current_adjusted_due_date_and_preserves_old_snapshot(): void
+    {
+        $this->activate(); $sale = $this->deliveredSale();
+        $delivery = (int)Db::name('fulfillment_delivery_item')->where('delivery_event_id', $sale['event_id'])->value('id');
+        $payload = ['subject_id' => $this->customerId, 'reason' => '按实际交付结算', 'lines' => [
+            ['delivery_item_id' => $delivery, 'covered_weight' => '2', 'settlement_weight' => '2', 'price' => '50']]];
+        $original = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'sales_batch', 'payload' => $payload]);
+        self::assertNotFalse($original); $source = $original['confirmed_result']['created_sources'][0]; $due = date('Y-m-t');
+        $changed = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receivable_due', 'payload' => ['subject_id' => $this->customerId, 'source' => $source, 'expected_due_revision' => 0, 'new_due_date' => $due, 'reason' => '客户重新约定月底付款']]);
+        self::assertNotFalse($changed, FinanceBusinessLogic::getError());
+        $payload['lines'][0]['price'] = '60'; $payload['lines'][0]['due_date'] = date('Y-m-d');
+        $corrected = FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $original['id'], 'payload' => $payload, 'correction_reason' => '仅纠正单价']);
+        self::assertNotFalse($corrected, FinanceBusinessLogic::getError());
+        $newSource = (new FinanceLedger(self::TENANT_ID))->source($corrected['confirmed_result']['created_sources'][0]);
+        self::assertSame('20.00', $newSource['balance']); self::assertSame($due, $newSource['due_date']);
+        self::assertSame(date('Y-m-d'), FinanceBusinessLogic::detail(['id' => $original['id']])['confirmed_result']['lines'][0]['due_date']);
+        $payload['lines'] = $corrected['confirmed_result']['lines']; $payload['lines'][0]['price'] = '65';
+        $again = FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $corrected['id'], 'payload' => $payload, 'correction_reason' => '复核后再次纠正单价']);
+        self::assertNotFalse($again, FinanceBusinessLogic::getError());
+        self::assertSame($due, (new FinanceLedger(self::TENANT_ID))->source($again['confirmed_result']['created_sources'][0])['due_date']);
+    }
+
     private function deliveredSale(): array
     {
         $unit = $this->createCustomerReportUnit('斤');
@@ -1121,6 +1241,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
     private function clean(): void
     {
+        Db::name('finance_sales_coverage')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_sales_precision_rule')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_overdue_event')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         foreach (['finance_statement_resolution', 'finance_statement_dispute', 'finance_statement_event', 'finance_statement'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }

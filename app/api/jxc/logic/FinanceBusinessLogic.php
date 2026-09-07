@@ -30,6 +30,7 @@ final class FinanceBusinessLogic extends BaseLogic
                 if ($existing) {
                     $result = FinanceValue::decode($existing['result']);
                     FinanceDocumentPolicy::authorize($result['type'], in_array($action, ['confirm', 'record', 'correct', 'reverse_duplicate', 'reverse'], true));
+                    if ($result['type'] === 'sales_batch' && $result['status'] === 'confirmed') { FinanceSalesBatches::reauthorize($result['confirmed_result']); }
                     if (!hash_equals($existing['fingerprint'], $fingerprint)) { throw new \DomainException('同一提交标识不能用于不同内容或操作人'); }
                     return $result;
                 }
@@ -67,9 +68,10 @@ final class FinanceBusinessLogic extends BaseLogic
                         $affectedCustomers = array_values(array_unique($affectedCustomers));
                         if ($affectedCustomers) { FinanceOverdue::captureWithinTransaction($tenantId, $affectedCustomers); }
                     }
-                    $result = $original ? (new FinanceCorrections($tenantId, $ledger))->replace($original, $document, (string)($params['correction_reason'] ?? ''),
+                    if ($type === 'sales_batch' && in_array($action, ['reverse', 'reverse_duplicate'], true)) { throw new \DomainException('销售结算应使用关联金额更正，不能直接反向已发生的销售'); }
+                    $result = $type === 'sales_batch' ? FinanceSalesBatches::confirm($ledger, $document, $original, (string)($params['correction_reason'] ?? '')) : ($original ? (new FinanceCorrections($tenantId, $ledger))->replace($original, $document, (string)($params['correction_reason'] ?? ''),
                         $action === 'reverse_duplicate' ? FinanceValue::id($params['duplicate_of'] ?? 0) : 0, $action === 'reverse')
-                        : (new FinancePayments($tenantId, $ledger))->confirm($document);
+                        : (new FinancePayments($tenantId, $ledger))->confirm($document));
                     $document['confirmed_result'] = FinanceValue::json($result);
                     $document['status'] = 'confirmed'; $document['confirmed_by'] = FinanceValue::json(FinanceAccess::actor()); $document['confirmed_at'] = time();
                 }
@@ -115,6 +117,9 @@ final class FinanceBusinessLogic extends BaseLogic
             $categories = $type === 'advance_allocate' && ($params['role'] ?? '') === 'fund' ? ['advance'] : $policy['sources'];
             $page = max(1, FinanceValue::id($params['page'] ?? 1));
             $sources = $ledger->sourcePage($categories, $subjectId, $page);
+            if ($type === 'sales_batch' && ($params['role'] ?? '') !== 'credit') {
+                $sources += FinanceSalesBatches::options($subjectId, FinanceValue::date($params['date_from'] ?? date('Y-m-01')), FinanceValue::date($params['date_to'] ?? date('Y-m-d')));
+            }
             if ($type === 'receipt_return') {
                 $sources = ['sources' => [], 'has_more' => false, 'receipt_choices' => []];
                 if (!empty($params['receipt_id'])) {
