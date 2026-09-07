@@ -15,6 +15,7 @@ final class FinancePayments
     {
         $type = $document['type']; $policy = FinanceDocumentPolicy::authorize($type, true);
         $data = FinanceValue::decode($document['payload']);
+        if ($type === 'purchase_difference') { return FinancePurchaseReviews::confirm($this->ledger, $document, $data); }
         if ($type === 'purchase_return_actual') { return FinancePurchaseReturns::confirm($this->ledger, $document, $data); }
         if ($type === 'purchase_return_resolution') { return FinancePurchaseReturnResolutions::confirm($this->ledger, $document, $data); }
         if ($type === 'purchase_return_acceptance') { return FinancePurchaseReturnAcceptances::confirm($this->ledger, $document, $data); }

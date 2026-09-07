@@ -19,6 +19,8 @@ final class FinancePurchaseCosts
         $value = FinancePurchaseSettlement::costValue($arrival['actual_quantity'], $arrival['estimated_amount'], $covered, $formal);
         $value['known_amount'] = FinanceValue::money(bcadd($value['known_amount'], $extra, 2), true);
         $value['cost_adjustments'] = $extra;
+        $value['difference_pending'] = FinancePurchaseReviews::pending($arrival);
+        $value['cost_pending'] = $value['cost_pending'] || $value['difference_pending'];
         return $value;
     }
 

@@ -32,6 +32,7 @@ final class FinanceBusinessLogic extends BaseLogic
                     FinanceDocumentPolicy::authorize($result['type'], in_array($action, ['confirm', 'record', 'correct', 'reverse_duplicate', 'reverse'], true));
                     if ($result['type'] === 'sales_batch' && $result['status'] === 'confirmed') { FinanceSalesBatches::reauthorize($result['confirmed_result']); }
                     if ($result['type'] === 'purchase_settlement' && $result['status'] === 'confirmed') { FinancePurchaseBatches::reauthorize($result['confirmed_result']); }
+                    if ($result['type'] === 'purchase_difference' && $result['status'] === 'confirmed') { FinancePurchaseReviews::reauthorize($result['confirmed_result']); }
                     if (!hash_equals($existing['fingerprint'], $fingerprint)) { throw new \DomainException('同一提交标识不能用于不同内容或操作人'); }
                     unset($result['output']);
                     if ($result['type'] === 'sales_batch' && $result['status'] === 'confirmed' && FinanceAccess::has('settlement.view')) { $result['output'] = FinanceSalesOutput::document(['id' => $result['id']]) + ['offline_generation_allowed' => true]; }
@@ -122,6 +123,7 @@ final class FinanceBusinessLogic extends BaseLogic
             if ($type === 'supplier_credit_allocate' && ($params['role'] ?? '') === 'fund') { $categories = ['supplier_refund']; }
             $page = max(1, FinanceValue::id($params['page'] ?? 1));
             $sources = match ($type) {
+                'purchase_difference' => FinancePurchaseReviews::options($subjectId, $params),
                 'purchase_return_resolution' => FinancePurchaseReturnResolutions::options($subjectId, $params),
                 'purchase_return_acceptance' => ($params['role'] ?? '') === 'credit' ? $ledger->sourcePage($categories, $subjectId, $page) : FinancePurchaseReturnAcceptances::options($subjectId, $params),
                 'purchase_return_actual' => FinancePurchaseReturns::options($subjectId, $params),

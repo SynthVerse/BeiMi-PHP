@@ -43,6 +43,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000020_finance_supplier_statements.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000021_finance_purchase_return.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000022_finance_purchase_return_resolution.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000023_finance_purchase_difference_review.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -80,6 +81,52 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $event['amount'] = '1001.00';
         $this->expectException(\DomainException::class);
         Db::transaction(fn() => $cost->recordWithinTransaction($event));
+    }
+
+    public function test_purchase_arrival_difference_queue_retains_dispute_and_original_rule_until_explicit_resolution(): void
+    {
+        $this->activate(); $warehouse = $this->createCustomerReportWarehouse('到货差复核仓');
+        $goods = $this->createCustomerReportGoods('差异复核商品', 'FIN-DIFF-QUEUE'); $sku = $this->customerReportSkuId($goods);
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '重量差复核供方']);
+        $arrival = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival', 'payload' => ['subject_id' => $vendor,
+            'warehouse_id' => $warehouse, 'actual_date' => date('Y-m-d'), 'source_reference' => 'DIFF-ARR', 'reason' => '实收与报量分别保留',
+            'lines' => [['sku_id' => $sku, 'actual_quantity' => '499', 'reported_quantity' => '500', 'agreed_price' => '2.00']]]]);
+        self::assertNotFalse($arrival, FinanceBusinessLogic::getError()); $arrivalId = $arrival['confirmed_result']['lines'][0]['arrival_line_id'];
+        $options = FinanceBusinessLogic::options(['type' => 'purchase_difference', 'subject_id' => $vendor]);
+        self::assertNotFalse($options, FinanceBusinessLogic::getError()); self::assertCount(1, $options['arrivals']);
+        self::assertSame('-1.0000', $options['arrivals'][0]['assessment']['quantity']); self::assertTrue($options['arrivals'][0]['assessment']['requires_owner']);
+        $rule = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_rules', 'payload' => ['rule_kind' => 'difference', 'scope' => 'store',
+            'expected_rule_version' => 0, 'absolute_limit' => '2', 'percent_limit' => '1', 'reason' => '后设规则不改变原到货门槛']]); self::assertNotFalse($rule);
+        $employee = WorkforceLogic::saveEmployee(['name' => '到货差经办', 'mobile' => '13800009929', 'bind_user_id' => 996929,
+            'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['finance.purchase.confirm']]); self::assertNotFalse($employee);
+        $payload = ['subject_id' => $vendor, 'arrival_line_id' => $arrivalId, 'expected_review_id' => 0, 'classification' => 'dispute',
+            'reason' => '报量与收货记录待双方逐项核对', 'responsibility' => '暂未查明责任，不认定门店损失', 'review_confirmed' => 1];
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996929; request()->adminId = 0;
+        $normal = $payload; $normal['classification'] = 'normal';
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_difference', 'payload' => $normal]));
+        self::assertTrue(FinanceBusinessLogic::options(['type' => 'purchase_difference', 'subject_id' => $vendor])['arrivals'][0]['assessment']['requires_owner']);
+        $this->prepareCustomerReportRequestContext();
+        $command = $this->command(0) + ['type' => 'purchase_difference', 'payload' => $payload];
+        $review = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($review, FinanceBusinessLogic::getError());
+        self::assertSame($review, FinanceBusinessLogic::action('record', $command)); self::assertFalse($review['confirmed_result']['resolved']);
+        $cost = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID);
+        self::assertNull($cost->balance($warehouse, $sku)['value']); self::assertSame('1000.000000', $cost->balance($warehouse, $sku)['known_value']);
+        self::assertSame('499.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $sku));
+        self::assertSame('0.00', (new FinanceLedger(self::TENANT_ID))->categoryBalance('payable', $vendor));
+        $settlement = ['subject_id' => $vendor, 'supplier_confirmed' => 1, 'supplier_confirmation' => '供方认可按报量计费', 'reason' => '核对正式应付',
+            'lines' => [['arrival_line_id' => $arrivalId, 'covered_quantity' => '499', 'settlement_quantity' => '500', 'price' => '2.00',
+                'arrival_difference_confirmed' => 1, 'arrival_difference_class' => 'normal', 'arrival_difference_reason' => '不能跳过独立争议复核',
+                'difference_confirmed' => 1, 'difference_class' => 'normal', 'difference_reason' => '按报量计费', 'difference_rule_id' => $rule['confirmed_result']['rule']['id']]]];
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_settlement', 'payload' => $settlement]));
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_difference', 'payload' => $payload]));
+        $payload['expected_review_id'] = $review['confirmed_result']['review_id']; $payload['classification'] = 'normal'; $payload['reason'] = '双方核实正常行业允差';
+        $resolved = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_difference', 'payload' => $payload]);
+        self::assertNotFalse($resolved, FinanceBusinessLogic::getError()); self::assertTrue($resolved['confirmed_result']['resolved']);
+        self::assertSame('1000.000000', $cost->balance($warehouse, $sku)['value']);
+        self::assertCount(0, FinanceBusinessLogic::options(['type' => 'purchase_difference', 'subject_id' => $vendor])['arrivals']);
+        $original = FinanceBusinessLogic::detail(['id' => $review['id']]); self::assertSame('dispute', $original['confirmed_result']['classification']);
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_settlement', 'payload' => $settlement]), FinanceBusinessLogic::getError());
+        self::assertSame('1000.00', (new FinanceLedger(self::TENANT_ID))->categoryBalance('payable', $vendor));
     }
 
     public static function disputeInitialPrices(): array { return ['已知暂估后补价' => ['2.00'], '未知成本后确认' => [null]]; }
@@ -2337,6 +2384,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
     private function clean(): void
     {
+        Db::name('finance_purchase_difference_review')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         foreach (['finance_purchase_cost_revision', 'finance_purchase_cost_change', 'finance_purchase_cost_bill'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         foreach (['finance_supplier_terms', 'finance_purchase_difference_rule', 'finance_purchase_settlement_line', 'finance_purchase_arrival_line', 'finance_purchase_price'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         foreach (['finance_cost_effect', 'finance_cost_event', 'finance_cost_shortage', 'finance_cost_position', 'finance_cost_origin'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }

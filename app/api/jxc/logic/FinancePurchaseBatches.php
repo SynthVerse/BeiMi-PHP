@@ -59,8 +59,13 @@ final class FinancePurchaseBatches
             $price = FinanceValue::money($item['price'] ?? null, true);
             $lineAmount = FinanceValue::money(bcadd(bcmul($quantity, $price, 6), '0.005', 2), true);
             $zeroReason = bccomp($price, '0', 2) === 0 ? FinanceValue::text($item['zero_price_reason'] ?? null, 500) : '';
-            $costValue = FinancePurchaseCosts::value($arrival, $covered, $lineAmount);
             $arrivalReview = self::difference($snapshot['arrival_difference'] ?? '0', $snapshot['reported_quantity'] ?? $arrival['actual_quantity'], $snapshot['difference_rule'] ?? null, $item, 'arrival_');
+            if ($arrivalReview['requires_confirmation']) {
+                $previousReview = FinancePurchaseReviews::latest($arrivalId);
+                if ($previousReview && !(bool)$previousReview['resolved']) { throw new \DomainException('本到货有未结争议或异常损耗，请先从到货差待办完成关联处理'); }
+                $arrivalReview = FinancePurchaseReviews::append($arrival, $document, $arrivalReview);
+            }
+            $costValue = FinancePurchaseCosts::value($arrival, $covered, $lineAmount);
             $differenceRule = FinancePurchaseRuleBook::threshold($vendor, (int)$arrival['sku_id'], (int)($snapshot['category_id'] ?? 0));
             if (FinanceValue::id($item['difference_rule_id'] ?? 0, true) !== (int)($differenceRule['id'] ?? 0)) { throw new \DomainException('采购差异复核规则已变化，请重新核对本次结算'); }
             $difference = bcsub($quantity, $covered, 4); $settlementReview = self::difference($difference, $covered, $differenceRule, $item, '');
