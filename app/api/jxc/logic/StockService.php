@@ -86,6 +86,21 @@ class StockService
         return $flow;
     }
 
+    /** 财务采购实际退离；库存、实物来源与移动平均成本在调用方事务一起写入。 */
+    public static function outboundFinancePurchaseReturnWithinTransaction(int $warehouseId, int $goodsId, int $skuId, string $quantity,
+        int $documentId, int $returnLineId, string $date): array
+    {
+        FinanceIntegration::lock();
+        $movement = WarehouseSkuBalanceService::purchaseReturnWithinTransaction($warehouseId, $skuId, $quantity);
+        if ($movement === false) { throw new \DomainException('采购实际退货出库失败'); }
+        self::writeFlow(['warehouse_id' => $warehouseId, 'goods_id' => $goodsId, 'sku_id' => $skuId, 'batch_id' => 0,
+            'order_id' => $documentId, 'order_type' => 'finance_purchase_return', 'order_sn' => 'FIN-RET-' . $documentId,
+            'flow_type' => StockFlow::FLOW_OUT, 'quantity' => $quantity, 'remark' => '采购实际退离-明细' . $returnLineId], $movement,
+            ['business_date' => $date, 'document_id' => $documentId, 'return_line_id' => $returnLineId]);
+        $movement['negative_attribution_id'] = NegativeInventoryLogic::purchaseReturnWithinTransaction($warehouseId, $goodsId, $skuId, $movement, $documentId, $returnLineId, $date);
+        return $movement;
+    }
+
     /** 销售单实际交付重量更正入库；调用方持有销售结算事务。 */
     public static function inboundDeliveryCorrectionWithinTransaction(
         int $warehouseId,

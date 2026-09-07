@@ -31,25 +31,66 @@ final class FinanceCostLedger
         $ledger->postingMonth($date);
         $stored = $this->load($sku); $before = $this->withOpening($stored, $sku);
         $this->persist($stored, $before, []);
-        $result = match ($event['type'] ?? '') {
-            'receive' => FinanceCostAllocation::receive($before, FinanceValue::text($event['origin'] ?? null, 160), $warehouse, $sku, $event['quantity'] ?? '', $event['amount'] ?? null),
-            'issue' => FinanceCostAllocation::issue($before, $warehouse, $sku, $event['quantity'] ?? '', $event['bucket'] ?? '', $event['target_reference'] ?? ''),
-            'restore' => FinanceCostAllocation::restore($before, $warehouse, $sku, $event['quantity'] ?? '', $event['bucket'] ?? '', $event['target_reference'] ?? '',
-                isset($event['to_warehouse_id']) ? FinanceValue::id($event['to_warehouse_id']) : null),
-            'transfer' => FinanceCostAllocation::transfer($before, $warehouse, FinanceValue::id($event['to_warehouse_id'] ?? null), $sku, $event['quantity'] ?? '', $reference),
-            'adjust' => FinanceCostAllocation::adjust($before, FinanceValue::text($event['origin'] ?? null, 160), $event['amount'] ?? ''),
-            'reestimate' => FinanceCostAllocation::reviseEstimate($before, FinanceValue::text($event['origin'] ?? null, 160), $event['amount'] ?? '',
-                is_bool($event['pending'] ?? null) ? $event['pending'] : throw new \DomainException('必须明确成本余量是否待确认')),
-            default => throw new \DomainException('成本事件类型无效'),
-        };
+        $replayed = !in_array($event['type'], ['adjust', 'reestimate'], true)
+            && $this->query('finance_cost_event')->where('sku_id', $sku)->whereIn('event_type', ['receive', 'issue', 'restore', 'transfer'])
+                ->where('business_date', '>', $date)->lock(true)->find();
+        $result = $replayed ? $this->replay($sku, $event) : $this->applyEvent($before, $event);
+        $effectTotals = $result['effect_totals'] ?? null; unset($result['effect_totals']);
         $after = $result['state']; unset($result['state']);
         $result += ['reference' => $reference, 'business_date' => $date, 'balance' => FinanceCostAllocation::balance($after, $warehouse, $sku)];
         $id = (int)$this->query('finance_cost_event')->insertGetId(['tenant_id' => $this->tenantId, 'reference' => $reference,
             'fingerprint' => $fingerprint, 'event_type' => $event['type'], 'sku_id' => $sku, 'document_id' => FinanceValue::id($event['document_id'] ?? 0, true),
             'business_date' => $date, 'snapshot' => FinanceValue::json($event), 'result' => FinanceValue::json($result),
             'actor' => FinanceValue::json(FinanceAccess::actor()), 'create_time' => time()]);
-        $this->effects($ledger, $id, $event, $before, $after);
+        if ($effectTotals !== null) { $this->replayEffects($ledger, $id, $sku, $effectTotals); }
+        else { $this->effects($ledger, $id, $event, $before, $after); }
         $this->persist($before, $after, $event['snapshot'] ?? []);
+        return $result;
+    }
+
+    private function applyEvent(array $before, array $event): array
+    {
+        $sku = FinanceValue::id($event['sku_id']); $warehouse = FinanceValue::id($event['warehouse_id']);
+        return match ($event['type'] ?? '') {
+            'receive' => FinanceCostAllocation::receive($before, FinanceValue::text($event['origin'] ?? null, 160), $warehouse, $sku, $event['quantity'] ?? '', $event['amount'] ?? null),
+            'issue' => FinanceCostAllocation::issue($before, $warehouse, $sku, $event['quantity'] ?? '', $event['bucket'] ?? '', $event['target_reference'] ?? ''),
+            'restore' => FinanceCostAllocation::restore($before, $warehouse, $sku, $event['quantity'] ?? '', $event['bucket'] ?? '', $event['target_reference'] ?? '',
+                isset($event['to_warehouse_id']) ? FinanceValue::id($event['to_warehouse_id']) : null),
+            'transfer' => FinanceCostAllocation::transfer($before, $warehouse, FinanceValue::id($event['to_warehouse_id'] ?? null), $sku, $event['quantity'] ?? '', $event['reference']),
+            'adjust' => FinanceCostAllocation::adjust($before, FinanceValue::text($event['origin'] ?? null, 160), $event['amount'] ?? ''),
+            'reestimate' => FinanceCostAllocation::reviseEstimate($before, FinanceValue::text($event['origin'] ?? null, 160), $event['amount'] ?? '',
+                is_bool($event['pending'] ?? null) ? $event['pending'] : throw new \DomainException('必须明确成本余量是否待确认')),
+            default => throw new \DomainException('成本事件类型无效'),
+        };
+    }
+
+    /** 实物按实际日期、同日按确认顺序重放；后续确认的成本沿重新分配后的来源去向补差。 */
+    private function replay(int $sku, array $incoming): array
+    {
+        $physical = []; $adjustments = [];
+        foreach ($this->query('finance_cost_event')->where('sku_id', $sku)->order('id')->lock(true)->select()->toArray() as $row) {
+            $event = FinanceValue::decode($row['snapshot']);
+            if (in_array($event['type'], ['adjust', 'reestimate'], true)) { $adjustments[] = $event; }
+            else { $physical[] = $event; }
+        }
+        $physical[] = $incoming;
+        // PHP 的稳定排序保留同日原始确认顺序，新补录同日事实追加在已有事实之后。
+        usort($physical, static fn(array $a, array $b): int => strcmp($a['business_date'], $b['business_date']));
+        $state = $this->withOpening(FinanceCostAllocation::empty(), $sku); $result = []; $totals = []; $firstDates = [];
+        foreach (array_merge($physical, $adjustments) as $event) {
+            $applied = $this->applyEvent($state, $event);
+            $rows = $this->effectChanges($event, $state, $applied['state'], static function (array $row) use (&$firstDates): ?string {
+                return $firstDates[FinanceValue::json([$row['warehouse_id'], $row['sku_id'], $row['bucket'], $row['reference']])] ?? null;
+            });
+            foreach ($rows as $row) {
+                $key = FinanceValue::json([$row['warehouse_id'], $row['sku_id'], $row['bucket'], $row['reference']]);
+                $firstDates[$key] ??= $row['business_date']; self::sumEffect($totals, $row);
+            }
+            $state = $applied['state'];
+            if ($event['reference'] === $incoming['reference']) { $result = $applied; }
+        }
+        $result['state'] = $state;
+        $result['effect_totals'] = $totals;
         return $result;
     }
 
@@ -131,6 +172,10 @@ final class FinanceCostLedger
                 $this->query('finance_cost_origin')->where('origin_key', $key)->update(['current_amount' => $origin['amount'], 'quantity' => $origin['quantity']]);
             }
         }
+        foreach (array_diff_key($before['origins'], $after['origins']) as $key => $_) {
+            if (!str_starts_with($key, 'pending-return:')) { throw new \DomainException('成本重放不能丢弃正式入库来源'); }
+            $this->query('finance_cost_origin')->where('origin_key', $key)->delete();
+        }
         foreach (['positions' => 'finance_cost_position', 'shortages' => 'finance_cost_shortage'] as $kind => $table) {
             foreach ($after[$kind] as $key => $row) {
                 if (($before[$kind][$key] ?? null) === $row) { continue; }
@@ -144,6 +189,15 @@ final class FinanceCostLedger
 
     private function effects(FinanceLedger $ledger, int $eventId, array $event, array $before, array $after): void
     {
+        $rows = $this->effectChanges($event, $before, $after, fn(array $position): ?string => $this->query('finance_cost_effect')
+            ->where('sku_id', $position['sku_id'])->where('warehouse_id', $position['warehouse_id'])->where('bucket', $position['bucket'])
+            ->where('reference', $position['reference'])->order('id')->value('business_date'));
+        foreach ($rows as $row) { $this->writeEffect($ledger, $eventId, $row); }
+    }
+
+    private function effectChanges(array $event, array $before, array $after, callable $originalDate): array
+    {
+        $rows = [];
         $beforeRows = self::effectRows($before); $afterRows = self::effectRows($after);
         foreach ($afterRows + $beforeRows as $key => $position) {
             $old = $beforeRows[$key] ?? ['quantity' => '0', 'value' => '0'];
@@ -153,12 +207,41 @@ final class FinanceCostLedger
             $date = $event['business_date'];
             if ($position['bucket'] !== 'inventory' && (in_array($event['type'], ['receive', 'adjust', 'reestimate', 'transfer'], true)
                 || ($event['type'] === 'restore' && $position['reference'] !== $event['target_reference']))) {
-                $date = $this->query('finance_cost_effect')->where('sku_id', $position['sku_id'])->where('warehouse_id', $position['warehouse_id'])
-                    ->where('bucket', $position['bucket'])->where('reference', $position['reference'])->order('id')->value('business_date') ?: $date;
+                $date = $originalDate($position) ?: $date;
             }
-            $this->query('finance_cost_effect')->insert(['tenant_id' => $this->tenantId, 'event_id' => $eventId, 'origin_key' => $position['origin'],
+            $rows[] = ['origin_key' => $position['origin'],
                 'warehouse_id' => $position['warehouse_id'], 'sku_id' => $position['sku_id'], 'bucket' => $position['bucket'], 'reference' => $position['reference'],
-                'quantity_delta' => $quantity, 'value_delta' => $value, 'business_date' => $date, 'posting_month' => $ledger->postingMonth($date)]);
+                'quantity_delta' => $quantity, 'value_delta' => $value, 'business_date' => $date];
+        }
+        return $rows;
+    }
+
+    private function writeEffect(FinanceLedger $ledger, int $eventId, array $row): void
+    {
+        $this->query('finance_cost_effect')->insert($row + ['tenant_id' => $this->tenantId, 'event_id' => $eventId, 'posting_month' => $ledger->postingMonth($row['business_date'])]);
+    }
+
+    private static function sumEffect(array &$totals, array $row): void
+    {
+        $key = FinanceValue::json([$row['origin_key'], $row['warehouse_id'], $row['sku_id'], $row['bucket'], $row['reference'], $row['business_date']]);
+        $old = $totals[$key] ?? ['quantity_delta' => '0', 'value_delta' => '0'];
+        $totals[$key] = $row;
+        $totals[$key]['quantity_delta'] = bcadd($old['quantity_delta'], $row['quantity_delta'], 12);
+        $totals[$key]['value_delta'] = bcadd($old['value_delta'], $row['value_delta'], 6);
+    }
+
+    /** 对比按事件日期重建的累计分录，保持库存与其后续去向的期间一致。 */
+    private function replayEffects(FinanceLedger $ledger, int $eventId, int $sku, array $expected): void
+    {
+        $actual = [];
+        foreach ($this->query('finance_cost_effect')->where('sku_id', $sku)->order('id')->lock(true)->select()->toArray() as $row) {
+            unset($row['id'], $row['tenant_id'], $row['event_id'], $row['posting_month']);
+            $row['sku_id'] = (int)$row['sku_id']; $row['warehouse_id'] = (int)$row['warehouse_id']; self::sumEffect($actual, $row);
+        }
+        foreach ($expected + $actual as $key => $row) {
+            $row['quantity_delta'] = bcsub($expected[$key]['quantity_delta'] ?? '0', $actual[$key]['quantity_delta'] ?? '0', 12);
+            $row['value_delta'] = bcsub($expected[$key]['value_delta'] ?? '0', $actual[$key]['value_delta'] ?? '0', 6);
+            if (bccomp($row['quantity_delta'], '0', 12) !== 0 || bccomp($row['value_delta'], '0', 6) !== 0) { $this->writeEffect($ledger, $eventId, $row); }
         }
     }
 

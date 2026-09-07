@@ -37,6 +37,13 @@ class WarehouseSkuBalanceService
         return $quantity === false ? false : self::change($warehouseId, $skuId, '-' . $quantity, '0.0000');
     }
 
+    /** 财务已确认的真实退离，调用方须保留原到货、退货单及成本缺口归因。 */
+    public static function purchaseReturnWithinTransaction(int $warehouseId, int $skuId, string $quantity): array|false
+    {
+        $quantity = self::normalizeQuantity($quantity);
+        return $quantity === false ? false : self::changeWithinTransaction($warehouseId, $skuId, '-' . $quantity, '0.0000', true);
+    }
+
     public static function reserve(int $warehouseId, int $skuId, string $quantity)
     {
         $quantity = self::normalizeQuantity($quantity);

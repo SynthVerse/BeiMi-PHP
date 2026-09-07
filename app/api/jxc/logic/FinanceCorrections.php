@@ -14,6 +14,7 @@ final class FinanceCorrections
     public function replace(array $original, array $replacement, string $reason, int $duplicateOf = 0, bool $reverseOnly = false): array
     {
         $policy = FinanceDocumentPolicy::authorize($original['type'], true);
+        if ($original['type'] === 'purchase_return_actual') { throw new \DomainException('已实际退离不能直接覆盖或撤销，请关联退货返回入库或供应商认可处理'); }
         if ($original['type'] === 'purchase_arrival') { throw new \DomainException('已验收入库不能直接覆盖或撤销，请从原到货明细关联实物更正或采购退货'); }
         if ($original['type'] === 'purchase_settlement') { throw new \DomainException('供应商结算请关联采购金额调整，不能直接撤销已处理的实收量'); }
         if ($original['type'] === 'purchase_extra_cost') { throw new \DomainException('已确认附加成本请关联费用金额调整，不能撤销已分配成本后重复登记'); }

@@ -12,6 +12,27 @@ final class NegativeInventoryLogic extends BaseLogic
 {
     private const SCALE = 4;
 
+    /** 已确认实物退离新增的负现存量，保留单据与明细引用并进入既有最高权限待办。 */
+    public static function purchaseReturnWithinTransaction(int $warehouse, int $goods, int $sku, array $movement, int $document, int $line, string $date): int
+    {
+        $before = bccomp($movement['before_on_hand_qty'], '0', 4) < 0 ? ltrim($movement['before_on_hand_qty'], '-') : '0';
+        $after = bccomp($movement['after_on_hand_qty'], '0', 4) < 0 ? ltrim($movement['after_on_hand_qty'], '-') : '0';
+        $quantity = bcsub($after, $before, 4);
+        if (bccomp($quantity, '0', 4) <= 0) { return 0; }
+        $now = time();
+        $id = (int)Db::name('negative_inventory_attribution')->insertGetId(['tenant_id' => self::tenantId(),
+            'delivery_item_id' => null, 'warehouse_id' => $warehouse, 'goods_id' => $goods, 'sku_id' => $sku,
+            'negative_qty' => $quantity, 'remaining_qty' => $quantity, 'negative_amount' => '0.00', 'cost_status' => 'pending',
+            'reason' => '采购实际退货 FIN-RET-' . $document . ' / 明细 #' . $line,
+            'threshold_explanation' => '实际退离已确认，库存来源需核实', 'threshold_confirmed' => 1,
+            'resolution_status' => 'open', 'operator_id' => self::operatorId(), 'occurred_time' => strtotime($date), 'update_time' => $now]);
+        if ($id <= 0 || Db::name('negative_inventory_todo')->insert(['tenant_id' => self::tenantId(), 'attribution_id' => $id,
+            'status' => 'open', 'severity' => 'red', 'assignee_scope' => 'highest_privilege', 'create_time' => $now, 'update_time' => $now]) !== 1) {
+            throw new \DomainException('采购实际退货未能建立负库存待办');
+        }
+        return $id;
+    }
+
     /** @return array{lists:array<int,array<string,mixed>>,count:int}|false */
     public static function todos(array $params = []): array|false
     {
