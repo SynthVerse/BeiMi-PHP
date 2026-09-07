@@ -40,6 +40,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000017_finance_purchase_rules.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000018_finance_purchase_cost_change.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000019_finance_purchase_cost_revision.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000020_finance_supplier_statements.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -361,6 +362,13 @@ final class FinanceBusinessWorkflowTest extends TestCase
         foreach ($entries as $entry) { self::assertSame(date('Y-m'), $entry['posting_month']); self::assertNull($entry['effective_date']); }
         $options = FinanceBusinessLogic::options(['type' => 'supplier_credit_allocate', 'subject_id' => $vendor, 'role' => 'fund']);
         self::assertNotFalse($options, FinanceBusinessLogic::getError()); self::assertSame($credit, $options['sources'][0]['reference']); self::assertSame('20.00', $options['sources'][0]['balance']);
+        $oldStatement = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['subject_kind' => 'vendor', 'vendor_id' => $vendor,
+            'date_from' => $oldDate, 'date_to' => date('Y-m-t', strtotime($oldDate))]);
+        self::assertSame('50.00', $oldStatement['snapshot']['balances']['supplier_refund']['closing']);
+        self::assertSame('0.00', $oldStatement['snapshot']['balances']['expense_payable']['closing']);
+        $currentStatement = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['subject_kind' => 'vendor', 'vendor_id' => $vendor]);
+        self::assertSame('20.00', $currentStatement['snapshot']['balances']['supplier_refund']['closing']);
+        self::assertSame('70.00', $currentStatement['snapshot']['balances']['expense_payable']['closing']);
         $reverse = FinanceBusinessLogic::action('reverse', $this->command($result['version']) + ['id' => $result['id'], 'correction_reason' => '撤销本次抵扣，恢复待退款']);
         self::assertNotFalse($reverse, FinanceBusinessLogic::getError());
         $reversals = Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('document_id', $reverse['id'])->select()->toArray();
@@ -1382,6 +1390,116 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertSame([], \app\api\jxc\logic\FinanceCustomerBalances::lists(['filter' => 'overdue'])['lists']);
     }
 
+    public function test_supplier_statement_freezes_formal_payables_refunds_and_actual_payments_separately(): void
+    {
+        $this->activate();
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '对账供应商']);
+        $ledger = new FinanceLedger(self::TENANT_ID);
+        $source = $ledger->createSource(0, 'payable', $vendor, '100.00', date('Y-m-d'), null, ['reason' => '已确认采购']);
+        $ledger->createSource(0, 'supplier_refund', $vendor, '20.00', date('Y-m-d'), null, ['reason' => '已确认贷项']);
+        $request = $this->command(0) + ['subject_kind' => 'vendor', 'vendor_id' => $vendor];
+        $first = \app\api\jxc\logic\FinanceStatements::action('generate', $request);
+        self::assertSame('vendor', $first['subject_kind']); self::assertSame($vendor, $first['vendor_id']);
+        self::assertSame('unanswered', $first['state']);
+        self::assertSame('100.00', $first['snapshot']['balances']['payable']['closing']);
+        self::assertSame('20.00', $first['snapshot']['balances']['supplier_refund']['closing']);
+        self::assertSame('80.00', $first['snapshot']['net_reference']);
+        self::assertArrayNotHasKey('receivable', $first['snapshot']['balances']);
+        self::assertSame($first, \app\api\jxc\logic\FinanceStatements::action('generate', $request));
+        $payment = $this->receipt('30', '30'); $payment['subject_id'] = $vendor; $payment['allocations'][0]['source'] = $source;
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'supplier_payment', 'payload' => $payment]), FinanceBusinessLogic::getError());
+        $old = \app\api\jxc\logic\FinanceStatements::detail(['id' => $first['id'], 'subject_kind' => 'vendor']);
+        self::assertSame($first['snapshot'], $old['snapshot']);
+        $second = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['subject_kind' => 'vendor', 'vendor_id' => $vendor, 'previous_id' => $first['id']]);
+        self::assertSame('70.00', $second['snapshot']['balances']['payable']['closing']);
+        self::assertSame('50.00', $second['snapshot']['net_reference']);
+        self::assertSame('supplier_payment', $second['snapshot']['actual_money'][0]['type']);
+        self::assertSame('-30.00', $second['snapshot']['actual_money'][0]['amount']);
+        self::assertSame($first['id'], $second['previous_id']);
+        self::assertSame('unanswered', $second['state']);
+    }
+
+    public function test_supplier_dispute_keeps_ledger_intact_and_allows_only_undisputed_payment_until_resolved(): void
+    {
+        $this->activate(); $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '异议供应商']);
+        $ledger = new FinanceLedger(self::TENANT_ID); $source = $ledger->createSource(0, 'payable', $vendor, '100.00', date('Y-m-d'), null, ['reason' => '已确认采购']);
+        $statement = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['subject_kind' => 'vendor', 'vendor_id' => $vendor]);
+        $reply = \app\api\jxc\logic\FinanceStatements::action('reply', $this->command(0) + ['subject_kind' => 'vendor', 'id' => $statement['id'],
+            'response' => 'disputed', 'respondent' => '供应商负责人', 'response_date' => date('Y-m-d'), 'evidence' => '单价尚待核对',
+            'items' => [['source' => $source, 'amount' => '20.00', 'reason' => '价格异议', 'ledger_uncertain' => true]]]);
+        self::assertSame('disputed', $reply['state']); self::assertSame('100.00', $ledger->source($source)['balance']);
+        self::assertSame([], \app\api\jxc\logic\FinanceStatements::openDisputes([$source]));
+        $payment = $this->receipt('81', '81'); $payment['subject_id'] = $vendor; $payment['allocations'][0]['source'] = $source;
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'supplier_payment', 'payload' => $payment]));
+        self::assertStringContainsString('争议', FinanceBusinessLogic::getError()); self::assertSame('100.00', $ledger->source($source)['balance']);
+        $payment['amount'] = '80'; $payment['allocations'][0]['amount'] = '80';
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'supplier_payment', 'payload' => $payment]), FinanceBusinessLogic::getError());
+        self::assertSame('20.00', $ledger->source($source)['balance']);
+        $resolved = \app\api\jxc\logic\FinanceStatements::action('resolve', $this->command(1) + ['subject_kind' => 'vendor', 'id' => $statement['id'],
+            'dispute_id' => $reply['disputes'][0]['id'], 'resolution' => 'ledger_verified', 'reason' => '账内价格正确，外部异议保留']);
+        self::assertFalse($resolved['disputes'][0]['ledger_uncertain']);
+        $resolved = \app\api\jxc\logic\FinanceStatements::action('resolve', $this->command(2) + ['subject_kind' => 'vendor', 'id' => $statement['id'],
+            'dispute_id' => $reply['disputes'][0]['id'], 'resolution' => 'resolved', 'reason' => '供方核对后确认原单正确']);
+        self::assertSame('awaiting_reconfirmation', $resolved['state']);
+        $payment['amount'] = '20'; $payment['allocations'][0]['amount'] = '20';
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'supplier_payment', 'payload' => $payment]), FinanceBusinessLogic::getError());
+        self::assertSame('0.00', $ledger->source($source)['balance']);
+    }
+
+    public function test_supplier_balances_and_statement_keep_unsettled_arrivals_out_of_formal_payables(): void
+    {
+        $this->activate(); $warehouse = $this->createCustomerReportWarehouse('对账仓');
+        $goods = $this->createCustomerReportGoods('对账商品', 'FIN-SUP-STMT'); $sku = $this->customerReportSkuId($goods);
+        $vendorName = '待结算供应商 ' . bin2hex(random_bytes(4));
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => $vendorName]);
+        $arrival = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival', 'payload' => ['subject_id' => $vendor,
+            'warehouse_id' => $warehouse, 'actual_date' => date('Y-m-d'), 'source_reference' => 'ARR-STMT', 'reason' => '实际到货',
+            'lines' => [['sku_id' => $sku, 'actual_quantity' => '100', 'agreed_price' => '2.00']]]]);
+        self::assertNotFalse($arrival, FinanceBusinessLogic::getError()); $line = $arrival['confirmed_result']['lines'][0]['arrival_line_id'];
+        $first = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['subject_kind' => 'vendor', 'vendor_id' => $vendor]);
+        self::assertSame('0.00', $first['snapshot']['balances']['payable']['closing']);
+        self::assertSame('100.0000', $first['snapshot']['pending_arrivals'][0]['pending_quantity']);
+        $settled = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_settlement', 'payload' => ['subject_id' => $vendor,
+            'reason' => '先确认四十斤', 'supplier_confirmation' => '双方确认', 'supplier_confirmed' => 1,
+            'lines' => [['arrival_line_id' => $line, 'covered_quantity' => '40', 'settlement_quantity' => '40', 'price' => '2.00']]]]);
+        self::assertNotFalse($settled, FinanceBusinessLogic::getError());
+        $detail = \app\api\jxc\logic\FinanceSupplierBalances::detail(['vendor_id' => $vendor]);
+        self::assertSame('80.00', $detail['balances']['payable']); self::assertSame('80.00', $detail['sources'][0]['available_payment']);
+        self::assertSame('60.0000', $detail['pending_arrivals'][0]['pending_quantity']);
+        self::assertArrayNotHasKey('overdue', $detail);
+        $list = \app\api\jxc\logic\FinanceSupplierBalances::lists(['keyword' => $vendorName]);
+        self::assertSame($vendor, $list['lists'][0]['id']); self::assertSame('80.00', $list['lists'][0]['payable']);
+        $second = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['subject_kind' => 'vendor', 'vendor_id' => $vendor]);
+        self::assertSame('60.0000', $second['snapshot']['pending_arrivals'][0]['pending_quantity']);
+        self::assertSame('100.0000', \app\api\jxc\logic\FinanceStatements::detail(['subject_kind' => 'vendor', 'id' => $first['id']])['snapshot']['pending_arrivals'][0]['pending_quantity']);
+    }
+
+    public function test_supplier_statement_permissions_subjects_and_versions_cannot_cross_customer_or_store_boundaries(): void
+    {
+        $this->activate(); $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '权限对账供应商']);
+        $statement = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['subject_kind' => 'vendor', 'vendor_id' => $vendor]);
+        $employee = WorkforceLogic::saveEmployee(['name' => '客户对账经办', 'mobile' => '13800009937', 'bind_user_id' => 996937, 'is_enabled' => 1, 'process_ids' => [],
+            'permission_keys' => ['finance.receivable.view', 'finance.receivable.prepare']]);
+        self::assertNotFalse($employee);
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996937; request()->adminId = 0;
+        try { \app\api\jxc\logic\FinanceStatements::detail(['subject_kind' => 'vendor', 'id' => $statement['id']]); self::fail('客户权限不能读取供应商账'); }
+        catch (\DomainException $error) { self::assertStringContainsString('权限', $error->getMessage()); }
+        Db::name('employee_permission')->insert(['tenant_id' => self::TENANT_ID, 'employee_id' => $employee['id'], 'permission_key' => 'finance.payable.view', 'create_time' => time()]);
+        self::assertSame($statement['snapshot'], \app\api\jxc\logic\FinanceStatements::detail(['subject_kind' => 'vendor', 'id' => $statement['id']])['snapshot']);
+        try { \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['subject_kind' => 'vendor', 'vendor_id' => $vendor]); self::fail('只读不能生成'); }
+        catch (\DomainException $error) { self::assertStringContainsString('权限', $error->getMessage()); }
+        $this->prepareCustomerReportRequestContext();
+        $wrong = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::OTHER_TENANT_ID, 'supplier_name' => '异店供应商']);
+        try { \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['subject_kind' => 'vendor', 'vendor_id' => $wrong]); self::fail('不允许异店对象'); }
+        catch (\DomainException $error) { self::assertStringContainsString('本门店', $error->getMessage()); }
+        $reply = $this->command(0) + ['subject_kind' => 'vendor', 'vendor_id' => $vendor, 'id' => $statement['id'], 'response' => 'confirmed', 'respondent' => '供方', 'response_date' => date('Y-m-d'), 'evidence' => '供方明确全部确认'];
+        $confirmed = \app\api\jxc\logic\FinanceStatements::action('reply', $reply); self::assertSame('confirmed', $confirmed['state']);
+        self::assertSame($confirmed, \app\api\jxc\logic\FinanceStatements::action('reply', $reply));
+        $stale = $reply; $stale['idempotency_key'] = $this->command(0)['idempotency_key'];
+        try { \app\api\jxc\logic\FinanceStatements::action('reply', $stale); self::fail('过期版本不能覆盖回复'); }
+        catch (\DomainException $error) { self::assertStringContainsString('已变化', $error->getMessage()); }
+    }
+
     public function test_statement_is_immutable_and_regeneration_links_old_snapshot_without_confirming_customer(): void
     {
         $this->activate();
@@ -1965,6 +2083,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         Db::name('finance_sales_precision_rule')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_overdue_event')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         foreach (['finance_statement_resolution', 'finance_statement_dispute', 'finance_statement_event', 'finance_statement'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
+        foreach (['finance_supplier_statement_resolution', 'finance_supplier_statement_dispute', 'finance_supplier_statement_event', 'finance_supplier_statement'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         Db::name('finance_advance_revision')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_due_adjustment')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_customer_terms')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();

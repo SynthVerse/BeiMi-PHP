@@ -155,6 +155,19 @@ final class FinanceBusinessLogic extends BaseLogic
                 if (!in_array($selected['category'], $categories, true) || $selected['subject_id'] !== $subjectId || bccomp($selected['balance'], '0', 2) <= 0) { throw new \DomainException('指定来源已结清或不属于本对象和业务类型'); }
                 $sources['selected_source'] = $selected;
             }
+            if ($type === 'supplier_payment') {
+                foreach ($sources['sources'] as &$source) {
+                    $source['disputed_amount'] = FinanceStatements::disputedAmount($source['reference']);
+                    $available = bcsub($source['balance'], $source['disputed_amount'], 2);
+                    $source['available_payment'] = bccomp($available, '0', 2) > 0 ? $available : '0.00';
+                }
+                unset($source);
+                if (isset($sources['selected_source'])) {
+                    $selected = &$sources['selected_source']; $selected['disputed_amount'] = FinanceStatements::disputedAmount($selected['reference']);
+                    $available = bcsub($selected['balance'], $selected['disputed_amount'], 2);
+                    $selected['available_payment'] = bccomp($available, '0', 2) > 0 ? $available : '0.00';
+                }
+            }
             return ['tenant_id' => FinanceAccess::tenant(), 'type' => $type, 'policy' => $policy,
                 'active' => Db::name('finance_opening_book')->where('tenant_id', FinanceAccess::tenant())->value('status') === 'active',
                 'can_confirm' => FinanceAccess::owner() || (!$policy['owner'] && FinanceAccess::has($policy['confirm'])),

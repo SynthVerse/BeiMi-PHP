@@ -38,6 +38,14 @@ final class FinancePayments
         $reason = FinanceValue::text($data['reason'] ?? '', 1000);
         $lines = $data['allocations'] ?? [];
         if (!is_array($lines)) { throw new \DomainException('请核对所选来源组成'); }
+        if ($type === 'supplier_payment') {
+            foreach ($lines as $line) {
+                if (!is_array($line)) { throw new \DomainException('付款组成格式无效'); }
+                $reference = FinanceValue::text($line['source'] ?? '', 40); $source = $this->ledger->source($reference);
+                $available = bcsub($source['balance'], FinanceStatements::disputedAmount($reference), 2);
+                if (bccomp(FinanceValue::money($line['amount'] ?? null), $available, 2) > 0) { throw new \DomainException('本次付款超过无争议可付金额，请先核实争议并完成正式调整'); }
+            }
+        }
         $total = $this->ledger->allocate((int)$document['id'], $lines, $policy['sources'], $subjectId, $date, $month);
         $advance = '0.00';
         if ($type === 'receipt') {

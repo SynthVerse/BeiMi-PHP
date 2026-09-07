@@ -9,11 +9,11 @@ use think\facade\Db;
 /** 生成时冻结已知业务；对账期间不改变分录的财务归属月份。 */
 final class FinanceStatementSnapshot
 {
-    public static function capture(int $customer, string $from, string $to): array
+    public static function capture(int $customer, string $from, string $to, bool $supplier = false): array
     {
         $tenant = FinanceAccess::tenant(); $activation = (string)Db::name('finance_preparation')->where('tenant_id', $tenant)->value('activation_date');
         if ($from < $activation || $to > date('Y-m-d') || $from > $to) { throw new \DomainException('对账期间须在启用日至今天之间，起始日不能晚于截止日'); }
-        $categories = ['receivable', 'advance', 'customer_refund', 'recovery']; $sources = []; $balances = []; $movements = [];
+        $categories = $supplier ? ['payable', 'expense_payable', 'supplier_refund', 'expense_refund'] : ['receivable', 'advance', 'customer_refund', 'recovery']; $sources = []; $balances = []; $movements = [];
         foreach ($categories as $category) { $balances[$category] = ['opening' => '0.00', 'change' => '0.00', 'closing' => '0.00']; }
         foreach (['o' => 'finance_opening_source', 'n' => 'finance_source'] as $kind => $table) {
             $rows = Db::name($table)->where('tenant_id', $tenant)->where('subject_id', $customer)->whereIn('category', $categories)->order('id')->limit(5001)->select()->toArray();
@@ -43,11 +43,17 @@ final class FinanceStatementSnapshot
             foreach ($entries as $entry) {
                 if ($entry['purpose'] === 'advance_revision' && $sources[$entry['source_ref']]['advance_revision']) { continue; }
                 $date = $entry['effective_date'] ?? $entry['business_date'] ?? $activation;
+                // 日期不详的期初贷项可能抵扣后月应付，原启用日不能使核销提前进入旧期快照。
+                $datePrecision = 'day';
+                if ($supplier && $entry['effective_date'] === null && $date < $entry['posting_month'] . '-01') {
+                    $date = $entry['posting_month'] . '-01'; $datePrecision = 'month';
+                }
                 if ($date > $to) { continue; }
                 $ref = $entry['source_ref']; $category = $sources[$ref]['category']; $bucket = $date < $from ? 'opening' : 'change';
                 if (bccomp($entry['amount'], '0', 2) > 0) { $sources[$ref]['reply_limit'] = bcadd($sources[$ref]['reply_limit'], $entry['amount'], 2); }
                 self::add($sources[$ref], $balances[$category], $bucket, $entry['amount']);
-                if ($bucket === 'change') { $movements[] = ['key' => 'e:' . $entry['id'], 'source' => $ref, 'category' => $category, 'date' => $date,
+                if ($bucket === 'change') { $movements[] = ['key' => 'e:' . $entry['id'], 'source' => $ref, 'category' => $category, 'date' => $datePrecision === 'month' ? substr($date, 0, 7) : $date,
+                    'date_precision' => $datePrecision, 'effective_date' => $entry['effective_date'],
                     'amount' => $entry['amount'], 'purpose' => $entry['purpose'], 'document_id' => (int)$entry['document_id'], 'posting_month' => $entry['posting_month']]; }
             }
         }
@@ -56,19 +62,22 @@ final class FinanceStatementSnapshot
         $types = $documents ? Db::name('finance_document')->where('tenant_id', $tenant)->whereIn('id', $documents)->column('type', 'id') : [];
         foreach ($movements as &$movement) { $movement['document_type'] = $types[$movement['document_id']] ?? ''; }
         return ['generated_at' => date('Y-m-d H:i:s'), 'balances' => $balances, 'sources' => array_values($sources), 'movements' => $movements,
-            'actual_money' => self::actualMoney($customer, $from, $to),
-            'pending_deliveries' => self::pendingDeliveries($customer, $from, $to),
-            'net_reference' => bcsub(bcsub($balances['receivable']['closing'], $balances['advance']['closing'], 2), $balances['customer_refund']['closing'], 2)];
+            'actual_money' => self::actualMoney($customer, $from, $to, $supplier),
+            'pending_deliveries' => $supplier ? [] : self::pendingDeliveries($customer, $from, $to),
+            'pending_arrivals' => $supplier ? self::pendingArrivals($customer, $to) : [],
+            'net_reference' => $supplier
+                ? bcsub(bcsub(bcadd($balances['payable']['closing'], $balances['expense_payable']['closing'], 2), $balances['supplier_refund']['closing'], 2), $balances['expense_refund']['closing'], 2)
+                : bcsub(bcsub($balances['receivable']['closing'], $balances['advance']['closing'], 2), $balances['customer_refund']['closing'], 2)];
     }
 
-    private static function actualMoney(int $customer, string $from, string $to): array
+    private static function actualMoney(int $customer, string $from, string $to, bool $supplier): array
     {
         $tenant = FinanceAccess::tenant();
         $replaced = Db::name('finance_correction')->where('tenant_id', $tenant)->field('original_document_id')->buildSql();
         $rows = Db::name('finance_entry')->alias('e')->join('finance_document d', 'd.id=e.document_id AND d.tenant_id=e.tenant_id')
             ->where('e.tenant_id', $tenant)->where('e.metric', 'cash')->whereIn('e.purpose', ['actual_money', 'correction_replacement'])
             ->whereBetween('e.business_date', [$from, $to])->where('d.status', 'confirmed')
-            ->whereIn('d.type', ['receipt', 'receipt_return', 'advance_refund', 'customer_refund', 'recovery_receipt'])
+            ->whereIn('d.type', $supplier ? ['supplier_payment', 'supplier_refund', 'expense_refund'] : ['receipt', 'receipt_return', 'advance_refund', 'customer_refund', 'recovery_receipt'])
             ->whereRaw("CAST(JSON_UNQUOTE(JSON_EXTRACT(d.payload,'$.subject_id')) AS UNSIGNED)=?", [$customer])
             ->whereRaw('d.id NOT IN ' . $replaced)->field('e.id,e.document_id,e.amount,e.business_date,e.details,d.type,d.confirmed_result')->order('e.business_date,e.id')->limit(5001)->select()->toArray();
         if (count($rows) > 5000) { throw new \DomainException('期间收退款过多，请缩短对账期间'); }
@@ -90,5 +99,21 @@ final class FinanceStatementSnapshot
     private static function pendingDeliveries(int $customer, string $from, string $to): array
     {
         return FinanceDeliveries::rows($customer, $from, $to);
+    }
+
+    public static function pendingArrivals(int $vendor, string $to): array
+    {
+        $tenant = FinanceAccess::tenant();
+        $covered = Db::name('finance_purchase_settlement_line')->where('tenant_id', $tenant)
+            ->field('arrival_line_id,SUM(covered_quantity) AS covered')->group('arrival_line_id')->buildSql();
+        $rows = Db::name('finance_purchase_arrival_line')->alias('a')->leftJoin([$covered => 's'], 's.arrival_line_id=a.id')
+            ->where('a.tenant_id', $tenant)->where('a.vendor_id', $vendor)->where('a.business_date', '<=', $to)
+            ->whereRaw('a.actual_quantity>COALESCE(s.covered,0)')->field('a.*,COALESCE(s.covered,0) AS covered_quantity')->order('a.business_date,a.id')->limit(5001)->select()->toArray();
+        if (count($rows) > 5000) { throw new \DomainException('待结算到货超过单次对账容量，请联系管理员处理'); }
+        foreach ($rows as &$row) {
+            $row['snapshot'] = FinanceValue::decode($row['snapshot']);
+            $row['pending_quantity'] = bcsub($row['actual_quantity'], $row['covered_quantity'], 4);
+        }
+        return $rows;
     }
 }
