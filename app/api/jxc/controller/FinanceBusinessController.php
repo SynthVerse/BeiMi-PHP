@@ -21,6 +21,11 @@ class FinanceBusinessController extends BaseJxcController
         try { return $this->data(\app\api\jxc\logic\FinanceSalesRules::save($this->request->post())); }
         catch (\DomainException $error) { return $this->fail($error->getMessage()); }
     }
+    public function saveSalesPrecision()
+    {
+        try { return $this->data(\app\api\jxc\logic\FinanceSalesPrecision::save($this->request->post())); }
+        catch (\DomainException $error) { return $this->fail($error->getMessage()); }
+    }
     public function action() { return $this->respond(FinanceBusinessLogic::action((string)$this->request->post('action', ''), $this->request->post())); }
     public function preview()
     {

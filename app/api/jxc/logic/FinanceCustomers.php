@@ -47,7 +47,10 @@ final class FinanceCustomers
         $version = Db::name('finance_sales_version')->where('tenant_id', $tenant)->where('order_id', $order['id'])
             ->where('version', (int)$order['settlement_version'])->find();
         $ledger = new FinanceLedger($tenant); $customer = (int)$order['customer_id'];
+        $payload = $version ? FinanceValue::decode((string)Db::name('finance_document')->where('tenant_id', $tenant)->where('id', $version['document_id'])->value('payload')) : [];
         return ['active' => true, 'source_ref' => $version['source_ref'] ?? '', 'due_date' => $version['due_date'] ?? null,
+            'precision_rules' => FinanceSalesPrecision::rules($customer), 'precision' => $payload['precision'] ?? null, 'automatic_rounding_difference' => $payload['automatic_rounding_difference'] ?? null,
+            'can_override_precision' => FinanceAccess::has('finance.sales.precision_override'), 'can_round_sales' => FinanceAccess::has('finance.sales.rounding'),
             'tenant_id' => $tenant, 'operator_id' => FinanceAccess::operator(), 'can_manage_terms' => FinanceAccess::owner(),
             'can_override_due' => FinanceAccess::has('finance.sales.due_override'),
             'terms' => FinanceSalesRules::terms($customer, date('Y-m-d', (int)$order['datetimesingle'])),

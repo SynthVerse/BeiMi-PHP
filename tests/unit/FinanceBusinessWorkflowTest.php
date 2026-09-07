@@ -31,6 +31,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         }
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000008_finance_statements.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000009_finance_overdue.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000011_finance_sales_precision.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -994,6 +995,78 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertSame(1, Db::name('finance_overdue_event')->where('tenant_id', self::TENANT_ID)->count());
     }
 
+    public function test_sales_precision_rounds_each_line_and_preserves_automatic_difference_separately_from_manual_rounding(): void
+    {
+        $this->activate(); $sale = $this->deliveredSale();
+        Db::name('order_goods')->where('id', $sale['line_id'])->update(['base_quantity' => '2.0050']);
+        Db::name('fulfillment_delivery_item')->where('delivery_event_id', $sale['event_id'])->update(['actual_delivery_weight' => '2.0050']);
+        $confirmed = SalesSettlementLogic::submit($this->command(0) + ['order_id' => $sale['order_id'], 'lines' => [['order_goods_id' => $sale['line_id'],
+            'customer_settlement_weight' => '2.0050', 'pricing_unit_id' => $sale['unit_id'], 'price' => '1.23']]]);
+        self::assertNotFalse($confirmed, SalesSettlementLogic::getError());
+        self::assertSame('2.47', $confirmed['order_money']);
+        $snapshot = json_decode(Db::name('sales_order_version')->where('tenant_id', self::TENANT_ID)->where('order_id', $sale['order_id'])->value('snapshot_json'), true);
+        self::assertSame('0.003850', $snapshot['automatic_rounding_difference']); self::assertSame('0.00', $snapshot['rounding_amount']);
+        self::assertSame('cents', $snapshot['precision']['actual_mode']);
+    }
+
+    public function test_sales_precision_defaults_override_and_history_are_explicit_and_idempotent(): void
+    {
+        $this->activate();
+        $saved = \app\api\jxc\logic\FinanceSalesPrecision::save($this->command(0) + ['customer_id' => 0, 'mode' => 'integer', 'reason' => '门店逐行四舍五入到整元']);
+        self::assertSame('integer', $saved['rule']['default_mode']);
+        $sale = $this->deliveredSale();
+        $command = $this->command(0) + ['order_id' => $sale['order_id'], 'lines' => [['order_goods_id' => $sale['line_id'], 'customer_settlement_weight' => '2', 'pricing_unit_id' => $sale['unit_id'], 'price' => '1.26']]];
+        $confirmed = SalesSettlementLogic::submit($command); self::assertNotFalse($confirmed, SalesSettlementLogic::getError()); self::assertSame('3.00', $confirmed['order_money']);
+        self::assertSame($confirmed, SalesSettlementLogic::submit($command));
+        $rule = \app\api\jxc\logic\FinanceSalesPrecision::save($this->command(0) + ['customer_id' => $this->customerId, 'mode' => 'cents', 'reason' => '该主客户采用两位小数']);
+        self::assertSame('cents', $rule['rule']['default_mode']);
+        $original = json_decode(Db::name('sales_order_version')->where('tenant_id', self::TENANT_ID)->where('order_id', $sale['order_id'])->value('snapshot_json'), true);
+        self::assertSame('integer', $original['precision']['actual_mode']);
+        $new = $this->deliveredSale();
+        $request = $this->command(0) + ['order_id' => $new['order_id'], 'precision_mode' => 'integer', 'lines' => [['order_goods_id' => $new['line_id'], 'customer_settlement_weight' => '2', 'pricing_unit_id' => $new['unit_id'], 'price' => '1.26']]];
+        self::assertFalse(SalesSettlementLogic::submit($request), '单笔覆盖必须填写原因');
+        $request['precision_override_reason'] = '客户本次要求按整元逐行核对';
+        self::assertNotFalse(SalesSettlementLogic::submit($request), SalesSettlementLogic::getError());
+    }
+
+    public function test_sales_precision_and_manual_rounding_permissions_are_independent_and_revocation_blocks_replay(): void
+    {
+        $this->activate(); $sale = $this->deliveredSale();
+        $employee = WorkforceLogic::saveEmployee(['name' => '精度经办', 'mobile' => '13800009929', 'bind_user_id' => 996929,
+            'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['settlement.view', 'settlement.bill']]);
+        self::assertNotFalse($employee, WorkforceLogic::getError());
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996929; request()->adminId = 0;
+        $request = $this->command(0) + ['order_id' => $sale['order_id'], 'rounding_amount' => '1.00',
+            'lines' => [['order_goods_id' => $sale['line_id'], 'customer_settlement_weight' => '2', 'pricing_unit_id' => $sale['unit_id'], 'price' => '1.26']]];
+        self::assertFalse(SalesSettlementLogic::submit($request)); self::assertStringContainsString('抹零权限', SalesSettlementLogic::getError());
+        $request['rounding_amount'] = '0'; $request['precision_mode'] = 'integer'; $request['precision_override_reason'] = '本次客户按整元结算';
+        self::assertFalse(SalesSettlementLogic::submit($request)); self::assertStringContainsString('权限', SalesSettlementLogic::getError());
+        foreach (['finance.sales.precision_override', 'finance.sales.rounding'] as $permission) {
+            Db::name('employee_permission')->insert(['tenant_id' => self::TENANT_ID, 'employee_id' => $employee['id'], 'permission_key' => $permission, 'create_time' => time()]);
+        }
+        $request['rounding_amount'] = '2.00';
+        $confirmed = SalesSettlementLogic::submit($request); self::assertNotFalse($confirmed, SalesSettlementLogic::getError());
+        self::assertSame('1.00', $confirmed['order_money'], '有独立权限即可抹零，不采用旧阈值或二次确认开关');
+        Db::name('employee_permission')->where('tenant_id', self::TENANT_ID)->where('employee_id', $employee['id'])->where('permission_key', 'finance.sales.precision_override')->delete();
+        self::assertFalse(SalesSettlementLogic::submit($request), '撤销精度覆盖权限后不得读取原覆盖请求缓存'); self::assertStringContainsString('权限', SalesSettlementLogic::getError());
+        self::assertSame(1, Db::name('sales_order_version')->where('tenant_id', self::TENANT_ID)->where('order_id', $sale['order_id'])->count());
+    }
+
+    public function test_sales_precision_rejects_stale_rules_and_keeps_customer_inheritance_explicit(): void
+    {
+        $this->activate(); $sale = $this->deliveredSale();
+        $request = $this->command(0) + ['order_id' => $sale['order_id'], 'precision_rules' => ['store_version' => 0, 'customer_version' => 0],
+            'lines' => [['order_goods_id' => $sale['line_id'], 'customer_settlement_weight' => '2', 'pricing_unit_id' => $sale['unit_id'], 'price' => '1.26']]];
+        $ruleCommand = $this->command(0) + ['customer_id' => 0, 'mode' => 'integer', 'reason' => '门店默认整元'];
+        $saved = \app\api\jxc\logic\FinanceSalesPrecision::save($ruleCommand);
+        self::assertSame($saved, \app\api\jxc\logic\FinanceSalesPrecision::save($ruleCommand));
+        self::assertSame('inherit', $saved['rule']['customer_mode']);
+        self::assertFalse(SalesSettlementLogic::submit($request)); self::assertStringContainsString('默认规则已变化', SalesSettlementLogic::getError());
+        self::assertSame(0, Db::name('sales_order_version')->where('tenant_id', self::TENANT_ID)->where('order_id', $sale['order_id'])->count());
+        $request['precision_rules']['store_version'] = 1;
+        self::assertNotFalse(SalesSettlementLogic::submit($request), SalesSettlementLogic::getError());
+    }
+
     private function deliveredSale(): array
     {
         $unit = $this->createCustomerReportUnit('斤');
@@ -1048,6 +1121,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
     private function clean(): void
     {
+        Db::name('finance_sales_precision_rule')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_overdue_event')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         foreach (['finance_statement_resolution', 'finance_statement_dispute', 'finance_statement_event', 'finance_statement'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         Db::name('finance_advance_revision')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();

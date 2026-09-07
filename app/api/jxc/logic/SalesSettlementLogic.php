@@ -356,8 +356,8 @@ final class SalesSettlementLogic extends BaseLogic
         if ($request === false) {
             return false;
         }
-        if (bccomp($request['rounding_amount'], '0.00', self::MONEY_SCALE) > 0 && !self::isHighestAuthority()) {
-            self::setError('只有最高权限人员可以执行销售单抹零');
+        if (bccomp($request['rounding_amount'], '0.00', self::MONEY_SCALE) > 0 && !(FinanceIntegration::active() ? FinanceAccess::has('finance.sales.rounding') : self::isHighestAuthority())) {
+            self::setError(FinanceIntegration::active() ? '没有销售单独立抹零权限' : '只有最高权限人员可以执行销售单抹零');
             return false;
         }
         $fingerprint = self::fingerprint($request);
@@ -980,6 +980,8 @@ final class SalesSettlementLogic extends BaseLogic
         $lines = [];
         $differences = [];
         $goodsAmount = '0.00';
+        $precision = FinanceIntegration::active() ? FinanceSalesPrecision::selection((int)$order['customer_id'], $request) : null;
+        $automaticDifference = '0.000000';
         foreach ($request['lines'] as $requested) {
             $id = (int)$requested['order_goods_id'];
             $row = $rowMap[$id] ?? null;
@@ -1005,7 +1007,9 @@ final class SalesSettlementLogic extends BaseLogic
             if ($pricingQuantity === false) {
                 return false;
             }
-            $amount = bcmul($pricingQuantity, $price, self::MONEY_SCALE);
+            $calculation = $precision ? FinanceSalesPrecision::amount($pricingQuantity, $price, $precision['actual_mode']) : null;
+            $amount = $calculation['amount'] ?? bcmul($pricingQuantity, $price, self::MONEY_SCALE);
+            if ($calculation) { $automaticDifference = bcadd($automaticDifference, $calculation['automatic_rounding_difference'], 6); }
             $goodsAmount = bcadd($goodsAmount, $amount, self::MONEY_SCALE);
             $beforeActual = self::quantity((string)$row['base_quantity']);
             $actual = $requested['actual_delivery_weight'] ?? $beforeActual;
@@ -1034,6 +1038,7 @@ final class SalesSettlementLogic extends BaseLogic
                 'zero_price_reason' => $priceStatus === 'zero' ? $requested['zero_price_reason'] : '',
                 'amount' => $amount,
                 'source_line_id' => (int)($row['source_line_id'] ?? 0),
+                ...($calculation ?? []),
             ];
             $lines[] = $line;
             if (bccomp($difference, '0.0000', self::QUANTITY_SCALE) !== 0) {
@@ -1056,7 +1061,7 @@ final class SalesSettlementLogic extends BaseLogic
         $threshold = Db::name('sales_settlement_setting')->where('tenant_id', self::tenantId())
             ->value('rounding_confirm_threshold');
         $threshold = $threshold === null ? '999999.99' : self::money((string)$threshold);
-        if (bccomp($rounding, $threshold, self::MONEY_SCALE) > 0
+        if (!$precision && bccomp($rounding, $threshold, self::MONEY_SCALE) > 0
             && ($request['rounding_reason'] === '' || !$request['second_confirmed'])) {
             self::setError('抹零超过阈值，必须填写原因并二次确认');
             return false;
@@ -1069,6 +1074,7 @@ final class SalesSettlementLogic extends BaseLogic
             'lines' => $lines,
             'differences' => $differences,
             'goods_amount' => $goodsAmount,
+            ...($precision ? ['precision' => $precision, 'automatic_rounding_difference' => $automaticDifference] : []),
             'rounding_amount' => $rounding,
             'rounding_reason' => $request['rounding_reason'],
             'order_money' => $orderMoney,
@@ -1136,6 +1142,7 @@ final class SalesSettlementLogic extends BaseLogic
     /** @return array<string,mixed>|false */
     private static function normalizeSubmitRequest(array $params): array|false
     {
+        if (isset($params['precision_rules']) && (!is_array($params['precision_rules']) || array_is_list($params['precision_rules']) && $params['precision_rules'] !== [])) { self::setError('金额精度规则版本格式无效'); return false; }
         try { $dueDate = FinanceValue::date($params['due_date'] ?? null, true); }
         catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
         $orderId = self::positiveInteger($params['order_id'] ?? null);
@@ -1222,6 +1229,9 @@ final class SalesSettlementLogic extends BaseLogic
             'opening_link_reviewed' => (int)($params['opening_link_reviewed'] ?? 0) === 1,
             'opening_source' => is_string($params['opening_source'] ?? '') ? ($params['opening_source'] ?? '') : '',
             'credit_allocations' => $params['credit_allocations'] ?? [],
+            'precision_mode' => $params['precision_mode'] ?? null,
+            'precision_rules' => $params['precision_rules'] ?? [],
+            'precision_override_reason' => $params['precision_override_reason'] ?? '',
             ], static fn($value): bool => $value !== null && $value !== '' && $value !== false && $value !== []),
             'lines' => $lines,
         ];
@@ -1443,6 +1453,8 @@ final class SalesSettlementLogic extends BaseLogic
     /** @param array<string,mixed> $action @return array<string,mixed>|false */
     private static function replayAction(array $action, string $fingerprint): array|false
     {
+        $snapshot = json_decode((string)($action['snapshot_json'] ?? '{}'), true);
+        if (!empty($snapshot['precision']['overridden']) && !FinanceAccess::has('finance.sales.precision_override')) { self::setError('没有本笔销售金额精度覆盖权限'); return false; }
         if (!hash_equals((string)$action['request_fingerprint'], $fingerprint)) {
             self::setError('同一幂等键不能提交不同的销售结算事实');
             return false;
