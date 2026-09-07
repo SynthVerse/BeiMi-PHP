@@ -9,6 +9,20 @@ use PHPUnit\Framework\TestCase;
 
 final class FinanceCostAllocationTest extends TestCase
 {
+    public function test_partial_supplier_cost_keeps_unpriced_remainder_pending_and_final_cost_follows_existing_sale(): void
+    {
+        $state = \app\api\jxc\logic\FinanceCostAllocation::receive(\app\api\jxc\logic\FinanceCostAllocation::empty(), 'arrival-partial', 10, 20, '100', null)['state'];
+        $state = \app\api\jxc\logic\FinanceCostAllocation::issue($state, 10, 20, '30', 'sale', 'sale-partial')['state'];
+        $partial = \app\api\jxc\logic\FinanceCostAllocation::reviseEstimate($state, 'arrival-partial', '82.00', true);
+        self::assertSame('24.600000', $partial['changes']['sale']);
+        $balance = \app\api\jxc\logic\FinanceCostAllocation::balance($partial['state'], 10, 20);
+        self::assertSame('57.400000', $balance['known_value']); self::assertNull($balance['value']);
+        self::assertSame('70.000000000000', $balance['quantity']);
+        $final = \app\api\jxc\logic\FinanceCostAllocation::reviseEstimate($partial['state'], 'arrival-partial', '200.00', false);
+        self::assertSame('35.400000', $final['changes']['sale']);
+        self::assertSame('140.000000', \app\api\jxc\logic\FinanceCostAllocation::balance($final['state'], 10, 20)['value']);
+    }
+
     public function test_physical_return_restores_original_sale_cost_and_later_adjustment_follows_returned_stock(): void
     {
         $state = FinanceCostAllocation::receive(FinanceCostAllocation::empty(), 'arrival:1', 10, 20, '100', '1000.00')['state'];

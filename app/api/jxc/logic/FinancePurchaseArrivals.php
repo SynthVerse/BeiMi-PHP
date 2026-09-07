@@ -66,7 +66,8 @@ final class FinancePurchaseArrivals
             $last = Db::name('finance_purchase_price')->where('tenant_id', $tenant)->where('vendor_id', $vendorId)->where('sku_id', $skuId)
                 ->where('business_date', '<=', $date)->order('id', 'desc')->lock(true)->find();
             $estimate = FinancePurchaseEstimate::line($item, $last ? ['price' => (string)$last['price'], 'reference' => 'purchase-settlement:' . $last['document_id']] : null);
-            $snapshot = $estimate + ['sku_id' => $skuId, 'goods_id' => (int)$sku['goods_id'], 'goods_name' => $goods['name'],
+            $snapshot = $estimate + ['sku_id' => $skuId, 'goods_id' => (int)$sku['goods_id'], 'goods_name' => $goods['name'], 'category_id' => (int)$goods['category_id'],
+                'difference_rule' => FinancePurchaseRuleBook::threshold($vendorId, $skuId, (int)$goods['category_id']),
                 'sku_name' => $sku['sku_name'], 'base_unit_name' => $sku['base_unit_name'],
                 'base_unit_id' => (int)$sku['base_unit_id'], 'source_reference' => $source];
             $id = (int)Db::name('finance_purchase_arrival_line')->insertGetId(['tenant_id' => $tenant, 'document_id' => $document['id'],

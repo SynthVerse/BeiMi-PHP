@@ -15,6 +15,8 @@ final class FinanceCorrections
     {
         $policy = FinanceDocumentPolicy::authorize($original['type'], true);
         if ($original['type'] === 'purchase_arrival') { throw new \DomainException('已验收入库不能直接覆盖或撤销，请从原到货明细关联实物更正或采购退货'); }
+        if ($original['type'] === 'purchase_settlement') { throw new \DomainException('供应商结算请关联采购金额调整，不能直接撤销已处理的实收量'); }
+        if ($original['type'] === 'purchase_rules') { throw new \DomainException('请以当前采购规则版本保存新规则，历史规则不能撤销覆盖'); }
         if ($reverseOnly && $policy['direction'] !== 'none') { throw new \DomainException('实际收付款不能按无资金业务直接撤销，请区分录入更正、退款或到账失效'); }
         if (in_array($original['type'], ['receivable_due', 'payable_due'], true)) { throw new \DomainException('付款日请从原未结明细再次调整，新的调整会关联当前日期版本并保留历史'); }
         if ($original['status'] !== 'confirmed') { throw new \DomainException('仅已确认记录可关联更正'); }

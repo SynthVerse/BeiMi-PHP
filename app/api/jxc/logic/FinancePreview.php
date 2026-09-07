@@ -39,8 +39,9 @@ final class FinancePreview
             }
             $months = array_values(array_unique(array_column($entries, 'posting_month')));
             if (!$months && isset($document['confirmed_result']['posting_month'])) { $months[] = $document['confirmed_result']['posting_month']; }
+            $months = array_values(array_unique(array_merge($months, $document['confirmed_result']['posting_months'] ?? [])));
             $costImpacts = [];
-            if ($document['type'] === 'purchase_arrival') {
+            if (in_array($document['type'], ['purchase_arrival', 'purchase_settlement'], true)) {
                 $pendingSkus = [];
                 foreach ($document['confirmed_result']['lines'] as $line) { if ($line['cost_pending']) { $pendingSkus[(int)$line['sku_id']] = true; } }
                 $costEvents = Db::name('finance_cost_event')->where('tenant_id', $tenant)->where('document_id', $document['id'])->column('id');
@@ -62,7 +63,8 @@ final class FinancePreview
             $result = $document['confirmed_result'];
             return ['tenant_id' => $tenant, 'balances' => $balances, 'impacts' => array_values($periods), 'posting_months' => $months,
                 ...($document['type'] === 'sales_batch' ? ['sales' => $result] : []),
-                ...($document['type'] === 'purchase_arrival' ? ['purchase' => $result, 'cost_impacts' => $costImpacts] : []),
+                ...(in_array($document['type'], ['purchase_arrival', 'purchase_settlement'], true) ? ['purchase' => $result, 'cost_impacts' => $costImpacts] : []),
+                ...($document['type'] === 'purchase_rules' ? ['purchase_rule' => $result] : []),
                 'old_due_date' => $result['old_due_date'] ?? null, 'new_due_date' => $result['new_due_date'] ?? null];
         } finally { Db::rollback(); }
     }

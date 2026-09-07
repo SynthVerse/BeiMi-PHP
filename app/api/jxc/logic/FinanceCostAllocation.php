@@ -106,6 +106,15 @@ final class FinanceCostAllocation
         return ['state' => $state, 'known_cost' => $cost, 'cost' => $pending ? null : $cost, 'pending' => $pending, 'shortage' => $shortage, 'movements' => $movements];
     }
 
+    /** 分次结算补入已知价值；原到货尚有未知余量时，全部混合去向仍标记待确认。 */
+    public static function reviseEstimate(array $state, string $origin, string $knownAmount, bool $pending): array
+    {
+        $result = self::adjust($state, $origin, $knownAmount);
+        if ($pending) { $result['state']['origins'][$origin]['amount'] = null; }
+        $result['pending'] = $pending;
+        return $result;
+    }
+
     public static function adjust(array $state, string $origin, string $newAmount): array
     {
         if (str_starts_with($origin, 'pending-return:')) { throw new \DomainException('待补成本须由原仓实际来源补齐，不能直接改写占位成本'); }

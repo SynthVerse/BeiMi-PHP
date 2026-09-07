@@ -38,6 +38,8 @@ final class FinanceCostLedger
                 isset($event['to_warehouse_id']) ? FinanceValue::id($event['to_warehouse_id']) : null),
             'transfer' => FinanceCostAllocation::transfer($before, $warehouse, FinanceValue::id($event['to_warehouse_id'] ?? null), $sku, $event['quantity'] ?? '', $reference),
             'adjust' => FinanceCostAllocation::adjust($before, FinanceValue::text($event['origin'] ?? null, 160), $event['amount'] ?? ''),
+            'reestimate' => FinanceCostAllocation::reviseEstimate($before, FinanceValue::text($event['origin'] ?? null, 160), $event['amount'] ?? '',
+                is_bool($event['pending'] ?? null) ? $event['pending'] : throw new \DomainException('必须明确成本余量是否待确认')),
             default => throw new \DomainException('成本事件类型无效'),
         };
         $after = $result['state']; unset($result['state']);
@@ -149,7 +151,7 @@ final class FinanceCostLedger
             $quantity = bcsub($position['quantity'], $old['quantity'], 12); $value = bcsub($position['value'], $old['value'], 6);
             if (bccomp($quantity, '0', 12) === 0 && bccomp($value, '0', 6) === 0) { continue; }
             $date = $event['business_date'];
-            if ($position['bucket'] !== 'inventory' && (in_array($event['type'], ['receive', 'adjust', 'transfer'], true)
+            if ($position['bucket'] !== 'inventory' && (in_array($event['type'], ['receive', 'adjust', 'reestimate', 'transfer'], true)
                 || ($event['type'] === 'restore' && $position['reference'] !== $event['target_reference']))) {
                 $date = $this->query('finance_cost_effect')->where('sku_id', $position['sku_id'])->where('warehouse_id', $position['warehouse_id'])
                     ->where('bucket', $position['bucket'])->where('reference', $position['reference'])->order('id')->value('business_date') ?: $date;

@@ -36,6 +36,8 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000013_finance_sales_output.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260907_000014_finance_cost.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000015_finance_purchase_arrival.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000016_finance_purchase_settlement.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000017_finance_purchase_rules.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -164,6 +166,98 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertSame('20.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $secondSku));
         self::assertFalse(FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $result['id'], 'payload' => $payload, 'correction_reason' => '试图覆盖实物记录']));
         self::assertSame('20.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $secondSku));
+    }
+
+    public function test_supplier_partial_settlement_creates_payables_and_completes_actual_coverage_without_receiving_again(): void
+    {
+        $this->activate(); $warehouse = $this->createCustomerReportWarehouse('分次供应商结算仓');
+        $goods = $this->createCustomerReportGoods('分次供应商结算商品', 'FIN-PURCHASE-BATCH'); $sku = $this->customerReportSkuId($goods);
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '分次结算供应商']);
+        $arrival = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival', 'payload' => ['subject_id' => $vendor,
+            'warehouse_id' => $warehouse, 'actual_date' => date('Y-m-d'), 'source_reference' => 'ARR-PART', 'reason' => '尚无可靠报价',
+            'lines' => [['sku_id' => $sku, 'actual_quantity' => '100']]]]);
+        self::assertNotFalse($arrival, FinanceBusinessLogic::getError()); $line = $arrival['confirmed_result']['lines'][0]['arrival_line_id'];
+        self::assertTrue(\app\api\jxc\logic\StockService::outbound($warehouse, $goods, '30', 901, 'sales', 'SALE-PART', '', $sku));
+        $payload = ['subject_id' => $vendor, 'reason' => '已逐项与供应商核对', 'supplier_confirmation' => '供应商结算单 SET-PART', 'supplier_confirmed' => 1,
+            'lines' => [['arrival_line_id' => $line, 'covered_quantity' => '40', 'settlement_quantity' => '41', 'price' => '2.00', 'terms_version' => 0,
+                'difference_class' => 'normal', 'difference_reason' => '双方确认一斤行业允差', 'difference_confirmed' => 1]]];
+        $command = $this->command(0) + ['type' => 'purchase_settlement', 'payload' => $payload];
+        $first = FinanceBusinessLogic::action('record', $command);
+        self::assertNotFalse($first, FinanceBusinessLogic::getError()); self::assertSame($first, FinanceBusinessLogic::action('record', $command));
+        $cost = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID);
+        self::assertNull($cost->balance($warehouse, $sku)['value']); self::assertSame('57.400000', $cost->balance($warehouse, $sku)['known_value']);
+        self::assertSame('82.00', (new FinanceLedger(self::TENANT_ID))->source($first['confirmed_result']['created_sources'][0])['balance']);
+        $options = FinanceBusinessLogic::options(['type' => 'purchase_settlement', 'subject_id' => $vendor]);
+        self::assertSame('60.0000', $options['arrivals'][0]['pending_quantity']);
+        self::assertSame('100.0000', $options['arrivals'][0]['actual_quantity']);
+        $payload['lines'][0]['covered_quantity'] = '60'; $payload['lines'][0]['settlement_quantity'] = '60';
+        $last = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_settlement', 'payload' => $payload]);
+        self::assertNotFalse($last, FinanceBusinessLogic::getError());
+        self::assertSame('0.0000', $last['confirmed_result']['lines'][0]['pending_quantity']);
+        self::assertSame('70.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $sku));
+        self::assertSame('141.400000', $cost->balance($warehouse, $sku)['value']);
+        self::assertSame('60.600000', $cost->destination($warehouse, $sku, 'sale', 'sales_order:901')['cost']);
+        self::assertSame('202.00', (new FinanceLedger(self::TENANT_ID))->categoryBalance('payable', $vendor));
+        self::assertSame([], FinanceBusinessLogic::options(['type' => 'purchase_settlement', 'subject_id' => $vendor])['arrivals']);
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_settlement', 'payload' => $payload]));
+        self::assertSame(2, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
+    public function test_purchase_rule_priority_and_arrival_snapshot_do_not_change_when_later_rules_are_saved(): void
+    {
+        $this->activate(); $warehouse = $this->createCustomerReportWarehouse('采购规则仓');
+        $goods = $this->createCustomerReportGoods('采购规则商品', 'FIN-PUR-RULE'); $sku = $this->customerReportSkuId($goods);
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '采购规则供应商']);
+        $rule = ['rule_kind' => 'difference', 'scope' => 'store', 'expected_rule_version' => 0, 'absolute_limit' => '2', 'percent_limit' => '1', 'reason' => '门店复核基准'];
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_rules', 'payload' => $rule]), FinanceBusinessLogic::getError());
+        $rule['scope'] = 'sku'; $rule['sku_id'] = $sku; $rule['absolute_limit'] = '3';
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_rules', 'payload' => $rule]), FinanceBusinessLogic::getError());
+        $before = \app\api\jxc\logic\FinancePurchaseRuleBook::threshold($vendor, $sku, 0);
+        self::assertSame('sku', $before['scope']); self::assertSame('3.0000', $before['absolute_limit']);
+        $arrival = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival', 'payload' => ['subject_id' => $vendor,
+            'warehouse_id' => $warehouse, 'actual_date' => date('Y-m-d'), 'source_reference' => 'ARR-RULE', 'reason' => '实际验收入库',
+            'lines' => [['sku_id' => $sku, 'actual_quantity' => '100', 'reported_quantity' => '101', 'agreed_price' => '2.00']]]]);
+        self::assertNotFalse($arrival, FinanceBusinessLogic::getError());
+        $rule['scope'] = 'vendor_sku'; $rule['subject_id'] = $vendor; $rule['absolute_limit'] = '0.1';
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_rules', 'payload' => $rule]), FinanceBusinessLogic::getError());
+        self::assertSame('vendor_sku', \app\api\jxc\logic\FinancePurchaseRuleBook::threshold($vendor, $sku, 0)['scope']);
+        $stored = FinanceBusinessLogic::detail(['id' => $arrival['id']]);
+        self::assertSame('sku', $stored['confirmed_result']['lines'][0]['difference_rule']['scope']);
+        self::assertSame('3.0000', $stored['confirmed_result']['lines'][0]['difference_rule']['absolute_limit']);
+    }
+
+    public function test_supplier_settlement_within_threshold_still_needs_confirmation_and_uses_versioned_supplier_terms(): void
+    {
+        $this->activate(); $warehouse = $this->createCustomerReportWarehouse('采购复核仓');
+        $goods = $this->createCustomerReportGoods('采购复核商品', 'FIN-PUR-REVIEW'); $sku = $this->customerReportSkuId($goods);
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '有付款期限供应商']);
+        $rule = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_rules', 'payload' => ['rule_kind' => 'difference', 'scope' => 'store',
+            'expected_rule_version' => 0, 'absolute_limit' => '2', 'percent_limit' => '2', 'reason' => '双方业务复核基准']]);
+        self::assertNotFalse($rule, FinanceBusinessLogic::getError());
+        $terms = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_rules', 'payload' => ['rule_kind' => 'terms', 'subject_id' => $vendor,
+            'expected_rule_version' => 0, 'mode' => 'days_after', 'days' => 7, 'reason' => '约定到货七天后付款']]);
+        self::assertNotFalse($terms, FinanceBusinessLogic::getError());
+        $arrival = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival', 'payload' => ['subject_id' => $vendor,
+            'warehouse_id' => $warehouse, 'actual_date' => date('Y-m-d'), 'source_reference' => 'ARR-REVIEW', 'reason' => '实际验收',
+            'lines' => [['sku_id' => $sku, 'actual_quantity' => '100', 'reported_quantity' => '101', 'agreed_price' => '2.00']]]]);
+        self::assertNotFalse($arrival, FinanceBusinessLogic::getError());
+        $employee = WorkforceLogic::saveEmployee(['name' => '采购结算经办', 'mobile' => '13800009928', 'bind_user_id' => 996928,
+            'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['finance.purchase.confirm']]);
+        self::assertNotFalse($employee, WorkforceLogic::getError());
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996928; request()->adminId = 0;
+        $payload = ['subject_id' => $vendor, 'supplier_confirmation' => '结算单 REVIEW-1', 'supplier_confirmed' => 1, 'reason' => '核实本次结算',
+            'lines' => [['arrival_line_id' => $arrival['confirmed_result']['lines'][0]['arrival_line_id'], 'covered_quantity' => '50', 'settlement_quantity' => '50.5',
+                'price' => '2.00', 'terms_version' => 1, 'difference_rule_id' => $rule['confirmed_result']['rule']['id'],
+                'difference_class' => 'normal', 'difference_reason' => '已核对计费允差', 'arrival_difference_class' => 'normal', 'arrival_difference_reason' => '已核对到货允差']]];
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_settlement', 'payload' => $payload]));
+        $payload['lines'][0]['difference_confirmed'] = 1; $payload['lines'][0]['arrival_difference_confirmed'] = 1;
+        $command = $this->command(0) + ['type' => 'purchase_settlement', 'payload' => $payload];
+        $result = FinanceBusinessLogic::action('record', $command);
+        self::assertNotFalse($result, FinanceBusinessLogic::getError());
+        self::assertFalse($result['confirmed_result']['lines'][0]['settlement_review']['requires_owner']);
+        self::assertSame(date('Y-m-d', strtotime('+7 days')), $result['confirmed_result']['lines'][0]['due_date']);
+        Db::name('employee_permission')->where('tenant_id', self::TENANT_ID)->where('employee_id', $employee['id'])->delete();
+        self::assertFalse(FinanceBusinessLogic::action('record', $command));
     }
 
     public function test_purchase_arrival_records_actual_stock_and_estimate_once_without_formal_payable(): void
@@ -1676,7 +1770,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
     private function clean(): void
     {
-        foreach (['finance_purchase_arrival_line', 'finance_purchase_price'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
+        foreach (['finance_supplier_terms', 'finance_purchase_difference_rule', 'finance_purchase_settlement_line', 'finance_purchase_arrival_line', 'finance_purchase_price'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         foreach (['finance_cost_effect', 'finance_cost_event', 'finance_cost_shortage', 'finance_cost_position', 'finance_cost_origin'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         Db::name('finance_sales_print')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_sales_coverage')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();

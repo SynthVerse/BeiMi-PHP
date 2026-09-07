@@ -31,6 +31,7 @@ final class FinanceBusinessLogic extends BaseLogic
                     $result = FinanceValue::decode($existing['result']);
                     FinanceDocumentPolicy::authorize($result['type'], in_array($action, ['confirm', 'record', 'correct', 'reverse_duplicate', 'reverse'], true));
                     if ($result['type'] === 'sales_batch' && $result['status'] === 'confirmed') { FinanceSalesBatches::reauthorize($result['confirmed_result']); }
+                    if ($result['type'] === 'purchase_settlement' && $result['status'] === 'confirmed') { FinancePurchaseBatches::reauthorize($result['confirmed_result']); }
                     if (!hash_equals($existing['fingerprint'], $fingerprint)) { throw new \DomainException('同一提交标识不能用于不同内容或操作人'); }
                     unset($result['output']);
                     if ($result['type'] === 'sales_batch' && $result['status'] === 'confirmed' && FinanceAccess::has('settlement.view')) { $result['output'] = FinanceSalesOutput::document(['id' => $result['id']]) + ['offline_generation_allowed' => true]; }
@@ -119,7 +120,12 @@ final class FinanceBusinessLogic extends BaseLogic
             $subjectId = FinanceValue::id($params['subject_id'] ?? 0, true);
             $categories = $type === 'advance_allocate' && ($params['role'] ?? '') === 'fund' ? ['advance'] : $policy['sources'];
             $page = max(1, FinanceValue::id($params['page'] ?? 1));
-            $sources = $type === 'purchase_arrival' ? FinancePurchaseArrivals::options($subjectId, $params) : $ledger->sourcePage($categories, $subjectId, $page);
+            $sources = match ($type) {
+                'purchase_arrival' => FinancePurchaseArrivals::options($subjectId, $params),
+                'purchase_settlement' => FinancePurchaseBatches::options($subjectId, $params),
+                'purchase_rules' => FinancePurchaseRuleBook::options($params),
+                default => $ledger->sourcePage($categories, $subjectId, $page),
+            };
             if ($type === 'sales_batch' && ($params['role'] ?? '') !== 'credit') {
                 $sources += FinanceSalesBatches::options($subjectId, FinanceValue::date($params['date_from'] ?? date('Y-m-01')), FinanceValue::date($params['date_to'] ?? date('Y-m-d')));
             }
