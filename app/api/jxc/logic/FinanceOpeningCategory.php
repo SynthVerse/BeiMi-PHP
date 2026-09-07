@@ -19,6 +19,12 @@ final class FinanceOpeningCategory
         'expense_refund' => ['vendor', 'supplier_name', '供应商 / 退款方'],
         'salary' => ['employee', 'name', '员工'],
         'reimbursement' => ['employee', 'name', '垫付员工'],
+        'equipment' => ['vendor', 'supplier_name', '设备供应商'],
+        'equipment_refund' => ['vendor', 'supplier_name', '设备退款方'],
+        'deferred' => ['vendor', 'supplier_name', '服务提供方'],
+        'transit' => ['finance_account', 'name', '原转出账户'],
+        'unclaimed' => ['finance_account', 'name', '实际到账账户'],
+        'inventory' => ['warehouse_sku_balance', 'id', '核算仓库 / SKU'],
     ];
     private const ORIGINS = [
         'advance' => '原客户收款或预收凭据',
@@ -29,6 +35,12 @@ final class FinanceOpeningCategory
         'expense_payable' => '原费用确认凭据',
         'salary' => '原工资确认或工资表',
         'reimbursement' => '原员工垫付及费用凭据',
+        'equipment' => '原设备购置确认凭据',
+        'equipment_refund' => '原设备退款待收凭据',
+        'deferred' => '原费用确认及服务合同',
+        'transit' => '原互转及已处理组成核对依据',
+        'unclaimed' => '实际到账及已认领组成核对依据',
+        'inventory' => '截点盘存及历史成本核对依据',
     ];
     private const EFFECTS = [
         'account' => '承接已核实的账户余额；不新增实际收付款。',
@@ -42,6 +54,12 @@ final class FinanceOpeningCategory
         'expense_payable' => '只承接旧费用待付款；后续付款不重复确认费用。',
         'salary' => '按员工和原受益月份承接旧工资待付；不新增启用当期工资费用。',
         'reimbursement' => '按员工和原受益月份承接未报销垫付；不重复确认费用，不承接员工借支。',
+        'equipment' => '只承接设备剩余付款额度；不生成普通应付或设备费用。真实退款不恢复付款额度。',
+        'equipment_refund' => '只承接设备退款待收；后续实际到账时冲减到账月设备费用。',
+        'deferred' => '只承接未摊余额和逐月计划；未付义务另列费用应付，不重复确认费用。',
+        'transit' => '在途已离开来源账户，单列为门店资金；额外扣费不扣减在途，未知差额不能填成手续费。',
+        'unclaimed' => '到账已包含在账户余额，只承接待认领余额；不再次增加资金，不猜测客户或用途。',
+        'inventory' => '按仓库和 SKU 承接截点已有数量与历史总成本；不增加第二次库存，不用售价估算成本。',
     ];
 
     public static function supported(string $category): bool { return isset(self::SUBJECTS[$category]); }
@@ -57,6 +75,7 @@ final class FinanceOpeningCategory
         if (self::hasBenefitMonth($category)) { $fields[] = ['key' => 'benefit_month', 'label' => '原受益月份', 'type' => 'month']; }
         if (isset(self::ORIGINS[$category])) { $fields[] = ['key' => 'origin_reference', 'label' => self::ORIGINS[$category], 'type' => 'text']; }
         if ($category === 'recovery') { $fields[] = ['key' => 'receivable_reference', 'label' => '原应收凭据', 'type' => 'text']; }
+        $fields = array_merge($fields, FinanceOpeningAssets::fields($category));
         return [
             'subject_label' => self::SUBJECTS[$category][2] ?? '',
             'allows_summary' => self::allowsSummary($category),
@@ -66,7 +85,9 @@ final class FinanceOpeningCategory
                 'advance' => '剩余可用预收（元）', 'customer_refund' => '剩余应退款（元）',
                 'recovery' => '剩余追偿备查额（元）', 'supplier_refund', 'expense_refund' => '剩余退款待收（元）',
                 'salary' => '剩余工资待付（元）', 'reimbursement' => '剩余未报销垫付（元）',
-                'expense_payable' => '剩余费用待付（元）', default => '核实金额（元）',
+                'expense_payable' => '剩余费用待付（元）', 'equipment' => '剩余可付额度（元）',
+                'equipment_refund' => '剩余设备退款待收（元）', 'inventory' => '核实历史总成本（元）',
+                'deferred' => '剩余未摊金额（元）', 'transit' => '剩余在途金额（元）', 'unclaimed' => '剩余待认领金额（元）', default => '核实金额（元）',
             },
         ];
     }
@@ -77,12 +98,7 @@ final class FinanceOpeningCategory
         $result = [];
         foreach (self::metadata($category)['detail_fields'] as $field) {
             $value = $details[$field['key']] ?? '';
-            if (!is_string($value) || mb_strlen(trim($value)) > 200) { throw new \DomainException($field['label'] . '格式或长度不正确'); }
-            $value = trim($value);
-            if ($field['type'] === 'month' && $value !== '' && !preg_match('/^(19|20)[0-9]{2}-(0[1-9]|1[0-2])$/D', $value)) {
-                throw new \DomainException('原受益月份格式必须为 YYYY-MM');
-            }
-            $result[$field['key']] = $value;
+            $result[$field['key']] = FinanceOpeningAssets::normalize($field, $value);
         }
         return $result;
     }

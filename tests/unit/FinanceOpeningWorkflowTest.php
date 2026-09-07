@@ -167,7 +167,7 @@ final class FinanceOpeningWorkflowTest extends TestCase
     {
         $result = $this->action('review', ['category' => 'excluded', 'state' => 'unresolved', 'evidence' => '有供应商预付款需要承接']);
         self::assertStringContainsString('范围外业务', implode('；', $result['blockers']));
-        self::assertFalse(FinanceSetupLogic::openingAction('item', $this->command(1) + $this->item('inventory', 1, '10')));
+        self::assertFalse(FinanceSetupLogic::openingAction('item', $this->command(1) + $this->item('excluded', 1, '10')));
         $customer = $this->createCustomer('日期客户');
         $this->prepare();
         $data = $this->item('receivable', $customer, '10');
@@ -388,6 +388,158 @@ final class FinanceOpeningWorkflowTest extends TestCase
         self::assertSame($pending['version'], FinanceSetupLogic::opening()['version']);
         self::assertSame(0, Db::name('finance_setup_action')->where('tenant_id', self::TENANT_ID)->where('action_type', 'opening.confirm')->count());
     }
+    public function test_equipment_opening_retains_payment_limit_composition_without_creating_payable(): void
+    {
+        $supplier = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '设备商']);
+        $data = $this->item('equipment', $supplier, '8000.00') + ['details' => [
+            'origin_reference' => '冰柜购置合同', 'original_amount' => '12000', 'price_adjustment' => '-1000',
+            'paid_amount' => '2000', 'cancelled_amount' => '1000',
+        ]];
+        $saved = $this->action('item', $data);
+        self::assertSame('-1000.00', $saved['items'][0]['details']['price_adjustment']);
+        $pending = $this->ready();
+        Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
+        $active = $this->action('confirm');
+        self::assertSame('equipment', $active['items'][0]['category']);
+        self::assertSame('8000.00', $active['items'][0]['amount']);
+        self::assertSame(0, Db::name('finance_opening_source')->where('tenant_id', self::TENANT_ID)->where('category', 'expense_payable')->count());
+    }
+
+    public function test_transit_and_unclaimed_openings_validate_composition_and_do_not_duplicate_cash(): void
+    {
+        $source = FinanceSetupLogic::saveAccount($this->command(0) + ['name' => '转出银行', 'account_type' => 'bank']);
+        $target = FinanceSetupLogic::saveAccount($this->command(0) + ['name' => '目标银行', 'account_type' => 'bank']);
+        $this->action('item', $this->item('account', (int)$source['id'], '1000'));
+        $this->action('item', $this->item('account', (int)$target['id'], '9000'));
+        $transit = array_merge($this->item('transit', (int)$source['id'], '690'), ['historical_date' => '2026-08-30', 'details' => [
+            'origin_reference' => '银行转账记录', 'target_account_id' => (string)$target['id'], 'principal' => '1000',
+            'arrived_amount' => '200', 'returned_amount' => '100', 'withheld_fee' => '10', 'additional_fee' => '3',
+        ]]);
+        $this->action('item', $transit);
+        $unclaimed = array_merge($this->item('unclaimed', (int)$target['id'], '600'), ['historical_date' => '2026-08-31', 'details' => [
+            'origin_reference' => '银行核实到账', 'original_amount' => '800', 'claimed_amount' => '200', 'account_inclusion' => 'confirmed',
+        ]]);
+        $this->action('item', $unclaimed);
+        $this->ready(); Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
+        $active = $this->action('confirm');
+        self::assertSame('10000.00', $active['categories'][0]['total']);
+        self::assertSame('690.00', $active['items'][2]['amount']);
+        self::assertSame('600.00', $active['items'][3]['amount']);
+        self::assertSame('3.00', $active['items'][2]['details']['additional_fee']);
+    }
+
+    public function test_complex_incomplete_or_inconsistent_openings_remain_drafts_and_block_activation(): void
+    {
+        $source = FinanceSetupLogic::saveAccount($this->command(0) + ['name' => '核对银行', 'account_type' => 'bank']);
+        $this->prepare();
+        $this->action('item', $this->item('unclaimed', (int)$source['id'], '600') + ['details' => [
+            'origin_reference' => '旧到账', 'original_amount' => '800', 'claimed_amount' => '300', 'account_inclusion' => '',
+        ]]);
+        $errors = implode('；', FinanceSetupLogic::opening()['blockers']);
+        self::assertStringContainsString('实际资金日期尚未核实', $errors);
+        self::assertStringContainsString('已包含在期初账户余额中尚未核实', $errors);
+        $item = FinanceSetupLogic::opening()['items'][0];
+        $this->action('item', array_merge($item, ['historical_date' => '2026-08-31', 'details' => array_merge($item['details'], ['account_inclusion' => 'confirmed'])]));
+        self::assertStringContainsString('待认领余额与原到账', implode('；', FinanceSetupLogic::opening()['blockers']));
+        $this->action('item', $this->item('transit', (int)$source['id'], '10') + ['details' => ['target_account_id' => (string)$source['id']]]);
+        self::assertStringContainsString('另一个资金账户', implode('；', FinanceSetupLogic::opening()['blockers']));
+    }
+
+    public function test_deferred_opening_retains_exact_monthly_plan_and_rejects_missing_months(): void
+    {
+        $supplier = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '房东']);
+        $this->prepare();
+        $data = $this->item('deferred', $supplier, '600') + ['details' => [
+            'origin_reference' => '原租赁费用', 'original_amount' => '1200', 'amortized_amount' => '600',
+            'paid_amount' => '900', 'unpaid_amount' => '300', 'payable_reference' => '原租金未付',
+            'original_service_start' => '2026-06', 'benefited_until' => '2026-08',
+            'service_start' => '2026-09', 'service_end' => '2026-11',
+            'schedule' => [['month' => '2026-09', 'amount' => '200'], ['month' => '2026-11', 'amount' => '400']],
+        ]];
+        $saved = $this->action('item', $data);
+        self::assertStringContainsString('缺少摊销计划', implode('；', $saved['blockers']));
+        $data['id'] = $saved['items'][0]['id'];
+        $data['details']['schedule'] = [['month' => '2026-09', 'amount' => '200.01'], ['month' => '2026-10', 'amount' => '200.00'], ['month' => '2026-11', 'amount' => '199.99']];
+        $this->action('item', $data);
+        self::assertStringContainsString('足额费用应付', implode('；', FinanceSetupLogic::opening()['blockers']));
+        $this->action('item', array_merge($this->item('expense_payable', $supplier, '300'), ['source_reference' => '原租金未付', 'details' => ['origin_reference' => '原租赁费用']]));
+        foreach (FinanceOpeningService::CATEGORIES as $key => $title) { $this->action('review', ['category' => $key, 'state' => in_array($key, ['deferred', 'expense_payable'], true) ? 'complete' : 'none', 'evidence' => '全部核实']); }
+        $this->action('submit'); Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
+        $active = $this->action('confirm');
+        self::assertSame($data['details']['schedule'], $active['items'][0]['details']['schedule']);
+        self::assertSame('600.00', $active['items'][0]['amount']);
+    }
+
+    public function test_inventory_opening_carries_quantity_and_value_without_adding_physical_stock(): void
+    {
+        $warehouse = $this->createCustomerReportWarehouse('期初仓库');
+        $goods = $this->createCustomerReportGoods('期初商品', 'OPEN-STOCK');
+        $sku = $this->customerReportSkuId($goods);
+        $stockId = (int)Db::name('warehouse_sku_balance')->insertGetId(['tenant_id' => self::TENANT_ID,
+            'warehouse_id' => $warehouse, 'goods_id' => $goods, 'sku_id' => $sku, 'on_hand_qty' => '12.3456', 'available_qty' => '12.3456']);
+        $subjects = FinanceSetupLogic::opening(['category' => 'inventory'], true);
+        self::assertNotFalse($subjects);
+        self::assertSame($stockId, (int)$subjects['lists'][0]['id']);
+        self::assertStringContainsString('期初仓库', $subjects['lists'][0]['name']);
+        $data = $this->item('inventory', $stockId, '246.91') + ['details' => ['quantity' => '12.3456', 'origin_reference' => '盘点及成本核对']];
+        $saved = $this->action('item', $data);
+        self::assertFalse(FinanceSetupLogic::openingAction('item', $this->command((int)$saved['version']) + array_merge($data, ['source_reference' => '另一份重复盘点'])));
+        $this->ready(); Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
+        $active = $this->action('confirm');
+        self::assertSame('12.3456', $active['items'][0]['details']['quantity']);
+        self::assertSame('12.3456', Db::name('warehouse_sku_balance')->where('id', $stockId)->value('on_hand_qty'));
+        self::assertSame(0, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
+    public function test_inventory_cutoff_reverses_later_movements_and_does_not_omit_sold_out_sku(): void
+    {
+        $this->prepare();
+        $warehouse = $this->createCustomerReportWarehouse('截点仓库');
+        foreach (['8.0000', '0.0000'] as $current) {
+            $goods = $this->createCustomerReportGoods('截点商品' . $current, 'CUT');
+            $sku = $this->customerReportSkuId($goods);
+            $id = (int)Db::name('warehouse_sku_balance')->insertGetId(['tenant_id' => self::TENANT_ID,
+                'warehouse_id' => $warehouse, 'goods_id' => $goods, 'sku_id' => $sku, 'on_hand_qty' => $current, 'available_qty' => $current]);
+            Db::name('stock_flow')->insert(['tenant_id' => self::TENANT_ID, 'warehouse_id' => $warehouse, 'goods_id' => $goods,
+                'sku_id' => $sku, 'before_stock' => '10.0000', 'after_stock' => $current, 'quantity' => bcsub('10', $current, 4),
+                'flow_type' => 2, 'create_time' => strtotime('2026-09-02 12:00:00')]);
+            self::assertStringContainsString('截点实物库存 #' . $id, implode('；', FinanceSetupLogic::opening()['blockers']));
+            $saved = $this->action('item', $this->item('inventory', $id, '200') + ['details' => ['quantity' => '10', 'origin_reference' => '8月31日盘存']]);
+            self::assertStringNotContainsString('期初数量与启用截点库存不一致', implode('；', $saved['blockers']));
+            $item = $saved['items'][count($saved['items']) - 1];
+            self::assertSame('10.0000', $item['subject_snapshot']['cutoff_qty']);
+            if ($current !== '0.0000') {
+                $wrong = $this->action('item', array_merge($item, ['details' => array_merge($item['details'], ['quantity' => $current])]));
+                self::assertStringContainsString('期初数量与启用截点库存不一致', implode('；', $wrong['blockers']));
+                $this->action('item', $item);
+            }
+        }
+        foreach (FinanceOpeningService::CATEGORIES as $key => $title) { $this->action('review', ['category' => $key, 'state' => $key === 'inventory' ? 'complete' : 'none', 'evidence' => '截点核实']); }
+        $this->action('submit'); Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
+        $active = $this->action('confirm');
+        self::assertCount(2, $active['items']);
+        self::assertSame('400.00', array_values(array_filter($active['categories'], static fn(array $row): bool => $row['key'] === 'inventory'))[0]['total']);
+    }
+
+    public function test_opening_stock_lock_blocks_the_shared_sku_lock_even_before_a_balance_exists(): void
+    {
+        $goods = $this->createCustomerReportGoods('确认锁商品', 'OPEN-LOCK');
+        $sku = $this->customerReportSkuId($goods);
+        $config = config('database.connections.mysql');
+        $connection = new \PDO('mysql:host=' . $config['hostname'] . ';port=' . $config['hostport'] . ';dbname=' . $config['database'], $config['username'], $config['password']);
+        $connection->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+        $connection->exec('SET SESSION innodb_lock_wait_timeout=1');
+        Db::startTrans();
+        try {
+            \app\api\jxc\logic\FinanceOpeningAssets::lockInventory(self::TENANT_ID);
+            $blocked = false;
+            try { $connection->query('SELECT id FROM la_goods_sku WHERE id=' . $sku . ' FOR UPDATE'); }
+            catch (\PDOException $exception) { $blocked = ($exception->errorInfo[1] ?? 0) === 1205; }
+            self::assertTrue($blocked, '权威库存写入口所需SKU锁须等待期初确认结束，未创建余额也不能绕过');
+        } finally { Db::rollback(); }
+        self::assertSame((string)$sku, (string)$connection->query('SELECT id FROM la_goods_sku WHERE id=' . $sku . ' FOR UPDATE')->fetchColumn());
+    }
+
     private function prepare(string $date = '2026-09-01', int $version = 0): void
     {
         self::assertNotFalse(FinanceSetupLogic::savePreparation($this->command($version) + ['activation_date' => $date,

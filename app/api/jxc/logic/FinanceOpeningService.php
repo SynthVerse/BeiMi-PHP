@@ -18,6 +18,7 @@ final class FinanceOpeningService
         'recovery' => '坏账追偿备查', 'equipment' => '设备剩余付款额度', 'excluded' => '本期范围外业务',
     ];
     public function __construct(private readonly int $tenantId, private readonly array $actor) {}
+    private bool $lockStock = false;
 
     public function snapshot(): array
     {
@@ -60,6 +61,12 @@ final class FinanceOpeningService
     {
         $category = self::text($params['category'] ?? '', 32);
         if (!FinanceOpeningCategory::supported($category)) { throw new \DomainException('该类别暂不支持明细录入'); }
+        $keyword = self::text($params['keyword'] ?? '', 60);
+        $page = max(1, self::id($params['page'] ?? 1));
+        if ($category === 'inventory') {
+            $rows = FinanceOpeningAssets::inventorySubjects($this->tenantId, $keyword, $page);
+            return ['tenant_id' => $this->tenantId, 'lists' => $rows, 'page' => $page, 'has_more' => count($rows) === 20];
+        }
         [$table, $name] = FinanceOpeningCategory::subject($category);
         $query = Db::name($table)->where('tenant_id', $this->tenantId);
         if ($table === 'customer') { $query->where('parent_id', 0); }
@@ -72,6 +79,7 @@ final class FinanceOpeningService
 
     public function execute(string $action, array $data, int $version): array
     {
+        if ($action === 'confirm') { FinanceOpeningAssets::lockInventory($this->tenantId); $this->lockStock = true; }
         $book = $this->book();
         if ((int)$book['version'] !== $version) { throw new \DomainException('期初资料已更新，请重新加载后核对'); }
         if ($book['status'] === 'active') { throw new \DomainException('期初已确认，不允许覆盖或删除历史'); }
@@ -167,7 +175,7 @@ final class FinanceOpeningService
                 throw new \DomainException('金额须为非负数，最多两位小数；未知金额请留空');
             }
             $amount = bcadd($amount, '0', 2);
-            if ($category !== 'account' && bccomp($amount, '0', 2) <= 0) { throw new \DomainException('剩余余额必须大于零，无余额请在类别核对中说明'); }
+            if (!in_array($category, ['account', 'inventory', 'equipment'], true) && bccomp($amount, '0', 2) <= 0) { throw new \DomainException('剩余余额必须大于零，无余额请在类别核对中说明'); }
         } else { $amount = null; }
         $mode = self::text($data['source_mode'] ?? '', 16);
         if (!in_array($mode, ['detail', 'summary'], true)) { throw new \DomainException('请标明历史明细或核实汇总'); }
@@ -188,7 +196,7 @@ final class FinanceOpeningService
         ];
         $duplicate = Db::name('finance_opening_item')->where('tenant_id', $this->tenantId)->where('category', $category)
             ->where('subject_id', $subjectId)->where('id', '<>', $id);
-        if ($category !== 'account') { $duplicate->where('source_reference', $reference); }
+        if (!in_array($category, ['account', 'inventory'], true)) { $duplicate->where('source_reference', $reference); }
         if ($duplicate->count()) { throw new \DomainException('该账户或同一对象的期初来源已存在，请修改原明细'); }
         if ($category !== 'account') {
             foreach ($this->items() as $other) {
@@ -231,20 +239,22 @@ final class FinanceOpeningService
             if ($date && $item['historical_date'] && $item['historical_date'] >= $date) { $errors[] = $label . '历史日期必须早于启用日期'; }
             foreach (FinanceOpeningCategory::metadata($item['category'])['detail_fields'] as $field) {
                 $value = $item['details'][$field['key']] ?? '';
-                if ($value === '') { $errors[] = $label . $field['label'] . '尚未核实'; }
-                if ($field['type'] === 'month' && $value !== '' && $date && $value > (new \DateTimeImmutable($date))->modify('-1 day')->format('Y-m')) {
+                if (($field['required'] ?? true) && ($value === '' || $value === [])) { $errors[] = $label . $field['label'] . '尚未核实'; }
+                if ($field['key'] === 'benefit_month' && $value !== '' && $date && $value > (new \DateTimeImmutable($date))->modify('-1 day')->format('Y-m')) {
                     $errors[] = $label . '原受益月份不能晚于期初截点';
                 }
             }
+            foreach (FinanceOpeningAssets::blockers($this->tenantId, $item, $date) as $error) { $errors[] = $label . $error; }
         }
         $accountIds = array_column(array_filter($items, static fn(array $item): bool => $item['category'] === 'account'), 'subject_id');
         foreach (Db::name('finance_account')->where('tenant_id', $this->tenantId)->column('id') as $id) {
             if (!in_array((int)$id, array_map('intval', $accountIds), true)) { $errors[] = '资金账户 #' . $id . '缺少核实余额，零余额也须录入'; }
         }
-        if (Db::name('warehouse_sku_balance')->where('tenant_id', $this->tenantId)->where('on_hand_qty', '<>', 0)->count()) {
-            $errors[] = '存在实物库存，须完成仓库与 SKU 历史成本承接后启用';
+        $stockIds = array_map('intval', array_column(array_filter($items, static fn(array $item): bool => $item['category'] === 'inventory'), 'subject_id'));
+        foreach (FinanceOpeningAssets::stockAtCutoff($this->tenantId, $date, $this->lockStock) as $stock) {
+            if (bccomp($stock['cutoff_qty'], '0', 4) !== 0 && !in_array((int)$stock['id'], $stockIds, true)) { $errors[] = '存在截点实物库存 #' . $stock['id'] . '，须完成仓库与 SKU 历史成本承接后启用'; }
         }
-        return $errors;
+        return array_merge($errors, FinanceOpeningAssets::payableBlockers($items));
     }
 
     private function items(): array
@@ -262,11 +272,15 @@ final class FinanceOpeningService
 
     private function subject(string $category, int $id): ?array
     {
+        if ($category === 'inventory') {
+            $date = Db::name('finance_preparation')->where('tenant_id', $this->tenantId)->value('activation_date');
+            return FinanceOpeningAssets::inventorySubject($this->tenantId, $id, $date, $this->lockStock);
+        }
         [$table, $name] = FinanceOpeningCategory::subject($category);
         $query = Db::name($table)->where('tenant_id', $this->tenantId)->where('id', $id);
         if ($table === 'customer') { $query->where('parent_id', 0); }
         $fields = 'id,' . $name . ' AS name';
-        if ($category === 'account') { $fields .= ',version,is_enabled,account_type'; }
+        if ($table === 'finance_account') { $fields .= ',version,is_enabled,account_type'; }
         return $query->field($fields)->find();
     }
 
