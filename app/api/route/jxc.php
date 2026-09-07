@@ -52,7 +52,11 @@ Route::group('', function () {
     Route::get('finance/business/subjects', 'jxc.FinanceBusiness/subjects');
     Route::get('finance/business/salesSources', 'jxc.FinanceBusiness/salesSources');
     Route::post('finance/business/saveSalesTerms', 'jxc.FinanceBusiness/saveSalesTerms');
+    Route::get('finance/business/customerBalances', 'jxc.FinanceBusiness/customerBalances');
+    Route::get('finance/business/customerBalanceDetail', 'jxc.FinanceBusiness/customerBalanceDetail');
+    Route::get('finance/business/customerSource', 'jxc.FinanceBusiness/customerSource');
     Route::post('finance/business/action', 'jxc.FinanceBusiness/action');
+    Route::post('finance/business/preview', 'jxc.FinanceBusiness/preview');
     Route::post('finance/business/evidence', 'jxc.FinanceBusiness/evidence');
     Route::get('finance/business/evidenceContent', 'jxc.FinanceBusiness/evidenceContent');
 

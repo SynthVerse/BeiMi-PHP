@@ -14,7 +14,7 @@ final class FinanceBusinessLogic extends BaseLogic
     {
         self::clearError();
         try {
-            if (!in_array($action, ['save', 'prepare', 'submit', 'reopen', 'confirm', 'record', 'correct', 'reverse_duplicate'], true)) { throw new \DomainException('不支持的单据动作'); }
+            if (!in_array($action, ['save', 'prepare', 'submit', 'reopen', 'confirm', 'record', 'correct', 'reverse_duplicate', 'reverse'], true)) { throw new \DomainException('不支持的单据动作'); }
             $tenantId = FinanceAccess::tenant();
             if ($tenantId <= 0 || FinanceAccess::operator() <= 0) { throw new \DomainException('请先登录并选择门店'); }
             if (FinanceValue::id($params['expected_tenant_id'] ?? 0) !== $tenantId) { throw new \DomainException('当前门店已变化，请重新进入'); }
@@ -29,23 +29,23 @@ final class FinanceBusinessLogic extends BaseLogic
                 $existing = Db::name('finance_command')->where('tenant_id', $tenantId)->where('idempotency_key', $key)->find();
                 if ($existing) {
                     $result = FinanceValue::decode($existing['result']);
-                    FinanceDocumentPolicy::authorize($result['type'], in_array($action, ['confirm', 'record', 'correct', 'reverse_duplicate'], true));
+                    FinanceDocumentPolicy::authorize($result['type'], in_array($action, ['confirm', 'record', 'correct', 'reverse_duplicate', 'reverse'], true));
                     if (!hash_equals($existing['fingerprint'], $fingerprint)) { throw new \DomainException('同一提交标识不能用于不同内容或操作人'); }
                     return $result;
                 }
                 $document = $id ? Db::name('finance_document')->where('tenant_id', $tenantId)->where('id', $id)->find() : null;
                 if ($id && !$document) { throw new \DomainException('单据不存在或不属于当前门店'); }
                 $type = $document['type'] ?? FinanceValue::text($params['type'] ?? '', 40);
-                FinanceDocumentPolicy::authorize($type, in_array($action, ['confirm', 'record', 'correct', 'reverse_duplicate'], true));
+                FinanceDocumentPolicy::authorize($type, in_array($action, ['confirm', 'record', 'correct', 'reverse_duplicate', 'reverse'], true));
                 if ($document && (int)$document['version'] !== $version) { throw new \DomainException('草稿已被修改，请核对最新版本'); }
                 if (!$document && ($version !== 0 || !in_array($action, ['save', 'prepare', 'record'], true))) { throw new \DomainException('请先保存有效草稿'); }
-                $original = in_array($action, ['correct', 'reverse_duplicate'], true) ? $document : null;
+                $original = in_array($action, ['correct', 'reverse_duplicate', 'reverse'], true) ? $document : null;
                 if ($original && $original['status'] !== 'confirmed') { throw new \DomainException('仅已确认记录可关联更正'); }
                 if ($document && $document['status'] === 'confirmed' && !$original) { throw new \DomainException('已确认单据不可覆盖或删除，请使用关联更正'); }
                 if ($original) { $document = null; }
-                if (in_array($action, ['save', 'prepare', 'record', 'correct', 'reverse_duplicate'], true)) {
+                if (in_array($action, ['save', 'prepare', 'record', 'correct', 'reverse_duplicate', 'reverse'], true)) {
                     if ($document && $document['status'] !== 'draft') { throw new \DomainException('请先退回草稿再修改'); }
-                    $payload = $action === 'reverse_duplicate' ? FinanceValue::decode($original['payload']) : ($params['payload'] ?? null);
+                    $payload = in_array($action, ['reverse_duplicate', 'reverse'], true) ? FinanceValue::decode($original['payload']) : ($params['payload'] ?? null);
                     if (!is_array($payload) || strlen(FinanceValue::json($payload)) > 65536) { throw new \DomainException('草稿内容格式无效或超过容量限制'); }
                     $document = array_merge($document ?? ['tenant_id' => $tenantId, 'type' => $type, 'created_by' => FinanceValue::json(FinanceAccess::actor()),
                         'create_time' => time(), 'confirmed_at' => 0, 'confirmed_by' => '{}', 'confirmed_result' => '{}'],
@@ -58,11 +58,11 @@ final class FinanceBusinessLogic extends BaseLogic
                     $document['status'] = 'draft';
                 }
                 if (!$id || $original) { $document['id'] = (int)Db::name('finance_document')->insertGetId($document + ['version' => 1, 'last_modified_by' => FinanceValue::json(FinanceAccess::actor()), 'update_time' => time()]); }
-                if (in_array($action, ['confirm', 'record', 'correct', 'reverse_duplicate'], true)) {
+                if (in_array($action, ['confirm', 'record', 'correct', 'reverse_duplicate', 'reverse'], true)) {
                     if ($document['status'] !== 'pending') { throw new \DomainException('请先提交草稿再确认'); }
                     $ledger = new FinanceLedger($tenantId); $ledger->lockBook();
                     $result = $original ? (new FinanceCorrections($tenantId, $ledger))->replace($original, $document, (string)($params['correction_reason'] ?? ''),
-                        $action === 'reverse_duplicate' ? FinanceValue::id($params['duplicate_of'] ?? 0) : 0)
+                        $action === 'reverse_duplicate' ? FinanceValue::id($params['duplicate_of'] ?? 0) : 0, $action === 'reverse')
                         : (new FinancePayments($tenantId, $ledger))->confirm($document);
                     $document['confirmed_result'] = FinanceValue::json($result);
                     $document['status'] = 'confirmed'; $document['confirmed_by'] = FinanceValue::json(FinanceAccess::actor()); $document['confirmed_at'] = time();
@@ -84,7 +84,15 @@ final class FinanceBusinessLogic extends BaseLogic
         try {
             $document = Db::name('finance_document')->where('tenant_id', FinanceAccess::tenant())->where('id', FinanceValue::id($params['id'] ?? 0))->find();
             if (!$document) { throw new \DomainException('单据不存在或不属于当前门店'); }
-            FinanceDocumentPolicy::authorize($document['type']);
+            $policy = FinanceDocumentPolicy::authorize($document['type']);
+            if (in_array($document['type'], ['receivable_due', 'payable_due'], true) && $document['status'] !== 'confirmed') {
+                $payload = FinanceValue::decode($document['payload']);
+                if (!empty($payload['source'])) {
+                    $source = (new FinanceLedger(FinanceAccess::tenant()))->source(FinanceValue::text($payload['source'], 40));
+                    if (!in_array($source['category'], $policy['sources'], true) || $source['subject_id'] !== FinanceValue::id($payload['subject_id'] ?? 0)) { throw new \DomainException('来源业务类型或往来主体不匹配，不能读取关联明细'); }
+                    $document['current_source'] = $source;
+                }
+            }
             return self::present($document) + ['replacement_document_id' => (int)(Db::name('finance_correction')->where('tenant_id', FinanceAccess::tenant())->where('original_document_id', $document['id'])->value('replacement_document_id') ?: 0)];
         } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
     }
@@ -100,6 +108,11 @@ final class FinanceBusinessLogic extends BaseLogic
             $categories = $type === 'advance_allocate' && ($params['role'] ?? '') === 'fund' ? ['advance'] : $policy['sources'];
             $page = max(1, FinanceValue::id($params['page'] ?? 1));
             $sources = $ledger->sourcePage($categories, $subjectId, $page);
+            if (!empty($params['source'])) {
+                $selected = $ledger->source(FinanceValue::text($params['source'], 40));
+                if (!in_array($selected['category'], $categories, true) || $selected['subject_id'] !== $subjectId || bccomp($selected['balance'], '0', 2) <= 0) { throw new \DomainException('指定来源已结清或不属于本对象和业务类型'); }
+                $sources['selected_source'] = $selected;
+            }
             return ['tenant_id' => FinanceAccess::tenant(), 'type' => $type, 'policy' => $policy,
                 'active' => Db::name('finance_opening_book')->where('tenant_id', FinanceAccess::tenant())->value('status') === 'active',
                 'can_confirm' => FinanceAccess::owner() || (!$policy['owner'] && FinanceAccess::has($policy['confirm'])),
@@ -118,7 +131,7 @@ final class FinanceBusinessLogic extends BaseLogic
     {
         $types = [];
         foreach (FinanceDocumentPolicy::TYPES as $type => $policy) {
-            try { FinanceDocumentPolicy::authorize($type); $types[] = ['type' => $type, 'title' => $policy['title']]; }
+            try { FinanceDocumentPolicy::authorize($type); $types[] = ['type' => $type, 'title' => $policy['title'], 'subject' => $policy['subject']]; }
             catch (\DomainException) { continue; }
         }
         return ['tenant_id' => FinanceAccess::tenant(), 'types' => $types,
@@ -131,7 +144,9 @@ final class FinanceBusinessLogic extends BaseLogic
         try {
             $type = FinanceValue::text($params['type'] ?? '', 40); FinanceDocumentPolicy::authorize($type);
             $page = FinanceValue::id($params['page'] ?? 1);
-            $rows = Db::name('finance_document')->where('tenant_id', FinanceAccess::tenant())->where('type', $type)->order('id', 'desc')->page($page, 20)->select()->toArray();
+            $query = Db::name('finance_document')->where('tenant_id', FinanceAccess::tenant())->where('type', $type);
+            if (!empty($params['subject_id'])) { $query->whereRaw("JSON_EXTRACT(payload,'$.subject_id')=?", [FinanceValue::id($params['subject_id'])]); }
+            $rows = $query->order('id', 'desc')->page($page, 20)->select()->toArray();
             return ['tenant_id' => FinanceAccess::tenant(), 'lists' => array_map(self::present(...), $rows), 'page' => $page, 'has_more' => count($rows) === 20];
         } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
     }

@@ -15,6 +15,8 @@ final class FinancePayments
     {
         $type = $document['type']; $policy = FinanceDocumentPolicy::authorize($type, true);
         $data = FinanceValue::decode($document['payload']);
+        if (in_array($type, ['receivable_due', 'payable_due'], true)) { return FinanceDueDates::confirm($this->ledger, $document, $data); }
+        if (in_array($type, ['bad_debt', 'recovery_termination'], true)) { return (new FinanceReceivableActions($this->tenantId, $this->ledger))->confirm($document, $data); }
         if ($type === 'advance_allocate') { return $this->advance($document, $data); }
         $date = FinanceValue::date($data['actual_date'] ?? null);
         $month = $this->ledger->postingMonth($date);

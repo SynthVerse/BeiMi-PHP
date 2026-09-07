@@ -7,6 +7,10 @@ namespace app\api\jxc\logic;
 final class FinanceDocumentPolicy
 {
     public const TYPES = [
+        'receivable_due' => ['title' => '调整应收付款日', 'prepare' => 'finance.receivable.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'customer', 'sources' => ['receivable'], 'direction' => 'none'],
+        'payable_due' => ['title' => '调整应付付款日', 'prepare' => 'finance.payment.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => ['payable', 'expense_payable'], 'direction' => 'none'],
+        'bad_debt' => ['title' => '确认客户坏账', 'prepare' => 'finance.receivable.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'customer', 'sources' => ['receivable'], 'direction' => 'none'],
+        'recovery_termination' => ['title' => '终止坏账追偿', 'prepare' => 'finance.recovery.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'customer', 'sources' => ['recovery'], 'direction' => 'none'],
         'advance_allocate' => ['title' => '预收抵扣应收', 'prepare' => 'finance.receipt.prepare', 'confirm' => 'finance.receipt.confirm', 'owner' => false, 'subject' => 'customer', 'sources' => ['receivable'], 'direction' => 'none'],
         'receipt' => ['title' => '客户收款', 'prepare' => 'finance.receipt.prepare', 'confirm' => 'finance.receipt.confirm', 'owner' => false, 'subject' => 'customer', 'sources' => ['receivable'], 'direction' => 'in'],
         'supplier_payment' => ['title' => '供应商 / 费用付款', 'prepare' => 'finance.payment.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => ['payable', 'expense_payable'], 'direction' => 'out'],

@@ -22,6 +22,19 @@ class FinanceBusinessController extends BaseJxcController
         catch (\DomainException $error) { return $this->fail($error->getMessage()); }
     }
     public function action() { return $this->respond(FinanceBusinessLogic::action((string)$this->request->post('action', ''), $this->request->post())); }
+    public function preview()
+    {
+        try { return $this->data(\app\api\jxc\logic\FinancePreview::calculate($this->request->post())); }
+        catch (\DomainException $error) { return $this->fail($error->getMessage()); }
+    }
+    public function customerBalances() { return $this->customerRead('lists'); }
+    public function customerBalanceDetail() { return $this->customerRead('detail'); }
+    public function customerSource() { return $this->customerRead('source'); }
+    private function customerRead(string $method)
+    {
+        try { return $this->data(\app\api\jxc\logic\FinanceCustomerBalances::$method($this->request->get())); }
+        catch (\DomainException $error) { return $this->fail($error->getMessage()); }
+    }
     public function evidence()
     {
         try {

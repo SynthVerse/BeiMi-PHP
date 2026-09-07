@@ -26,7 +26,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     protected function setUp(): void
     {
         $this->prepareCustomerReportRequestContext(); $this->ensureCustomerReportTables();
-        foreach (['20260907_000001_finance_preparation.sql', '20260907_000002_finance_opening.sql', '20260907_000003_finance_opening_details.sql', '20260907_000004_finance_business.sql', '20260907_000005_finance_sales.sql'] as $file) {
+        foreach (['20260907_000001_finance_preparation.sql', '20260907_000002_finance_opening.sql', '20260907_000003_finance_opening_details.sql', '20260907_000004_finance_business.sql', '20260907_000005_finance_sales.sql', '20260907_000006_finance_receivables.sql'] as $file) {
             $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/' . $file)));
         }
         $this->clean();
@@ -539,6 +539,147 @@ final class FinanceBusinessWorkflowTest extends TestCase
         \app\api\jxc\logic\FinanceSalesRules::save($this->command(0) + ['customer_id' => $this->customerId, 'mode' => 'unagreed', 'reason' => '试图修改规则']);
     }
 
+    public function test_bad_debt_moves_only_verified_receivable_to_recovery_then_termination_does_not_repeat_loss(): void
+    {
+        $this->activate();
+        $payload = ['subject_id' => $this->customerId, 'actual_date' => date('Y-m-d'), 'amount' => '300',
+            'allocations' => [['source' => $this->receivable, 'amount' => '300']], 'debt_verified' => 1, 'undisputed' => 1,
+            'reason' => '核实债务真实无争议，债务人已无清偿能力', 'basis' => '已核实原始债权和清偿情况'];
+        $badDebt = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'bad_debt', 'payload' => $payload]);
+        self::assertNotFalse($badDebt, FinanceBusinessLogic::getError());
+        $ledger = new FinanceLedger(self::TENANT_ID);
+        self::assertSame('700.00', $ledger->source($this->receivable)['balance']);
+        $recovery = $badDebt['confirmed_result']['created_sources'][0]; self::assertSame('300.00', $ledger->source($recovery)['balance']);
+        self::assertEquals(300, Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('metric', 'loss')->sum('amount'));
+        $payload = ['subject_id' => $this->customerId, 'actual_date' => date('Y-m-d'), 'amount' => '100',
+            'allocations' => [['source' => $recovery, 'amount' => '100']], 'reason' => '有明确依据终止部分追偿', 'basis' => '终止追偿依据已复核'];
+        $termination = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'recovery_termination', 'payload' => $payload]);
+        self::assertNotFalse($termination, FinanceBusinessLogic::getError());
+        self::assertSame('200.00', $ledger->source($recovery)['balance']);
+        $reverseBad = $this->command($badDebt['version']) + ['id' => $badDebt['id'], 'correction_reason' => '复核原坏账事实不成立'];
+        self::assertFalse(FinanceBusinessLogic::action('reverse', $reverseBad));
+        self::assertStringContainsString('后续处理', FinanceBusinessLogic::getError());
+        $reverseTermination = $this->command($termination['version']) + ['id' => $termination['id'], 'correction_reason' => '复核仍应继续追偿'];
+        $reversed = FinanceBusinessLogic::action('reverse', $reverseTermination);
+        self::assertNotFalse($reversed, FinanceBusinessLogic::getError());
+        self::assertSame($reversed, FinanceBusinessLogic::action('reverse', $reverseTermination));
+        self::assertSame('300.00', $ledger->source($recovery)['balance']);
+        self::assertFalse(FinanceBusinessLogic::action('reverse', $this->command($reversed['version']) + ['id' => $reversed['id'], 'correction_reason' => '不得冲销反向凭据']));
+        self::assertStringContainsString('反向凭据', FinanceBusinessLogic::getError());
+        self::assertNotFalse(FinanceBusinessLogic::action('reverse', $reverseBad), FinanceBusinessLogic::getError());
+        self::assertSame('1000.00', $ledger->source($this->receivable)['balance']);
+        self::assertSame('0.00', $ledger->source($recovery)['balance']);
+        self::assertEquals(0, Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('metric', 'loss')->sum('amount'));
+        $receipt = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $this->receipt('100', '100')]);
+        self::assertNotFalse($receipt, FinanceBusinessLogic::getError());
+        self::assertFalse(FinanceBusinessLogic::action('reverse', $this->command($receipt['version']) + ['id' => $receipt['id'], 'correction_reason' => '不能把真实资金当无资金撤销']));
+        self::assertStringContainsString('实际收付款不能', FinanceBusinessLogic::getError());
+        self::assertSame('900.00', $ledger->source($this->receivable)['balance']);
+        self::assertSame('5100.00', $ledger->account($this->accountId)['balance']);
+        self::assertSame(1, Db::name('finance_money_transaction')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
+    public function test_bad_debt_requires_verified_undisputed_debt_before_any_effect(): void
+    {
+        $this->activate();
+        $payload = ['subject_id' => $this->customerId, 'actual_date' => date('Y-m-d'), 'amount' => '300', 'allocations' => [['source' => $this->receivable, 'amount' => '300']], 'reason' => '仅逾期尚未核实', 'basis' => '没有充分依据'];
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'bad_debt', 'payload' => $payload]));
+        self::assertStringContainsString('无争议', FinanceBusinessLogic::getError());
+        $ledger = new FinanceLedger(self::TENANT_ID);
+        self::assertSame('1000.00', $ledger->source($this->receivable)['balance']);
+        self::assertEquals(0, Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('metric', 'loss')->sum('amount'));
+        self::assertSame('5000.00', $ledger->account($this->accountId)['balance']);
+        self::assertSame(0, Db::name('finance_money_transaction')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
+    public function test_impact_preview_rolls_back_documents_commands_sources_and_entries_even_for_reverse(): void
+    {
+        $this->activate();
+        $payload = ['subject_id' => $this->customerId, 'actual_date' => date('Y-m-d'), 'amount' => '300', 'allocations' => [['source' => $this->receivable, 'amount' => '300']], 'debt_verified' => 1, 'undisputed' => 1, 'reason' => '债务真实无争议且无清偿能力', 'basis' => '核实债权及清偿事实'];
+        $command = $this->command(0) + ['action' => 'record', 'type' => 'bad_debt', 'payload' => $payload];
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($command);
+        self::assertSame(['700.00', '300.00'], array_column(array_reverse($preview['balances']), 'after'));
+        self::assertSame('300.00', $preview['impacts'][0]['amount']);
+        self::assertSame([date('Y-m')], $preview['posting_months']);
+        foreach (['finance_document', 'finance_command', 'finance_source', 'finance_entry'] as $table) { self::assertSame(0, Db::name($table)->where('tenant_id', self::TENANT_ID)->count()); }
+        $bad = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($bad, FinanceBusinessLogic::getError());
+        $reverse = $this->command($bad['version']) + ['action' => 'reverse', 'id' => $bad['id'], 'correction_reason' => '原坏账事实复核不成立'];
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($reverse);
+        self::assertSame('-300.00', $preview['impacts'][0]['amount']);
+        self::assertSame(0, Db::name('finance_correction')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame('700.00', (new FinanceLedger(self::TENANT_ID))->source($this->receivable)['balance']);
+        self::assertNotFalse(FinanceBusinessLogic::action('reverse', $reverse), FinanceBusinessLogic::getError());
+        self::assertSame('1000.00', (new FinanceLedger(self::TENANT_ID))->source($this->receivable)['balance']);
+    }
+
+    public function test_recovery_preparer_can_read_customer_sources_but_cannot_confirm_and_revocation_blocks_reads(): void
+    {
+        $this->activate();
+        $employee = WorkforceLogic::saveEmployee(['name' => '追偿经办', 'mobile' => '13800009928', 'bind_user_id' => 996928, 'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['finance.recovery.prepare']]);
+        self::assertNotFalse($employee, WorkforceLogic::getError());
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996928; request()->adminId = 0;
+        self::assertCount(1, \app\api\jxc\logic\FinanceCustomerBalances::lists([])['lists']);
+        $detail = \app\api\jxc\logic\FinanceCustomerBalances::detail(['customer_id' => $this->customerId, 'category' => 'recovery']);
+        self::assertSame('0.00', $detail['balances']['recovery']);
+        self::assertSame(['recovery_receipt', 'recovery_termination'], array_column($detail['actions'], 'type'));
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'recovery_termination', 'payload' => []]));
+        self::assertStringContainsString('最高权限', FinanceBusinessLogic::getError());
+        Db::name('employee_permission')->where('tenant_id', self::TENANT_ID)->where('employee_id', $employee['id'])->delete();
+        $this->expectException(\DomainException::class); $this->expectExceptionMessage('权限');
+        \app\api\jxc\logic\FinanceCustomerBalances::lists([]);
+    }
+
+    public function test_due_draft_cannot_read_salary_source_through_current_date_projection(): void
+    {
+        $this->activate();
+        $source = (new FinanceLedger(self::TENANT_ID))->createSource(0, 'salary', 98765, '5678', date('Y-m-d'), null, ['subject_name' => '敏感工资对象', 'salary_month' => date('Y-m')]);
+        $employee = WorkforceLogic::saveEmployee(['name' => '应收经办', 'mobile' => '13800009928', 'bind_user_id' => 996928, 'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['finance.receivable.prepare']]);
+        self::assertNotFalse($employee, WorkforceLogic::getError());
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996928; request()->adminId = 0;
+        $draft = FinanceBusinessLogic::action('save', $this->command(0) + ['type' => 'receivable_due', 'payload' => ['subject_id' => 98765, 'source' => $source]]);
+        self::assertNotFalse($draft, FinanceBusinessLogic::getError());
+        self::assertFalse(FinanceBusinessLogic::detail(['id' => $draft['id']]));
+        self::assertStringContainsString('来源业务类型或往来主体', FinanceBusinessLogic::getError());
+    }
+
+    public function test_due_adjustment_updates_current_overdue_without_rewriting_original_source_or_amount(): void
+    {
+        $this->activate(); $ledger = new FinanceLedger(self::TENANT_ID); $date = date('Y-m-01'); $oldDue = date('Y-m-d', strtotime('-1 day'));
+        $source = $ledger->createSource(999, 'receivable', $this->customerId, '100', $date, $oldDue, []);
+        self::assertSame('100.00', \app\api\jxc\logic\FinanceCustomers::overdue($this->customerId)['amount']);
+        $command = $this->command(0) + ['type' => 'receivable_due', 'payload' => ['subject_id' => $this->customerId, 'source' => $source,
+            'expected_due_revision' => 0, 'new_due_date' => date('Y-m-d', strtotime('+7 days')), 'reason' => '经双方约定延期一周']];
+        $result = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($result, FinanceBusinessLogic::getError());
+        self::assertSame($result, FinanceBusinessLogic::action('record', $command));
+        $current = $ledger->source($source); self::assertSame($command['payload']['new_due_date'], $current['due_date']);
+        self::assertSame($oldDue, $current['original_due_date']); self::assertSame($date, $current['business_date']); self::assertSame('100.00', $current['balance']);
+        self::assertSame('0.00', \app\api\jxc\logic\FinanceCustomers::overdue($this->customerId)['amount']);
+        $newCommand = $this->command(0) + ['type' => 'receivable_due', 'payload' => array_merge($command['payload'], ['new_due_date' => null, 'reason' => '改为未约定'])];
+        self::assertFalse(FinanceBusinessLogic::action('record', $newCommand)); self::assertStringContainsString('新调整', FinanceBusinessLogic::getError());
+        $newCommand['payload']['expected_due_revision'] = $current['due_revision'];
+        $second = FinanceBusinessLogic::action('record', $newCommand); self::assertNotFalse($second, FinanceBusinessLogic::getError());
+        self::assertNull($ledger->source($source)['due_date']);
+        self::assertSame(2, Db::name('finance_due_adjustment')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame(0, Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->count());
+        $page = $ledger->sourcePage(['receivable'], $this->customerId, 1);
+        $row = array_values(array_filter($page['sources'], static fn(array $row): bool => $row['reference'] === $source))[0];
+        self::assertNull($row['due_date']); self::assertSame($oldDue, $row['original_due_date']);
+    }
+
+    public function test_customer_balances_read_ledger_instead_of_legacy_shadow_and_preserve_unknown_opening_age(): void
+    {
+        $this->activate();
+        Db::name('customer')->where('id', $this->customerId)->update(['order_receivable' => '999999']);
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $this->receipt('100', '100')]));
+        $result = \app\api\jxc\logic\FinanceCustomerBalances::lists(['filter' => 'debt']);
+        self::assertCount(1, $result['lists']); self::assertSame('900.00', $result['lists'][0]['receivable']);
+        $detail = \app\api\jxc\logic\FinanceCustomerBalances::detail(['customer_id' => $this->customerId]);
+        self::assertSame('900.00', $detail['balances']['receivable']); self::assertNull($detail['sources'][0]['age_days']);
+        $source = \app\api\jxc\logic\FinanceCustomerBalances::source(['source' => $this->receivable]);
+        self::assertCount(1, $source['entries']); self::assertSame('-100.00', $source['entries'][0]['amount']);
+        self::assertSame([], \app\api\jxc\logic\FinanceCustomerBalances::lists(['filter' => 'overdue'])['lists']);
+    }
+
     private function deliveredSale(): array
     {
         $unit = $this->createCustomerReportUnit('斤');
@@ -590,6 +731,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
     private function clean(): void
     {
+        Db::name('finance_due_adjustment')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_customer_terms')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         foreach (Db::name('finance_evidence')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->select()->toArray() as $proof) {
             $snapshot = json_decode($proof['snapshot'], true); $key = $snapshot['storage_key'] ?? '';

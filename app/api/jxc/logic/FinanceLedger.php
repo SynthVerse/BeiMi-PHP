@@ -39,10 +39,12 @@ final class FinanceLedger
         if (!$row) { throw new \DomainException('未结来源不存在或不属于本门店'); }
         $snapshot = FinanceValue::decode($row[$opening ? 'source_snapshot' : 'snapshot']);
         $change = (string)(Db::name('finance_entry')->where('tenant_id', $this->tenantId)->where('source_ref', $reference)->where('metric', 'balance')->sum('amount') ?: '0');
+        $due = FinanceDueDates::forSources($this->tenantId, [$reference])[$reference] ?? null;
+        $originalDue = $opening ? ($snapshot['due_date'] ?? null) : $row['due_date'];
         return ['reference' => $reference, 'category' => $row['category'], 'subject_id' => (int)$row['subject_id'],
             'subject_name' => $snapshot['subject_name'] ?? '', 'confirmed_amount' => $row['amount'],
             'balance' => bcadd($row['amount'], $change, 2), 'business_date' => $opening ? ($snapshot['historical_date'] ?? null) : $row['business_date'],
-            'due_date' => $opening ? ($snapshot['due_date'] ?? null) : $row['due_date'], 'snapshot' => $snapshot,
+            'due_date' => $due ? $due['new_due_date'] : $originalDue, 'original_due_date' => $originalDue, 'due_revision' => (int)($due['id'] ?? 0), 'snapshot' => $snapshot,
             'document_id' => $opening ? null : (int)$row['document_id']];
     }
 
@@ -83,10 +85,13 @@ final class FinanceLedger
         }
         $rows = Db::query(implode(' UNION ALL ', $parts) . ' ORDER BY source_kind,source_id LIMIT ' . (($page - 1) * 20) . ',21');
         $more = count($rows) > 20; $rows = array_slice($rows, 0, 20);
+        $dueDates = FinanceDueDates::forSources($this->tenantId, array_column($rows, 'reference'));
         foreach ($rows as &$row) {
             $row['snapshot'] = FinanceValue::decode($row['snapshot']); $row['subject_id'] = (int)$row['subject_id'];
             $row['subject_name'] = $row['snapshot']['subject_name'] ?? '';
             if ($row['source_kind'] === 'o') { $row['business_date'] = $row['snapshot']['historical_date'] ?? null; $row['due_date'] = $row['snapshot']['due_date'] ?? null; }
+            $row['original_due_date'] = $row['due_date']; $row['due_revision'] = (int)($dueDates[$row['reference']]['id'] ?? 0);
+            if ($row['due_revision']) { $row['due_date'] = $dueDates[$row['reference']]['new_due_date']; }
             unset($row['source_kind'], $row['source_id']);
         }
         return ['sources' => $rows, 'has_more' => $more];

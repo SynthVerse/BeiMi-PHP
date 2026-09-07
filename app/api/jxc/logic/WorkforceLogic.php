@@ -55,6 +55,8 @@ final class WorkforceLogic extends BaseLogic
         ],
         '财务收付款' => [
             ['key' => 'finance.receipt.prepare', 'name' => '准备客户收款草稿'],
+            ['key' => 'finance.receivable.prepare', 'name' => '准备应收调整与坏账草稿（不含确认）'],
+            ['key' => 'finance.receivable.view', 'name' => '查看本门店客户往来与欠款明细'],
             ['key' => 'finance.receipt.confirm', 'name' => '确认本门店客户收款'],
             ['key' => 'finance.sales.due_override', 'name' => '单笔销售覆盖默认付款日（需填写依据）'],
             ['key' => 'finance.payment.prepare', 'name' => '准备供应商与费用付款（不含确认）'],

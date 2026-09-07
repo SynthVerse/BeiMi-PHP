@@ -27,7 +27,9 @@ final class FinanceCustomers
             ->field('source_ref,SUM(amount) AS delta')->group('source_ref')->buildSql();
         foreach (['o' => 'finance_opening_source', 'n' => 'finance_source'] as $kind => $table) {
             $due = $kind === 'o' ? "NULLIF(JSON_UNQUOTE(JSON_EXTRACT(s.source_snapshot,'$.due_date')),'null')" : 's.due_date';
+            $due = "CASE WHEN d.id IS NULL THEN {$due} ELSE d.new_due_date END";
             $row = Db::name($table)->alias('s')->leftJoin([$changes => 'b'], "b.source_ref=CONCAT('{$kind}:',s.id)")
+                ->leftJoin([FinanceDueDates::latestSql($tenant) => 'd'], "d.source_ref=CONCAT('{$kind}:',s.id)")
                 ->where('s.tenant_id', $tenant)->where('s.category', 'receivable')->where('s.subject_id', $customerId)
                 ->whereRaw('s.amount+COALESCE(b.delta,0)>0')->whereRaw("{$due} IS NOT NULL AND {$due}<?", [date('Y-m-d')])
                 ->field("COALESCE(SUM(s.amount+COALESCE(b.delta,0)),0) AS balance,MIN({$due}) AS earliest,COUNT(*) AS total")->find();

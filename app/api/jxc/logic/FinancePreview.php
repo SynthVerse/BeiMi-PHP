@@ -1,0 +1,47 @@
+<?php
+
+declare(strict_types=1);
+
+namespace app\api\jxc\logic;
+
+use think\facade\Db;
+
+/** 在独立外层事务内演算完整命令，始终回滚；确认仍重验当前版本、权限和余额。 */
+final class FinancePreview
+{
+    public static function calculate(array $params): array
+    {
+        $action = FinanceValue::text($params['action'] ?? '', 40);
+        if (!in_array($action, ['record', 'confirm', 'correct', 'reverse', 'reverse_duplicate'], true)) { throw new \DomainException('该操作没有记账影响预览'); }
+        $params['idempotency_key'] = 'preview-' . bin2hex(random_bytes(24));
+        Db::startTrans();
+        try {
+            $document = FinanceBusinessLogic::action($action, $params);
+            if ($document === false) { throw new \DomainException(FinanceBusinessLogic::getError()); }
+            $tenant = FinanceAccess::tenant(); $ledger = new FinanceLedger($tenant);
+            $entries = Db::name('finance_entry')->where('tenant_id', $tenant)->where('document_id', $document['id'])->select()->toArray();
+            $created = Db::name('finance_source')->where('tenant_id', $tenant)->where('document_id', $document['id'])->select()->toArray();
+            $changes = []; $periods = [];
+            foreach ($created as $source) { $changes['n:' . $source['id']] = $source['amount']; }
+            foreach ($entries as $entry) {
+                if ($entry['metric'] === 'balance') { $changes[$entry['source_ref']] = bcadd($changes[$entry['source_ref']] ?? '0', $entry['amount'], 2); }
+                else {
+                    $key = $entry['metric'] . ':' . $entry['posting_month'];
+                    $periods[$key] ??= ['metric' => $entry['metric'], 'posting_month' => $entry['posting_month'], 'amount' => '0.00'];
+                    $periods[$key]['amount'] = bcadd($periods[$key]['amount'], $entry['amount'], 2);
+                }
+            }
+            $balances = [];
+            foreach ($changes as $reference => $amount) {
+                $source = $ledger->source($reference);
+                $balances[] = ['category' => $source['category'], 'label' => $source['snapshot']['source_reference'] ?? $source['snapshot']['reason'] ?? '本次业务来源',
+                    'before' => bcsub($source['balance'], $amount, 2), 'change' => $amount, 'after' => $source['balance']];
+            }
+            $months = array_values(array_unique(array_column($entries, 'posting_month')));
+            if (!$months && isset($document['confirmed_result']['posting_month'])) { $months[] = $document['confirmed_result']['posting_month']; }
+            $result = $document['confirmed_result'];
+            return ['tenant_id' => $tenant, 'balances' => $balances, 'impacts' => array_values($periods), 'posting_months' => $months,
+                'old_due_date' => $result['old_due_date'] ?? null, 'new_due_date' => $result['new_due_date'] ?? null];
+        } finally { Db::rollback(); }
+    }
+}

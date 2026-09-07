@@ -11,16 +11,18 @@ final class FinanceCorrections
 {
     public function __construct(private readonly int $tenantId, private readonly FinanceLedger $ledger) {}
 
-    public function replace(array $original, array $replacement, string $reason, int $duplicateOf = 0): array
+    public function replace(array $original, array $replacement, string $reason, int $duplicateOf = 0, bool $reverseOnly = false): array
     {
-        FinanceDocumentPolicy::authorize($original['type'], true);
+        $policy = FinanceDocumentPolicy::authorize($original['type'], true);
+        if ($reverseOnly && $policy['direction'] !== 'none') { throw new \DomainException('实际收付款不能按无资金业务直接撤销，请区分录入更正、退款或到账失效'); }
+        if (in_array($original['type'], ['receivable_due', 'payable_due'], true)) { throw new \DomainException('付款日请从原未结明细再次调整，新的调整会关联当前日期版本并保留历史'); }
         if ($original['status'] !== 'confirmed') { throw new \DomainException('仅已确认记录可关联更正'); }
         if (Db::name('finance_correction')->where('tenant_id', $this->tenantId)->where('original_document_id', $original['id'])->count()) {
             throw new \DomainException('原记录已有更正，请打开最新有效记录处理');
         }
         $reason = FinanceValue::text($reason, 1000);
         $originalResult = FinanceValue::decode($original['confirmed_result']);
-        if (!empty($originalResult['duplicate_of'])) { throw new \DomainException('重复反向凭据不是实际业务，不能再次冲销或替代'); }
+        if (!empty($originalResult['duplicate_of']) || !empty($originalResult['reversal_of'])) { throw new \DomainException('反向凭据不是原业务，不能再次冲销或替代'); }
         if ($duplicateOf) { $this->validateDuplicate($original, $originalResult, $duplicateOf); }
         // 派生预收等已被其他业务消耗时，不能让更正形成负来源余额。
         $created = Db::name('finance_source')->where('tenant_id', $this->tenantId)->where('document_id', $original['id'])->select()->toArray();
@@ -48,8 +50,8 @@ final class FinanceCorrections
             $transaction = Db::name('finance_money_transaction')->where('tenant_id', $this->tenantId)->where('id', $originalResult['money']['transaction_id'])->find();
             if (!$transaction) { throw new \DomainException('原真实资金交易不存在，不能建立更正'); }
         }
-        $result = $duplicateOf ? ['type' => $original['type'], 'subject_id' => $originalResult['subject_id'], 'subject_name' => $originalResult['subject_name'],
-            'allocated_amount' => '0.00', 'created_sources' => [], 'duplicate_of' => $duplicateOf, 'reason' => $reason]
+        $result = $duplicateOf || $reverseOnly ? ['type' => $original['type'], 'subject_id' => $originalResult['subject_id'], 'subject_name' => $originalResult['subject_name'],
+            'allocated_amount' => '0.00', 'created_sources' => [], 'duplicate_of' => $duplicateOf, 'reversal_of' => $reverseOnly ? (int)$original['id'] : null, 'reason' => $reason]
             : (new FinancePayments($this->tenantId, $this->ledger))->confirm($replacement, $transaction);
         Db::name('finance_correction')->insert(['tenant_id' => $this->tenantId, 'original_document_id' => $original['id'],
             'replacement_document_id' => $replacement['id'], 'reason' => $reason, 'actor' => FinanceValue::json(FinanceAccess::actor()), 'create_time' => time()]);
