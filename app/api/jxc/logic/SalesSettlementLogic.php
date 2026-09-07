@@ -674,14 +674,18 @@ final class SalesSettlementLogic extends BaseLogic
     {
         $currentVersion = (int)($order['settlement_version'] ?? 0);
         $targetVersion = $currentVersion + 1;
+        if (FinanceIntegration::active()) {
+            $legacy = FinanceLegacySales::context($order); FinanceLegacySales::assertSnapshot($legacy, $snapshot);
+            $snapshot['preserve_delivery_totals'] = $legacy['preserves_legacy_coverage'];
+        }
         if (self::applyActualCorrections($order, $snapshot, $actionId)) {
             $order['cost_status'] = 'pending';
         }
-        self::applyLines($snapshot['lines']);
+        self::applyLines($snapshot['lines'], (bool)($snapshot['preserve_delivery_totals'] ?? false));
 
         $previousMoney = $currentVersion > 0 ? self::money((string)$order['order_money']) : '0.00';
         $delta = bcsub($snapshot['order_money'], $previousMoney, self::MONEY_SCALE);
-        $finance = FinanceIntegration::active() ? FinanceSales::post($order, $snapshot, $actionId) : null;
+        $finance = FinanceIntegration::active() ? FinanceSales::post($order, $snapshot, $actionId, $legacy) : null;
         if ($finance) {
             Db::name('customer')->where('tenant_id', self::tenantId())->where('id', (int)$order['customer_id'])
                 ->update(['order_receivable' => $finance['debt_after_order'], 'update_time' => time()]);
@@ -942,13 +946,13 @@ final class SalesSettlementLogic extends BaseLogic
     }
 
     /** @param array<int,array<string,mixed>> $lines */
-    private static function applyLines(array $lines): void
+    private static function applyLines(array $lines, bool $preserveDeliveryTotals = false): void
     {
         foreach ($lines as $line) {
             $updated = Db::name('order_goods')->where('tenant_id', self::tenantId())
                 ->where('id', (int)$line['order_goods_id'])->update([
                     'number' => $line['pricing_quantity'],
-                    'base_quantity' => $line['actual_delivery_weight'],
+                    ...($preserveDeliveryTotals ? [] : ['base_quantity' => $line['actual_delivery_weight']]),
                     'customer_settlement_quantity' => $line['customer_settlement_weight'],
                     'billing_weight_difference' => $line['billing_weight_difference'],
                     'price' => $line['price'],
@@ -969,6 +973,9 @@ final class SalesSettlementLogic extends BaseLogic
     /** @param array<string,mixed> $order @param array<int,array<string,mixed>> $rows @param array<string,mixed> $request @return array<string,mixed>|false */
     private static function buildSnapshot(array $order, array $rows, array $request): array|false
     {
+        $legacy = FinanceIntegration::active() ? FinanceLegacySales::context($order) : null;
+        if ($legacy && $legacy['requires_delivery_batches']) { throw new \DomainException('该订单须按真实交付逐项结算，请进入交付分次结算'); }
+        if ($legacy && $legacy['preserves_legacy_coverage']) { $rows = array_values(array_filter($rows, static fn(array $row): bool => isset($legacy['legacy_lines'][(int)$row['id']]))); }
         if ($rows === [] || count($rows) !== count($request['lines'])) {
             self::setError('销售结算商品明细不完整');
             return false;
@@ -1011,7 +1018,7 @@ final class SalesSettlementLogic extends BaseLogic
             $amount = $calculation['amount'] ?? bcmul($pricingQuantity, $price, self::MONEY_SCALE);
             if ($calculation) { $automaticDifference = bcadd($automaticDifference, $calculation['automatic_rounding_difference'], 6); }
             $goodsAmount = bcadd($goodsAmount, $amount, self::MONEY_SCALE);
-            $beforeActual = self::quantity((string)$row['base_quantity']);
+            $beforeActual = self::quantity((string)(($legacy && $legacy['preserves_legacy_coverage']) ? $legacy['legacy_lines'][$id]['actual_delivery_weight'] : $row['base_quantity']));
             $actual = $requested['actual_delivery_weight'] ?? $beforeActual;
             if ((int)($order['settlement_version'] ?? 0) === 0
                 && bccomp($actual, $beforeActual, self::QUANTITY_SCALE) !== 0) {
@@ -1052,6 +1059,7 @@ final class SalesSettlementLogic extends BaseLogic
                 ];
             }
         }
+        if ($legacy) { FinanceLegacySales::assertSnapshot($legacy, ['lines' => $lines]); }
         $rounding = $request['rounding_amount'];
         if (bccomp($rounding, '0.00', self::MONEY_SCALE) > 0
             && (bccomp($rounding, $goodsAmount, self::MONEY_SCALE) >= 0)) {
@@ -1083,7 +1091,7 @@ final class SalesSettlementLogic extends BaseLogic
             'inventory_exception_reason' => $request['inventory_exception_reason'],
             'inventory_second_confirmed' => $request['inventory_second_confirmed'],
             'due_date' => $request['due_date'] ?? null,
-            'due_terms' => FinanceIntegration::active() ? FinanceSalesRules::terms((int)$order['customer_id'], date('Y-m-d', (int)$order['datetimesingle'])) : null,
+            'due_terms' => $legacy ? FinanceSalesRules::terms((int)$order['customer_id'], $legacy['business_date'] ?? date('Y-m-d')) : null,
             'due_date_reviewed' => $request['due_date_reviewed'] ?? false,
             'due_override_reason' => $request['due_override_reason'] ?? '',
             'credit_reviewed' => $request['credit_reviewed'] ?? false,
@@ -1247,6 +1255,11 @@ final class SalesSettlementLogic extends BaseLogic
         }
         $lines = Db::name('order_goods')->where('tenant_id', self::tenantId())->where('order_id', $orderId)
             ->where('order_type', 'sales')->order('id', 'asc')->select()->toArray();
+        $legacy = FinanceIntegration::active() ? FinanceLegacySales::context($order) : null;
+        if ($legacy && $legacy['preserves_legacy_coverage']) {
+            $lines = array_values(array_filter($lines, static fn(array $line): bool => isset($legacy['legacy_lines'][(int)$line['id']])));
+            foreach ($lines as &$line) { $line['total_actual_delivery_weight'] = $line['base_quantity']; $line['base_quantity'] = $legacy['legacy_lines'][(int)$line['id']]['actual_delivery_weight']; } unset($line);
+        }
         foreach ($lines as &$line) {
             $line['id'] = (int)$line['id'];
             $line['actual_delivery_weight'] = self::quantity((string)$line['base_quantity']);

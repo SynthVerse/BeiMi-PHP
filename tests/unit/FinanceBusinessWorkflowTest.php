@@ -1248,6 +1248,67 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $next = \app\api\jxc\logic\FinanceSalesOutput::prepare($this->command(1) + ['id' => $formal['id']]); self::assertSame(3, $next['copy_no']); self::assertSame(1, $next['reprint_count'], '失败尝试占流水号，但不增加重打次数');
     }
 
+    public function test_legacy_sale_uses_real_delivery_day_for_first_revenue_and_default_due_date(): void
+    {
+        $this->activate(); $sale = $this->deliveredSale(); $day = date('Y-m-01');
+        Db::name('fulfillment_delivery_event')->where('id', $sale['event_id'])->update(['delivered_time' => strtotime($day)]);
+        \app\api\jxc\logic\FinanceSalesRules::save($this->command(0) + ['customer_id' => $this->customerId, 'mode' => 'days_after', 'days' => 5, 'reason' => '交付后五天付款']);
+        $detail = SalesSettlementLogic::detail(['id' => $sale['order_id']]); self::assertSame(date('Y-m-06'), $detail['finance']['terms']['default_due_date']);
+        $result = SalesSettlementLogic::submit($this->command(0) + ['order_id' => $sale['order_id'], 'lines' => [['order_goods_id' => $sale['line_id'], 'customer_settlement_weight' => '2', 'pricing_unit_id' => $sale['unit_id'], 'price' => '50']]]);
+        self::assertNotFalse($result, SalesSettlementLogic::getError());
+        $version = Db::name('finance_sales_version')->where('order_id', $sale['order_id'])->find();
+        self::assertSame($day, $version['business_date']); self::assertSame(date('Y-m-06'), $version['due_date']);
+    }
+
+    public function test_legacy_first_confirmation_cannot_put_multiple_delivery_days_on_one_revenue_day(): void
+    {
+        $this->activate(); $sale = $this->deliveredSale();
+        Db::name('fulfillment_delivery_event')->where('id', $sale['event_id'])->update(['delivered_time' => strtotime(date('Y-m-01'))]);
+        $event = Db::name('fulfillment_delivery_event')->where('id', $sale['event_id'])->find(); unset($event['id']); $event['idempotency_key'] = 'legacy-second-' . uniqid(); $event['delivered_time'] = strtotime(date('Y-m-02'));
+        $eventId = (int)Db::name('fulfillment_delivery_event')->insertGetId($event);
+        $item = Db::name('fulfillment_delivery_item')->where('delivery_event_id', $sale['event_id'])->find(); unset($item['id']); $item['delivery_event_id'] = $eventId; $item['actual_delivery_weight'] = '3'; Db::name('fulfillment_delivery_item')->insert($item);
+        Db::name('order_goods')->where('id', $sale['line_id'])->update(['base_quantity' => '5']);
+        $result = SalesSettlementLogic::submit($this->command(0) + ['order_id' => $sale['order_id'], 'lines' => [['order_goods_id' => $sale['line_id'], 'customer_settlement_weight' => '5', 'pricing_unit_id' => $sale['unit_id'], 'price' => '50']]]);
+        self::assertFalse($result); self::assertStringContainsString('交付', SalesSettlementLogic::getError());
+        self::assertSame(0, Db::name('finance_sales_version')->where('order_id', $sale['order_id'])->count());
+        self::assertTrue(SalesSettlementLogic::detail(['id' => $sale['order_id']])['finance']['requires_delivery_batches']);
+    }
+
+    public function test_legacy_price_correction_after_new_delivery_batch_preserves_original_coverage_and_total_delivery(): void
+    {
+        $this->activate(); $sale = $this->deliveredSale();
+        $request = ['order_id' => $sale['order_id'], 'lines' => [['order_goods_id' => $sale['line_id'], 'customer_settlement_weight' => '2', 'pricing_unit_id' => $sale['unit_id'], 'price' => '50']]];
+        self::assertNotFalse(SalesSettlementLogic::submit($this->command(0) + $request));
+        $event = Db::name('fulfillment_delivery_event')->where('id', $sale['event_id'])->find(); unset($event['id']); $event['idempotency_key'] = 'legacy-extra-' . uniqid();
+        $eventId = (int)Db::name('fulfillment_delivery_event')->insertGetId($event);
+        $item = Db::name('fulfillment_delivery_item')->where('delivery_event_id', $sale['event_id'])->find(); unset($item['id']); $item['delivery_event_id'] = $eventId; $item['actual_delivery_weight'] = '3'; $delivery = (int)Db::name('fulfillment_delivery_item')->insertGetId($item);
+        Db::name('order_goods')->where('id', $sale['line_id'])->update(['base_quantity' => '5']);
+        $batch = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'sales_batch', 'payload' => ['subject_id' => $this->customerId, 'reason' => '新增交付单独结算', 'lines' => [['delivery_item_id' => $delivery, 'covered_weight' => '3', 'settlement_weight' => '3', 'price' => '40']]]]); self::assertNotFalse($batch, FinanceBusinessLogic::getError());
+        $detail = SalesSettlementLogic::detail(['id' => $sale['order_id']]); self::assertSame('2.0000', $detail['lines'][0]['actual_delivery_weight']); self::assertTrue($detail['finance']['preserves_legacy_coverage']);
+        $request['lines'][0]['price'] = '60'; $request['edit_reason'] = '原来两斤的单价更正';
+        $corrected = SalesSettlementLogic::submit($this->command(1) + $request); self::assertNotFalse($corrected, SalesSettlementLogic::getError());
+        self::assertSame('1240.00', (new FinanceLedger(self::TENANT_ID))->categoryBalance('receivable', $this->customerId));
+        self::assertSame('5.0000', Db::name('order_goods')->where('id', $sale['line_id'])->value('base_quantity'));
+        self::assertSame([], \app\api\jxc\logic\FinanceDeliveries::rows($this->customerId, date('Y-m-01'), date('Y-m-d')));
+        self::assertSame(0, Db::name('sales_delivery_correction')->where('order_id', $sale['order_id'])->count());
+        $request['lines'][0]['actual_delivery_weight'] = '3';
+        self::assertFalse(SalesSettlementLogic::submit($this->command(2) + $request)); self::assertStringContainsString('原覆盖量', SalesSettlementLogic::getError());
+        self::assertSame(0, Db::name('sales_weight_difference_todo')->where('order_id', $sale['order_id'])->count(), '禁止的覆盖量变更不能留下无法确认的待办');
+    }
+
+    public function test_legacy_actual_correction_without_later_delivery_remains_valid_and_updates_stock_only_once(): void
+    {
+        $this->activate(); $sale = $this->deliveredSale();
+        $request = ['order_id' => $sale['order_id'], 'lines' => [['order_goods_id' => $sale['line_id'], 'customer_settlement_weight' => '2', 'pricing_unit_id' => $sale['unit_id'], 'price' => '50']]];
+        $initial = SalesSettlementLogic::submit($this->command(0) + $request); self::assertNotFalse($initial);
+        $request['lines'][0]['actual_delivery_weight'] = '1.5'; $request['lines'][0]['customer_settlement_weight'] = '1.5'; $request['edit_reason'] = '原实际交付误录';
+        $request['credit_reviewed'] = 1; $request['credit_allocations'] = [['source' => $initial['finance']['source_ref'], 'amount' => '25']];
+        $command = $this->command(1) + $request; $corrected = SalesSettlementLogic::submit($command); self::assertNotFalse($corrected, SalesSettlementLogic::getError());
+        self::assertSame($corrected, SalesSettlementLogic::submit($command)); self::assertSame('75.00', $corrected['order_money']);
+        self::assertSame(1, Db::name('sales_delivery_correction')->where('order_id', $sale['order_id'])->count());
+        self::assertFalse(SalesSettlementLogic::detail(['id' => $sale['order_id']])['finance']['preserves_legacy_coverage']);
+    }
+
     private function deliveredSale(): array
     {
         $unit = $this->createCustomerReportUnit('斤');

@@ -9,10 +9,10 @@ use think\facade\Db;
 /** 销售结算版本的账务映射；不在金额确认处重复登记实物交付。 */
 final class FinanceSales
 {
-    public static function post(array $order, array $snapshot, int $actionId): array
+    public static function post(array $order, array $snapshot, int $actionId, ?array $legacyContext = null): array
     {
         $tenant = FinanceAccess::tenant(); $ledger = new FinanceLedger($tenant); $ledger->lockBook();
-        if (Db::name('finance_sales_coverage')->where('tenant_id', $tenant)->where('order_id', $order['id'])->count()) { throw new \DomainException('该订单已按交付分次结算，请从对应结算记录更正，不能再按整单重复确认'); }
+        $legacy = $legacyContext ?? FinanceLegacySales::context($order); FinanceLegacySales::assertSnapshot($legacy, $snapshot);
         FinanceOverdue::captureWithinTransaction($tenant, [(int)$order['customer_id']]);
         $version = (int)($order['settlement_version'] ?? 0);
         $previous = $version ? Db::name('finance_sales_version')->where('tenant_id', $tenant)->where('order_id', $order['id'])->where('version', $version)->find() : null;
@@ -27,12 +27,12 @@ final class FinanceSales
             }
             $previous = ['source_ref' => $opening['reference'], 'business_date' => date('Y-m-d', (int)$order['datetimesingle']), 'due_date' => $opening['due_date']];
         }
-        $date = $previous['business_date'] ?? date('Y-m-d', (int)$order['datetimesingle']);
+        $date = $previous['business_date'] ?? $legacy['business_date'];
         $month = $ledger->postingMonth($date < $activation ? date('Y-m-d') : $date);
         $overdue = FinanceCustomers::overdue((int)$order['customer_id']);
         if (bccomp($overdue['amount'], '0', 2) > 0 && empty($snapshot['overdue_acknowledged'])) { throw new \DomainException('客户存在逾期未收款，请核对逾期提示并明确知晓后继续确认'); }
         $terms = $snapshot['due_terms'] ?? FinanceSalesRules::terms((int)$order['customer_id'], $date);
-        $dueDate = $previous ? $previous['due_date'] : ((!empty($snapshot['due_date_reviewed']) || !empty($snapshot['due_date']))
+        $dueDate = $previous ? (!empty($previous['source_ref']) ? $ledger->source($previous['source_ref'])['due_date'] : $previous['due_date']) : ((!empty($snapshot['due_date_reviewed']) || !empty($snapshot['due_date']))
             ? FinanceValue::date($snapshot['due_date'] ?? null, true) : $terms['default_due_date']);
         $dueReason = '';
         if (!$previous && $dueDate !== $terms['default_due_date']) {
