@@ -34,15 +34,34 @@ final class FinanceBusinessLogic extends BaseLogic
         } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
     }
 
+    public static function reportTrace(array $params): array|false
+    {
+        self::clearError();
+        try {
+            FinanceReports::authorize($params);
+            return Db::transaction(static function () use ($params): array {
+                $ledger = new FinanceLedger(FinanceAccess::tenant()); $ledger->lockBook();
+                return FinanceReportTrace::read($ledger, $params);
+            });
+        } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
+    }
+
     public static function reportExport(string $action, array $params): array|false
     {
         self::clearError();
         try {
             return Db::transaction(static function () use ($action, $params): array {
                 $ledger = new FinanceLedger(FinanceAccess::tenant()); $ledger->lockBook();
-                return FinanceReportExports::execute($ledger, $action, $params);
+                $result = FinanceReportExports::execute($ledger, $action, $params);
+                FinanceReportExports::auditAttempt($action, $params, $result);
+                return $result;
             });
-        } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
+        } catch (\Throwable $error) {
+            // 失败发生在事务回滚之后，避免拒权或文件生成失败的审计一起被撤销。
+            FinanceReportExports::auditAttempt($action, $params, null, $error instanceof \DomainException ? $error->getMessage() : '导出处理异常');
+            if (!$error instanceof \DomainException) { throw $error; }
+            self::setError($error->getMessage()); return false;
+        }
     }
 
     public static function closingChecklist(array $params): array|false

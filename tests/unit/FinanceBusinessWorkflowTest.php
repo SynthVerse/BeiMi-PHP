@@ -64,6 +64,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000041_finance_account_reconciliation.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000042_finance_transit_reconciliation.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260909_000043_finance_report_export.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260909_000044_finance_report_export_attempt.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -149,6 +150,10 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertNotFalse(FinanceBusinessLogic::reportExport('content', ['id' => $export['id']]), FinanceBusinessLogic::getError());
         $this->prepareCustomerReportRequestContext();
         self::assertFalse(FinanceBusinessLogic::reportExport('content', ['id' => $export['id']])); self::assertStringContainsString('操作人', FinanceBusinessLogic::getError());
+        $attempts = Db::name('finance_report_export_attempt')->where('tenant_id', self::TENANT_ID)->order('id')->select()->toArray();
+        self::assertCount(10, $attempts); self::assertSame('failure', $attempts[0]['outcome']); self::assertSame('success', $attempts[1]['outcome']);
+        self::assertSame('expense', $attempts[2]['report']); self::assertSame(date('Y-m'), $attempts[2]['period']); self::assertSame(date('Y-m-d'), $attempts[2]['cutoff']);
+        self::assertSame('failure', $attempts[9]['outcome']); self::assertStringContainsString('操作人', $attempts[9]['message']);
     }
 
     public function test_report_export_preserves_long_frozen_evidence_and_never_executes_formula_text(): void
@@ -169,6 +174,25 @@ final class FinanceBusinessWorkflowTest extends TestCase
             foreach ($book->getAllSheets() as $part) { foreach ($part->getCoordinates() as $coordinate) { self::assertNotSame('f', $part->getCell($coordinate)->getDataType()); } }
             $book->disconnectWorksheets();
         } finally { unlink($file); }
+    }
+
+    public function test_report_trace_keeps_original_document_and_links_reversal_current_sources_and_entries(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01'); $query = ['report' => 'cash', 'period_type' => 'month', 'period' => $month];
+        $original = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => array_replace($this->receipt('100', '100'), ['actual_date' => $month . '-10'])]); self::assertNotFalse($original, FinanceBusinessLogic::getError());
+        $reports = []; foreach (['cash', 'customer'] as $kind) { $reports[$kind] = FinanceBusinessLogic::monthlyReport(['report' => $kind, 'month' => $month]); $reports[$kind]['closing_status'] = 'closed'; $reports[$kind]['stage'] = false; }
+        Db::name('finance_period')->insert(['tenant_id' => self::TENANT_ID, 'month' => $month, 'status' => 'closed', 'snapshot' => json_encode(['reports' => $reports, 'unresolved' => []]), 'closed_by' => '{}', 'closed_at' => time()]);
+        $changed = FinanceBusinessLogic::action('correct', $this->command($original['version']) + ['id' => $original['id'], 'correction_reason' => '报表追溯保留原到账依据', 'payload' => array_replace($this->receipt('120', '120'), ['actual_date' => $month . '-10'])]); self::assertNotFalse($changed, FinanceBusinessLogic::getError());
+        $trace = FinanceBusinessLogic::reportTrace($query + ['target_kind' => 'document', 'target' => (string)$original['id']]); self::assertNotFalse($trace, FinanceBusinessLogic::getError());
+        self::assertSame((string)$original['id'], $trace['target']); self::assertContains($original['id'], array_column($trace['documents'], 'id')); self::assertContains($changed['id'], array_column($trace['documents'], 'id'));
+        self::assertContains('correction_reversal', array_column($trace['entries'], 'purpose'));
+        self::assertContains(date('Y-m'), array_column($trace['entries'], 'posting_month')); self::assertSame($reports['cash'], FinanceBusinessLogic::monthlyReport(['report' => 'cash', 'month' => $month]));
+        self::assertEquals($original['confirmed_result'], FinanceBusinessLogic::detail(['id' => $original['id']])['confirmed_result']);
+        $source = FinanceBusinessLogic::reportTrace(array_replace($query, ['report' => 'customer']) + ['target_kind' => 'source', 'target' => $this->receivable]); self::assertNotFalse($source, FinanceBusinessLogic::getError());
+        self::assertSame($this->receivable, $source['source']['reference']); self::assertContains($changed['id'], array_column($source['documents'], 'id'));
+        self::assertFalse(FinanceBusinessLogic::reportTrace($query + ['target_kind' => 'document', 'target' => '999999999']));
+        request()->adminInfo = ['root' => 1, 'tenant_id' => self::OTHER_TENANT_ID];
+        self::assertFalse(FinanceBusinessLogic::reportTrace($query + ['target_kind' => 'document', 'target' => (string)$original['id']]));
     }
 
     public function test_year_reports_sum_flows_keep_last_balances_and_preserve_frozen_months(): void
@@ -3258,7 +3282,10 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $receipt = $this->command(0) + ['type' => 'expense_refund', 'payload' => ['subject_id' => $vendor, 'account_id' => $this->accountId,
             'actual_date' => date('Y-m-d'), 'amount' => '70', 'reason' => '收到调减费用退款', 'allocations' => [['source' => $refund['reference'], 'amount' => '70']]]];
         $impact = \app\api\jxc\logic\FinancePreview::calculate($receipt + ['action' => 'record']); self::assertSame(['cash'], array_column($impact['impacts'], 'metric'));
-        self::assertNotFalse(FinanceBusinessLogic::action('record', $receipt), FinanceBusinessLogic::getError());
+        $received = FinanceBusinessLogic::action('record', $receipt); self::assertNotFalse($received, FinanceBusinessLogic::getError());
+        $trace = FinanceBusinessLogic::reportTrace(['report' => 'expense', 'period_type' => 'month', 'period' => date('Y-m'), 'target_kind' => 'source', 'target' => $source]); self::assertNotFalse($trace, FinanceBusinessLogic::getError());
+        self::assertContains($received['id'], array_column($trace['documents'], 'id'), '原费用来源必须沿调减后的退款来源追到实际到账凭据');
+        self::assertContains($refund['reference'], array_column($trace['entries'], 'source_ref'));
         self::assertSame('4820.00', $ledger->account($this->accountId)['balance']); self::assertSame('0.00', $ledger->source($refund['reference'])['balance']);
         $adjustment['idempotency_key'] = $this->command(0)['idempotency_key'];
         self::assertFalse(FinanceBusinessLogic::action('record', $adjustment)); self::assertStringContainsString('已有后续调整', FinanceBusinessLogic::getError());
@@ -4605,6 +4632,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     private function clean(): void
     {
         Db::name('finance_transit_reconciliation')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
+        Db::name('finance_report_export_attempt')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_report_export_access')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_report_export')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_cash_shortage_application')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();

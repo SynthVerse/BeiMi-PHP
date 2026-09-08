@@ -12,6 +12,23 @@ use think\facade\Db;
 /** 导出保存读取时的权威版本；文件读取再次鉴权，二进制不放公共目录。 */
 final class FinanceReportExports
 {
+    public static function auditAttempt(string $action, array $params, ?array $result, string $message = ''): void
+    {
+        $tenant = FinanceAccess::tenant();
+        if ($tenant <= 0 || FinanceAccess::operator() <= 0) { return; }
+        $snapshot = []; $exportId = $result['id'] ?? null;
+        if ($action === 'content' && filter_var($params['id'] ?? null, FILTER_VALIDATE_INT)) {
+            $row = Db::name('finance_report_export')->where('tenant_id', $tenant)->where('id', $params['id'])->find();
+            if ($row) { $snapshot = FinanceValue::decode($row['snapshot']); $exportId = (int)$row['id']; }
+        }
+        $fields = $result ?? ($snapshot ?: $params);
+        $text = static fn(mixed $value, int $limit): ?string => is_string($value) ? mb_substr($value, 0, $limit, 'UTF-8') : null;
+        Db::name('finance_report_export_attempt')->insert(['tenant_id' => $tenant, 'export_id' => $exportId, 'actor' => FinanceValue::json(FinanceAccess::actor()),
+            'action' => mb_substr($action, 0, 24, 'UTF-8'), 'report' => $text($fields['report'] ?? null, 24), 'period_type' => $text($fields['period_type'] ?? 'month', 12),
+            'period' => $text($fields['period'] ?? $fields['month'] ?? null, 12), 'cutoff' => $result['cutoff'] ?? $snapshot['cutoff'] ?? null,
+            'outcome' => $result === null ? 'failure' : 'success', 'message' => mb_substr($message, 0, 240, 'UTF-8'), 'create_time' => time()]);
+    }
+
     public static function execute(FinanceLedger $ledger, string $action, array $params): array
     {
         $tenant = FinanceAccess::tenant();
@@ -58,7 +75,7 @@ final class FinanceReportExports
     {
         $snapshot = FinanceValue::decode($row['snapshot']);
         return ['tenant_id' => (int)$row['tenant_id'], 'id' => (int)$row['id'], 'report' => $row['report'], 'period_type' => $snapshot['period_type'], 'period' => $snapshot['period'],
-            'filename' => FinanceReports::TYPES[$row['report']] . '-' . $snapshot['period'] . '-' . $row['id'] . '.xlsx', 'snapshot_hash' => $row['snapshot_hash'], 'created_at' => (int)$row['create_time']];
+            'filename' => FinanceReports::TYPES[$row['report']] . '-' . $snapshot['period'] . '-' . $row['id'] . '.xlsx', 'snapshot_hash' => $row['snapshot_hash'], 'cutoff' => $snapshot['cutoff'], 'created_at' => (int)$row['create_time']];
     }
 
     private static function hash(mixed $value): string

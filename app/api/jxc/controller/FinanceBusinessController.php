@@ -13,6 +13,7 @@ class FinanceBusinessController extends BaseJxcController
     public function closingChecklist() { return $this->respond(FinanceBusinessLogic::closingChecklist($this->request->get())); }
     public function monthlyReport() { return $this->respond(FinanceBusinessLogic::monthlyReport($this->request->get())); }
     public function prepareReportExport() { return $this->respond(FinanceBusinessLogic::reportExport('prepare', $this->request->post())); }
+    public function reportTrace() { return $this->respond(FinanceBusinessLogic::reportTrace($this->request->get())); }
     public function reportExportContent() { return $this->respond(FinanceBusinessLogic::reportExport('content', $this->request->get()))->header(['Cache-Control' => 'private, no-store', 'Pragma' => 'no-cache']); }
     public function periodPreview() { return $this->respond(FinanceBusinessLogic::periodAction('preview', $this->request->get())); }
     public function closePeriod() { return $this->respond(FinanceBusinessLogic::periodAction('close', $this->request->post())); }

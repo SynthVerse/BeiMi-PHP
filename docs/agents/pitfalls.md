@@ -49,7 +49,7 @@
 - 尚未验证：业务库部署与小程序原生体验。
 - 后续建议：扩展持久业务指纹前，使用已发布的历史结构检查版本兼容性；不把展示元数据加入相等性判断。
 
-## PIT-0059：遗留成本只追踪原引用，分类转移后误判完成
+## PIT-0059：只追踪原引用，遗漏分类转移或调整后的派生来源
 
 日期：2026-09-09
 
@@ -60,13 +60,26 @@
 - 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`用户级自定义 / impeccable`、`Matt Pocock / code-review`、`Matt Pocock / diagnosing-bugs`、`用户级自定义 / prevent-repeat-pitfalls`（第53批自动调用）。
 - 说明：统一遗留进度审查与关联边界复现后建立自动化防线，完成后继续资金核实及报表开发。
 
-- 状态：已防护；首次／最近发生：2026-09-09；复发次数：0。
+- 状态：已防护；首次／最近发生：2026-09-09；复发次数：1。
 - 触发场景：待核实实物减少先缺来源，结账后确认归为损失，原成本引用清空而新损失去向仍缺成本。
 - 根因：按原 reference 是否还有缺口判断完成，忽略 reclassify 的 to_reference 承接未知份额；责任核实被误当作成本核实。
 - 防线：沿同仓库、SKU 的正式 reclassify 事件追踪后续引用，并合计各去向缺口及未知成本份额；回归覆盖重分类前后分次补齐。
 - 已验证事实：对应回归在修复前稳定失败；修复后月结与遗留相关18 tests、703 assertions通过。
 - 尚未验证：业务库部署、原生小程序操作及账户在途专项遗留核实。
 - 后续建议：派生清单沿完整业务状态与后续引用判断，不以原记录消失或历史状态保持不变推断完成。
+
+### 第59批补充（2026-09-09）
+
+#### 报告来源
+
+- 生成原因：工作流要求；主工作流：Matt Pocock。
+- 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`用户级自定义 / impeccable`、`Matt Pocock / code-review`、`用户级自定义 / prevent-repeat-pitfalls`、`Matt Pocock / diagnosing-bugs`（自动调用，沿用已读取流程）。
+- 说明：报表来源追溯再次出现只查原引用的缺口，保留测试防线后恢复财务一期开发。
+
+- 发生记录：费用300元已付250元，调减到180元产生退款70元；从原费用来源进入能看到调整单，却遗漏新退款来源的实际到账。原防线仅覆盖遗留成本投影，没有覆盖新报表追溯入口。
+- 自动防线：`FinanceReportTrace` 对各入口共同迭代“原单与更正关系、派生来源、后续流水和调整单”直至来源集合稳定；输出仍逐单鉴权。原来源不被新来源替代。
+- 已验证事实：`test_expense_reduction_after_partial_payment_creates_only_excess_refund_and_preserves_original_cost` 已结与未结两例在 `.scratch/finance-59-chain-red.log` 中均漏掉到账凭据；修复后 `.scratch/finance-59-chain-green.log` 3 tests、201 assertions通过，包含原月冻结报表不变。
+- 尚未验证：业务库部署与微信原生追溯体验；后续建议：发现派生来源后必须继续追踪其后续处理，不能只把调整单加入展示列表。
 
 ## PIT-0060：周期暂估状态遗漏于统一核实进度的分支
 
