@@ -14,6 +14,7 @@ final class FinanceCorrections
     public function replace(array $original, array $replacement, string $reason, int $duplicateOf = 0, bool $reverseOnly = false): array
     {
         $policy = FinanceDocumentPolicy::authorize($original['type'], true);
+        if (in_array($original['type'], ['expense', 'expense_category'], true)) { throw new \DomainException('费用请关联原费用调整；类别请按当前版本维护，不能覆盖历史确认'); }
         if ($original['type'] === 'legacy_return_cost') { throw new \DomainException('旧售退回成本须关联原来源登记新的核实金额，不得覆盖历史确认'); }
         if (in_array($original['type'], ['inventory_loss', 'inventory_loss_resolution'], true)) { throw new \DomainException('库内实物损耗与核实结论须关联后续处理，不得覆盖原记录或重复出入库'); }
         if ($original['type'] === 'purchase_arrival_loss') { throw new \DomainException('已确认损失须保留原实物和成本份额，通过关联成本调整纠正，不能覆盖或重复还原库存'); }

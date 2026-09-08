@@ -67,6 +67,8 @@ final class WorkforceLogic extends BaseLogic
             ['key' => 'finance.receipt.confirm', 'name' => '确认本门店客户收款'],
             ['key' => 'finance.sales.due_override', 'name' => '单笔销售覆盖默认付款日（需填写依据）'],
             ['key' => 'finance.payment.prepare', 'name' => '准备供应商与费用付款（不含确认）'],
+            ['key' => 'finance.expense.prepare', 'name' => '准备普通费用草稿（不含付款）'],
+            ['key' => 'finance.expense.confirm', 'name' => '确认普通费用（不含付款）'],
             ['key' => 'finance.payable.view', 'name' => '查看本门店供应商往来与对账明细'],
             ['key' => 'finance.salary.prepare', 'name' => '准备工资与发放草稿（另需工资明细权）'],
             ['key' => 'finance.reimbursement.prepare', 'name' => '准备员工垫付报销（不含付款确认）'],
