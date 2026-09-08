@@ -6,6 +6,21 @@ use PHPUnit\Framework\TestCase;
 
 final class CustomerReportRouteContractTest extends TestCase
 {
+    public function test_finance_transfer_uses_one_business_transaction_and_one_pair_timestamp(): void
+    {
+        $root = dirname(__DIR__, 2); $source = (string)file_get_contents($root . '/app/api/jxc/logic/StockService.php');
+        $start = strpos($source, 'public static function transfer('); $end = strpos($source, 'public static function rollback(', $start);
+        $method = substr($source, $start, $end - $start);
+        self::assertStringNotContainsString('WarehouseSkuBalanceService::transfer(', $method);
+        self::assertStringContainsString('WarehouseSkuBalanceService::transferWithinTransaction(', $method);
+        self::assertStringContainsString("'create_time' => time()", $method);
+        $source = (string)file_get_contents($root . '/app/api/jxc/logic/WarehouseSkuBalanceService.php');
+        $start = strpos($source, 'public static function transferWithinTransaction('); self::assertNotFalse($start);
+        $end = strpos($source, 'public static function available(', $start); $method = substr($source, $start, $end - $start);
+        self::assertStringContainsString('self::changeWithinTransaction(', $method);
+        self::assertStringNotContainsString('Db::transaction(', $method);
+    }
+
     public function test_finance_stock_loss_never_starts_an_inner_stock_transaction(): void
     {
         $root = dirname(__DIR__, 2);

@@ -46,6 +46,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000023_finance_purchase_difference_review.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000024_finance_purchase_arrival_loss.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000025_finance_inventory_loss.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000026_finance_stock_transfer_pair.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -193,6 +194,38 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
 
     public static function unresolvedBootstrapFlows(): array { return [['purchase', true], ['warehouse-transfer', false]]; }
+
+    public function test_activation_carries_authoritative_transfer_pair_at_same_value_then_uses_target_average(): void
+    {
+        $from = $this->createCustomerReportWarehouse('调出承接仓'); $to = $this->createCustomerReportWarehouse('调入承接仓');
+        $goods = $this->createCustomerReportGoods('调拨承接商品', 'FIN-TRANSFER-BOOT'); $sku = $this->customerReportSkuId($goods); $stocks = [];
+        foreach ([$from, $to] as $warehouse) {
+            $stocks[$warehouse] = (int)Db::name('warehouse_sku_balance')->insertGetId(['tenant_id' => self::TENANT_ID,
+                'warehouse_id' => $warehouse, 'goods_id' => $goods, 'sku_id' => $sku, 'on_hand_qty' => '100', 'available_qty' => '100']);
+        }
+        self::assertNotFalse(FinanceSetupLogic::savePreparation($this->command(0) + ['activation_date' => date('Y-m-d'),
+            'inventory_cost_reviewed' => 1, 'legacy_settlement_reviewed' => 1, 'excluded_business_reviewed' => 1]));
+        self::assertFalse(\app\api\jxc\logic\StockService::transfer($from, 999999, $goods, '10', 98629, 'warehouse-transfer', 'INVALID-TRANSFER', '', $sku));
+        self::assertSame('100.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($from, $sku));
+        self::assertTrue(\app\api\jxc\logic\StockService::transfer($from, $to, $goods, '10', 98629, 'warehouse-transfer', 'BEFORE-TRANSFER', '', $sku));
+        foreach ([$from => '200.00', $to => '400.00'] as $warehouse => $amount) {
+            $this->opening('item', ['category' => 'inventory', 'subject_id' => $stocks[$warehouse], 'amount' => $amount, 'historical_date' => null, 'due_date' => null,
+                'source_mode' => 'detail', 'source_reference' => '调拨前截点盘存-' . $warehouse, 'evidence' => '两仓截点各一百，分别核实成本',
+                'details' => ['quantity' => '100', 'origin_reference' => '两仓盘存凭据']]);
+        }
+        foreach (FinanceSetupLogic::opening()['categories'] as $category) { $this->opening('review', ['category' => $category['key'], 'state' => $category['count'] ? 'complete' : 'none', 'evidence' => '逐类核实']); }
+        $this->opening('submit'); $this->opening('confirm');
+        $cost = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID);
+        self::assertSame('180.000000', $cost->balance($from, $sku)['value']); self::assertSame('420.000000', $cost->balance($to, $sku)['value']);
+        self::assertSame('90.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($from, $sku));
+        self::assertSame('110.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($to, $sku));
+        self::assertCount(1, $cost->events($sku)); self::assertSame('transfer', $cost->events($sku)[0]['type']);
+        self::assertTrue(\app\api\jxc\logic\StockService::outbound($to, $goods, '55', 98630, 'sales', 'SALE-AFTER-TRANSFER', '', $sku));
+        self::assertSame('210.000000', $cost->destination($to, $sku, 'sale', 'sales_order:98630')['cost']);
+        self::assertSame('210.000000', $cost->balance($to, $sku)['value']); self::assertSame('180.000000', $cost->balance($from, $sku)['value']);
+        self::assertFalse(\app\api\jxc\logic\StockService::transfer($to, 999999, $goods, '10', 98631, 'warehouse-transfer', 'INVALID-ACTIVE-TRANSFER', '', $sku));
+        self::assertSame('55.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($to, $sku)); self::assertCount(2, $cost->events($sku));
+    }
 
     /** @dataProvider unresolvedBootstrapFlows */
     public function test_activation_rejects_unverified_inbound_cost_or_unpaired_stock_destination_atomically(string $type, bool $inbound): void
@@ -2642,7 +2675,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         Db::name('finance_purchase_difference_review')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         foreach (['finance_purchase_cost_revision', 'finance_purchase_cost_change', 'finance_purchase_cost_bill'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         foreach (['finance_supplier_terms', 'finance_purchase_difference_rule', 'finance_purchase_settlement_line', 'finance_purchase_arrival_line', 'finance_purchase_price'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
-        foreach (['finance_cost_effect', 'finance_cost_event', 'finance_cost_shortage', 'finance_cost_position', 'finance_cost_origin'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
+        foreach (['finance_stock_transfer_pair', 'finance_cost_effect', 'finance_cost_event', 'finance_cost_shortage', 'finance_cost_position', 'finance_cost_origin'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         Db::name('finance_sales_print')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_sales_coverage')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_sales_precision_rule')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();

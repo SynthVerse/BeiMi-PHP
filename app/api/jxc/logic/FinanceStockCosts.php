@@ -58,9 +58,12 @@ final class FinanceStockCosts
 
     public static function transferWithinTransaction(int $outboundFlow, int $inboundFlow, int $from, int $to, int $sku, string $quantity): void
     {
+        FinanceStockTransferPairs::recordWithinTransaction($outboundFlow, $inboundFlow, $from, $to, $sku, $quantity);
         if (!FinanceIntegration::active()) { return; }
+        $occurred = (int)Db::name('stock_flow')->where('tenant_id', FinanceAccess::tenant())->where('id', $outboundFlow)->value('create_time');
+        if ($occurred <= 0 || $occurred > time()) { throw new \DomainException('调拨实物发生日期尚未核实'); }
         (new FinanceCostLedger(FinanceAccess::tenant()))->recordWithinTransaction(['reference' => 'stock-transfer:' . $outboundFlow, 'type' => 'transfer',
-            'sku_id' => $sku, 'warehouse_id' => $from, 'to_warehouse_id' => $to, 'quantity' => $quantity, 'business_date' => date('Y-m-d'),
+            'sku_id' => $sku, 'warehouse_id' => $from, 'to_warehouse_id' => $to, 'quantity' => $quantity, 'business_date' => date('Y-m-d', $occurred),
             'snapshot' => ['outbound_flow_id' => $outboundFlow, 'inbound_flow_id' => $inboundFlow]]);
     }
 }

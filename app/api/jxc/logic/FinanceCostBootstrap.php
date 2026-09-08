@@ -14,10 +14,13 @@ final class FinanceCostBootstrap
         $pdo = Db::connect()->getPdo();
         if ($tenant !== FinanceAccess::tenant() || !$pdo || !$pdo->inTransaction()) { throw new \DomainException('启用成本承接须在本门店期初确认事务内执行'); }
         $rows = Db::name('stock_flow')->where('tenant_id', $tenant)->where('create_time', '>=', strtotime($date))->order('create_time,id')->lock(true)->select()->toArray();
+        $transfers = FinanceStockTransferPairs::forFlows($tenant, $rows);
         $cost = new FinanceCostLedger($tenant); $count = 0; $pending = []; $last = 0;
         foreach ($rows as $flow) {
             $last = max($last, (int)$flow['id']); $delta = bcsub($flow['after_stock'], $flow['before_stock'], 4);
             if (bccomp($delta, '0', 4) === 0) { continue; }
+            $pair = $transfers[(int)$flow['id']] ?? null;
+            if ($pair && (int)$pair['inbound_flow_id'] === (int)$flow['id']) { continue; }
             $occurred = FinanceStockFactTime::resolve($tenant, $flow, true);
             if ($occurred < strtotime($date)) { continue; }
             $warehouse = FinanceValue::id($flow['warehouse_id']); $sku = FinanceValue::id($flow['sku_id']);
@@ -26,7 +29,11 @@ final class FinanceCostBootstrap
                 'business_date' => date('Y-m-d', $occurred),
                 'snapshot' => ['stock_flow_id' => (int)$flow['id'], 'order_type' => $flow['order_type'], 'order_id' => (int)$flow['order_id'],
                     'bootstrap' => true, 'original_flow' => $flow]];
-            if ($flow['order_type'] === 'sales_delivery_correction') {
+            if ($pair) {
+                $event['reference'] = 'stock-transfer:' . $flow['id'];
+                $event += ['type' => 'transfer', 'to_warehouse_id' => (int)$pair['to_warehouse_id']];
+                $event['snapshot']['transfer_pair'] = $pair;
+            } elseif ($flow['order_type'] === 'sales_delivery_correction') {
                 $event += ['type' => bccomp($delta, '0', 4) > 0 ? 'restore' : 'issue',
                     'bucket' => 'sale', 'target_reference' => 'sales_order:' . $flow['order_id']];
             } elseif ($flow['order_type'] === 'sales-return' && bccomp($delta, '0', 4) > 0) {

@@ -787,7 +787,7 @@
 - 状态：已防护
 - 首次发生：2026-07-29
 - 最近发生：2026-09-08
-- 复发次数：10
+- 复发次数：11
 - 适用范围：`CustomerReportLogic`、`FulfillmentChangeLogic`、`FulfillmentTaskLogic`、`DeliveryInventoryLogic`、`DeliveryVariantLogic`、`LineVehicleLogic`、`NegativeInventoryLogic`、`SalesSettlementLogic`、`FinanceService`、`FinanceCostLedger`、`FinancePurchaseArrivals` 等已开启业务事务后调用库存、财务原语或写入幂等事实的路径
 - 相关问题：PIT-0022
 
@@ -841,6 +841,7 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 | 2026-08-19 | BeiMi-PHP #11 → BeiMi-ERP #11 接口接线 | 记账完成新增 report→task 写事务，但首次实现遇到 `1213`/`1205` 直接失败 | 原防线覆盖了交付、结算与财务写入口，却没有把新迁移职责后的 `FulfillmentTaskLogic::bill()` 纳入有界重试结构与可恢复锁等待行为测试。 |
 | 2026-09-07 | 财务第十批 | 逾期待办观察服务被外层确认事务调用 | 旧结构防线未包含新接入的财务观察服务，独立读取入口与确认原语未拆分。 |
 | 2026-09-08 | 财务第26批库内损耗 | 新增同事务库存流水入口却调用独立出库包装 | 原结构防线未覆盖新损耗写入口；新增同事务普通出库原语并用结构测试与真实业务回归共同保护。 |
+| 2026-09-08 | 财务第29批调拨成本承接 | 调拨外层事务仍调用独立仓库调拨事务 | 既有结构防线没有覆盖调拨；新增 `transferWithinTransaction`，对基线 `904c8b9` 的独立事务调用探针失败，现结构测试 1 test、6 assertions 通过。调入无效仓库时真实两仓实物与成本保持不变；调拨、仓库和成本专项 29 tests、219 assertions 通过。两侧流水共用一次发生时间，避免午夜被拆到不同截点；来源为 Matt Pocock / implement、tdd、diagnosing-bugs、prevent-repeat-pitfalls、code-review，防护后继续财务一期。 |
 
 ## PIT-0005：迁移静态探针替换前缀但真实执行器保留占位符
 

@@ -186,19 +186,25 @@ class WarehouseSkuBalanceService
         }
         try {
             return Db::transaction(static function () use ($fromWarehouseId, $toWarehouseId, $skuId, $quantity) {
-                $outbound = self::changeWithinTransaction($fromWarehouseId, $skuId, '-' . $quantity, '0.0000');
-                if ($outbound === false) {
-                    throw new \RuntimeException('Insufficient warehouse SKU stock for transfer.');
-                }
-                $inbound = self::changeWithinTransaction($toWarehouseId, $skuId, $quantity, '0.0000');
-                if ($inbound === false) {
-                    throw new \RuntimeException('Unable to receive warehouse SKU transfer.');
-                }
-                return ['outbound' => $outbound, 'inbound' => $inbound];
+                return self::transferWithinTransaction($fromWarehouseId, $toWarehouseId, $skuId, $quantity);
             });
         } catch (\Throwable) {
             return false;
         }
+    }
+
+    /** 调拨业务的外层事务持有者调用，任一侧失败由外层整体回滚。 */
+    public static function transferWithinTransaction(int $fromWarehouseId, int $toWarehouseId, int $skuId, string $quantity): array
+    {
+        $pdo = Db::connect()->getPdo();
+        if (!$pdo || !$pdo->inTransaction()) { throw new \DomainException('仓库调拨须在业务事务内执行'); }
+        $quantity = self::normalizeQuantity($quantity);
+        if ($quantity === false || $fromWarehouseId <= 0 || $toWarehouseId <= 0 || $fromWarehouseId === $toWarehouseId) { throw new \DomainException('请选择不同的有效仓库及正数调拨数量'); }
+        $outbound = self::changeWithinTransaction($fromWarehouseId, $skuId, '-' . $quantity, '0.0000');
+        if ($outbound === false) { throw new \RuntimeException('Insufficient warehouse SKU stock for transfer.'); }
+        $inbound = self::changeWithinTransaction($toWarehouseId, $skuId, $quantity, '0.0000');
+        if ($inbound === false) { throw new \RuntimeException('Unable to receive warehouse SKU transfer.'); }
+        return ['outbound' => $outbound, 'inbound' => $inbound];
     }
 
     public static function available(int $warehouseId, int $skuId): string

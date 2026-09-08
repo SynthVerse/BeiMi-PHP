@@ -422,11 +422,12 @@ class StockService
         try {
             return Db::transaction(static function () use ($fromWarehouseId, $toWarehouseId, $goodsId, $quantity, $orderId, $orderType, $orderSn, $remark, $skuId, $batchId) {
                 FinanceIntegration::lock();
-                $movements = WarehouseSkuBalanceService::transfer($fromWarehouseId, $toWarehouseId, $skuId, $quantity);
+                $movements = WarehouseSkuBalanceService::transferWithinTransaction($fromWarehouseId, $toWarehouseId, $skuId, $quantity);
                 if ($movements === false) {
                     throw new \RuntimeException('Unable to transfer warehouse SKU stock.');
                 }
                 $common = [
+                    'create_time' => time(),
                     'goods_id' => $goodsId,
                     'sku_id' => $skuId,
                     'batch_id' => $batchId,
