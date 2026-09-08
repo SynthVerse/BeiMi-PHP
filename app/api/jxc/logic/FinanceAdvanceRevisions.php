@@ -35,6 +35,29 @@ final class FinanceAdvanceRevisions
         return null;
     }
 
+    /** 原来源不改写；更正的预收组成沿对应资金冲销、替代分录的入账月份投影。 */
+    public static function reportMovements(int $tenant): array
+    {
+        $revisions = Db::name('finance_advance_revision')->where('tenant_id', $tenant)->order('id')->select()->toArray();
+        if (!$revisions) { return []; }
+        $entries = Db::name('finance_entry')->where('tenant_id', $tenant)->whereIn('document_id', array_column($revisions, 'document_id'))
+            ->where('metric', 'cash')->whereIn('purpose', ['correction_reversal', 'correction_replacement'])->select()->toArray();
+        $cashEntries = [];
+        foreach ($entries as $entry) { $cashEntries[$entry['document_id']][$entry['purpose']] = $entry; }
+        $movements = [];
+        foreach ($revisions as $revision) {
+            $posting = $cashEntries[$revision['document_id']] ?? [];
+            if (!isset($posting['correction_reversal'], $posting['correction_replacement'])) { throw new \DomainException('预收更正缺少完整资金入账依据，请核查原更正记录'); }
+            foreach (['correction_reversal' => bcsub('0', $revision['old_amount'], 2), 'correction_replacement' => $revision['new_amount']] as $purpose => $amount) {
+                $movements[$revision['source_ref']][] = ['revision_id' => (int)$revision['id'], 'document_id' => (int)$revision['document_id'],
+                    'cash_entry_id' => (int)$posting[$purpose]['id'], 'source_ref' => $revision['source_ref'], 'posting_month' => $posting[$purpose]['posting_month'],
+                    'business_date' => $purpose === 'correction_reversal' ? $revision['old_business_date'] : $revision['new_business_date'],
+                    'movement' => $purpose === 'correction_reversal' ? 'remove_previous' : 'recognize_replacement', 'amount' => $amount, 'reason' => $revision['reason']];
+            }
+        }
+        return $movements;
+    }
+
     public static function append(FinanceLedger $ledger, int $documentId, array $source, string $amount, string $date, string $month, string $reason): void
     {
         $delta = bcsub($amount, $source['confirmed_amount'], 2);

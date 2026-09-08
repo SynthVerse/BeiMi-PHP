@@ -79,7 +79,8 @@ final class FinanceReportPeriods
     {
         return ['categories' => self::balanceRows($months, 'categories', ['category'], ['new_sources', 'entries_change']),
             'subjects' => self::balanceRows($months, 'subjects', ['subject_id', 'category'], ['new_sources', 'entries_change']),
-            'sources' => self::balanceRows($months, 'sources', ['reference'], ['new_sources', 'entries_change']), 'entries' => self::concatenate($months, 'entries')];
+            'sources' => self::balanceRows($months, 'sources', ['reference'], ['new_sources', 'entries_change']), 'entries' => self::concatenate($months, 'entries'),
+            'advance_movements' => self::concatenate($months, 'advance_movements')];
     }
 
     private static function aggregate(string $kind, array $months, string $start, string $end): array

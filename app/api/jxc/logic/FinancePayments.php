@@ -59,6 +59,13 @@ final class FinancePayments
         if ($type === 'advance_allocate') { return $this->advance($document, $data); }
         $date = FinanceValue::date($data['actual_date'] ?? null);
         $month = $this->ledger->postingMonth($date);
+        if ($correctingDocument) {
+            $originalMonth = Db::name('finance_entry')->where('tenant_id', $this->tenantId)->where('document_id', $correctingDocument)
+                ->where('metric', 'cash')->whereIn('purpose', ['actual_money', 'correction_replacement'])->value('posting_month');
+            if ($originalMonth && Db::name('finance_period')->where('tenant_id', $this->tenantId)->where('month', $originalMonth)->lock(true)->find()) {
+                $month = $this->ledger->postingMonth(date('Y-m-d'));
+            }
+        }
         $amount = FinanceValue::money($data['amount'] ?? null);
         $subjectId = FinanceValue::id($data['subject_id'] ?? 0);
         $nameColumn = ['customer' => 'customer_name', 'vendor' => 'supplier_name', 'employee' => 'name'][$policy['subject']];

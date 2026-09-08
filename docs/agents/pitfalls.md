@@ -870,11 +870,21 @@
 
 ## PIT-0035：同一次核销的两侧余额落在不同月份
 
+日期：2026-09-09（第60批补充）
+
+### 报告来源
+
+- 生成原因：工作流要求
+- 主工作流：Matt Pocock
+- 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`Matt Pocock / diagnosing-bugs`、`用户级自定义 / prevent-repeat-pitfalls`、`Matt Pocock / code-review`（自动调用）。
+- 说明：原任务为财务一期已用预收跨月更正；在月报与资金期间不一致处补充回归防护，然后返回采购及其他未完成流程。以下来源只说明本次补充，不追认早期记录的执行顺序。
+- 页面补充实际使用 `用户级自定义 / impeccable`，沿既有报表明细展示期间更正组成；源码审查通过，原生验收仍受限。
+
 - 状态：已防护
 - 首次发生：2026-09-07
-- 最近发生：2026-09-08
-- 复发次数：4
-- 适用范围：预收抵扣、后续资金认领、历史销售贷项、未知日期供应商贷项冲销与期间对账快照
+- 最近发生：2026-09-09
+- 复发次数：5
+- 适用范围：预收抵扣、已用预收跨月更正、后续资金认领、历史销售贷项、未知日期供应商贷项冲销与期间对账快照
 - 相关问题：PIT-0032（时点含义不同）
 
 ### 触发场景
@@ -895,6 +905,7 @@
 历史销售更正还必须把关联贷项核销与收入差额统一放入本次调整期间；原业务日期和生效日期继续保留，不能把启用日当作当前确认日。
 未知日期期初贷项抵扣后月应付时，冲销必须以原分录实际入账月为基准，再按关账规则转入开放期间；不能由业务日期重新推导原期。
 对账读取同类核销时也必须以已记录的目标月份约束截止范围，不能用启用日提前减少旧期余额；只能确定月份时按月展示，未知生效日期继续保留为空。
+已用预收更正保留来源身份时，月报按每次资金冲销和替代分录的实际入账月投影原预收组成移出及新组成移入，金额差额不得再叠加一次。已结账原资金的替代影响与反向影响都进入当前确认月，原业务日期仍保留。
 
 ### 防线
 
@@ -916,6 +927,11 @@
 | 2026-09-08 | 供应商贷项抵扣 | 日期不详期初贷项抵后月应付后反向，启用月仍开放 | 原测试分别覆盖已知日期反向与未知日期正向，遗漏组合场景；反向从业务日期重推期间，丢失原分录实际入账月。 |
 | 2026-09-08 | 供应商对账 | 后月抵扣之后生成启用月份快照，旧期应退款提前减少 | 原防线检查了正反分录月份，未覆盖快照读取仍回落到启用日的期间筛选。 |
 | 2026-09-08 | 普通费用调整 | 上月费用已结账，本月调减产生的应退款仍用原发生日进入旧期对账 | 原测试仅让受益月在上月，原发生日仍为今天，未覆盖新增义务来源的截止时点。 |
+| 2026-09-09 | 财务一期第60批 | 已退回部分预收后向前／向后改到账月份，或原已结月改为另一个未结月 | 原防线验证当前余额及同月日期对账，没有验证保留来源身份后的月报归属；替代入账只看新业务日期，未承接原现金已封账的确认月边界。 |
+
+2026-09-09 自动防线：`test_consumed_advance_date_correction_keeps_cash_and_customer_months_consistent` 覆盖向前／向后移动、已结来源、改回已结月、连续日期更正和更正后再封账；金额不变时不生成零分录。原红 `.scratch/finance-60-date-red.log` 4 tests、126 assertions、3 failures；修复后相关回归 `.scratch/finance-60-regression.log` 14 tests、523 assertions 通过。当前总余额正确并不能证明各月正确，测试同时比较客户预收、现金、相邻月承接及原冻结快照。尚未验证：本批生产部署及真机；后续建议：其他保留来源身份的日期更正也须核对关联分录期间，不能从最新业务日期重推历史入账。
+
+审查补充：暂估结账必须与普通结账同样冻结；`.scratch/finance-60-review-red.log` 同时复现暂估旧月错入和并发关账旧快照错入。期间更正明细缺失由 `.scratch/finance-60-movement-red.log` 两例复现，现按资金分录保存的入账月提供可追溯的组成；季年汇总、Excel 和页面均接入。最终 `.scratch/finance-60-final-php.log` 28 tests、1409 assertions 通过，前端专项 14 tests 与 source integrity 通过，两轴复审关闭全部发现项。
 
 2026-09-08 费用时点防线：原发生日保留在费用快照与分录业务日期；本次义务生效日独立保存为 `obligation_date`，用于新增应付/应退款及对应余额调整的生效日。费用仍按真实受益月及关账规则入账，不能把本次退款倒灌旧期。上述费用公开用例增加原发生日在已结上月的供应商对账：修复前上月应退款为70.00（应为0.00），修复后上月应退款0.00、费用应付300.00保持。本次实际使用 `Matt Pocock / implement`、`Matt Pocock / tdd`、`Matt Pocock / code-review`、`Matt Pocock / diagnosing-bugs`、`Matt Pocock / prevent-repeat-pitfalls`。完成防护后继续费用调整页面；完整月报尚未完成。
 
@@ -1228,10 +1244,19 @@
 
 ## PIT-0004：外层业务事务中再次开启嵌套事务
 
+日期：2026-09-09（第60批期间当前读补充）
+
+### 报告来源
+
+- 生成原因：工作流要求
+- 主工作流：Matt Pocock
+- 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`Matt Pocock / diagnosing-bugs`、`用户级自定义 / prevent-repeat-pitfalls`、`Matt Pocock / code-review`（自动调用）。
+- 说明：本次只扩展财务期间的旧快照防线，原任务及恢复位置见 PIT-0035；不重写此前记录。
+
 - 状态：已防护
 - 首次发生：2026-07-29
-- 最近发生：2026-09-08
-- 复发次数：11
+- 最近发生：2026-09-09
+- 复发次数：12
 - 适用范围：`CustomerReportLogic`、`FulfillmentChangeLogic`、`FulfillmentTaskLogic`、`DeliveryInventoryLogic`、`DeliveryVariantLogic`、`LineVehicleLogic`、`NegativeInventoryLogic`、`SalesSettlementLogic`、`FinanceService`、`FinanceCostLedger`、`FinancePurchaseArrivals` 等已开启业务事务后调用库存、财务原语或写入幂等事实的路径
 - 相关问题：PIT-0022
 
@@ -1254,6 +1279,7 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 ### 防线
 
 - 2026-09-08 库内损耗扩展：`StockService::outboundFinanceInventoryLossWithinTransaction` 曾调用会自行开事务的 `WarehouseSkuBalanceService::outbound`。新增禁止负量的 `outboundWithinTransaction` 并改用它；`CustomerReportRouteContractTest::test_finance_stock_loss_never_starts_an_inner_stock_transaction` 在旧调用上明确失败，保护同事务调用和原语不再开事务、不放开负量。行为用例继续覆盖可用量不足整体回滚、原事件幂等和核实不二扣。来源为 Matt Pocock / implement、tdd、code-review、diagnosing-bugs、prevent-repeat-pitfalls；此为原入口枚举防线未覆盖新损耗路径的复发，不另建 PIT，防护后返回财务一期开发。
+- 2026-09-09 收款更正扩展：新增原现金入账月冻结判断时曾使用普通 `count()`，漏掉外层 RR 快照之后另一连接提交的关账；`test_receipt_correction_reads_original_period_closed_after_outer_snapshot` 用真实双连接复现替代进入旧开放月，原冲销却进入本月。改为原期间 `lock(true)->find()`，同时识别普通和暂估月结；最终财务专项 28 tests、1409 assertions 通过。既有成本入口当前读测试没有覆盖新的付款更正入口。业务库部署与生产并发压测尚未验证；后续期间判断继续复用当前读边界。
 - 2026-09-08 财务成本扩展：成本原语在外层事务内先取得稳定的门店准备行锁，再对成本来源、份额和待补数量使用当前读，避免沿外层已创建的 RR 快照覆盖其他事务已提交的成本。`FinanceBusinessWorkflowTest::test_cost_confirmation_reloads_committed_facts_after_an_outer_transaction_created_an_older_snapshot` 与 `tests/fixtures/finance_cost_worker.php` 用两个真实 PHP 连接固定先建快照、另一个事务出库 2、原事务再出库 3 的交错；修复前剩余成本错误为 70，修复后为 50，且两次销售成本分别为 20 和 30。此次只更新同根因记录；来源为 Matt Pocock / implement、tdd、code-review、diagnosing-bugs、prevent-repeat-pitfalls，完成后返回财务一期成本与采购接线。
 - 同批期间边界：`FinanceLedger::lockBook` 与 `postingMonth` 同样采用当前读；`test_cost_confirmation_cannot_ignore_a_month_closed_after_outer_transaction_snapshot` 用第二连接在快照创建后关闭当前月，修复前成本确认未抛异常，修复后明确拒绝已结账月份。此为同一 RR 旧快照根因的边界扩展，不另记复发次数。
 - 2026-09-08 采购到货扩展：审查发现多商品到货按客户端行序取库存锁，与报货预留的 SKU 升序相反，存在交叉等待路径。`FinancePurchaseArrivals` 现在先去重并按 SKU 升序调用既有 `lockBalanceWithinTransaction`，再按原单据行序追加到货和成本快照；单一收货仓下 SKU 唯一决定商品维度。`test_multi_sku_arrival_preserves_document_order_and_stock_when_lock_order_differs` 核对反向输入时各商品实收量、展示顺序及禁止覆盖实物记录。尚未进行此场景的双进程压力复现，不能把顺序检查当作并发验收。来源为 Matt Pocock / implement、tdd、code-review、diagnosing-bugs、prevent-repeat-pitfalls；后续继续供应商正式结算，并在整体并发验收中覆盖到货与报货交错。

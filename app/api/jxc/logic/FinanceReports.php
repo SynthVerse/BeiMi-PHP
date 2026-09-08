@@ -140,23 +140,33 @@ final class FinanceReports
     {
         $tenant = FinanceAccess::tenant(); $activation = substr((string)Db::name('finance_preparation')->where('tenant_id', $tenant)->value('activation_date'), 0, 7);
         $documentMonths = array_column(Db::name('finance_entry')->where('tenant_id', $tenant)->field('document_id,MIN(posting_month) AS month')->group('document_id')->select()->toArray(), 'month', 'document_id');
-        $sources = [];
+        $advanceMovements = in_array('advance', $categories, true) ? FinanceAdvanceRevisions::reportMovements($tenant) : [];
+        $sources = []; $periodMovements = [];
         foreach (['o' => 'finance_opening_source', 'n' => 'finance_source'] as $prefix => $table) {
             foreach (Db::name($table)->where('tenant_id', $tenant)->whereIn('category', $categories)->order('id')->select()->toArray() as $row) {
                 $snapshot = FinanceValue::decode($row[$prefix === 'o' ? 'source_snapshot' : 'snapshot']);
                 $posting = $prefix === 'o' ? substr($row['activation_date'], 0, 7) : ($snapshot['posting_month'] ?? max($activation, substr($row['business_date'] ?? $activation, 0, 7), $documentMonths[$row['document_id']] ?? $activation));
-                if ($posting > $month) { continue; }
                 $ref = $prefix . ':' . $row['id'];
+                $movements = array_filter($advanceMovements[$ref] ?? [], static fn (array $movement): bool => $movement['posting_month'] <= $month);
+                if ($posting > $month && !$movements) { continue; }
                 $sources[$ref] = ['reference' => $ref, 'category' => $row['category'], 'subject_id' => (int)$row['subject_id'], 'subject_name' => $snapshot['subject_name'] ?? '',
                     'document_id' => $prefix === 'o' ? null : (int)$row['document_id'], 'business_date' => $prefix === 'o' ? ($snapshot['historical_date'] ?? null) : $row['business_date'], 'posting_month' => $posting, 'snapshot' => $snapshot,
-                    'opening' => $prefix === 'o' || $posting < $month ? $row['amount'] : '0.00', 'new_sources' => $prefix === 'n' && $posting === $month ? $row['amount'] : '0.00', 'entries_change' => '0.00', 'closing' => $row['amount']];
+                    'opening' => $prefix === 'o' || $posting < $month ? $row['amount'] : '0.00', 'new_sources' => $prefix === 'n' && $posting === $month ? $row['amount'] : '0.00', 'entries_change' => '0.00', 'closing' => $posting <= $month ? $row['amount'] : '0.00'];
+                foreach ($movements as $movement) {
+                    $bucket = $movement['posting_month'] < $month ? 'opening' : 'entries_change';
+                    $sources[$ref][$bucket] = bcadd($sources[$ref][$bucket], $movement['amount'], 2);
+                    $sources[$ref]['closing'] = bcadd($sources[$ref]['closing'], $movement['amount'], 2);
+                    if ($movement['posting_month'] === $month) { $periodMovements[] = $movement; }
+                }
             }
         }
         $entries = $sources ? Db::name('finance_entry')->where('tenant_id', $tenant)->where('metric', 'balance')->whereIn('source_ref', array_keys($sources))->where('posting_month', '<=', $month)->order('id')->select()->toArray() : [];
         $period = [];
         foreach ($entries as $entry) {
             $ref = $entry['source_ref']; $bucket = $entry['posting_month'] < $month ? 'opening' : 'entries_change';
-            $sources[$ref][$bucket] = bcadd($sources[$ref][$bucket], $entry['amount'], 2); $sources[$ref]['closing'] = bcadd($sources[$ref]['closing'], $entry['amount'], 2);
+            if ($entry['purpose'] !== 'advance_revision' || !isset($advanceMovements[$ref])) {
+                $sources[$ref][$bucket] = bcadd($sources[$ref][$bucket], $entry['amount'], 2); $sources[$ref]['closing'] = bcadd($sources[$ref]['closing'], $entry['amount'], 2);
+            }
             if ($entry['posting_month'] === $month) { $entry['details'] = FinanceValue::decode($entry['details']); $period[] = $entry; }
         }
         $totals = []; $subjects = [];
@@ -168,7 +178,7 @@ final class FinanceReports
                 $totals[$source['category']][$field] = bcadd($totals[$source['category']][$field], $source[$field], 2); $subjects[$key][$field] = bcadd($subjects[$key][$field], $source[$field], 2);
             }
         }
-        return ['categories' => array_values($totals), 'subjects' => array_values($subjects), 'sources' => array_values($sources), 'entries' => $period];
+        return ['categories' => array_values($totals), 'subjects' => array_values($subjects), 'sources' => array_values($sources), 'entries' => $period, 'advance_movements' => $periodMovements];
     }
 
     private static function vendor(string $month, string $cutoff): array

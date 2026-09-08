@@ -4146,6 +4146,85 @@ final class FinanceBusinessWorkflowTest extends TestCase
         \app\api\jxc\logic\FinanceStatements::action('reply', $command);
     }
 
+    public static function advanceReportCorrectionCases(): array { return [['earlier_open'], ['later_open'], ['later_closed'], ['back_into_closed'], ['earlier_then_close'], ['later_estimated']]; }
+
+    /** @dataProvider advanceReportCorrectionCases */
+    public function test_consumed_advance_date_correction_keeps_cash_and_customer_months_consistent(string $mode): void
+    {
+        $prior = date('Y-m', strtotime('first day of last month')); $older = date('Y-m', strtotime('first day of -2 months')); $current = date('Y-m');
+        $this->activate('cash', $older . '-01');
+        $freeze = function (string $month) use ($mode): array {
+            $status = $mode === 'later_estimated' ? 'estimated' : 'closed';
+            $reports = []; foreach (['cash', 'customer'] as $kind) { $reports[$kind] = FinanceBusinessLogic::monthlyReport(['report' => $kind, 'month' => $month]); self::assertNotFalse($reports[$kind]); $reports[$kind]['stage'] = false; $reports[$kind]['closing_status'] = $status; }
+            Db::name('finance_period')->insert(['tenant_id' => self::TENANT_ID, 'month' => $month, 'status' => $status, 'snapshot' => json_encode(['reports' => $reports, 'unresolved' => []]), 'closed_by' => '{}', 'closed_at' => time()]); return $reports;
+        };
+        if ($mode === 'back_into_closed') { $freeze($older); }
+        $frozen = $mode === 'back_into_closed' ? $freeze($prior) : null;
+        $oldDate = in_array($mode, ['later_closed', 'later_estimated'], true) ? $older . '-10' : ($mode === 'later_open' ? $prior . '-10' : $current . '-01');
+        $newDate = $mode === 'later_open' ? $current . '-01' : $prior . '-15';
+        $payload = array_replace($this->receipt('100', '0', '100'), ['allocations' => [], 'actual_date' => $oldDate]);
+        $original = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $payload]); self::assertNotFalse($original, FinanceBusinessLogic::getError());
+        $advance = $original['confirmed_result']['created_sources'][0];
+        if (in_array($mode, ['later_closed', 'later_estimated'], true)) { $frozen = $freeze($older); }
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt_return', 'payload' => ['subject_id' => $this->customerId, 'receipt_id' => $original['id'], 'account_id' => $this->accountId, 'actual_date' => date('Y-m-d'), 'amount' => '20', 'allocations' => [['source' => $advance, 'amount' => '20']], 'reason' => '真实预收退回20元']]), FinanceBusinessLogic::getError());
+        $changed = FinanceBusinessLogic::action('correct', $this->command($original['version']) + ['id' => $original['id'], 'payload' => array_replace($payload, ['actual_date' => $newDate, 'amount' => '120', 'advance_amount' => '120']), 'correction_reason' => '核实实际到账月份及金额，保持已用预收引用']); self::assertNotFalse($changed, FinanceBusinessLogic::getError());
+        $expectedPrior = ['earlier_open' => '120.00', 'later_open' => '0.00', 'later_closed' => '100.00', 'back_into_closed' => '0.00', 'earlier_then_close' => '120.00', 'later_estimated' => '100.00'][$mode];
+        $past = FinanceBusinessLogic::monthlyReport(['report' => 'customer', 'month' => $prior]); self::assertNotFalse($past, FinanceBusinessLogic::getError());
+        self::assertSame($expectedPrior, array_column($past['data']['categories'], 'closing', 'category')['advance'], '未结月份应采用更正归属；已结来源的差额只能进入确认月');
+        $cash = FinanceBusinessLogic::monthlyReport(['report' => 'cash', 'month' => $prior]); self::assertSame(bcadd('5000', $expectedPrior, 2), $cash['data']['summary']['closing_accounts']);
+        $now = FinanceBusinessLogic::monthlyReport(['report' => 'customer', 'month' => $current]); $advanceRow = array_column($now['data']['categories'], null, 'category')['advance'];
+        self::assertSame($expectedPrior, $advanceRow['opening']); self::assertSame('100.00', $advanceRow['closing']);
+        if ($frozen) { $closedMonth = in_array($mode, ['later_closed', 'later_estimated'], true) ? $older : $prior; foreach ($frozen as $kind => $snapshot) { self::assertSame($snapshot, FinanceBusinessLogic::monthlyReport(['report' => $kind, 'month' => $closedMonth])); } }
+        self::assertSame('100.00', (new FinanceLedger(self::TENANT_ID))->source($advance)['balance']);
+        // 金额不变的第二次日期更正也须移动期间；第一次更正后封账则只允许本月差额。
+        if ($mode === 'earlier_then_close') { $freeze($older); $frozen = $freeze($prior); }
+        $nextDate = $mode === 'later_open' ? $prior . '-16' : $current . '-01';
+        $revisionCount = Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('purpose', 'advance_revision')->count();
+        $again = FinanceBusinessLogic::action('correct', $this->command($changed['version']) + ['id' => $changed['id'], 'payload' => array_replace($payload, ['actual_date' => $nextDate, 'amount' => '120', 'advance_amount' => '120']), 'correction_reason' => '再次核实到账日期，金额和实际退回不变']); self::assertNotFalse($again, FinanceBusinessLogic::getError());
+        self::assertSame($revisionCount, Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('purpose', 'advance_revision')->count(), '日期更正不生成零金额差额分录');
+        $expectedAgain = ['earlier_open' => '0.00', 'later_open' => '120.00', 'later_closed' => '100.00', 'back_into_closed' => '0.00', 'earlier_then_close' => '120.00', 'later_estimated' => '100.00'][$mode];
+        $pastAgain = FinanceBusinessLogic::monthlyReport(['report' => 'customer', 'month' => $prior]);
+        self::assertSame($expectedAgain, array_column($pastAgain['data']['categories'], 'closing', 'category')['advance']);
+        if (in_array($mode, ['earlier_open', 'later_open'], true)) {
+            self::assertNotEmpty($pastAgain['data']['advance_movements'] ?? [], '纯日期更正必须提供期间变动的计算明细');
+            $movementTotal = '0.00';
+            foreach ($pastAgain['data']['advance_movements'] as $movement) {
+                self::assertSame($advance, $movement['source_ref']); self::assertSame($prior, $movement['posting_month']);
+                self::assertGreaterThan(0, $movement['revision_id']); self::assertGreaterThan(0, $movement['document_id']);
+                $cashEntry = Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('id', $movement['cash_entry_id'])->find();
+                self::assertSame('cash', $cashEntry['metric']); self::assertSame($prior, $cashEntry['posting_month']);
+                $movementTotal = bcadd($movementTotal, $movement['amount'], 2);
+            }
+            self::assertSame($movementTotal, array_column($pastAgain['data']['categories'], 'entries_change', 'category')['advance']);
+        }
+        $cashAgain = FinanceBusinessLogic::monthlyReport(['report' => 'cash', 'month' => $prior]); self::assertSame(bcadd('5000', $expectedAgain, 2), $cashAgain['data']['summary']['closing_accounts']);
+        $nowAgain = FinanceBusinessLogic::monthlyReport(['report' => 'customer', 'month' => $current]); $advanceAgain = array_column($nowAgain['data']['categories'], null, 'category')['advance'];
+        self::assertSame($expectedAgain, $advanceAgain['opening']); self::assertSame('100.00', $advanceAgain['closing']);
+        if ($frozen) { $closedMonth = in_array($mode, ['later_closed', 'later_estimated'], true) ? $older : $prior; foreach ($frozen as $kind => $snapshot) { self::assertSame($snapshot, FinanceBusinessLogic::monthlyReport(['report' => $kind, 'month' => $closedMonth])); } }
+        self::assertSame('100.00', (new FinanceLedger(self::TENANT_ID))->source($advance)['balance']);
+    }
+
+    public function test_receipt_correction_reads_original_period_closed_after_outer_snapshot(): void
+    {
+        $older = date('Y-m', strtotime('first day of -2 months')); $prior = date('Y-m', strtotime('first day of last month'));
+        $this->activate('cash', $older . '-01');
+        $payload = array_replace($this->receipt('100', '0', '100'), ['allocations' => [], 'actual_date' => $older . '-10']);
+        $original = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $payload]); self::assertNotFalse($original, FinanceBusinessLogic::getError());
+        $config = config('database.connections.mysql');
+        $other = new \PDO('mysql:host=' . $config['hostname'] . ';port=' . $config['hostport'] . ';dbname=' . $config['database'], $config['username'], $config['password'], [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION]);
+        Db::execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ'); Db::startTrans();
+        try {
+            Db::name('finance_period')->where('tenant_id', self::TENANT_ID)->select();
+            $other->beginTransaction();
+            $lock = $other->prepare('SELECT tenant_id FROM ' . Db::name('finance_preparation')->getTable() . ' WHERE tenant_id=? FOR UPDATE'); $lock->execute([self::TENANT_ID]);
+            $close = $other->prepare('INSERT INTO ' . Db::name('finance_period')->getTable() . ' (tenant_id,month,status,snapshot,closed_by,closed_at) VALUES (?, ?, ?, ?, ?, ?)');
+            $close->execute([self::TENANT_ID, $older, 'closed', '{}', '{}', time()]); $other->commit();
+            $changed = FinanceBusinessLogic::action('correct', $this->command($original['version']) + ['id' => $original['id'], 'payload' => array_replace($payload, ['actual_date' => $prior . '-15', 'amount' => '120', 'advance_amount' => '120']), 'correction_reason' => '原期间并发完成关账后更正到账']);
+            self::assertNotFalse($changed, FinanceBusinessLogic::getError());
+            self::assertSame(date('Y-m'), $changed['confirmed_result']['money']['posting_month']);
+        } finally { Db::rollback(); }
+    }
+
     public function test_statement_regeneration_projects_corrected_advance_date_without_duplicating_revision_amount(): void
     {
         $this->activate(); $payload = $this->receipt('100', '0', '100'); $payload['allocations'] = []; $payload['actual_date'] = date('Y-m-02');
