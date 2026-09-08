@@ -7,6 +7,12 @@ namespace app\api\jxc\logic;
 final class FinanceDocumentPolicy
 {
     public const TYPES = [
+        'unclaimed_receipt' => ['title' => '待认领实际到账', 'prepare' => 'finance.receipt.prepare', 'confirm' => 'finance.receipt.confirm', 'owner' => false, 'subject' => 'account', 'sources' => [], 'direction' => 'in'],
+        'unclaimed_customer_claim' => ['title' => '待认领转客户收款', 'prepare' => 'finance.receipt.prepare', 'confirm' => 'finance.receipt.confirm', 'owner' => false, 'subject' => 'customer', 'sources' => ['receivable'], 'direction' => 'none'],
+        'unclaimed_recovery_claim' => ['title' => '待认领转坏账收回', 'prepare' => 'finance.recovery.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'customer', 'sources' => ['recovery'], 'direction' => 'none'],
+        'unclaimed_supplier_refund_claim' => ['title' => '待认领转供应商退款', 'prepare' => 'finance.refund.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => ['supplier_refund'], 'direction' => 'none'],
+        'unclaimed_expense_refund_claim' => ['title' => '待认领转费用退款', 'prepare' => 'finance.refund.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => ['expense_refund'], 'direction' => 'none'],
+        'unclaimed_equipment_refund_claim' => ['title' => '待认领转设备退款', 'prepare' => 'finance.equipment.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => ['equipment_refund'], 'direction' => 'none'],
         'account_transfer_out' => ['title' => '同门店账户实际转出', 'prepare' => 'finance.transfer.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'account', 'sources' => [], 'direction' => 'none'],
         'account_transfer_arrival' => ['title' => '同门店互转实际到账', 'prepare' => 'finance.transfer.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'account', 'sources' => [], 'direction' => 'none'],
         'account_transfer_return' => ['title' => '同门店互转实际返还', 'prepare' => 'finance.transfer.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'account', 'sources' => [], 'direction' => 'none'],
