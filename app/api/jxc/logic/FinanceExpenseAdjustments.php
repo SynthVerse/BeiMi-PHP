@@ -51,6 +51,29 @@ final class FinanceExpenseAdjustments
 
     public static function confirm(FinanceLedger $ledger, array $document, array $data): array
     {
+        return self::apply($ledger, $document, $data, false);
+    }
+
+    /** 仅供周期更正命令调用；对象、月份与类别全部取已校验的原计划。 */
+    public static function recurring(FinanceLedger $ledger, array $document, array $data, array $plan): array
+    {
+        if ($document['type'] !== 'expense_recurring_correct') { throw new \DomainException('周期费用须由关联更正命令处理'); }
+        $current = self::current($plan['expense_document_id'], $plan['subject_id']); $before = $current['expense'];
+        if (($before['recurring_plan_id'] ?? 0) !== $plan['plan_id'] || $before['benefit_month'] !== $plan['benefit_month']) { throw new \DomainException('原费用与周期月份不匹配'); }
+        $cancel = $data['correction_mode'] === 'cancel_expense';
+        $amount = $cancel ? '0.00' : FinanceValue::money($data['new_amount'] ?? null);
+        $originalLines = FinanceValue::decode($current['bill']['snapshot'])['lines'];
+        $originalCategory = array_column($originalLines, null, 'category_id')[$plan['category_id']] ?? null;
+        if (!$originalCategory) { throw new \DomainException('原费用类别与周期计划不匹配'); }
+        return self::apply($ledger, $document, ['subject_id' => $plan['subject_id'], 'new_subject_id' => $plan['subject_id'],
+            'original_expense_document_id' => $plan['expense_document_id'], 'expected_revision_id' => $data['expected_expense_revision_id'] ?? null,
+            'benefit_month' => $plan['benefit_month'], 'new_amount' => $amount, 'adjustment_verified' => $data['correction_verified'],
+            'reason' => $data['reason'], 'confirmation_basis' => $data['reason'], 'lines' => $cancel ? [] : [[
+                'category_id' => $plan['category_id'], 'expected_category_version' => $originalCategory['category_version'], 'amount' => $amount, 'reason' => $data['reason']]]], true);
+    }
+
+    private static function apply(FinanceLedger $ledger, array $document, array $data, bool $recurring): array
+    {
         FinanceAccess::require('', true); $tenant = FinanceAccess::tenant(); $id = (int)$document['id'];
         $vendor = FinanceValue::id($data['subject_id'] ?? null); $originalId = FinanceValue::id($data['original_expense_document_id'] ?? null);
         $current = self::current($originalId, $vendor); $before = $current['expense'];
@@ -80,15 +103,19 @@ final class FinanceExpenseAdjustments
         if ($benefit < substr($activation, 0, 7) || $benefit > date('Y-m')) { throw new \DomainException('调整后归属须为财务启用后已发生的服务月份'); }
         $month = $ledger->postingMonth(max($benefit . '-01', $activation));
         $reverseMonth = $ledger->postingMonth(max($before['posting_month'] . '-01', $activation));
-        $lines = self::lines($data['lines'] ?? null, $amount, $before['lines']);
-        if (!empty($before['recurring_plan_id'])) {
+        $lineContext = $recurring ? FinanceValue::decode($current['bill']['snapshot'])['lines'] : $before['lines'];
+        $lines = self::lines($data['lines'] ?? null, $amount, $lineContext);
+        if (!empty($before['recurring_plan_id']) && !$recurring) {
             $plan = FinanceRecurringExpenses::plan((int)$before['recurring_plan_id']);
+            $selected = array_values(array_filter($plan['months'], static fn(array $row): bool => $row['month'] === $before['benefit_month']))[0] ?? null;
+            if (!$selected || !in_array($selected['status'], ['expense', 'estimated'], true)) { throw new \DomainException('周期月份已更正，请从原计划重新核实费用'); }
             if ($newVendor !== $plan['subject_id'] || $benefit !== $before['benefit_month'] || bccomp($amount, '0', 2) === 0
                 || count($lines) !== 1 || $lines[0]['category_id'] !== $plan['category_id']) {
                 throw new \DomainException('周期费用改变对象、类别、月份或取消须关联原周期重新核实；普通调整仅可修订原范围内金额与说明');
             }
         }
-        if ($newVendor === $vendor && bccomp($delta, '0', 2) === 0 && $benefit === $before['benefit_month'] && $lines === $before['lines']) { throw new \DomainException('费用金额、归属与明细均未变化'); }
+        $unchanged = $newVendor === $vendor && bccomp($delta, '0', 2) === 0 && $benefit === $before['benefit_month'] && $lines === $before['lines'];
+        if ($unchanged && !($recurring && bccomp($amount, '0', 2) === 0)) { throw new \DomainException('费用金额、归属与明细均未变化'); }
         $reason = FinanceValue::text($data['reason'] ?? null, 1000); $basis = FinanceValue::text($data['confirmation_basis'] ?? null, 1000);
         $expense = array_replace($before, ['amount' => $amount, 'subject_id' => $newVendor, 'subject_name' => $newName,
             'benefit_month' => $benefit, 'posting_month' => $month, 'lines' => $lines, 'due_date' => $due, 'due_mode' => $dueMode]);
@@ -119,6 +146,7 @@ final class FinanceExpenseAdjustments
         }
         $result = $snapshot + ['created_sources' => $created, 'source_refs' => $allRefs, 'balance_changes' => $balanceChanges,
             'posting_months' => array_values(array_unique([$reverseMonth, $month])), 'previous_revision_id' => $current['expected_revision_id']];
+        if ($unchanged) { return $result + ['revision_id' => $current['expected_revision_id']]; }
         $revision = (int)Db::name('finance_expense_revision')->insertGetId(['tenant_id' => $tenant, 'document_id' => $id, 'bill_id' => $current['bill']['id'],
             'previous_revision_id' => $current['expected_revision_id'], 'snapshot' => FinanceValue::json($result), 'create_time' => time()]);
         return $result + ['revision_id' => $revision];

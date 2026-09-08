@@ -65,6 +65,103 @@ final class FinanceBusinessWorkflowTest extends TestCase
 
     public static function deferredClosureCases(): array { return [[false], [true]]; }
 
+    public function test_recurring_paid_expense_can_be_cancelled_and_restated_without_recreating_payment(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '周期重述服务方']);
+        $category = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_category', 'payload' => [
+            'category_id' => 0, 'expected_category_version' => 0, 'parent' => 'utilities', 'name' => '周期重述水费', 'is_enabled' => 1]]);
+        self::assertNotFalse($category, FinanceBusinessLogic::getError()); $categoryId = $category['confirmed_result']['category']['id'];
+        $plan = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_recurring_plan', 'payload' => ['subject_id' => $vendor,
+            'category_id' => $categoryId, 'expected_category_version' => 1, 'source_reference' => 'CYCLE-37', 'service_start' => $month, 'service_end' => $month,
+            'interval_months' => 1, 'reason' => '每月核实', 'plan_verified' => 1]]);
+        self::assertNotFalse($plan, FinanceBusinessLogic::getError()); $planId = $plan['confirmed_result']['plan_id'];
+        $base = ['subject_id' => $vendor, 'recurring_plan_id' => $planId, 'expected_plan_version' => 1, 'expected_month_revision_id' => 0, 'benefit_month' => $month];
+        $expense = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense', 'payload' => $base + [
+            'actual_date' => $month . '-05', 'amount' => '1000', 'source_reference' => 'CYCLE-37/' . $month, 'due_mode' => 'unspecified',
+            'reason' => '原核实费用', 'material_status' => 'missing', 'material_verified' => 1, 'missing_material_reason' => '人工核实表数',
+            'lines' => [['category_id' => $categoryId, 'expected_category_version' => 1, 'amount' => '1000', 'reason' => '当月费用']]]]);
+        self::assertNotFalse($expense, FinanceBusinessLogic::getError());
+        $payment = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'supplier_payment', 'payload' => ['subject_id' => $vendor,
+            'account_id' => $this->accountId, 'actual_date' => date('Y-m-d'), 'amount' => '600', 'reason' => '部分付款',
+            'allocations' => [['source' => $expense['confirmed_result']['created_sources'][0], 'amount' => '600']]]]);
+        self::assertNotFalse($payment, FinanceBusinessLogic::getError());
+        Db::name('finance_period')->insert(['tenant_id' => self::TENANT_ID, 'month' => $month, 'status' => 'closed', 'snapshot' => '{}', 'closed_by' => '{}', 'closed_at' => time()]);
+        $data = $base + ['correction_mode' => 'cancel_expense', 'correction_verified' => 1, 'expected_expense_revision_id' => 0, 'reason' => '经核实本月并未发生，原录入有误'];
+        $command = $this->command(0) + ['type' => 'expense_recurring_correct', 'payload' => $data];
+        $cancel = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($cancel, FinanceBusinessLogic::getError());
+        self::assertSame($cancel, FinanceBusinessLogic::action('record', $command));
+        self::assertSame('-1000.00', $cancel['confirmed_result']['amount_change']);
+        self::assertSame([date('Y-m')], $cancel['confirmed_result']['posting_months']);
+        $ledger = new FinanceLedger(self::TENANT_ID);
+        self::assertSame('0.00', $ledger->categoryBalance('expense_payable', $vendor));
+        self::assertSame('600.00', $ledger->categoryBalance('expense_refund', $vendor));
+        self::assertSame('4400.00', $ledger->account($this->accountId)['balance']);
+        $row = FinanceBusinessLogic::options(['type' => 'expense_recurring_plan', 'recurring_plan_id' => $planId])['selected_plan']['months'][0];
+        self::assertSame('none', $row['status']); self::assertSame($expense['id'], $row['expense_document_id']);
+        $generic = ['subject_id' => $vendor, 'new_subject_id' => $vendor, 'original_expense_document_id' => $expense['id'],
+            'expected_revision_id' => $row['expected_expense_revision_id'], 'new_amount' => '800', 'benefit_month' => $month,
+            'reason' => '绕过周期状态恢复费用', 'confirmation_basis' => '重复来源', 'adjustment_verified' => 1,
+            'lines' => [['category_id' => $categoryId, 'expected_category_version' => 1, 'amount' => '800', 'reason' => '费用']]];
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_adjustment', 'payload' => $generic]), '普通调整不能绕过本月不发生状态恢复费用');
+        $data['expected_month_revision_id'] = $row['month_revision_id']; $data['correction_mode'] = 'reopen_none';
+        $reopen = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_recurring_correct', 'payload' => $data]); self::assertNotFalse($reopen, FinanceBusinessLogic::getError());
+        foreach ([[1, 0], [2, 1]] as [$version, $enabled]) {
+            self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_category', 'payload' => [
+                'category_id' => $categoryId, 'expected_category_version' => $version, 'parent' => 'utilities', 'name' => '周期重述水费', 'is_enabled' => $enabled]]), FinanceBusinessLogic::getError());
+        }
+        $row = FinanceBusinessLogic::options(['type' => 'expense_recurring_plan', 'recurring_plan_id' => $planId])['selected_plan']['months'][0];
+        $data['correction_mode'] = 'restate_expense'; $data['new_amount'] = '800';
+        $data['expected_month_revision_id'] = $row['month_revision_id'];
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_recurring_correct', 'payload' => $data]), '不能沿用取消前费用版本');
+        $data['expected_expense_revision_id'] = $row['expected_expense_revision_id'];
+        $command = $this->command(0) + ['type' => 'expense_recurring_correct', 'payload' => $data];
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($command + ['action' => 'record']);
+        self::assertSame('800.00', $preview['expense']['amount_change']);
+        $restated = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($restated, FinanceBusinessLogic::getError());
+        self::assertSame($restated, FinanceBusinessLogic::action('record', $command));
+        self::assertSame('200.00', $ledger->categoryBalance('expense_payable', $vendor)); self::assertSame('0.00', $ledger->categoryBalance('expense_refund', $vendor));
+        self::assertSame('4400.00', $ledger->account($this->accountId)['balance']);
+        $row = FinanceBusinessLogic::options(['type' => 'expense_recurring_plan', 'recurring_plan_id' => $planId])['selected_plan']['months'][0];
+        self::assertSame('expense', $row['status']); self::assertSame($expense['id'], $row['expense_document_id']); self::assertCount(4, $row['history']);
+        self::assertSame($expense['confirmed_result'], FinanceBusinessLogic::detail(['id' => $expense['id']])['confirmed_result']);
+        self::assertSame($payment['confirmed_result'], FinanceBusinessLogic::detail(['id' => $payment['id']])['confirmed_result']);
+    }
+
+    public function test_recurring_estimate_must_be_resolved_before_cancellation_even_when_final_is_zero(): void
+    {
+        $this->activate(); $month = date('Y-m');
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '周期暂估取消方']);
+        $category = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_category', 'payload' => [
+            'category_id' => 0, 'expected_category_version' => 0, 'parent' => 'utilities', 'name' => '周期暂估核实', 'is_enabled' => 1]]);
+        self::assertNotFalse($category, FinanceBusinessLogic::getError()); $categoryId = $category['confirmed_result']['category']['id'];
+        $plan = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_recurring_plan', 'payload' => ['subject_id' => $vendor,
+            'category_id' => $categoryId, 'expected_category_version' => 1, 'source_reference' => 'CYCLE-37-ZERO', 'service_start' => $month, 'service_end' => $month,
+            'interval_months' => 1, 'reason' => '按月核实', 'plan_verified' => 1]]);
+        self::assertNotFalse($plan, FinanceBusinessLogic::getError()); $planId = $plan['confirmed_result']['plan_id'];
+        $base = ['subject_id' => $vendor, 'recurring_plan_id' => $planId, 'expected_plan_version' => 1, 'expected_month_revision_id' => 0, 'benefit_month' => $month];
+        $expense = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense', 'payload' => $base + [
+            'actual_date' => date('Y-m-d'), 'amount' => '300', 'amount_status' => 'estimated', 'estimate_basis_type' => 'history', 'estimate_basis' => '上月实际用量',
+            'source_reference' => 'CYCLE-37-ZERO/' . $month, 'due_mode' => 'unspecified', 'reason' => '暂估本月',
+            'material_status' => 'missing', 'material_verified' => 1, 'missing_material_reason' => '等正式账单',
+            'lines' => [['category_id' => $categoryId, 'expected_category_version' => 1, 'amount' => '300', 'reason' => '暂估']]]]);
+        self::assertNotFalse($expense, FinanceBusinessLogic::getError());
+        $data = $base + ['correction_mode' => 'cancel_expense', 'correction_verified' => 1, 'expected_expense_revision_id' => 0, 'reason' => '本月未发生'];
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_recurring_correct', 'payload' => $data]));
+        $resolved = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_estimate_final', 'payload' => [
+            'subject_id' => $vendor, 'original_expense_document_id' => $expense['id'], 'expected_revision_id' => 0, 'expected_resolution_id' => 0,
+            'final_verified' => 1, 'reason' => '本月停业账单为零', 'resolutions' => [['category_id' => $categoryId, 'final_amount' => '0', 'confirmation_basis' => '最终账单']]]]);
+        self::assertNotFalse($resolved, FinanceBusinessLogic::getError());
+        $row = FinanceBusinessLogic::options(['type' => 'expense_recurring_plan', 'recurring_plan_id' => $planId])['selected_plan']['months'][0];
+        $data['expected_expense_revision_id'] = $row['expected_expense_revision_id'];
+        $command = $this->command(0) + ['type' => 'expense_recurring_correct', 'payload' => $data];
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($command + ['action' => 'record']);
+        self::assertSame([], $preview['impacts']); self::assertSame([], $preview['balances']);
+        $cancel = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($cancel, FinanceBusinessLogic::getError());
+        $row = FinanceBusinessLogic::options(['type' => 'expense_recurring_plan', 'recurring_plan_id' => $planId])['selected_plan']['months'][0];
+        self::assertSame('none', $row['status']); self::assertSame($data['expected_expense_revision_id'], $row['expected_expense_revision_id']);
+    }
+
     public function test_recurring_none_can_be_reopened_with_history_then_expense_requires_latest_month_revision(): void
     {
         $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');

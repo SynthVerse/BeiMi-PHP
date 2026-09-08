@@ -17,7 +17,7 @@ final class FinanceRecurringExpenses
         foreach ($plan['months'] as $row) { if ($row['month'] === $month) { $selected = $row; break; } }
         if (!$selected || !in_array($selected['status'], $allowed, true)) { throw new \DomainException('该月不在计划周期内、尚未发生或已有处理结果，请重新读取'); }
         if (FinanceValue::id($data['expected_month_revision_id'] ?? 0, true) !== $selected['month_revision_id']) { throw new \DomainException('本月已有后续处理，请重新读取月份最新状态'); }
-        return $plan + ['benefit_month' => $month, 'month_revision_id' => $selected['month_revision_id'], 'previous_month_document_id' => $selected['document_id']];
+        return $plan + ['benefit_month' => $month, 'month_revision_id' => $selected['month_revision_id'], 'previous_month_document_id' => $selected['document_id'], 'expense_document_id' => $selected['expense_document_id']];
     }
 
     public static function expenseContext(array $data, array $lines): ?array
@@ -42,14 +42,23 @@ final class FinanceRecurringExpenses
     public static function correct(array $document, array $data): array
     {
         FinanceAccess::require('', true);
-        if (($data['correction_mode'] ?? null) !== 'reopen_none' || ($data['correction_verified'] ?? null) !== 1) { throw new \DomainException('请明确核实原不发生记录确有错误并恢复待核实'); }
-        $plan = self::month($data, ['none']); $snapshot = $plan; unset($snapshot['months']);
-        $result = ['type' => 'expense_recurring_correct', 'correction_mode' => 'reopen_none', 'subject_id' => $plan['subject_id'], 'subject_name' => $plan['subject_name'],
+        $mode = $data['correction_mode'] ?? null;
+        if (!in_array($mode, ['reopen_none', 'cancel_expense', 'restate_expense'], true) || ($data['correction_verified'] ?? null) !== 1) { throw new \DomainException('请明确核实原记录、更正内容及依据'); }
+        $plan = self::month($data, $mode === 'reopen_none' ? ['none'] : ($mode === 'cancel_expense' ? ['expense', 'estimated'] : ['pending']));
+        $snapshot = $plan; unset($snapshot['months']); $adjustment = [];
+        $reason = FinanceValue::text($data['reason'] ?? null, 1000);
+        if ($mode !== 'reopen_none') {
+            if (!$plan['expense_document_id']) { throw new \DomainException('本月尚无原费用，请从本期费用入口登记'); }
+            $adjustment = FinanceExpenseAdjustments::recurring(new FinanceLedger(FinanceAccess::tenant()), $document, $data, $plan);
+        }
+        $outcome = $mode === 'reopen_none' ? 'pending' : ($mode === 'cancel_expense' ? 'none' : 'expense');
+        $result = ['type' => 'expense_recurring_correct', 'correction_mode' => $mode, 'outcome' => $outcome, 'subject_id' => $plan['subject_id'], 'subject_name' => $plan['subject_name'],
             'recurring_plan_id' => $plan['plan_id'], 'source_reference' => $plan['source_reference'], 'benefit_month' => $plan['benefit_month'],
             'category_name' => $plan['category_name'], 'plan_snapshot' => $snapshot, 'previous_document_id' => $plan['previous_month_document_id'],
-            'previous_month_revision_id' => $plan['month_revision_id'], 'reason' => FinanceValue::text($data['reason'] ?? null, 1000),
-            'confirmed_by' => FinanceAccess::actor(), 'confirmed_at' => time(), 'created_sources' => []];
-        self::complete($document, $plan, 'pending', $result);
+            'previous_month_revision_id' => $plan['month_revision_id'], 'reason' => $reason,
+            'confirmed_by' => FinanceAccess::actor(), 'confirmed_at' => time()] + $adjustment;
+        $result += ['created_sources' => []];
+        self::complete($document, $plan, $outcome, $result);
         return $result;
     }
 
@@ -109,7 +118,12 @@ final class FinanceRecurringExpenses
                 $result = FinanceValue::decode($revision['snapshot']); $currentDocument = (int)$revision['document_id']; $revisionId = (int)$revision['id'];
                 $history[] = ['document_id' => $currentDocument, 'type' => $result['result']['type'], 'outcome' => $result['outcome']];
             }
+            $expenseId = 0;
+            foreach ($history as $item) { if ($item['type'] === 'expense') { $expenseId = $item['document_id']; break; } }
+            $expense = $expenseId ? FinanceExpenseAdjustments::current($expenseId, $plan['subject_id']) : null;
             $months[] = ['month' => $month, 'status' => $result ? $result['outcome'] : ($month > date('Y-m') ? 'future' : 'pending'),
+                'expense_document_id' => $expenseId, 'expected_expense_revision_id' => $expense['expected_revision_id'] ?? 0,
+                'expense_amount' => $expense['expense']['amount'] ?? null,
                 'result' => $result, 'document_id' => $currentDocument, 'month_revision_id' => $revisionId, 'history' => $history];
             $cursor = $cursor->modify('+' . $plan['interval_months'] . ' months');
         }
