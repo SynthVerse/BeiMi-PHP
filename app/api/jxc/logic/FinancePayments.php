@@ -15,6 +15,8 @@ final class FinancePayments
     {
         $type = $document['type']; $policy = FinanceDocumentPolicy::authorize($type, true);
         $data = FinanceValue::decode($document['payload']);
+        if ($type === 'equipment_refund_due') { return FinanceEquipmentRefunds::confirm($this->ledger, $document, $data); }
+        if ($type === 'equipment_refund_adjustment') { return FinanceEquipmentRefunds::adjust($this->ledger, $document, $data); }
         if ($type === 'equipment_purchase') { return FinanceEquipment::confirm($this->ledger, $document, $data); }
         if ($type === 'equipment_adjustment') { return FinanceEquipment::adjust($this->ledger, $document, $data); }
         if ($type === 'salary_adjustment') { return FinanceSalaries::adjust($this->ledger, $document, $data); }

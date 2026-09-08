@@ -7,6 +7,8 @@ namespace app\api\jxc\logic;
 final class FinanceDocumentPolicy
 {
     public const TYPES = [
+        'equipment_refund_due' => ['title' => '设备退款待收确认', 'prepare' => 'finance.equipment.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],
+        'equipment_refund_adjustment' => ['title' => '设备退款约定调整', 'prepare' => 'finance.equipment.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],
         'equipment_purchase' => ['title' => '设备购置额度确认', 'prepare' => 'finance.equipment.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],
         'equipment_adjustment' => ['title' => '设备调价与取消未付', 'prepare' => 'finance.equipment.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],
         'salary_adjustment' => ['title' => '工资金额关联调整', 'prepare' => 'finance.salary.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'employee', 'sources' => [], 'direction' => 'none'],

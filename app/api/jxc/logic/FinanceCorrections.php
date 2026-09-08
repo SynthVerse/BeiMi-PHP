@@ -14,6 +14,7 @@ final class FinanceCorrections
     public function replace(array $original, array $replacement, string $reason, int $duplicateOf = 0, bool $reverseOnly = false): array
     {
         $policy = FinanceDocumentPolicy::authorize($original['type'], true);
+        if (in_array($original['type'], ['equipment_refund_due', 'equipment_refund_adjustment'], true)) { throw new \DomainException('设备退款约定须从原退款关联调整，不能覆盖实际到账历史'); }
         if (in_array($original['type'], ['equipment_purchase', 'equipment_adjustment'], true)) { throw new \DomainException('设备额度请从原购置记录关联调价或取消未付，不能覆盖已有付款历史'); }
         if (in_array($original['type'], ['salary_expense', 'salary_adjustment'], true)) { throw new \DomainException('工资结果须关联原工资和已发放组成调整，不能覆盖历史'); }
         if (in_array($original['type'], ['employee_expense', 'employee_expense_adjustment'], true)) { throw new \DomainException('员工垫付须关联原费用与已报销组成调整，不能覆盖历史'); }
@@ -82,6 +83,7 @@ final class FinanceCorrections
         $result = $duplicateOf || $reverseOnly ? ['type' => $original['type'], 'subject_id' => $originalResult['subject_id'], 'subject_name' => $originalResult['subject_name'],
             'allocated_amount' => '0.00', 'created_sources' => [], 'duplicate_of' => $duplicateOf, 'reversal_of' => $reverseOnly ? (int)$original['id'] : null, 'reason' => $reason]
             : (new FinancePayments($this->tenantId, $this->ledger))->confirm($replacement, $transaction, (int)$original['id'], $preservedAdvance);
+        if ($original['type'] === 'equipment_payment') { FinanceEquipmentRefunds::protectPaymentCorrection($this->ledger, FinanceValue::decode($original['payload']), FinanceValue::decode($replacement['payload'])); }
         Db::name('finance_correction')->insert(['tenant_id' => $this->tenantId, 'original_document_id' => $original['id'],
             'replacement_document_id' => $replacement['id'], 'reason' => $reason, 'actor' => FinanceValue::json(FinanceAccess::actor()), 'create_time' => time()]);
         return $result + ['corrects_document_id' => (int)$original['id'], 'correction_reason' => $reason];

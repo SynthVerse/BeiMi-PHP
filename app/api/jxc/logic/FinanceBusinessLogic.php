@@ -124,6 +124,7 @@ final class FinanceBusinessLogic extends BaseLogic
             $page = max(1, FinanceValue::id($params['page'] ?? 1));
             $sources = match ($type) {
                 'equipment_purchase', 'equipment_adjustment' => FinanceEquipment::options($subjectId, $params),
+                'equipment_refund_due', 'equipment_refund_adjustment' => FinanceEquipmentRefunds::options($subjectId, $params),
                 'salary_adjustment' => FinanceSalaries::adjustmentOptions($subjectId, $params),
                 'salary_expense' => FinanceSalaries::options($params),
                 'employee_expense_adjustment' => FinanceEmployeeExpenses::options($subjectId, $params),

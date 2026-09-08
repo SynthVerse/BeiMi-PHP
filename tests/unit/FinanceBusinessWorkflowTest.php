@@ -58,6 +58,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000035_finance_salary_result.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000036_finance_salary_revision.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000037_finance_equipment.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000038_finance_equipment_refund.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -69,6 +70,81 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
 
     public static function deferredClosureCases(): array { return [[false], [true]]; }
+
+    public function test_equipment_refund_obligation_revisions_and_receipts_never_restore_payment_limit(): void
+    {
+        $this->activate(); $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '设备退款供应商']);
+        $purchase = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'equipment_purchase', 'payload' => [
+            'subject_id' => $vendor, 'equipment_name' => '设备退款冰柜', 'source_reference' => 'EQUIP-43', 'amount' => '12000', 'actual_date' => date('Y-m-d'),
+            'equipment_verified' => 1, 'reason' => '购置', 'confirmation_basis' => '核实合同', 'material_status' => 'missing', 'material_verified' => 1, 'missing_material_reason' => '人工核实']]);
+        self::assertNotFalse($purchase, FinanceBusinessLogic::getError()); $equipment = $purchase['confirmed_result']['created_sources'][0]; $ledger = new FinanceLedger(self::TENANT_ID);
+        $pay = ['subject_id' => $vendor, 'account_id' => $this->accountId, 'actual_date' => date('Y-m-d'), 'amount' => '2000', 'reason' => '实际付款', 'allocations' => [['source' => $equipment, 'amount' => '2000']]];
+        $payment = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'equipment_payment', 'payload' => $pay]); self::assertNotFalse($payment, FinanceBusinessLogic::getError());
+        $cancel = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'equipment_adjustment', 'payload' => [
+            'subject_id' => $vendor, 'original_equipment_document_id' => $purchase['id'], 'expected_revision_id' => 0, 'mode' => 'cancel', 'cancel_amount' => '10000',
+            'adjustment_verified' => 1, 'reason' => '取消未付', 'confirmation_basis' => '双方取消协议']]); self::assertNotFalse($cancel, FinanceBusinessLogic::getError());
+        $due = ['subject_id' => $vendor, 'original_equipment_document_id' => $purchase['id'], 'amount' => '2000', 'actual_date' => date('Y-m-d'),
+            'refund_verified' => 1, 'reason' => '设备实际退货退款约定', 'confirmation_basis' => '供应商确认退回已付款'];
+        $command = $this->command(0) + ['type' => 'equipment_refund_due', 'payload' => $due];
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($command + ['action' => 'record']); self::assertSame([], $preview['impacts']);
+        $refund = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($refund, FinanceBusinessLogic::getError()); self::assertSame($refund, FinanceBusinessLogic::action('record', $command));
+        $source = $refund['confirmed_result']['created_sources'][0]; self::assertSame('0.00', $ledger->source($equipment)['balance']); self::assertSame('3000.00', $ledger->account($this->accountId)['balance']);
+        self::assertSame($payment['id'], $refund['confirmed_result']['payment_composition'][0]['document_id']);
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'equipment_refund_due', 'payload' => $due]));
+        $receive = $pay; $receive['amount'] = '500'; $receive['allocations'] = [['source' => $source, 'amount' => '500']]; $receive['reason'] = '第一笔实际退款到账';
+        $receipt = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'equipment_refund', 'payload' => $receive]); self::assertNotFalse($receipt, FinanceBusinessLogic::getError());
+        self::assertSame('0.00', $ledger->source($equipment)['balance']); self::assertSame('3500.00', $ledger->account($this->accountId)['balance']);
+        $adjust = ['subject_id' => $vendor, 'original_refund_document_id' => $refund['id'], 'expected_revision_id' => 0, 'new_amount' => '400',
+            'refund_verified' => 1, 'reason' => '核实退款总额', 'confirmation_basis' => '补充协议'];
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'equipment_refund_adjustment', 'payload' => $adjust]));
+        $adjust['new_amount'] = '2500'; self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'equipment_refund_adjustment', 'payload' => $adjust]));
+        $adjust['new_amount'] = '1500'; $revised = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'equipment_refund_adjustment', 'payload' => $adjust]); self::assertNotFalse($revised, FinanceBusinessLogic::getError());
+        self::assertSame('1000.00', $ledger->source($source)['balance']); self::assertSame('500.00', $revised['confirmed_result']['received_amount']);
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'equipment_refund_adjustment', 'payload' => $adjust]));
+        $wrongPay = array_replace($pay, ['amount' => '1400', 'allocations' => [['source' => $equipment, 'amount' => '1400']]]);
+        self::assertFalse(FinanceBusinessLogic::action('correct', $this->command($payment['version']) + ['id' => $payment['id'], 'payload' => $wrongPay, 'correction_reason' => '付款金额误录']));
+        self::assertStringContainsString('退款', FinanceBusinessLogic::getError()); self::assertSame('0.00', $ledger->source($equipment)['balance']);
+        $receive['amount'] = '1000'; $receive['allocations'][0]['amount'] = '1000';
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'equipment_refund', 'payload' => $receive]), FinanceBusinessLogic::getError());
+        self::assertSame('0.00', $ledger->source($source)['balance']); self::assertSame('0.00', $ledger->source($equipment)['balance']);
+        self::assertSame('4500.00', $ledger->account($this->accountId)['balance']); self::assertSame('500.00', bcadd((string)Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('metric', 'expense')->sum('amount'), '0', 2));
+        $current = FinanceBusinessLogic::options(['type' => 'equipment_refund_adjustment', 'original_refund_document_id' => $refund['id']]);
+        self::assertSame('1500.00', $current['selected_refund']['received_amount']); self::assertSame([], $current['current_sources']);
+        self::assertSame($refund['confirmed_result'], FinanceBusinessLogic::detail(['id' => $refund['id']])['confirmed_result']);
+        $correctedPay = array_replace($pay, ['amount' => '1500', 'allocations' => [['source' => $equipment, 'amount' => '1500']]]);
+        $corrected = FinanceBusinessLogic::action('correct', $this->command($payment['version']) + ['id' => $payment['id'], 'payload' => $correctedPay, 'correction_reason' => '原付款确实误录500']);
+        self::assertNotFalse($corrected, FinanceBusinessLogic::getError()); self::assertSame('500.00', $ledger->source($equipment)['balance']);
+        self::assertSame('5000.00', $ledger->account($this->accountId)['balance']); self::assertSame($payment['confirmed_result']['money']['transaction_id'], $corrected['confirmed_result']['money']['transaction_id']);
+    }
+
+    public function test_equipment_refund_preparation_requires_owner_confirmation_and_preserves_closed_months(): void
+    {
+        $lastMonth = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $lastMonth . '-01');
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '设备退回权限供应商']);
+        $purchase = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'equipment_purchase', 'payload' => [
+            'subject_id' => $vendor, 'equipment_name' => '设备退款秤', 'source_reference' => 'EQUIP-43-ROLE', 'amount' => '800', 'actual_date' => $lastMonth . '-01',
+            'equipment_verified' => 1, 'reason' => '购置', 'confirmation_basis' => '核实合同', 'material_status' => 'missing', 'material_verified' => 1, 'missing_material_reason' => '人工核实']]);
+        self::assertNotFalse($purchase, FinanceBusinessLogic::getError()); $source = $purchase['confirmed_result']['created_sources'][0];
+        $pay = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'equipment_payment', 'payload' => ['subject_id' => $vendor, 'account_id' => $this->accountId,
+            'actual_date' => $lastMonth . '-02', 'amount' => '800', 'reason' => '实际设备付款', 'allocations' => [['source' => $source, 'amount' => '800']]]]); self::assertNotFalse($pay, FinanceBusinessLogic::getError());
+        Db::name('finance_period')->insert(['tenant_id' => self::TENANT_ID, 'month' => $lastMonth, 'status' => 'closed', 'snapshot' => '{}', 'closed_by' => '{}', 'closed_at' => time()]);
+        $data = ['subject_id' => $vendor, 'original_equipment_document_id' => $purchase['id'], 'amount' => '600', 'actual_date' => $lastMonth . '-03', 'refund_verified' => 1, 'reason' => '核实退款', 'confirmation_basis' => '双方退款约定'];
+        foreach ([['subject_id' => 99999999], ['amount' => '801'], ['refund_verified' => 0], ['confirmation_basis' => ''], ['actual_date' => date('Y-m-d', strtotime('+1 day'))]] as $invalid) {
+            self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'equipment_refund_due', 'payload' => array_replace($data, $invalid)]));
+        }
+        $employee = WorkforceLogic::saveEmployee(['name' => '设备退款经办', 'mobile' => '13800009947', 'bind_user_id' => 996947, 'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['finance.equipment.prepare']]); self::assertNotFalse($employee, WorkforceLogic::getError());
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996947; request()->adminId = 0;
+        $draft = FinanceBusinessLogic::action('prepare', $this->command(0) + ['type' => 'equipment_refund_due', 'payload' => $data]); self::assertNotFalse($draft, FinanceBusinessLogic::getError());
+        self::assertSame([], (new FinanceLedger(self::TENANT_ID))->sources('equipment_refund', $vendor));
+        self::assertFalse(FinanceBusinessLogic::action('confirm', $this->command($draft['version']) + ['id' => $draft['id']])); $this->prepareCustomerReportRequestContext();
+        $due = FinanceBusinessLogic::action('confirm', $this->command($draft['version']) + ['id' => $draft['id']]); self::assertNotFalse($due, FinanceBusinessLogic::getError()); self::assertSame(date('Y-m'), $due['confirmed_result']['posting_month']);
+        $refund = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'equipment_refund', 'payload' => ['subject_id' => $vendor, 'account_id' => $this->accountId,
+            'actual_date' => $lastMonth . '-04', 'amount' => '600', 'reason' => '实际设备退款补录', 'allocations' => [['source' => $due['confirmed_result']['created_sources'][0], 'amount' => '600']]]]); self::assertNotFalse($refund, FinanceBusinessLogic::getError());
+        self::assertSame('-600.00', Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('document_id', $refund['id'])->where('metric', 'expense')->value('amount'));
+        self::assertSame(date('Y-m'), Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('document_id', $refund['id'])->where('metric', 'expense')->value('posting_month'));
+        self::assertSame('{}', Db::name('finance_period')->where('tenant_id', self::TENANT_ID)->where('month', $lastMonth)->value('snapshot'));
+        $this->prepareCustomerReportRequestContext(self::OTHER_TENANT_ID); self::assertFalse(FinanceBusinessLogic::options(['type' => 'equipment_refund_adjustment', 'original_refund_document_id' => $due['id']]));
+    }
 
     public function test_equipment_staff_prepare_but_owner_alone_confirms_and_cancellation_cannot_consume_paid_money(): void
     {
@@ -3616,7 +3692,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     private function clean(): void
     {
         foreach (['finance_recurring_month_revision', 'finance_recurring_expense_month', 'finance_recurring_expense_plan'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
-        foreach (['finance_equipment_revision', 'finance_equipment_purchase', 'finance_salary_revision', 'finance_salary_result', 'finance_employee_expense_revision', 'finance_employee_expense', 'finance_expense_estimate_resolution', 'finance_deferred_amortization', 'finance_expense_identity', 'finance_expense_revision', 'finance_expense_bill', 'finance_expense_category'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
+        foreach (['finance_equipment_refund_revision', 'finance_equipment_refund_due', 'finance_equipment_revision', 'finance_equipment_purchase', 'finance_salary_revision', 'finance_salary_result', 'finance_employee_expense_revision', 'finance_employee_expense', 'finance_expense_estimate_resolution', 'finance_deferred_amortization', 'finance_expense_identity', 'finance_expense_revision', 'finance_expense_bill', 'finance_expense_category'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         foreach (['finance_inventory_loss_resolution', 'finance_inventory_loss'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         Db::name('finance_purchase_arrival_loss')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_purchase_difference_review')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
