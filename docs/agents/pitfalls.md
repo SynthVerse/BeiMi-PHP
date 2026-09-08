@@ -2,12 +2,52 @@
 
 按根因去重。每条记录必须指向实际防线；仅有“不要这样做”的提醒不算已防护。
 
+## PIT-0046：财务启用只加载期初成本，遗漏截点之后的实物去向
+
+- 状态：已防护
+- 首次发生：2026-09-08
+- 最近发生：2026-09-08
+- 复发次数：0
+- 适用范围：财务期初确认与库存成本承接
+- 相关问题：PIT-0032（截点数量校验）、PIT-0044（实际日期重放）
+
+### 触发场景
+
+期初截点库存 100 单位、历史成本 200 元，正式确认财务前已销售 10 单位。实物库存为 90，但启用后的成本账仍保留 100 单位、200 元。
+
+### 根因
+
+未启用门店的库存钩子按设计跳过新成本账；期初确认仅创建截点来源，没有承接截点至确认之间已发生的实物流水。已有截点测试只校验期初保存数量，没有验证正式成本余额与销售去向。
+
+### 错误做法
+
+把期初数量改成当前量掩盖缺失；或再次执行库存出入库；或将无法配对的旧调拨当成已知零成本入库。
+
+### 正确做法
+
+在期初确认的同一事务和门店锁内承接原流水，沿原事实日期建立成本去向，校验成本数量与现存量一致；原销售退回恢复原份额，截点前退回的未知成本明确保留。无可靠入库成本、实物去向或调拨配对时阻断启用并回滚正式成本。
+
+### 防线
+
+- 自动化防线：`FinanceBusinessWorkflowTest` 的 `test_activation_carries_cutoff_stock_then_replays_intervening_sales_cost_without_moving_stock_again`、`test_activation_keeps_return_from_pre_cutoff_sale_unpriced_without_borrowing_opening_unit_cost`、`test_activation_rejects_unverified_inbound_cost_or_unpaired_stock_destination_atomically`。
+- 架构防线：`FinanceCostBootstrap::withinTransaction`、既有 `FinanceCostLedger` 幂等事件、期初确认外层事务与 SKU 锁。
+- 已验证：原红灯为预期 90、实际 100；增加交付更正退回后预期 188 元、实际未知；修复后期初与启用边界 39 tests、767 assertions 通过，两轴复审关闭发现项。
+- 尚未验证：真实旧流水的完整迁移；旧入库、调拨核实入口以及旧售退回后续补价仍在开发，正式租户名单保持关闭。
+- 后续建议：新增承接种类须覆盖启用前后连续事件，不只校验期初资料保存成功。
+- 本次来源：`Matt Pocock / implement`、`Matt Pocock / tdd`、`Matt Pocock / diagnosing-bugs`、`Matt Pocock / prevent-repeat-pitfalls`、`Matt Pocock / code-review`；防重复工作流保存证据后继续财务一期开发。
+
+### 发生记录
+
+| 日期 | 任务 | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-09-08 | 财务一期启用衔接 | 期初数量正确但确认后的成本未减去已销售部分 | 既有测试验证截点数量，未贯通成本余额和启用后下一次销售。 |
+
 ## PIT-0044：补录历史实物流仍按确认顺序计算移动平均成本
 
 - 状态：已防护
 - 首次发生：2026-09-08
 - 最近发生：2026-09-08
-- 复发次数：1
+- 复发次数：2
 - 适用范围：财务成本事件、采购实际退货和受其影响的后续库存去向
 - 相关问题：PIT-0032（历史截点与实时状态混淆，计算层不同）
 
@@ -21,6 +61,8 @@
 
 返回入库和损失确认再次暴露历史重放边界：事件中间结果在后续补价前生成，新确认入口误将其作为最终成本快照；成本持仓已更新，业务结果却保留旧金额或待确认标记。
 
+启用成本承接又把实物流水录入时间当作原交付日期，绕过正式交付入口已建立的事实日期规则；期初数量回退也会把晚录的截点前旧交付误算成本期变动。
+
 ### 错误做法
 
 仅修改成本流水的业务日期，继续用当前混合成本计算历史退货。
@@ -33,6 +75,7 @@
 
 - 自动化防线：`FinanceBusinessWorkflowTest::test_backdated_purchase_return_replays_actual_cost_order_and_keeps_later_stock`，覆盖 20 元退货、后续销售由 285 重算为 290、原日期、幂等及后续采购价格调整。
 - 架构防线：`FinanceCostLedger::recordWithinTransaction` 检测乱序并在同一账套锁与事务内重放；统一 `applyEvent`，不另建退货专用估价算法。
+- 启用衔接防线：`FinanceStockFactTime::resolve` 供截点数量与成本承接共用，交付及运输损耗读取原交付事件日期。`FinanceBusinessWorkflowTest::test_activation_carries_cutoff_stock_then_replays_intervening_sales_cost_without_moving_stock_again` 的运输损耗样本修改前预期 `2026-08-11`、实际 `2026-09-08`；修复后启用边界 8 tests、245 assertions 通过。必要日期或来源无法核实则阻断，不按录入日补造事实。
 - 返回和损失防线：`FinancePurchaseReturnResolutions` 从重放完成后的原退货去向差额或独立损失去向取得成本，不保存事件中间估价。`test_purchase_return_dispute_restores_original_cost_to_actual_warehouse_and_reclassifies_loss_without_stock_change` 覆盖已知暂估及未知成本补价、跨仓恢复和确认快照；初次红灯为预期 12、实际 8，扩展后与定向负量用例共 3 tests、132 assertions 通过。第23批财务、销售结算与仓库专项 192 tests、4418 assertions、1 skipped；两轴复审已关闭本次 P2，跳过项不计通过。
 - 已验证：最小用例修改前预期 20、实际 30；修改后与负库存用例合计 2 tests、87 assertions 通过。
 - 已验证补充：跨月测试保护上月库存 180、本月销售及剩余库存各 290，专项 2 tests、88 assertions；串行财务、销售、仓库及负库存回归 195 tests、4329 assertions、1 skipped。两轴复审已关闭跨月库存补差问题；一次并发干扰测试库的运行已作废，不计入通过结果。
@@ -46,6 +89,7 @@
 |---|---|---|---|
 | 2026-09-08 | 财务一期采购实际退货 | 到货后补录更早退离 | 原成本测试覆盖混批均价和后补价格，未覆盖实物事件录入顺序不同于发生顺序。 |
 | 2026-09-08 | 财务一期退货争议处置 | 历史返回或损失的确认快照保留补价前成本 | 既有防线验证最终持仓及实际退离，未验证返回、损失入口对重放中间结果的消费。 |
+| 2026-09-08 | 财务一期启用成本承接 | 晚录交付或运输损耗错入录入月 | 正式交付入口已沿原事件日期，新增启用入口自行采用实物流水创建时间。 |
 
 ## PIT-0045：新增允许负库存的实物入口遗漏异常待办
 

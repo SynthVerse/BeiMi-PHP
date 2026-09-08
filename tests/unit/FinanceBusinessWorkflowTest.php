@@ -85,6 +85,105 @@ final class FinanceBusinessWorkflowTest extends TestCase
         Db::transaction(fn() => $cost->recordWithinTransaction($event));
     }
 
+    public static function bootstrapCorrections(): array { return [['none'], ['correction'], ['return'], ['transport'], ['old_transport']]; }
+
+    /** @dataProvider bootstrapCorrections */
+    public function test_activation_carries_cutoff_stock_then_replays_intervening_sales_cost_without_moving_stock_again(string $mode): void
+    {
+        $corrected = in_array($mode, ['correction', 'return'], true);
+        $date = $mode === 'transport' ? date('Y-m-01', strtotime('first day of last month')) : date('Y-m-d');
+        $bucket = 'sale'; $destination = 'sales_order:9827';
+        $warehouse = $this->createCustomerReportWarehouse('启用衔接仓');
+        $goods = $this->createCustomerReportGoods('启用衔接商品', 'FIN-BOOTSTRAP'); $sku = $this->customerReportSkuId($goods);
+        $stockId = (int)Db::name('warehouse_sku_balance')->insertGetId(['tenant_id' => self::TENANT_ID,
+            'warehouse_id' => $warehouse, 'goods_id' => $goods, 'sku_id' => $sku, 'on_hand_qty' => '100.0000', 'available_qty' => '100.0000']);
+        self::assertNotFalse(FinanceSetupLogic::savePreparation($this->command(0) + ['activation_date' => $date,
+            'inventory_cost_reviewed' => 1, 'legacy_settlement_reviewed' => 1, 'excluded_business_reviewed' => 1]));
+        if (in_array($mode, ['transport', 'old_transport'], true)) {
+            $delivery = (int)Db::name('fulfillment_delivery_event')->insertGetId(['tenant_id' => self::TENANT_ID,
+                'idempotency_key' => 'BOOTSTRAP-TRANSPORT', 'actual_handoff_time' => $mode === 'old_transport' ? strtotime('yesterday') : strtotime($date . ' +10 days'), 'create_time' => time()]);
+            self::assertNotFalse(Db::transaction(fn() => \app\api\jxc\logic\StockService::outboundTransportLossWithinTransaction($warehouse, $goods, $sku, '10', '0', $delivery)));
+            $bucket = 'loss'; $destination = 'delivery_loss:' . $delivery;
+        } else { self::assertTrue(\app\api\jxc\logic\StockService::outbound($warehouse, $goods, '10', 9827, 'sales', 'BEFORE-ACTIVATION', '', $sku)); }
+        if ($mode === 'correction') { self::assertTrue(\app\api\jxc\logic\StockService::inbound($warehouse, $goods, '4', 9827, 'sales_delivery_correction', 'BEFORE-CORRECTION', '', $sku)); }
+        if ($mode === 'return') {
+            Db::name('sales_order')->insert(['id' => 9827, 'tenant_id' => self::TENANT_ID, 'warehouse_id' => $warehouse, 'order_sn' => 'BOOTSTRAP-SALE']);
+            $return = (int)Db::name('sales_return_order')->insertGetId(['tenant_id' => self::TENANT_ID, 'warehouse_id' => $warehouse, 'original_sales_order_id' => 9827, 'order_sn' => 'BOOTSTRAP-RETURN']);
+            self::assertTrue(\app\api\jxc\logic\StockService::inbound($warehouse, $goods, '4', $return, 'sales-return', 'BOOTSTRAP-RETURN', '', $sku));
+        }
+        $this->opening('item', ['category' => 'inventory', 'subject_id' => $stockId, 'amount' => $mode === 'old_transport' ? '180.00' : '200.00', 'historical_date' => null, 'due_date' => null,
+            'source_mode' => 'detail', 'source_reference' => '启用日前一日盘存', 'evidence' => '统一截点数量一百、历史成本二百',
+            'details' => ['quantity' => $mode === 'old_transport' ? '90.0000' : '100.0000', 'origin_reference' => '截点盘存凭据']]);
+        foreach (FinanceSetupLogic::opening()['categories'] as $category) { $this->opening('review', ['category' => $category['key'], 'state' => $category['count'] ? 'complete' : 'none', 'evidence' => '逐类核实']); }
+        $this->opening('submit'); $this->opening('confirm');
+        $cost = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID);
+        self::assertSame($corrected ? '94.0000' : '90.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $sku));
+        self::assertSame($corrected ? '94.000000000000' : '90.000000000000', $cost->balance($warehouse, $sku)['quantity']);
+        self::assertSame($corrected ? '188.000000' : '180.000000', $cost->balance($warehouse, $sku)['value']);
+        self::assertSame($mode === 'old_transport' ? '0.000000' : ($corrected ? '12.000000' : '20.000000'), $cost->destination($warehouse, $sku, $bucket, $destination)['cost']);
+        if ($mode === 'transport') { self::assertSame(date('Y-m-d', strtotime($date . ' +10 days')), $cost->events($sku)[0]['business_date']); }
+        if ($mode === 'old_transport') { self::assertSame([], $cost->events($sku)); }
+        self::assertTrue(\app\api\jxc\logic\StockService::outbound($warehouse, $goods, '5', 9828, 'sales', 'AFTER-ACTIVATION', '', $sku));
+        self::assertSame($corrected ? '89.0000' : '85.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $sku));
+        self::assertSame($corrected ? '178.000000' : '170.000000', $cost->balance($warehouse, $sku)['value']);
+        self::assertSame('10.000000', $cost->destination($warehouse, $sku, 'sale', 'sales_order:9828')['cost']);
+        self::assertSame($mode === 'old_transport' ? '0.000000' : ($corrected ? '12.000000' : '20.000000'), $cost->destination($warehouse, $sku, $bucket, $destination)['cost']);
+    }
+
+    public static function historicalSaleDates(): array { return [[true], [false]]; }
+
+    /** @dataProvider historicalSaleDates */
+    public function test_activation_keeps_return_from_pre_cutoff_sale_unpriced_without_borrowing_opening_unit_cost(bool $knownDate): void
+    {
+        $warehouse = $this->createCustomerReportWarehouse('旧售退回仓');
+        $goods = $this->createCustomerReportGoods('旧售退回商品', 'FIN-OLD-RETURN'); $sku = $this->customerReportSkuId($goods);
+        $stock = (int)Db::name('warehouse_sku_balance')->insertGetId(['tenant_id' => self::TENANT_ID,
+            'warehouse_id' => $warehouse, 'goods_id' => $goods, 'sku_id' => $sku, 'on_hand_qty' => '100', 'available_qty' => '100']);
+        self::assertNotFalse(FinanceSetupLogic::savePreparation($this->command(0) + ['activation_date' => date('Y-m-d'),
+            'inventory_cost_reviewed' => 1, 'legacy_settlement_reviewed' => 1, 'excluded_business_reviewed' => 1]));
+        $sale = (int)Db::name('sales_order')->insertGetId(['tenant_id' => self::TENANT_ID, 'warehouse_id' => $warehouse,
+            'order_sn' => 'PRE-CUTOFF-SALE', 'datetimesingle' => $knownDate ? strtotime('yesterday') : 0]);
+        $return = (int)Db::name('sales_return_order')->insertGetId(['tenant_id' => self::TENANT_ID, 'warehouse_id' => $warehouse,
+            'original_sales_order_id' => $sale, 'order_sn' => 'OLD-SALE-RETURN']);
+        self::assertTrue(\app\api\jxc\logic\StockService::inbound($warehouse, $goods, '4', $return, 'sales-return', 'OLD-SALE-RETURN', '', $sku));
+        $this->opening('item', ['category' => 'inventory', 'subject_id' => $stock, 'amount' => '200.00', 'historical_date' => null, 'due_date' => null,
+            'source_mode' => 'detail', 'source_reference' => '旧售退回前截点盘存', 'evidence' => '截点库存一百；旧销售成本尚待核对',
+            'details' => ['quantity' => '100', 'origin_reference' => '期初盘存']]);
+        foreach (FinanceSetupLogic::opening()['categories'] as $category) { $this->opening('review', ['category' => $category['key'], 'state' => $category['count'] ? 'complete' : 'none', 'evidence' => '逐类核实']); }
+        $this->opening('submit'); $active = $this->opening('confirm');
+        $cost = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID); $balance = $cost->balance($warehouse, $sku);
+        self::assertSame('104.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $sku));
+        self::assertSame('104.000000000000', $balance['quantity']); self::assertSame('200.000000', $balance['known_value']);
+        self::assertNull($balance['value']); self::assertSame('4.000000000000', $balance['pending_quantity']);
+        self::assertCount(1, $active['cost_bootstrap']['pending_flow_ids']);
+        self::assertSame('0.000000000000', $cost->destination($warehouse, $sku, 'sale', 'sales_order:' . $sale)['quantity']);
+    }
+
+    public static function unresolvedBootstrapFlows(): array { return [['purchase', true], ['warehouse-transfer', false]]; }
+
+    /** @dataProvider unresolvedBootstrapFlows */
+    public function test_activation_rejects_unverified_inbound_cost_or_unpaired_stock_destination_atomically(string $type, bool $inbound): void
+    {
+        $warehouse = $this->createCustomerReportWarehouse('未核实承接仓');
+        $goods = $this->createCustomerReportGoods('未核实承接商品', 'FIN-BOOT-BLOCK'); $sku = $this->customerReportSkuId($goods);
+        $stock = (int)Db::name('warehouse_sku_balance')->insertGetId(['tenant_id' => self::TENANT_ID,
+            'warehouse_id' => $warehouse, 'goods_id' => $goods, 'sku_id' => $sku, 'on_hand_qty' => '100', 'available_qty' => '100']);
+        self::assertNotFalse(FinanceSetupLogic::savePreparation($this->command(0) + ['activation_date' => date('Y-m-d'),
+            'inventory_cost_reviewed' => 1, 'legacy_settlement_reviewed' => 1, 'excluded_business_reviewed' => 1]));
+        $method = $inbound ? 'inbound' : 'outbound';
+        self::assertTrue(\app\api\jxc\logic\StockService::$method($warehouse, $goods, '10', 9827, $type, 'UNVERIFIED-STOCK', '', $sku));
+        $this->opening('item', ['category' => 'inventory', 'subject_id' => $stock, 'amount' => '200.00', 'historical_date' => null, 'due_date' => null,
+            'source_mode' => 'detail', 'source_reference' => '截点库存凭据', 'evidence' => '截点库存一百',
+            'details' => ['quantity' => '100', 'origin_reference' => '期初盘存']]);
+        foreach (FinanceSetupLogic::opening()['categories'] as $category) { $this->opening('review', ['category' => $category['key'], 'state' => $category['count'] ? 'complete' : 'none', 'evidence' => '逐类核实']); }
+        $pending = $this->opening('submit');
+        self::assertFalse(FinanceSetupLogic::openingAction('confirm', $this->command((int)$pending['version'])));
+        self::assertStringContainsString('尚未核实', FinanceSetupLogic::getError());
+        self::assertSame('pending', FinanceSetupLogic::opening()['status']);
+        self::assertSame($inbound ? '110.0000' : '90.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $sku));
+        self::assertSame([], (new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID))->events($sku));
+    }
+
     /** @dataProvider arrivalLossPrices */
     public function test_stock_loss_keeps_unresolved_cost_separate_then_confirms_partial_loss_without_second_outbound(?string $initialPrice): void
     {

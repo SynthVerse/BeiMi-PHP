@@ -22,7 +22,8 @@ final class FinanceOpeningWorkflowTest extends TestCase
     {
         $this->prepareCustomerReportRequestContext();
         $this->ensureCustomerReportTables();
-        foreach (['20260907_000001_finance_preparation.sql', '20260907_000002_finance_opening.sql', '20260907_000003_finance_opening_details.sql'] as $migration) {
+        foreach (['20260907_000001_finance_preparation.sql', '20260907_000002_finance_opening.sql', '20260907_000003_finance_opening_details.sql',
+            '20260907_000004_finance_business.sql', '20260907_000014_finance_cost.sql'] as $migration) {
             $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/' . $migration)));
         }
         Db::execute('CREATE TABLE IF NOT EXISTS la_vendor (id int unsigned AUTO_INCREMENT PRIMARY KEY, tenant_id int unsigned NOT NULL, supplier_name varchar(100) NOT NULL) ENGINE=InnoDB');
@@ -502,7 +503,7 @@ final class FinanceOpeningWorkflowTest extends TestCase
                 'warehouse_id' => $warehouse, 'goods_id' => $goods, 'sku_id' => $sku, 'on_hand_qty' => $current, 'available_qty' => $current]);
             Db::name('stock_flow')->insert(['tenant_id' => self::TENANT_ID, 'warehouse_id' => $warehouse, 'goods_id' => $goods,
                 'sku_id' => $sku, 'before_stock' => '10.0000', 'after_stock' => $current, 'quantity' => bcsub('10', $current, 4),
-                'flow_type' => 2, 'create_time' => strtotime('2026-09-02 12:00:00')]);
+                'flow_type' => 2, 'order_type' => 'sales', 'order_id' => 98527, 'create_time' => strtotime('2026-09-02 12:00:00')]);
             self::assertStringContainsString('截点实物库存 #' . $id, implode('；', FinanceSetupLogic::opening()['blockers']));
             $saved = $this->action('item', $this->item('inventory', $id, '200') + ['details' => ['quantity' => '10', 'origin_reference' => '8月31日盘存']]);
             self::assertStringNotContainsString('期初数量与启用截点库存不一致', implode('；', $saved['blockers']));
@@ -563,6 +564,9 @@ final class FinanceOpeningWorkflowTest extends TestCase
     }
     private function clean(): void
     {
+        foreach (['finance_cost_effect', 'finance_cost_event', 'finance_cost_shortage', 'finance_cost_position', 'finance_cost_origin', 'finance_period'] as $table) {
+            Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
+        }
         foreach (['finance_opening_item_detail', 'finance_opening_source', 'finance_opening_item', 'finance_opening_book', 'finance_setup_action', 'finance_account', 'finance_preparation', 'vendor'] as $table) {
             Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         }

@@ -40,10 +40,11 @@ final class FinanceOpeningAssets
     {
         $row['cutoff_qty'] = $row['on_hand_qty'];
         if ($date) {
-            // 库存流水记录实际入出库发生时点；回退截点之后的净变动，包含已售罄的 SKU。
+            // 回退截点之后的净变动；晚录旧交付沿原事件日期，包含已售罄的 SKU。
             $flows = Db::name('stock_flow')->where('tenant_id', $tenantId)->where('warehouse_id', $row['warehouse_id'])
                 ->where('sku_id', $row['sku_id'])->where('create_time', '>=', strtotime($date))->order('id')->lock($lock)->select()->toArray();
             foreach ($flows as $flow) {
+                if (FinanceStockFactTime::resolve($tenantId, $flow, $lock) < strtotime($date)) { continue; }
                 $delta = bcsub($flow['after_stock'], $flow['before_stock'], 4);
                 $row['cutoff_qty'] = bcsub($row['cutoff_qty'], $delta, 4);
             }

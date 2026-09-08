@@ -159,6 +159,10 @@ final class FinanceOpeningService
         if ($version > 0) {
             Db::name('finance_opening_book')->where('tenant_id', $this->tenantId)->update($book);
         } else { Db::name('finance_opening_book')->insert($book); }
+        if ($action === 'confirm') {
+            $confirmed['cost_bootstrap'] = FinanceCostBootstrap::withinTransaction($this->tenantId, $before['activation_date']);
+            Db::name('finance_opening_book')->where('tenant_id', $this->tenantId)->update(['confirmed_snapshot' => self::json($confirmed)]);
+        }
         return [$before, $this->snapshot()];
     }
 
