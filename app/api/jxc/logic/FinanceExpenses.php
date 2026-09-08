@@ -42,6 +42,7 @@ final class FinanceExpenses
         }
         $bill = (int)Db::name('finance_expense_bill')->insertGetId(['tenant_id' => $tenant, 'document_id' => $id, 'vendor_id' => $vendor,
             'source_reference' => $reference, 'source_ref' => $source, 'amount' => $amount, 'snapshot' => FinanceValue::json($snapshot), 'create_time' => time()]);
+        FinanceExpenseIdentities::claim($vendor, $reference, $bill, $id);
         return $snapshot + ['bill_id' => $bill, 'created_sources' => [$source]];
     }
 

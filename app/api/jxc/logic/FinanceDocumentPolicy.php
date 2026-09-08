@@ -7,6 +7,7 @@ namespace app\api\jxc\logic;
 final class FinanceDocumentPolicy
 {
     public const TYPES = [
+        'expense_adjustment' => ['title' => '普通费用关联调整', 'prepare' => 'finance.expense.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],
         'expense' => ['title' => '普通费用确认', 'prepare' => 'finance.expense.prepare', 'confirm' => 'finance.expense.confirm', 'owner' => false, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],
         'expense_category' => ['title' => '费用二级类别维护', 'prepare' => '', 'confirm' => '', 'owner' => true, 'subject' => 'none', 'sources' => [], 'direction' => 'none'],
         'legacy_return_cost' => ['title' => '旧售退回成本核实', 'prepare' => 'finance.inventory.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'none', 'sources' => [], 'direction' => 'none'],
