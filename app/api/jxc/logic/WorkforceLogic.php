@@ -74,6 +74,7 @@ final class WorkforceLogic extends BaseLogic
             ['key' => 'finance.reimbursement.prepare', 'name' => '准备员工垫付报销（不含付款确认）'],
             ['key' => 'finance.equipment.prepare', 'name' => '准备设备业务（不含确认）'],
             ['key' => 'finance.transfer.prepare', 'name' => '准备同门店互转、到账、返还及手续费（不含确认）'],
+            ['key' => 'finance.reconcile.prepare', 'name' => '准备账户月末核对与现金短款（不含确认）'],
             ['key' => 'finance.refund.prepare', 'name' => '准备退款业务（不含确认）'],
             ['key' => 'finance.recovery.prepare', 'name' => '准备坏账追偿收回（不含确认）'],
         ],

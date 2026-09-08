@@ -61,6 +61,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000038_finance_equipment_refund.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000039_finance_opening_equipment_revision.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000040_finance_account_transfer.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000041_finance_account_reconciliation.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -72,6 +73,112 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
 
     public static function deferredClosureCases(): array { return [[false], [true]]; }
+
+    public static function staleShortageCases(): array { return [['backdated'], ['later_reconciliation']]; }
+
+    /** @dataProvider staleShortageCases */
+    public function test_cash_shortage_cannot_reuse_stale_or_superseded_difference(string $case): void
+    {
+        $start = date('Y-m-01', strtotime('first day of last month')); $month = substr($start, 0, 7); $cutoff = date('Y-m-t', strtotime($start)); $this->activate('cash', $start);
+        $data = ['account_id' => $this->accountId, 'month' => $month, 'actual_cutoff' => $cutoff . ' 23:59:59', 'actual_balance' => '4900', 'expected_book_balance' => '5000', 'reconciliation_verified' => 1, 'expected_reconciliation_id' => 0, 'reason' => '核实原短款100'];
+        $record = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_reconcile', 'payload' => $data]); self::assertNotFalse($record, FinanceBusinessLogic::getError());
+        $lossData = ['reconciliation_document_id' => $record['id'], 'actual_date' => $cutoff, 'amount' => '100', 'loss_verified' => 1, 'reason' => '实际遗失已核实'];
+        if ($case === 'backdated') {
+            $receipt = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => array_replace($this->receipt('100', '100'), ['actual_date' => $cutoff])]); self::assertNotFalse($receipt, FinanceBusinessLogic::getError());
+            self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'cash_shortage', 'payload' => $lossData]), '补录改变原核对账面后不能按旧差额登记损失');
+            self::assertSame('5100.00', (new FinanceLedger(self::TENANT_ID))->account($this->accountId)['balance']);
+        } else {
+            $first = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'cash_shortage', 'payload' => array_replace($lossData, ['amount' => '50'])]); self::assertNotFalse($first, FinanceBusinessLogic::getError());
+            $next = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_reconcile', 'payload' => array_replace($data, ['expected_book_balance' => '4950', 'expected_reconciliation_id' => $record['id']])]); self::assertNotFalse($next, FinanceBusinessLogic::getError());
+            $second = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'cash_shortage', 'payload' => array_replace($lossData, ['reconciliation_document_id' => $next['id'], 'amount' => '50'])]); self::assertNotFalse($second, FinanceBusinessLogic::getError());
+            self::assertFalse(FinanceBusinessLogic::action('correct', $this->command($first['version']) + ['id' => $first['id'], 'payload' => $lossData, 'correction_reason' => '不能绕过后续核对增加原损失']), '同一短款已在新核对处理，不能调增旧记录再次消耗');
+            self::assertSame('4900.00', (new FinanceLedger(self::TENANT_ID))->account($this->accountId)['balance']);
+        }
+    }
+
+    public function test_cash_shortage_after_close_keeps_snapshot_and_limits_original_difference_across_corrections(): void
+    {
+        $start = date('Y-m-01', strtotime('first day of last month')); $month = substr($start, 0, 7); $cutoff = date('Y-m-t', strtotime($start)); $this->activate('cash', $start);
+        $data = ['account_id' => $this->accountId, 'month' => $month, 'actual_cutoff' => $cutoff . ' 23:59:59', 'actual_balance' => '4900', 'expected_book_balance' => '5000', 'reconciliation_verified' => 1, 'expected_reconciliation_id' => 0, 'reason' => '保留原月末短款事实'];
+        $record = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_reconcile', 'payload' => $data]); self::assertNotFalse($record, FinanceBusinessLogic::getError());
+        Db::name('finance_period')->insert(['tenant_id' => self::TENANT_ID, 'month' => $month, 'status' => 'estimated', 'snapshot' => '{"frozen":true}', 'closed_by' => '{}', 'closed_at' => time()]);
+        $lossData = ['reconciliation_document_id' => $record['id'], 'actual_date' => $cutoff, 'amount' => '100', 'loss_verified' => 1, 'reason' => '结后查明现金遗失'];
+        foreach ([['amount' => '101'], ['loss_verified' => 0], ['actual_date' => date('Y-m-d')], ['reconciliation_document_id' => 999999999]] as $invalid) {
+            self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'cash_shortage', 'payload' => array_replace($lossData, $invalid)]));
+        }
+        $loss = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'cash_shortage', 'payload' => $lossData]); self::assertNotFalse($loss, FinanceBusinessLogic::getError()); self::assertSame(date('Y-m'), $loss['confirmed_result']['posting_month']);
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'cash_shortage', 'payload' => $lossData]));
+        $options = FinanceBusinessLogic::options(['type' => 'cash_shortage', 'reconciliation_document_id' => $record['id']]); self::assertNotFalse($options, FinanceBusinessLogic::getError());
+        self::assertTrue($options['closed']); self::assertSame('5000.00', $options['checks'][0]['book_balance']); self::assertSame('0.00', $options['selected_reconciliation']['remaining_shortage']);
+        $reverse = FinanceBusinessLogic::action('reverse', $this->command($loss['version']) + ['id' => $loss['id'], 'correction_reason' => '错误遗失结论按关联反向恢复']); self::assertNotFalse($reverse, FinanceBusinessLogic::getError());
+        self::assertSame('5000.00', (new FinanceLedger(self::TENANT_ID))->account($this->accountId)['balance']);
+        $replacement = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'cash_shortage', 'payload' => $lossData]); self::assertNotFalse($replacement, FinanceBusinessLogic::getError());
+        self::assertSame('{"frozen":true}', Db::name('finance_period')->where('tenant_id', self::TENANT_ID)->where('month', $month)->value('snapshot'));
+        self::assertSame(0, Db::name('finance_money_transaction')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
+    public function test_account_reconciliation_rejects_unseen_balance_changes_and_shortage_requires_owner_and_real_cash(): void
+    {
+        $start = date('Y-m-01', strtotime('first day of last month')); $month = substr($start, 0, 7); $cutoff = date('Y-m-t', strtotime($start)); $this->activate('bank', $start);
+        $data = ['account_id' => $this->accountId, 'month' => $month, 'actual_cutoff' => $cutoff . ' 23:59:59', 'actual_balance' => '4900', 'expected_book_balance' => '4999', 'reconciliation_verified' => 1, 'expected_reconciliation_id' => 0, 'reason' => '核对月末银行对账单'];
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_reconcile', 'payload' => $data]), '不能把用户未看到的新账面余额自动确认');
+        $data['expected_book_balance'] = '5000';
+        $record = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_reconcile', 'payload' => $data]); self::assertNotFalse($record, FinanceBusinessLogic::getError());
+        $loss = ['reconciliation_document_id' => $record['id'], 'actual_date' => $cutoff, 'amount' => '100', 'loss_verified' => 1, 'reason' => '银行差额不能虚构现金遗失'];
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'cash_shortage', 'payload' => $loss])); self::assertStringContainsString('现金账户', FinanceBusinessLogic::getError());
+        Db::name('finance_period')->insert(['tenant_id' => self::TENANT_ID, 'month' => $month, 'status' => 'closed', 'snapshot' => '{"frozen":true}', 'closed_by' => '{}', 'closed_at' => time()]);
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_reconcile', 'payload' => array_replace($data, ['expected_reconciliation_id' => $record['id']])]));
+        self::assertStringContainsString('已结', FinanceBusinessLogic::getError());
+        $employee = WorkforceLogic::saveEmployee(['name' => '仅准备账户核对', 'mobile' => '13800009948', 'bind_user_id' => 996948, 'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['finance.reconcile.prepare']]); self::assertNotFalse($employee, WorkforceLogic::getError());
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996948; request()->adminId = 0;
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'cash_shortage', 'payload' => $loss])); self::assertStringContainsString('最高权限', FinanceBusinessLogic::getError());
+        self::assertNotFalse(FinanceBusinessLogic::action('prepare', $this->command(0) + ['type' => 'account_reconcile', 'payload' => $data]), FinanceBusinessLogic::getError());
+    }
+
+    public function test_cash_shortage_uses_verified_difference_without_external_payment_and_requires_reconciliation_again(): void
+    {
+        $start = date('Y-m-01', strtotime('first day of last month')); $month = substr($start, 0, 7); $cutoff = date('Y-m-t', strtotime($start)); $this->activate('cash', $start);
+        $data = ['account_id' => $this->accountId, 'month' => $month, 'actual_cutoff' => $cutoff . ' 23:59:59', 'actual_balance' => '4900', 'expected_book_balance' => '5000', 'reconciliation_verified' => 1, 'expected_reconciliation_id' => 0, 'reason' => '实盘发现短款100元'];
+        $record = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_reconcile', 'payload' => $data]); self::assertNotFalse($record, FinanceBusinessLogic::getError());
+        $lossData = ['reconciliation_document_id' => $record['id'], 'actual_date' => $cutoff, 'amount' => '100', 'loss_verified' => 1, 'reason' => '查明为门店承担的现金遗失，清点记录已核对'];
+        $command = $this->command(0) + ['type' => 'cash_shortage', 'payload' => $lossData];
+        $loss = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($loss, FinanceBusinessLogic::getError());
+        self::assertSame($loss, FinanceBusinessLogic::action('record', $command));
+        $ledger = new FinanceLedger(self::TENANT_ID); self::assertSame('4900.00', $ledger->account($this->accountId)['balance']);
+        self::assertEquals(100, Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('metric', 'loss')->sum('amount'));
+        self::assertSame(0, Db::name('finance_money_transaction')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'cash_shortage', 'payload' => $lossData]));
+        $checks = FinanceBusinessLogic::options(['type' => 'account_reconcile', 'month' => $month])['checks']; self::assertSame('needs_review', $checks[0]['state']);
+        $corrected = FinanceBusinessLogic::action('correct', $this->command($loss['version']) + ['id' => $loss['id'], 'payload' => array_replace($lossData, ['amount' => '80']), 'correction_reason' => '查明20元不是遗失，纠正原短款损失']); self::assertNotFalse($corrected, FinanceBusinessLogic::getError());
+        self::assertSame('4920.00', $ledger->account($this->accountId)['balance']);
+        $rest = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'cash_shortage', 'payload' => array_replace($lossData, ['amount' => '20'])]); self::assertNotFalse($rest, FinanceBusinessLogic::getError());
+        $newRecord = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_reconcile', 'payload' => array_replace($data, ['expected_book_balance' => '4900', 'expected_reconciliation_id' => $record['id']])]); self::assertNotFalse($newRecord, FinanceBusinessLogic::getError());
+        self::assertSame('matched', FinanceBusinessLogic::options(['type' => 'account_reconcile', 'month' => $month])['checks'][0]['state']);
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'cash_shortage', 'payload' => array_replace($lossData, ['reconciliation_document_id' => $newRecord['id'], 'amount' => '1'])]));
+        self::assertFalse(FinanceBusinessLogic::action('reverse', $this->command($record['version']) + ['id' => $record['id'], 'correction_reason' => '不能删除原核对历史']));
+    }
+
+    public function test_account_reconciliation_preserves_cutoff_and_requires_review_only_for_changed_account(): void
+    {
+        $start = date('Y-m-01', strtotime('first day of last month')); $month = substr($start, 0, 7); $cutoff = date('Y-m-t', strtotime($start));
+        $this->activate('cash', $start);
+        $other = FinanceSetupLogic::saveAccount($this->command(0) + ['name' => '备用现金', 'account_type' => 'cash']); self::assertNotFalse($other);
+        $data = ['account_id' => $this->accountId, 'month' => $month, 'actual_cutoff' => $cutoff . ' 23:59:59', 'actual_balance' => '5000', 'expected_book_balance' => '5000', 'reconciliation_verified' => 1, 'expected_reconciliation_id' => 0, 'reason' => '按月末同一时点清点现金'];
+        $record = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_reconcile', 'payload' => $data]); self::assertNotFalse($record, FinanceBusinessLogic::getError());
+        self::assertSame('5000.00', $record['confirmed_result']['book_balance']); self::assertSame('0.00', $record['confirmed_result']['difference']);
+        $otherRecord = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_reconcile', 'payload' => array_replace($data, ['account_id' => (int)$other['id'], 'actual_balance' => '0', 'expected_book_balance' => '0'])]); self::assertNotFalse($otherRecord, FinanceBusinessLogic::getError());
+        self::assertSame(0, Db::name('finance_money_transaction')->where('tenant_id', self::TENANT_ID)->count());
+        $receipt = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $this->receipt('100', '100')]); self::assertNotFalse($receipt, FinanceBusinessLogic::getError());
+        $options = FinanceBusinessLogic::options(['type' => 'account_reconcile', 'month' => $month]); self::assertNotFalse($options, FinanceBusinessLogic::getError());
+        $checks = array_column($options['checks'], null, 'account_id'); self::assertSame('matched', $checks[$this->accountId]['state']);
+        $backdated = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => array_replace($this->receipt('200', '200'), ['actual_date' => $cutoff])]); self::assertNotFalse($backdated, FinanceBusinessLogic::getError());
+        $options = FinanceBusinessLogic::options(['type' => 'account_reconcile', 'month' => $month]); $checks = array_column($options['checks'], null, 'account_id');
+        self::assertSame('needs_review', $checks[$this->accountId]['state']); self::assertSame('5200.00', $checks[$this->accountId]['book_balance']); self::assertSame('matched', $checks[(int)$other['id']]['state']);
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_reconcile', 'payload' => array_replace($data, ['actual_balance' => '5200'])]));
+        $updated = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_reconcile', 'payload' => array_replace($data, ['actual_balance' => '5200', 'expected_book_balance' => '5200', 'expected_reconciliation_id' => $record['id']])]); self::assertNotFalse($updated, FinanceBusinessLogic::getError());
+        self::assertSame('0.00', $updated['confirmed_result']['difference']); self::assertSame($record['confirmed_result'], FinanceBusinessLogic::detail(['id' => $record['id']])['confirmed_result']);
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_reconcile', 'payload' => array_replace($data, ['actual_cutoff' => date('Y-m-d') . ' 23:59:59', 'expected_reconciliation_id' => $updated['id']])]));
+    }
 
     public function test_unclaimed_customer_to_vendor_correction_records_reopened_customer_overdue_history(): void
     {
@@ -3948,6 +4055,8 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
     private function clean(): void
     {
+        Db::name('finance_cash_shortage_application')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
+        Db::name('finance_account_reconciliation')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         foreach (['finance_recurring_month_revision', 'finance_recurring_expense_month', 'finance_recurring_expense_plan'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         foreach (['finance_transfer_settlement', 'finance_account_transfer', 'finance_opening_equipment_revision', 'finance_equipment_refund_revision', 'finance_equipment_refund_due', 'finance_equipment_revision', 'finance_equipment_purchase', 'finance_salary_revision', 'finance_salary_result', 'finance_employee_expense_revision', 'finance_employee_expense', 'finance_expense_estimate_resolution', 'finance_deferred_amortization', 'finance_expense_identity', 'finance_expense_revision', 'finance_expense_bill', 'finance_expense_category'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         foreach (['finance_inventory_loss_resolution', 'finance_inventory_loss'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }

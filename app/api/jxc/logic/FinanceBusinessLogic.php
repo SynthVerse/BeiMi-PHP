@@ -129,6 +129,7 @@ final class FinanceBusinessLogic extends BaseLogic
             if ($type === 'supplier_credit_allocate' && ($params['role'] ?? '') === 'fund') { $categories = ['supplier_refund']; }
             $page = max(1, FinanceValue::id($params['page'] ?? 1));
             $sources = match ($type) {
+                'account_reconcile', 'cash_shortage' => FinanceReconciliations::options($ledger, $params),
                 'unclaimed_receipt', 'unclaimed_customer_claim', 'unclaimed_recovery_claim', 'unclaimed_supplier_refund_claim', 'unclaimed_expense_refund_claim', 'unclaimed_equipment_refund_claim' => FinanceUnclaimed::options($ledger, $type, $params),
                 'account_transfer_out', 'account_transfer_arrival', 'account_transfer_return' => FinanceAccountTransfers::options($ledger, $params),
                 'equipment_purchase', 'equipment_adjustment' => FinanceEquipment::options($subjectId, $params),

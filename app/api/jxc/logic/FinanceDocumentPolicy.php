@@ -7,6 +7,8 @@ namespace app\api\jxc\logic;
 final class FinanceDocumentPolicy
 {
     public const TYPES = [
+        'cash_shortage' => ['title' => '核实现金短款损失', 'prepare' => 'finance.reconcile.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'account', 'sources' => [], 'direction' => 'none'],
+        'account_reconcile' => ['title' => '账户月末核对', 'prepare' => 'finance.reconcile.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'account', 'sources' => [], 'direction' => 'none'],
         'unclaimed_receipt' => ['title' => '待认领实际到账', 'prepare' => 'finance.receipt.prepare', 'confirm' => 'finance.receipt.confirm', 'owner' => false, 'subject' => 'account', 'sources' => [], 'direction' => 'in'],
         'unclaimed_customer_claim' => ['title' => '待认领转客户收款', 'prepare' => 'finance.receipt.prepare', 'confirm' => 'finance.receipt.confirm', 'owner' => false, 'subject' => 'customer', 'sources' => ['receivable'], 'direction' => 'none'],
         'unclaimed_recovery_claim' => ['title' => '待认领转坏账收回', 'prepare' => 'finance.recovery.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'customer', 'sources' => ['recovery'], 'direction' => 'none'],
