@@ -17,6 +17,23 @@ final class FinanceUnclaimed
         'unclaimed_equipment_refund_claim' => 'equipment_refund',
     ];
 
+    public static function replacementType(string $originalType, array $data): string
+    {
+        $type = FinanceValue::text($data['replacement_type'] ?? $originalType, 40);
+        if ($type === $originalType) { return $type; }
+        if (!isset(self::CLAIM_TYPES[$originalType], self::CLAIM_TYPES[$type])) { throw new \DomainException('只有待认领用途认领可以关联改为另一合法认领用途'); }
+        FinanceDocumentPolicy::authorize($type, true);
+        return $type;
+    }
+
+    public static function reauthorizeCorrection(array $result): void
+    {
+        if (!isset(self::CLAIM_TYPES[$result['type'] ?? '']) || empty($result['corrects_document_id'])) { return; }
+        $type = Db::name('finance_document')->where('tenant_id', FinanceAccess::tenant())->where('id', $result['corrects_document_id'])->value('type');
+        if (!$type || !isset(self::CLAIM_TYPES[$type])) { throw new \DomainException('原认领更正关系无效，请核对原记录'); }
+        FinanceDocumentPolicy::authorize($type, true);
+    }
+
     public static function receipt(FinanceLedger $ledger, array $document, array $data, ?array $originalTransaction): array
     {
         if (($data['funds_verified'] ?? null) !== 1) { throw new \DomainException('金额、实际日期、账户及门店须全部核实；仅付款客户或用途可以未知'); }

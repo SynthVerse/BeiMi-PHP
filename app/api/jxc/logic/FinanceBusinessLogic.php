@@ -30,6 +30,7 @@ final class FinanceBusinessLogic extends BaseLogic
                 if ($existing) {
                     $result = FinanceValue::decode($existing['result']);
                     FinanceDocumentPolicy::authorize($result['type'], in_array($action, ['confirm', 'record', 'correct', 'reverse_duplicate', 'reverse'], true));
+                    FinanceUnclaimed::reauthorizeCorrection($result['confirmed_result']);
                     if ($result['type'] === 'sales_batch' && $result['status'] === 'confirmed') { FinanceSalesBatches::reauthorize($result['confirmed_result']); }
                     if ($result['type'] === 'purchase_settlement' && $result['status'] === 'confirmed') { FinancePurchaseBatches::reauthorize($result['confirmed_result']); }
                     if ($result['type'] === 'purchase_difference' && $result['status'] === 'confirmed') { FinancePurchaseReviews::reauthorize($result['confirmed_result']); }
@@ -46,6 +47,9 @@ final class FinanceBusinessLogic extends BaseLogic
                 if (!$document && ($version !== 0 || !in_array($action, ['save', 'prepare', 'record'], true))) { throw new \DomainException('请先保存有效草稿'); }
                 $original = in_array($action, ['correct', 'reverse_duplicate', 'reverse'], true) ? $document : null;
                 if ($original && $original['status'] !== 'confirmed') { throw new \DomainException('仅已确认记录可关联更正'); }
+                if ($original && $action === 'correct' && isset($params['payload']['replacement_type'])) {
+                    $type = FinanceUnclaimed::replacementType($type, $params['payload']);
+                }
                 if ($document && $document['status'] === 'confirmed' && !$original) { throw new \DomainException('已确认单据不可覆盖或删除，请使用关联更正'); }
                 if ($original) { $document = null; }
                 if (in_array($action, ['save', 'prepare', 'record', 'correct', 'reverse_duplicate', 'reverse'], true)) {
@@ -67,11 +71,13 @@ final class FinanceBusinessLogic extends BaseLogic
                     if ($document['status'] !== 'pending') { throw new \DomainException('请先提交草稿再确认'); }
                     $ledger = new FinanceLedger($tenantId); $ledger->lockBook();
                     $affectedCustomers = [];
-                    if (FinanceDocumentPolicy::TYPES[$type]['subject'] === 'customer') {
-                        foreach ([$document, $original] as $affected) { if ($affected) { $customerId = (int)(FinanceValue::decode($affected['payload'])['subject_id'] ?? 0); if ($customerId > 0) { $affectedCustomers[] = $customerId; } } }
-                        $affectedCustomers = array_values(array_unique($affectedCustomers));
-                        if ($affectedCustomers) { FinanceOverdue::captureWithinTransaction($tenantId, $affectedCustomers); }
+                    foreach ([$document, $original] as $affected) {
+                        if (!$affected || FinanceDocumentPolicy::TYPES[$affected['type']]['subject'] !== 'customer') { continue; }
+                        $customerId = (int)(FinanceValue::decode($affected['payload'])['subject_id'] ?? 0);
+                        if ($customerId > 0) { $affectedCustomers[] = $customerId; }
                     }
+                    $affectedCustomers = array_values(array_unique($affectedCustomers));
+                    if ($affectedCustomers) { FinanceOverdue::captureWithinTransaction($tenantId, $affectedCustomers); }
                     if ($type === 'sales_batch' && in_array($action, ['reverse', 'reverse_duplicate'], true)) { throw new \DomainException('销售结算应使用关联金额更正，不能直接反向已发生的销售'); }
                     $result = $type === 'sales_batch' ? FinanceSalesBatches::confirm($ledger, $document, $original, (string)($params['correction_reason'] ?? '')) : ($original ? (new FinanceCorrections($tenantId, $ledger))->replace($original, $document, (string)($params['correction_reason'] ?? ''),
                         $action === 'reverse_duplicate' ? FinanceValue::id($params['duplicate_of'] ?? 0) : 0, $action === 'reverse')
