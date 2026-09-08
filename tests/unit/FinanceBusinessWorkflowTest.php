@@ -101,8 +101,35 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertFalse(FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => 'cash']));
         $expense = FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => 'expense']); self::assertNotFalse($expense, FinanceBusinessLogic::getError()); self::assertSame('100.00', $expense['data']['summary']['amount']); self::assertSame([], $expense['data']['entries']); self::assertSame([], $expense['data']['obligations']['sources']); self::assertSame([], $expense['data']['obligations']['subjects']);
         self::assertStringNotContainsString('工资私密依据', json_encode($expense, JSON_UNESCAPED_UNICODE));
+        $yearly = FinanceBusinessLogic::monthlyReport(['period_type' => 'year', 'period' => substr($month, 0, 4), 'report' => 'expense']); self::assertNotFalse($yearly, FinanceBusinessLogic::getError());
+        self::assertSame('100.00', $yearly['data']['summary']['amount']); self::assertStringNotContainsString('工资私密依据', json_encode($yearly, JSON_UNESCAPED_UNICODE)); self::assertFalse($yearly['followups_visible']);
+        self::assertFalse(FinanceBusinessLogic::monthlyReport(['period_type' => 'year', 'period' => substr($month, 0, 4), 'report' => 'cash']));
         Db::name('employee_permission')->insert(['tenant_id' => self::TENANT_ID, 'employee_id' => $employee['id'], 'permission_key' => 'finance.salary.view']);
         $visible = FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => 'expense']); self::assertNotFalse($visible, FinanceBusinessLogic::getError()); self::assertCount(1, $visible['data']['entries']);
+    }
+
+    public function test_year_reports_sum_flows_keep_last_balances_and_preserve_frozen_months(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
+        $receipt = $this->receipt('100', '100'); $receipt['actual_date'] = $month . '-02';
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $receipt]), FinanceBusinessLogic::getError());
+        $preview = FinanceBusinessLogic::periodAction('preview', ['month' => $month]);
+        $closed = FinanceBusinessLogic::periodAction('close', $this->command(0) + ['month' => $month, 'mode' => 'estimated', 'acknowledge_unresolved' => 1, 'expected_fingerprint' => $preview['fingerprint'], 'reason' => '年度报表保留原月核验状态']); self::assertNotFalse($closed, FinanceBusinessLogic::getError());
+        $receipt['actual_date'] = date('Y-m-d');
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $receipt]), FinanceBusinessLogic::getError());
+        $sameYear = substr($month, 0, 4) === date('Y');
+        $query = ['period_type' => 'year', 'period' => substr($month, 0, 4)];
+        $cash = FinanceBusinessLogic::monthlyReport($query + ['report' => 'cash']); self::assertNotFalse($cash, FinanceBusinessLogic::getError());
+        self::assertSame('year', $cash['period_type']); self::assertSame($month, $cash['start_month']);
+        self::assertSame('5000.00', $cash['data']['summary']['opening_accounts']); self::assertSame($sameYear ? '5200.00' : '5100.00', $cash['data']['summary']['closing_accounts']); self::assertSame($sameYear ? '200.00' : '100.00', $cash['data']['summary']['external_in']);
+        self::assertSame($closed['snapshot']['reports']['cash'], $cash['months'][0]); self::assertTrue($cash['verification']['has_unresolved']);
+        $customer = FinanceBusinessLogic::monthlyReport($query + ['report' => 'customer']); self::assertNotFalse($customer);
+        $ar = array_values(array_filter($customer['data']['categories'], static fn(array $row): bool => $row['category'] === 'receivable'))[0];
+        self::assertSame($sameYear ? '-200.00' : '-100.00', $ar['entries_change']); self::assertSame(bcsub($ar['opening'], $sameYear ? '200' : '100', 2), $ar['closing']);
+        foreach (['profit', 'vendor', 'expense', 'inventory'] as $kind) { self::assertNotFalse(FinanceBusinessLogic::monthlyReport($query + ['report' => $kind]), FinanceBusinessLogic::getError()); }
+        $quarter = date('Y') . '-Q' . (string)(int)ceil((int)date('n') / 3);
+        self::assertNotFalse(FinanceBusinessLogic::monthlyReport(['period_type' => 'quarter', 'period' => $quarter, 'report' => 'cash']), FinanceBusinessLogic::getError());
+        foreach ([['period_type' => 'quarter', 'period' => '2026-Q5'], ['period_type' => 'year', 'period' => '9999'], ['period_type' => 'week', 'period' => '2026']] as $invalid) { self::assertFalse(FinanceBusinessLogic::monthlyReport($invalid + ['report' => 'cash'])); }
     }
 
     public function test_closed_transit_followup_distinguishes_later_arrival_from_backdated_adjustment(): void
@@ -318,6 +345,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $confirmed = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'sales_batch', 'payload' => ['subject_id' => $this->customerId, 'reason' => '月报正式收入', 'rounding_amount' => '0', 'precision_mode' => 'cents', 'lines' => [['delivery_item_id' => $delivery, 'covered_weight' => '2', 'settlement_weight' => '2', 'price' => '10']]]]); self::assertNotFalse($confirmed, FinanceBusinessLogic::getError());
         $report = FinanceBusinessLogic::monthlyReport(['month' => date('Y-m'), 'report' => 'profit']); self::assertNotFalse($report, FinanceBusinessLogic::getError());
         self::assertSame('20.00', $report['data']['summary']['revenue']); self::assertNull($report['data']['summary']['sales_cost']); self::assertNull($report['data']['summary']['profit']); self::assertSame('0.00', $report['data']['summary']['known_sales_cost']);
+        $yearly = FinanceBusinessLogic::monthlyReport(['period_type' => 'year', 'period' => date('Y'), 'report' => 'profit']); self::assertNotFalse($yearly, FinanceBusinessLogic::getError()); self::assertNull($yearly['data']['summary']['sales_cost']); self::assertNull($yearly['data']['summary']['profit']); self::assertTrue($yearly['data']['summary']['cost_pending']);
         self::assertTrue($report['verification']['has_unresolved']);
         $item = Db::name('fulfillment_delivery_item')->where('delivery_event_id', $sale['event_id'])->find(); $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '月报成本供方']);
         $arrival = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival', 'payload' => ['subject_id' => $vendor, 'warehouse_id' => $item['warehouse_id'], 'actual_date' => date('Y-m-d'), 'source_reference' => 'REPORT-COST-51', 'reason' => '核实漏记的实际入库来源', 'lines' => [['sku_id' => $item['sku_id'], 'actual_quantity' => '2', 'reported_quantity' => '2', 'agreed_price' => '3']]]]); self::assertNotFalse($arrival, FinanceBusinessLogic::getError());

@@ -29,7 +29,7 @@ final class FinanceBusinessLogic extends BaseLogic
             FinanceReports::authorize($params);
             return Db::transaction(static function () use ($params): array {
                 $ledger = new FinanceLedger(FinanceAccess::tenant()); $ledger->lockBook();
-                return FinanceReports::monthly($ledger, $params);
+                return FinanceReportPeriods::read($ledger, $params);
             });
         } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
     }
