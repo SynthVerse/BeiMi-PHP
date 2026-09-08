@@ -123,6 +123,7 @@ final class FinanceBusinessLogic extends BaseLogic
             if ($type === 'supplier_credit_allocate' && ($params['role'] ?? '') === 'fund') { $categories = ['supplier_refund']; }
             $page = max(1, FinanceValue::id($params['page'] ?? 1));
             $sources = match ($type) {
+                'salary_adjustment' => FinanceSalaries::adjustmentOptions($subjectId, $params),
                 'salary_expense' => FinanceSalaries::options($params),
                 'employee_expense_adjustment' => FinanceEmployeeExpenses::options($subjectId, $params),
                 'employee_expense' => !empty($params['original_expense_document_id']) ? FinanceEmployeeExpenses::outstanding(FinanceValue::id($params['original_expense_document_id'])) : FinanceExpenseCategories::options(),
@@ -189,7 +190,7 @@ final class FinanceBusinessLogic extends BaseLogic
             return ['tenant_id' => FinanceAccess::tenant(), 'type' => $type, 'policy' => $policy,
                 'active' => Db::name('finance_opening_book')->where('tenant_id', FinanceAccess::tenant())->value('status') === 'active',
                 'can_confirm' => FinanceAccess::owner() || (!$policy['owner'] && FinanceAccess::has($policy['confirm'])),
-                'can_prepare' => in_array($type, ['salary_expense', 'salary_payment'], true) ? FinanceAccess::has('finance.salary.prepare') : ($type !== 'sales_batch' || FinanceAccess::has('settlement.bill')),
+                'can_prepare' => in_array($type, ['salary_expense', 'salary_payment', 'salary_adjustment'], true) ? FinanceAccess::has('finance.salary.prepare') : ($type !== 'sales_batch' || FinanceAccess::has('settlement.bill')),
                 'can_return_receipt' => $type === 'receipt' && FinanceAccess::has('finance.refund.prepare'),
                 'accounts' => $accounts] + $sources;
         } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
@@ -207,7 +208,7 @@ final class FinanceBusinessLogic extends BaseLogic
     {
         $types = [];
         foreach (FinanceDocumentPolicy::TYPES as $type => $policy) {
-            try { FinanceDocumentPolicy::read($type); $types[] = ['type' => $type, 'title' => $policy['title'], 'subject' => $policy['subject'], 'can_prepare' => in_array($type, ['salary_expense', 'salary_payment'], true) ? FinanceAccess::has('finance.salary.prepare') : ($type !== 'sales_batch' || FinanceAccess::has('settlement.bill'))]; }
+            try { FinanceDocumentPolicy::read($type); $types[] = ['type' => $type, 'title' => $policy['title'], 'subject' => $policy['subject'], 'can_prepare' => in_array($type, ['salary_expense', 'salary_payment', 'salary_adjustment'], true) ? FinanceAccess::has('finance.salary.prepare') : ($type !== 'sales_batch' || FinanceAccess::has('settlement.bill'))]; }
             catch (\DomainException) { continue; }
         }
         return ['tenant_id' => FinanceAccess::tenant(), 'types' => $types,

@@ -15,6 +15,7 @@ final class FinancePayments
     {
         $type = $document['type']; $policy = FinanceDocumentPolicy::authorize($type, true);
         $data = FinanceValue::decode($document['payload']);
+        if ($type === 'salary_adjustment') { return FinanceSalaries::adjust($this->ledger, $document, $data); }
         if ($type === 'salary_expense') { return FinanceSalaries::confirm($this->ledger, $document, $data); }
         if ($type === 'employee_expense') { return FinanceEmployeeExpenses::confirm($this->ledger, $document, $data); }
         if ($type === 'employee_expense_adjustment') { return FinanceEmployeeExpenses::adjust($this->ledger, $document, $data); }

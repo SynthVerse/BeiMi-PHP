@@ -56,6 +56,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000033_finance_employee_expense.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000034_finance_employee_expense_revision.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000035_finance_salary_result.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000036_finance_salary_revision.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -68,13 +69,83 @@ final class FinanceBusinessWorkflowTest extends TestCase
 
     public static function deferredClosureCases(): array { return [[false], [true]]; }
 
+    public function test_zero_salary_can_gain_an_obligation_once_and_adjustment_reads_remain_private(): void
+    {
+        $this->activate();
+        $employee = WorkforceLogic::saveEmployee(['name' => '零工资复核员工', 'mobile' => '13800009945', 'bind_user_id' => 996945,
+            'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['finance.salary.view']]); self::assertNotFalse($employee, WorkforceLogic::getError());
+        $category = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_category', 'payload' => [
+            'category_id' => 0, 'expected_category_version' => 0, 'parent' => 'personnel', 'name' => '零工资复核类别', 'is_enabled' => 1]]); self::assertNotFalse($category, FinanceBusinessLogic::getError());
+        $data = ['subject_id' => $employee['id'], 'benefit_month' => date('Y-m'), 'amount' => '0', 'source_reference' => 'SALARY-41-ZERO', 'salary_verified' => 1,
+            'confirmation_basis' => '初次核定结果', 'reason' => '当月工资', 'material_status' => 'missing', 'material_verified' => 1, 'missing_material_reason' => '已经核实', 'lines' => []];
+        $original = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'salary_expense', 'payload' => $data]); self::assertNotFalse($original, FinanceBusinessLogic::getError());
+        $adjust = ['subject_id' => $employee['id'], 'original_expense_document_id' => $original['id'], 'expected_revision_id' => 0, 'benefit_month' => date('Y-m'),
+            'new_amount' => '500', 'adjustment_verified' => 1, 'reason' => '外部复核补增工资', 'confirmation_basis' => '最终核定修正表',
+            'lines' => [['category_id' => $category['confirmed_result']['category']['id'], 'expected_category_version' => 1, 'amount' => '500', 'reason' => '人员工资']]];
+        $command = $this->command(0) + ['type' => 'salary_adjustment', 'payload' => $adjust];
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($command + ['action' => 'record']); self::assertSame('500.00', $preview['balances'][0]['change']);
+        self::assertSame([], (new FinanceLedger(self::TENANT_ID))->sources('salary', $employee['id']));
+        $result = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($result, FinanceBusinessLogic::getError()); self::assertSame($result, FinanceBusinessLogic::action('record', $command));
+        $source = $result['confirmed_result']['created_sources'][0]; self::assertSame('0.00', $result['confirmed_result']['paid_amount']);
+        $adjust['expected_revision_id'] = $result['confirmed_result']['revision_id']; $adjust['new_amount'] = '0'; $adjust['lines'] = [];
+        $zero = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'salary_adjustment', 'payload' => $adjust]); self::assertNotFalse($zero, FinanceBusinessLogic::getError());
+        self::assertSame([], FinanceBusinessLogic::options(['type' => 'salary_expense', 'original_expense_document_id' => $original['id']])['current_sources']);
+        self::assertSame('0.00', (new FinanceLedger(self::TENANT_ID))->source($source)['balance']);
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996945; request()->adminId = 0;
+        self::assertNotFalse(FinanceBusinessLogic::detail(['id' => $zero['id']]), FinanceBusinessLogic::getError());
+        self::assertFalse(FinanceBusinessLogic::options(['type' => 'salary_adjustment'])['can_prepare']);
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'salary_adjustment', 'payload' => $adjust]));
+        Db::name('employee_permission')->where('tenant_id', self::TENANT_ID)->where('employee_id', $employee['id'])->where('permission_key', 'finance.salary.view')->delete();
+        self::assertFalse(FinanceBusinessLogic::detail(['id' => $zero['id']])); self::assertFalse(FinanceBusinessLogic::options(['type' => 'salary_adjustment']));
+    }
+
+    public function test_salary_adjustment_preserves_paid_wages_and_changes_only_remaining_obligation(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
+        $employee = WorkforceLogic::saveEmployee(['name' => '工资调整员工', 'mobile' => '13800009944', 'bind_user_id' => 996944,
+            'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => []]); self::assertNotFalse($employee, WorkforceLogic::getError());
+        $category = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_category', 'payload' => [
+            'category_id' => 0, 'expected_category_version' => 0, 'parent' => 'personnel', 'name' => '工资调整类别', 'is_enabled' => 1]]);
+        self::assertNotFalse($category, FinanceBusinessLogic::getError()); $categoryId = $category['confirmed_result']['category']['id'];
+        $data = ['subject_id' => $employee['id'], 'benefit_month' => $month, 'amount' => '2000', 'source_reference' => 'PAYROLL-41',
+            'salary_verified' => 1, 'confirmation_basis' => '外部核定工资', 'reason' => '当月工资', 'material_status' => 'missing', 'material_verified' => 1, 'missing_material_reason' => '核实结果',
+            'lines' => [['category_id' => $categoryId, 'expected_category_version' => 1, 'amount' => '2000', 'reason' => '人员工资']]];
+        $original = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'salary_expense', 'payload' => $data]); self::assertNotFalse($original, FinanceBusinessLogic::getError());
+        $source = $original['confirmed_result']['created_sources'][0];
+        $payment = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'salary_payment', 'payload' => [
+            'subject_id' => $employee['id'], 'account_id' => $this->accountId, 'actual_date' => date('Y-m-d'), 'amount' => '1200', 'reason' => '已实际发放', 'allocations' => [['source' => $source, 'amount' => '1200']]]]);
+        self::assertNotFalse($payment, FinanceBusinessLogic::getError());
+        Db::name('finance_period')->insert(['tenant_id' => self::TENANT_ID, 'month' => $month, 'status' => 'closed', 'snapshot' => '{}', 'closed_by' => '{}', 'closed_at' => time()]);
+        $adjust = ['subject_id' => $employee['id'], 'new_subject_id' => $employee['id'], 'original_expense_document_id' => $original['id'], 'expected_revision_id' => 0,
+            'benefit_month' => $month, 'new_amount' => '1500', 'adjustment_verified' => 1, 'reason' => '核定总额修正', 'confirmation_basis' => '外部复核最终结果',
+            'lines' => [['category_id' => $categoryId, 'expected_category_version' => 1, 'amount' => '1500', 'reason' => '人员工资']]];
+        $command = $this->command(0) + ['type' => 'salary_adjustment', 'payload' => $adjust];
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($command + ['action' => 'record']);
+        self::assertSame([['metric' => 'expense', 'posting_month' => date('Y-m'), 'amount' => '-500.00']], $preview['impacts']);
+        $result = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($result, FinanceBusinessLogic::getError()); self::assertSame($result, FinanceBusinessLogic::action('record', $command));
+        self::assertSame('1200.00', $result['confirmed_result']['paid_amount']); self::assertSame('300.00', $result['confirmed_result']['balance_changes'][0]['after']);
+        self::assertSame('3800.00', (new FinanceLedger(self::TENANT_ID))->account($this->accountId)['balance']);
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'salary_adjustment', 'payload' => $adjust]));
+        $adjust['expected_revision_id'] = $result['confirmed_result']['revision_id'];
+        foreach ([['new_amount' => '1100'], ['new_subject_id' => 999999999], ['benefit_month' => date('Y-m')]] as $invalid) {
+            self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'salary_adjustment', 'payload' => array_replace($adjust, $invalid)]));
+        }
+        $options = FinanceBusinessLogic::options(['type' => 'salary_adjustment', 'original_expense_document_id' => $original['id']]);
+        self::assertSame('1500.00', $options['bills'][0]['expense']['amount']); self::assertSame('1200.00', $options['bills'][0]['paid_amount']);
+        $adjust['new_amount'] = '1800'; $adjust['lines'][0]['amount'] = '1800';
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'salary_adjustment', 'payload' => $adjust]), FinanceBusinessLogic::getError());
+        self::assertSame('600.00', FinanceBusinessLogic::options(['type' => 'salary_expense', 'original_expense_document_id' => $original['id']])['current_sources'][0]['balance']);
+        self::assertSame($original['confirmed_result'], FinanceBusinessLogic::detail(['id' => $original['id']])['confirmed_result']);
+        self::assertSame($payment['confirmed_result'], FinanceBusinessLogic::detail(['id' => $payment['id']])['confirmed_result']);
+    }
+
     public function test_salary_view_only_can_read_results_payments_and_private_material_without_preparation_rights(): void
     {
         $this->activate();
         $employee = WorkforceLogic::saveEmployee(['name' => '工资仅查看员工', 'mobile' => '13800009943', 'bind_user_id' => 996943,
             'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['finance.salary.view']]); self::assertNotFalse($employee, WorkforceLogic::getError());
         $documents = []; $proofs = [];
-        foreach (['salary_expense', 'salary_payment'] as $type) {
+        foreach (['salary_expense', 'salary_payment', 'salary_adjustment'] as $type) {
             $document = FinanceBusinessLogic::action('prepare', $this->command(0) + ['type' => $type, 'payload' => ['subject_id' => $employee['id']]]);
             self::assertNotFalse($document, FinanceBusinessLogic::getError()); $documents[] = $document;
             $path = tempnam(sys_get_temp_dir(), 'salary-read-');
@@ -3478,7 +3549,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     private function clean(): void
     {
         foreach (['finance_recurring_month_revision', 'finance_recurring_expense_month', 'finance_recurring_expense_plan'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
-        foreach (['finance_salary_result', 'finance_employee_expense_revision', 'finance_employee_expense', 'finance_expense_estimate_resolution', 'finance_deferred_amortization', 'finance_expense_identity', 'finance_expense_revision', 'finance_expense_bill', 'finance_expense_category'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
+        foreach (['finance_salary_revision', 'finance_salary_result', 'finance_employee_expense_revision', 'finance_employee_expense', 'finance_expense_estimate_resolution', 'finance_deferred_amortization', 'finance_expense_identity', 'finance_expense_revision', 'finance_expense_bill', 'finance_expense_category'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         foreach (['finance_inventory_loss_resolution', 'finance_inventory_loss'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         Db::name('finance_purchase_arrival_loss')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_purchase_difference_review')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();

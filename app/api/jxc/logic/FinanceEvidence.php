@@ -40,7 +40,7 @@ final class FinanceEvidence
         if (FinanceAccess::tenant() <= 0 || FinanceAccess::operator() <= 0) { throw new \DomainException('请先登录并选择门店'); }
         $row = Db::name('finance_evidence')->where('tenant_id', FinanceAccess::tenant())->where('id', $id)->find();
         if (!$row) { throw new \DomainException('截图不存在或不属于本门店'); }
-        if (in_array($row['document_type'], ['salary_expense', 'salary_payment'], true)) { FinanceDocumentPolicy::read($row['document_type']); }
+        if (in_array($row['document_type'], ['salary_expense', 'salary_payment', 'salary_adjustment'], true)) { FinanceDocumentPolicy::read($row['document_type']); }
         else { FinanceDocumentPolicy::authorize($row['document_type']); }
         $snapshot = FinanceValue::decode($row['snapshot']);
         $key = $snapshot['storage_key'] ?? '';
