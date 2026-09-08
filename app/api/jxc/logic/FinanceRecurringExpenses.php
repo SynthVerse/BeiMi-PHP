@@ -9,14 +9,15 @@ use think\facade\Db;
 /** 周期计划只列出应处理月份；逐月人工确认费用、暂估或不发生。 */
 final class FinanceRecurringExpenses
 {
-    public static function month(array $data): array
+    public static function month(array $data, array $allowed = ['pending']): array
     {
         $plan = self::plan(FinanceValue::id($data['recurring_plan_id'] ?? null));
         if (FinanceValue::id($data['subject_id'] ?? null) !== $plan['subject_id'] || FinanceValue::id($data['expected_plan_version'] ?? null) !== $plan['version']) { throw new \DomainException('周期计划对象或版本不匹配，请重新读取'); }
         $month = FinanceValue::text($data['benefit_month'] ?? null, 7); $selected = null;
         foreach ($plan['months'] as $row) { if ($row['month'] === $month) { $selected = $row; break; } }
-        if (!$selected || $selected['status'] !== 'pending') { throw new \DomainException('该月不在计划周期内、尚未发生或已有处理结果，请重新读取'); }
-        return $plan + ['benefit_month' => $month];
+        if (!$selected || !in_array($selected['status'], $allowed, true)) { throw new \DomainException('该月不在计划周期内、尚未发生或已有处理结果，请重新读取'); }
+        if (FinanceValue::id($data['expected_month_revision_id'] ?? 0, true) !== $selected['month_revision_id']) { throw new \DomainException('本月已有后续处理，请重新读取月份最新状态'); }
+        return $plan + ['benefit_month' => $month, 'month_revision_id' => $selected['month_revision_id'], 'previous_month_document_id' => $selected['document_id']];
     }
 
     public static function expenseContext(array $data, array $lines): ?array
@@ -30,9 +31,26 @@ final class FinanceRecurringExpenses
 
     public static function complete(array $document, array $plan, string $outcome, array $snapshot): void
     {
-        Db::name('finance_recurring_expense_month')->insert(['tenant_id' => FinanceAccess::tenant(), 'plan_id' => $plan['plan_id'],
+        $row = ['tenant_id' => FinanceAccess::tenant(), 'plan_id' => $plan['plan_id'],
             'benefit_month' => $plan['benefit_month'], 'document_id' => $document['id'],
-            'snapshot' => FinanceValue::json(['outcome' => $outcome, 'plan_reference' => $plan['source_reference'], 'result' => $snapshot]), 'create_time' => time()]);
+            'snapshot' => FinanceValue::json(['outcome' => $outcome, 'plan_reference' => $plan['source_reference'], 'result' => $snapshot]), 'create_time' => time()];
+        $original = Db::name('finance_recurring_expense_month')->where('tenant_id', FinanceAccess::tenant())->where('plan_id', $plan['plan_id'])->where('benefit_month', $plan['benefit_month'])->lock(true)->find();
+        if ($original) { Db::name('finance_recurring_month_revision')->insert($row + ['previous_revision_id' => $plan['month_revision_id']]); }
+        else { Db::name('finance_recurring_expense_month')->insert($row); }
+    }
+
+    public static function correct(array $document, array $data): array
+    {
+        FinanceAccess::require('', true);
+        if (($data['correction_mode'] ?? null) !== 'reopen_none' || ($data['correction_verified'] ?? null) !== 1) { throw new \DomainException('请明确核实原不发生记录确有错误并恢复待核实'); }
+        $plan = self::month($data, ['none']); $snapshot = $plan; unset($snapshot['months']);
+        $result = ['type' => 'expense_recurring_correct', 'correction_mode' => 'reopen_none', 'subject_id' => $plan['subject_id'], 'subject_name' => $plan['subject_name'],
+            'recurring_plan_id' => $plan['plan_id'], 'source_reference' => $plan['source_reference'], 'benefit_month' => $plan['benefit_month'],
+            'category_name' => $plan['category_name'], 'plan_snapshot' => $snapshot, 'previous_document_id' => $plan['previous_month_document_id'],
+            'previous_month_revision_id' => $plan['month_revision_id'], 'reason' => FinanceValue::text($data['reason'] ?? null, 1000),
+            'confirmed_by' => FinanceAccess::actor(), 'confirmed_at' => time(), 'created_sources' => []];
+        self::complete($document, $plan, 'pending', $result);
+        return $result;
     }
 
     public static function confirmNone(array $document, array $data): array
@@ -80,11 +98,19 @@ final class FinanceRecurringExpenses
         if (!$row) { throw new \DomainException('周期计划不存在或不属于本门店'); }
         $plan = FinanceValue::decode($row['snapshot']); $months = [];
         $done = Db::name('finance_recurring_expense_month')->where('tenant_id', FinanceAccess::tenant())->where('plan_id', $id)->select()->toArray();
+        $revisions = Db::name('finance_recurring_month_revision')->where('tenant_id', FinanceAccess::tenant())->where('plan_id', $id)->order('id')->select()->toArray();
+        $byRevisionMonth = []; foreach ($revisions as $revision) { $byRevisionMonth[$revision['benefit_month']][] = $revision; }
         $byMonth = array_column($done, null, 'benefit_month'); $cursor = new \DateTimeImmutable($plan['service_start'] . '-01');
         while (($month = $cursor->format('Y-m')) <= $plan['service_end']) {
             $result = isset($byMonth[$month]) ? FinanceValue::decode($byMonth[$month]['snapshot']) : null;
+            $currentDocument = (int)($byMonth[$month]['document_id'] ?? 0); $revisionId = 0; $history = [];
+            if ($result) { $history[] = ['document_id' => $currentDocument, 'type' => $result['result']['type'], 'outcome' => $result['outcome']]; }
+            foreach ($byRevisionMonth[$month] ?? [] as $revision) {
+                $result = FinanceValue::decode($revision['snapshot']); $currentDocument = (int)$revision['document_id']; $revisionId = (int)$revision['id'];
+                $history[] = ['document_id' => $currentDocument, 'type' => $result['result']['type'], 'outcome' => $result['outcome']];
+            }
             $months[] = ['month' => $month, 'status' => $result ? $result['outcome'] : ($month > date('Y-m') ? 'future' : 'pending'),
-                'result' => $result, 'document_id' => (int)($byMonth[$month]['document_id'] ?? 0)];
+                'result' => $result, 'document_id' => $currentDocument, 'month_revision_id' => $revisionId, 'history' => $history];
             $cursor = $cursor->modify('+' . $plan['interval_months'] . ' months');
         }
         return $plan + ['plan_id' => $id, 'document_id' => (int)$row['document_id'], 'months' => $months];

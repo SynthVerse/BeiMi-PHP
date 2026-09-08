@@ -52,6 +52,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000029_finance_deferred_amortization.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000030_finance_expense_estimate_resolution.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000031_finance_recurring_expense.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000032_finance_recurring_month_revision.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -63,6 +64,40 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
 
     public static function deferredClosureCases(): array { return [[false], [true]]; }
+
+    public function test_recurring_none_can_be_reopened_with_history_then_expense_requires_latest_month_revision(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '周期更正服务方']);
+        $category = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_category', 'payload' => [
+            'category_id' => 0, 'expected_category_version' => 0, 'parent' => 'utilities', 'name' => '用水核实', 'is_enabled' => 1]]);
+        self::assertNotFalse($category, FinanceBusinessLogic::getError()); $categoryId = $category['confirmed_result']['category']['id'];
+        $plan = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_recurring_plan', 'payload' => ['subject_id' => $vendor,
+            'category_id' => $categoryId, 'expected_category_version' => 1, 'source_reference' => 'CYCLE-36-1', 'service_start' => $month, 'service_end' => $month,
+            'interval_months' => 1, 'reason' => '按月核实水费', 'plan_verified' => 1]]);
+        self::assertNotFalse($plan, FinanceBusinessLogic::getError()); $planId = $plan['confirmed_result']['plan_id'];
+        $base = ['subject_id' => $vendor, 'recurring_plan_id' => $planId, 'expected_plan_version' => 1, 'expected_month_revision_id' => 0, 'benefit_month' => $month];
+        $none = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_recurring_none', 'payload' => $base + ['reason' => '误核实本月没有用水', 'none_verified' => 1]]);
+        self::assertNotFalse($none, FinanceBusinessLogic::getError());
+        Db::name('finance_period')->insert(['tenant_id' => self::TENANT_ID, 'month' => $month, 'status' => 'closed', 'snapshot' => '{}', 'closed_by' => '{}', 'closed_at' => time()]);
+        $command = $this->command(0) + ['type' => 'expense_recurring_correct', 'payload' => $base + ['correction_mode' => 'reopen_none', 'correction_verified' => 1, 'reason' => '取得原表数，原不发生判断错误，重新核实']];
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($command + ['action' => 'record']); self::assertSame([], $preview['impacts']); self::assertSame([], $preview['balances']);
+        $reopened = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($reopened, FinanceBusinessLogic::getError());
+        self::assertSame($reopened, FinanceBusinessLogic::action('record', $command));
+        $row = FinanceBusinessLogic::options(['type' => 'expense_recurring_plan', 'recurring_plan_id' => $planId])['selected_plan']['months'][0];
+        self::assertSame('pending', $row['status']); self::assertGreaterThan(0, $row['month_revision_id']);
+        self::assertSame([$none['id'], $reopened['id']], array_column($row['history'], 'document_id'));
+        $data = $base + ['actual_date' => date('Y-m-d'), 'amount' => '500', 'source_reference' => 'CYCLE-36-1/' . $month,
+            'due_mode' => 'unspecified', 'reason' => '补充核实实际费用', 'material_status' => 'missing', 'material_verified' => 1, 'missing_material_reason' => '依据双方核对读数',
+            'lines' => [['category_id' => $categoryId, 'expected_category_version' => 1, 'amount' => '500', 'reason' => '实际用水费用']]];
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense', 'payload' => $data]), '不得沿用更正前月份版本');
+        $data['expected_month_revision_id'] = $row['month_revision_id'];
+        $expense = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense', 'payload' => $data]); self::assertNotFalse($expense, FinanceBusinessLogic::getError());
+        self::assertSame(date('Y-m'), $expense['confirmed_result']['posting_month']);
+        $row = FinanceBusinessLogic::options(['type' => 'expense_recurring_plan', 'recurring_plan_id' => $planId])['selected_plan']['months'][0];
+        self::assertSame('expense', $row['status']); self::assertCount(3, $row['history']);
+        self::assertSame($none['confirmed_result'], FinanceBusinessLogic::detail(['id' => $none['id']])['confirmed_result']);
+    }
 
     public function test_recurring_expense_plan_lists_due_months_without_posting_or_paying(): void
     {
@@ -3139,7 +3174,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
     private function clean(): void
     {
-        foreach (['finance_recurring_expense_month', 'finance_recurring_expense_plan'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
+        foreach (['finance_recurring_month_revision', 'finance_recurring_expense_month', 'finance_recurring_expense_plan'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         foreach (['finance_expense_estimate_resolution', 'finance_deferred_amortization', 'finance_expense_identity', 'finance_expense_revision', 'finance_expense_bill', 'finance_expense_category'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         foreach (['finance_inventory_loss_resolution', 'finance_inventory_loss'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         Db::name('finance_purchase_arrival_loss')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();

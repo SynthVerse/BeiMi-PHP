@@ -14,7 +14,7 @@ final class FinanceCorrections
     public function replace(array $original, array $replacement, string $reason, int $duplicateOf = 0, bool $reverseOnly = false): array
     {
         $policy = FinanceDocumentPolicy::authorize($original['type'], true);
-        if (in_array($original['type'], ['expense_recurring_plan', 'expense_recurring_none'], true)) { throw new \DomainException('周期计划及逐月处理须关联原计划更正，不能覆盖已有待办或确认结果'); }
+        if (in_array($original['type'], ['expense_recurring_plan', 'expense_recurring_none', 'expense_recurring_correct'], true)) { throw new \DomainException('周期计划及逐月处理须关联原计划更正，不能覆盖已有待办或确认结果'); }
         if ($original['type'] === 'deferred_expense') { throw new \DomainException('待摊计划须关联原服务计划调整，不得覆盖已确认义务或已摊费用'); }
         if ($original['type'] === 'deferred_amortization') { throw new \DomainException('已摊费用须保留原服务月份和来源，请通过关联调整处理'); }
         if (in_array($original['type'], ['expense', 'expense_category', 'expense_adjustment', 'expense_estimate_final'], true)) { throw new \DomainException('费用请关联原费用调整；类别请按当前版本维护，不能覆盖历史确认'); }
