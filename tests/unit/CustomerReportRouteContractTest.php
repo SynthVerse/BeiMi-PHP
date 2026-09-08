@@ -6,6 +6,26 @@ use PHPUnit\Framework\TestCase;
 
 final class CustomerReportRouteContractTest extends TestCase
 {
+    public function test_finance_stock_loss_never_starts_an_inner_stock_transaction(): void
+    {
+        $root = dirname(__DIR__, 2);
+        $source = (string)file_get_contents($root . '/app/api/jxc/logic/StockService.php');
+        $start = strpos($source, 'public static function outboundFinanceInventoryLossWithinTransaction(');
+        $end = strpos($source, 'public static function outboundFinancePurchaseReturnWithinTransaction(', $start);
+        $method = substr($source, $start, $end - $start);
+        self::assertStringNotContainsString('WarehouseSkuBalanceService::outbound(', $method, '外层财务事务不得再次调用独立事务包装');
+        self::assertStringContainsString('WarehouseSkuBalanceService::outboundWithinTransaction(', $method);
+        $balance = (string)file_get_contents($root . '/app/api/jxc/logic/WarehouseSkuBalanceService.php');
+        $start = strpos($balance, 'public static function outboundWithinTransaction(');
+        self::assertNotFalse($start);
+        $end = strpos($balance, 'public static function ', $start + 1);
+        $primitive = substr($balance, $start, $end - $start);
+        self::assertStringContainsString('self::changeWithinTransaction(', $primitive);
+        self::assertStringNotContainsString('self::change(', $primitive);
+        self::assertStringNotContainsString('Db::transaction(', $primitive);
+        self::assertStringNotContainsString(', true)', $primitive, '普通库内减少仍禁止负库存，不能复用退货的负量特许');
+    }
+
     public function test_canonical_conversion_side_effects_do_not_use_model_create_inside_the_outer_transaction(): void
     {
         $root = dirname(__DIR__, 2);

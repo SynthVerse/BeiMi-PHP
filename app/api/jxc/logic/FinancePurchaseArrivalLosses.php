@@ -26,6 +26,7 @@ final class FinancePurchaseArrivalLosses
         $snapshot = array_merge($basis, ['type' => 'purchase_arrival_loss', 'arrival_line_id' => $id, 'subject_id' => $vendor,
             'subject_name' => Db::name('vendor')->where('tenant_id', $tenant)->where('id', $vendor)->value('supplier_name'),
             'warehouse_id' => (int)$arrival['warehouse_id'], 'actual_date' => $arrival['business_date'], 'quantity' => $quantity, 'arrival_source_reference' => $basis['source_reference'],
+            'warehouse_name' => $basis['warehouse_name'] ?? (Db::name('warehouse')->where('tenant_id', $tenant)->where('id', $arrival['warehouse_id'])->value('name') ?: '名称未留存'),
             'source_reference' => FinanceValue::text($data['source_reference'] ?? null, 160), 'reason' => FinanceValue::text($data['reason'] ?? null, 1000),
             'responsibility' => FinanceValue::text($data['responsibility'] ?? null, 1000), 'excluded_from_received_confirmed' => true,
             'previous_review_id' => (int)$review['id'], 'confirmed_by' => FinanceAccess::actor(), 'confirmed_at' => time()]);

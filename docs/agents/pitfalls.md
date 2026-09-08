@@ -743,7 +743,7 @@
 - 状态：已防护
 - 首次发生：2026-07-29
 - 最近发生：2026-09-08
-- 复发次数：9
+- 复发次数：10
 - 适用范围：`CustomerReportLogic`、`FulfillmentChangeLogic`、`FulfillmentTaskLogic`、`DeliveryInventoryLogic`、`DeliveryVariantLogic`、`LineVehicleLogic`、`NegativeInventoryLogic`、`SalesSettlementLogic`、`FinanceService`、`FinanceCostLedger`、`FinancePurchaseArrivals` 等已开启业务事务后调用库存、财务原语或写入幂等事实的路径
 - 相关问题：PIT-0022
 
@@ -765,6 +765,7 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 
 ### 防线
 
+- 2026-09-08 库内损耗扩展：`StockService::outboundFinanceInventoryLossWithinTransaction` 曾调用会自行开事务的 `WarehouseSkuBalanceService::outbound`。新增禁止负量的 `outboundWithinTransaction` 并改用它；`CustomerReportRouteContractTest::test_finance_stock_loss_never_starts_an_inner_stock_transaction` 在旧调用上明确失败，保护同事务调用和原语不再开事务、不放开负量。行为用例继续覆盖可用量不足整体回滚、原事件幂等和核实不二扣。来源为 Matt Pocock / implement、tdd、code-review、diagnosing-bugs、prevent-repeat-pitfalls；此为原入口枚举防线未覆盖新损耗路径的复发，不另建 PIT，防护后返回财务一期开发。
 - 2026-09-08 财务成本扩展：成本原语在外层事务内先取得稳定的门店准备行锁，再对成本来源、份额和待补数量使用当前读，避免沿外层已创建的 RR 快照覆盖其他事务已提交的成本。`FinanceBusinessWorkflowTest::test_cost_confirmation_reloads_committed_facts_after_an_outer_transaction_created_an_older_snapshot` 与 `tests/fixtures/finance_cost_worker.php` 用两个真实 PHP 连接固定先建快照、另一个事务出库 2、原事务再出库 3 的交错；修复前剩余成本错误为 70，修复后为 50，且两次销售成本分别为 20 和 30。此次只更新同根因记录；来源为 Matt Pocock / implement、tdd、code-review、diagnosing-bugs、prevent-repeat-pitfalls，完成后返回财务一期成本与采购接线。
 - 同批期间边界：`FinanceLedger::lockBook` 与 `postingMonth` 同样采用当前读；`test_cost_confirmation_cannot_ignore_a_month_closed_after_outer_transaction_snapshot` 用第二连接在快照创建后关闭当前月，修复前成本确认未抛异常，修复后明确拒绝已结账月份。此为同一 RR 旧快照根因的边界扩展，不另记复发次数。
 - 2026-09-08 采购到货扩展：审查发现多商品到货按客户端行序取库存锁，与报货预留的 SKU 升序相反，存在交叉等待路径。`FinancePurchaseArrivals` 现在先去重并按 SKU 升序调用既有 `lockBalanceWithinTransaction`，再按原单据行序追加到货和成本快照；单一收货仓下 SKU 唯一决定商品维度。`test_multi_sku_arrival_preserves_document_order_and_stock_when_lock_order_differs` 核对反向输入时各商品实收量、展示顺序及禁止覆盖实物记录。尚未进行此场景的双进程压力复现，不能把顺序检查当作并发验收。来源为 Matt Pocock / implement、tdd、code-review、diagnosing-bugs、prevent-repeat-pitfalls；后续继续供应商正式结算，并在整体并发验收中覆盖到货与报货交错。
@@ -795,6 +796,7 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 | 2026-08-19 | BeiMi-PHP #11 销售结算与版本快照 | 结算外层事务直接调用使用 ORM 锁定/更新客户的普通应收方法 | 原结构契约只枚举报货、履约、交付和负库存事务入口，没有要求新增结算模块必须使用显式 `*WithinTransaction` 财务原语。 |
 | 2026-08-19 | BeiMi-PHP #11 → BeiMi-ERP #11 接口接线 | 记账完成新增 report→task 写事务，但首次实现遇到 `1213`/`1205` 直接失败 | 原防线覆盖了交付、结算与财务写入口，却没有把新迁移职责后的 `FulfillmentTaskLogic::bill()` 纳入有界重试结构与可恢复锁等待行为测试。 |
 | 2026-09-07 | 财务第十批 | 逾期待办观察服务被外层确认事务调用 | 旧结构防线未包含新接入的财务观察服务，独立读取入口与确认原语未拆分。 |
+| 2026-09-08 | 财务第26批库内损耗 | 新增同事务库存流水入口却调用独立出库包装 | 原结构防线未覆盖新损耗写入口；新增同事务普通出库原语并用结构测试与真实业务回归共同保护。 |
 
 ## PIT-0005：迁移静态探针替换前缀但真实执行器保留占位符
 

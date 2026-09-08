@@ -7,6 +7,8 @@ namespace app\api\jxc\logic;
 final class FinanceDocumentPolicy
 {
     public const TYPES = [
+        'inventory_loss' => ['title' => '库内实物损耗待核实', 'prepare' => 'finance.inventory.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'none', 'sources' => [], 'direction' => 'none'],
+        'inventory_loss_resolution' => ['title' => '库内损耗分次确认', 'prepare' => 'finance.inventory.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'none', 'sources' => [], 'direction' => 'none'],
         'purchase_arrival_loss' => ['title' => '到货已扣数量的异常损失确认', 'prepare' => 'finance.purchase.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],
         'purchase_difference' => ['title' => '采购到货差复核', 'prepare' => 'finance.purchase.prepare', 'confirm' => 'finance.purchase.confirm', 'owner' => false, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],
         'purchase_return_resolution' => ['title' => '退货争议返回与门店损失', 'prepare' => 'finance.purchase.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],

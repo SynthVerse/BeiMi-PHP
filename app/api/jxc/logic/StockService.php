@@ -86,6 +86,17 @@ class StockService
         return $flow;
     }
 
+    /** 库内实物减少只出库一次；原因未查明时成本仍在待核实去向。 */
+    public static function outboundFinanceInventoryLossWithinTransaction(int $warehouse, int $goods, int $sku, string $quantity, int $document, string $date): int
+    {
+        FinanceIntegration::lock(); $movement = WarehouseSkuBalanceService::outboundWithinTransaction($warehouse, $sku, $quantity);
+        if ($movement === false) { throw new \DomainException('可用库存不足，请先核对仓库库存和预留，不能重复登记实物减少'); }
+        return self::writeFlow(['warehouse_id' => $warehouse, 'goods_id' => $goods, 'sku_id' => $sku, 'batch_id' => 0,
+            'order_id' => $document, 'order_type' => 'finance_inventory_loss', 'order_sn' => 'FIN-LOSS-' . $document,
+            'flow_type' => StockFlow::FLOW_OUT, 'quantity' => $quantity, 'remark' => '库内实物减少待核实'], $movement,
+            ['business_date' => $date, 'document_id' => $document]);
+    }
+
     /** 财务采购实际退离；库存、实物来源与移动平均成本在调用方事务一起写入。 */
     public static function outboundFinancePurchaseReturnWithinTransaction(int $warehouseId, int $goodsId, int $skuId, string $quantity,
         int $documentId, int $returnLineId, string $date): array

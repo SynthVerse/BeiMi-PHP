@@ -14,6 +14,7 @@ final class FinanceCorrections
     public function replace(array $original, array $replacement, string $reason, int $duplicateOf = 0, bool $reverseOnly = false): array
     {
         $policy = FinanceDocumentPolicy::authorize($original['type'], true);
+        if (in_array($original['type'], ['inventory_loss', 'inventory_loss_resolution'], true)) { throw new \DomainException('库内实物损耗与核实结论须关联后续处理，不得覆盖原记录或重复出入库'); }
         if ($original['type'] === 'purchase_arrival_loss') { throw new \DomainException('已确认损失须保留原实物和成本份额，通过关联成本调整纠正，不能覆盖或重复还原库存'); }
         if ($original['type'] === 'purchase_difference') { throw new \DomainException('到货差须追加后续复核或关联损耗处理，不能删除原复核事实'); }
         if ($original['type'] === 'purchase_return_actual') { throw new \DomainException('已实际退离不能直接覆盖或撤销，请关联退货返回入库或供应商认可处理'); }

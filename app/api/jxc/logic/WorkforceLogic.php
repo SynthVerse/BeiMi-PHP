@@ -55,6 +55,7 @@ final class WorkforceLogic extends BaseLogic
         ],
         '财务收付款' => [
             ['key' => 'finance.purchase.prepare', 'name' => '准备采购到货与供应商结算草稿'],
+            ['key' => 'finance.inventory.prepare', 'name' => '准备库内损耗与核实草稿'],
             ['key' => 'finance.purchase.receive', 'name' => '确认采购实际到货与暂估成本'],
             ['key' => 'finance.purchase.confirm', 'name' => '确认供应商采购结算'],
             ['key' => 'finance.purchase.due_override', 'name' => '单笔采购覆盖默认付款日（须说明原因）'],

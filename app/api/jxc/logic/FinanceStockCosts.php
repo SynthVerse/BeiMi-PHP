@@ -22,7 +22,7 @@ final class FinanceStockCosts
         }
         $event = ['reference' => $reference, 'sku_id' => (int)$flow['sku_id'], 'warehouse_id' => (int)$flow['warehouse_id'],
             'business_date' => $date, 'quantity' => (string)$flow['quantity'], 'snapshot' => ['stock_flow_id' => $id, 'order_type' => $flow['order_type'], 'order_id' => (int)$flow['order_id']]];
-        if (in_array($flow['order_type'], ['finance_purchase_arrival', 'finance_purchase_return', 'finance_purchase_return_back'], true)) {
+        if (in_array($flow['order_type'], ['finance_inventory_loss', 'finance_purchase_arrival', 'finance_purchase_return', 'finance_purchase_return_back'], true)) {
             $event['business_date'] = FinanceValue::date($context['business_date'] ?? null);
             $event['document_id'] = FinanceValue::id($context['document_id'] ?? null);
         }
@@ -46,6 +46,7 @@ final class FinanceStockCosts
                 'delivery_transport_loss' => ['loss', 'delivery_loss:' . $flow['order_id']],
                 'fulfillment_internal_loss' => ['loss', 'fulfillment_loss:' . $flow['order_id']],
                 'fulfillment_pending' => ['pending', 'fulfillment_loss:' . $flow['order_id']],
+                'finance_inventory_loss' => ['pending', 'inventory-loss:' . FinanceValue::id($context['document_id'] ?? null)],
                 'purchase_return', 'supply_return', 'purchase-return' => ['return', 'purchase_return:' . $flow['order_id']],
                 'finance_purchase_return' => ['return', 'purchase-return:' . FinanceValue::id($context['return_line_id'] ?? null)],
                 default => throw new \DomainException('财务启用后出库须明确销售、损耗或采购退货来源'),

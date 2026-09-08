@@ -43,6 +43,7 @@ final class FinancePurchaseReviews
             $basis = FinanceValue::decode($row['snapshot']);
             $arrivals[] = array_merge($basis, ['arrival_line_id' => (int)$row['id'], 'arrival_document_id' => (int)$row['document_id'],
                 'subject_id' => $vendor, 'actual_date' => $row['business_date'], 'warehouse_id' => (int)$row['warehouse_id'],
+                'warehouse_name' => $basis['warehouse_name'] ?? (Db::name('warehouse')->where('tenant_id', $tenant)->where('id', $row['warehouse_id'])->value('name') ?: '名称未留存'),
                 'expected_review_id' => (int)($row['review_id'] ?? 0), 'classification' => $row['classification'] ?? '',
                 'assessment' => self::assessment($row), 'latest_review' => $row['review_snapshot'] ? FinanceValue::decode($row['review_snapshot']) : null]);
         }

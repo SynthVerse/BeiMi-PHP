@@ -37,6 +37,13 @@ class WarehouseSkuBalanceService
         return $quantity === false ? false : self::change($warehouseId, $skuId, '-' . $quantity, '0.0000');
     }
 
+    /** 普通实物减少的同事务原语，保留可用量与预留约束，不另开事务。 */
+    public static function outboundWithinTransaction(int $warehouseId, int $skuId, string $quantity): array|false
+    {
+        $quantity = self::normalizeQuantity($quantity);
+        return $quantity === false ? false : self::changeWithinTransaction($warehouseId, $skuId, '-' . $quantity, '0.0000');
+    }
+
     /** 财务已确认的真实退离，调用方须保留原到货、退货单及成本缺口归因。 */
     public static function purchaseReturnWithinTransaction(int $warehouseId, int $skuId, string $quantity): array|false
     {

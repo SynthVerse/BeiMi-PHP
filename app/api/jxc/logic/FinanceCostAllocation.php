@@ -47,7 +47,7 @@ final class FinanceCostAllocation
     public static function reclassify(array $state, int $warehouse, int $sku, string $quantity, string $fromBucket, string $fromReference, string $toBucket, string $toReference): array
     {
         self::dimension($warehouse, $sku); $quantity = self::quantity($quantity);
-        if ($fromBucket !== 'return' || $toBucket !== 'loss') { throw new \DomainException('本次仅支持将采购退货争议确认为门店损失'); }
+        if (!in_array($fromBucket, ['return', 'pending'], true) || $toBucket !== 'loss') { throw new \DomainException('本次仅支持将退货争议或待核实实物减少确认为门店损失'); }
         FinanceValue::text($fromReference, 160); FinanceValue::text($toReference, 160);
         $weights = []; $total = '0.000000000000';
         foreach ($state['positions'] as $key => $row) {
@@ -57,7 +57,7 @@ final class FinanceCostAllocation
         }
         $shortageKey = FinanceValue::json([$warehouse, $sku, $fromBucket, $fromReference]); $shortage = $state['shortages'][$shortageKey]['quantity'] ?? '0';
         if (bccomp($shortage, '0', 12) > 0) { $weights['shortage'] = $shortage; $total = bcadd($total, $shortage, 12); }
-        if (bccomp($quantity, $total, 12) > 0) { throw new \DomainException('处理数量超过原退货剩余成本去向'); }
+        if (bccomp($quantity, $total, 12) > 0) { throw new \DomainException('处理数量超过原来源剩余成本去向'); }
         $parts = self::quantityShares($quantity, $weights, $total); $cost = '0.000000'; $pending = false;
         foreach ($parts as $key => $take) {
             if (bccomp($take, '0', 12) === 0) { continue; }
