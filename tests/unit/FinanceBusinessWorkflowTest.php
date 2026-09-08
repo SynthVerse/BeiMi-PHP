@@ -59,6 +59,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000036_finance_salary_revision.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000037_finance_equipment.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000038_finance_equipment_refund.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000039_finance_opening_equipment_revision.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -70,6 +71,39 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
 
     public static function deferredClosureCases(): array { return [[false], [true]]; }
+
+    public function test_opening_equipment_adjustments_preserve_the_original_proof_and_historical_paid_amount(): void
+    {
+        $this->activate(); $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '期初设备方']);
+        $snapshot = ['id' => 9044, 'subject_name' => '期初设备方', 'source_reference' => '旧设备E44', 'historical_date' => null, 'evidence' => '期初已核实原合同与历史付款',
+            'details' => ['original_amount' => '12000.00', 'price_adjustment' => '-1000.00', 'paid_amount' => '2000.00', 'cancelled_amount' => '1000.00']];
+        $id = (int)Db::name('finance_opening_source')->insertGetId(['tenant_id' => self::TENANT_ID, 'opening_item_id' => 9044, 'category' => 'equipment', 'subject_id' => $vendor,
+            'amount' => '8000.00', 'activation_date' => date('Y-m-01'), 'source_snapshot' => json_encode($snapshot), 'create_time' => time()]);
+        $source = 'o:' . $id; $ledger = new FinanceLedger(self::TENANT_ID);
+        $options = FinanceBusinessLogic::options(['type' => 'equipment_adjustment', 'equipment_source' => $source]); self::assertNotFalse($options, FinanceBusinessLogic::getError());
+        self::assertNotNull($options['selected_equipment']); self::assertSame('2000.00', $options['selected_equipment']['paid_amount']);
+        self::assertSame('11000.00', $options['selected_equipment']['equipment']['amount']); self::assertNull($options['selected_equipment']['equipment']['actual_date']);
+        $adjust = ['subject_id' => $vendor, 'equipment_source' => $source, 'expected_revision_id' => 0, 'mode' => 'price', 'new_amount' => '10000',
+            'adjustment_verified' => 1, 'reason' => '启用后重新核实剩余总价', 'confirmation_basis' => '双方补充价格约定'];
+        $command = $this->command(0) + ['type' => 'equipment_adjustment', 'payload' => $adjust];
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($command + ['action' => 'record']); self::assertSame([], $preview['impacts']);
+        $price = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($price, FinanceBusinessLogic::getError()); self::assertSame($price, FinanceBusinessLogic::action('record', $command));
+        self::assertSame('7000.00', $ledger->source($source)['balance']); self::assertSame('2000.00', $price['confirmed_result']['paid_amount']);
+        $pay = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'equipment_payment', 'payload' => ['subject_id' => $vendor, 'account_id' => $this->accountId,
+            'actual_date' => date('Y-m-d'), 'amount' => '1000', 'reason' => '本月实际支付旧设备款', 'allocations' => [['source' => $source, 'amount' => '1000']]]]); self::assertNotFalse($pay, FinanceBusinessLogic::getError());
+        $adjust['mode'] = 'cancel'; $adjust['cancel_amount'] = '6001'; $adjust['expected_revision_id'] = $price['confirmed_result']['revision_id'];
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'equipment_adjustment', 'payload' => $adjust]));
+        $adjust['cancel_amount'] = '6000'; $cancel = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'equipment_adjustment', 'payload' => $adjust]); self::assertNotFalse($cancel, FinanceBusinessLogic::getError());
+        self::assertSame('0.00', $ledger->source($source)['balance']); self::assertSame('3000.00', $cancel['confirmed_result']['paid_amount']);
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'equipment_adjustment', 'payload' => $adjust]));
+        $list = FinanceBusinessLogic::options(['type' => 'equipment_adjustment', 'subject_id' => $vendor, 'equipment_origin' => 'opening']); self::assertNotFalse($list, FinanceBusinessLogic::getError());
+        self::assertSame($source, $list['bills'][0]['equipment_source']); self::assertSame('0.00', $list['bills'][0]['remaining_amount']);
+        self::assertSame($snapshot, json_decode(Db::name('finance_opening_source')->where('tenant_id', self::TENANT_ID)->where('id', $id)->value('source_snapshot'), true));
+        self::assertSame(0, Db::name('finance_equipment_purchase')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame('4000.00', $ledger->account($this->accountId)['balance']);
+        self::assertSame('1000.00', bcadd((string)Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('metric', 'expense')->sum('amount'), '0', 2));
+        $this->prepareCustomerReportRequestContext(self::OTHER_TENANT_ID); self::assertFalse(FinanceBusinessLogic::options(['type' => 'equipment_adjustment', 'equipment_source' => $source]));
+    }
 
     public function test_equipment_refund_obligation_revisions_and_receipts_never_restore_payment_limit(): void
     {
@@ -3692,7 +3726,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     private function clean(): void
     {
         foreach (['finance_recurring_month_revision', 'finance_recurring_expense_month', 'finance_recurring_expense_plan'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
-        foreach (['finance_equipment_refund_revision', 'finance_equipment_refund_due', 'finance_equipment_revision', 'finance_equipment_purchase', 'finance_salary_revision', 'finance_salary_result', 'finance_employee_expense_revision', 'finance_employee_expense', 'finance_expense_estimate_resolution', 'finance_deferred_amortization', 'finance_expense_identity', 'finance_expense_revision', 'finance_expense_bill', 'finance_expense_category'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
+        foreach (['finance_opening_equipment_revision', 'finance_equipment_refund_revision', 'finance_equipment_refund_due', 'finance_equipment_revision', 'finance_equipment_purchase', 'finance_salary_revision', 'finance_salary_result', 'finance_employee_expense_revision', 'finance_employee_expense', 'finance_expense_estimate_resolution', 'finance_deferred_amortization', 'finance_expense_identity', 'finance_expense_revision', 'finance_expense_bill', 'finance_expense_category'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         foreach (['finance_inventory_loss_resolution', 'finance_inventory_loss'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         Db::name('finance_purchase_arrival_loss')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_purchase_difference_review')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
