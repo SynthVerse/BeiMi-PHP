@@ -53,6 +53,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000030_finance_expense_estimate_resolution.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000031_finance_recurring_expense.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000032_finance_recurring_month_revision.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000033_finance_employee_expense.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -64,6 +65,71 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
 
     public static function deferredClosureCases(): array { return [[false], [true]]; }
+
+    public function test_employee_advance_requires_actual_verified_cost_and_owner_confirmation_without_borrowing(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
+        $employee = WorkforceLogic::saveEmployee(['name' => '垫付经办员工', 'mobile' => '13800009939', 'bind_user_id' => 996939,
+            'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['finance.reimbursement.prepare']]); self::assertNotFalse($employee, WorkforceLogic::getError());
+        $category = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_category', 'payload' => [
+            'category_id' => 0, 'expected_category_version' => 0, 'parent' => 'office', 'name' => '垫付归属验证', 'is_enabled' => 1]]);
+        self::assertNotFalse($category, FinanceBusinessLogic::getError());
+        $data = ['subject_id' => $employee['id'], 'actual_date' => $month . '-05', 'benefit_month' => $month, 'amount' => '100', 'source_reference' => 'EMP-38-VERIFY',
+            'advance_verified' => 1, 'reason' => '实际垫付耗材', 'material_status' => 'missing', 'material_verified' => 1, 'missing_material_reason' => '已人工核实',
+            'lines' => [['category_id' => $category['confirmed_result']['category']['id'], 'expected_category_version' => 1, 'amount' => '100', 'reason' => '本月耗用']]];
+        foreach ([['advance_verified' => 0], ['amount_status' => 'estimated'], ['subject_id' => 999999999], ['material_verified' => 0], ['benefit_month' => date('Y-m', strtotime('first day of next month'))]] as $invalid) {
+            self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'employee_expense', 'payload' => array_replace($data, $invalid)]));
+        }
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996939; request()->adminId = 0;
+        $prepared = FinanceBusinessLogic::action('prepare', $this->command(0) + ['type' => 'employee_expense', 'payload' => $data]); self::assertNotFalse($prepared, FinanceBusinessLogic::getError());
+        self::assertSame([], (new FinanceLedger(self::TENANT_ID))->sources('reimbursement', $employee['id']));
+        self::assertFalse(FinanceBusinessLogic::action('confirm', $this->command($prepared['version']) + ['id' => $prepared['id']]));
+        $this->prepareCustomerReportRequestContext();
+        Db::name('finance_period')->insert(['tenant_id' => self::TENANT_ID, 'month' => $month, 'status' => 'closed', 'snapshot' => '{}', 'closed_by' => '{}', 'closed_at' => time()]);
+        $command = $this->command($prepared['version']) + ['id' => $prepared['id']];
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($command + ['action' => 'confirm']);
+        self::assertSame([['metric' => 'expense', 'posting_month' => date('Y-m'), 'amount' => '100.00']], $preview['impacts']);
+        $confirmed = FinanceBusinessLogic::action('confirm', $command); self::assertNotFalse($confirmed, FinanceBusinessLogic::getError());
+        self::assertSame('100.00', (new FinanceLedger(self::TENANT_ID))->categoryBalance('reimbursement', $employee['id']));
+        self::assertSame($month, $confirmed['confirmed_result']['benefit_month']);
+    }
+
+    public function test_employee_advances_create_separate_expenses_and_combine_partial_reimbursements_without_extra_expense(): void
+    {
+        $this->activate(); $employee = WorkforceLogic::saveEmployee(['name' => '垫付员工', 'mobile' => '13800009938', 'bind_user_id' => 996938,
+            'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => []]); self::assertNotFalse($employee, WorkforceLogic::getError());
+        $category = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_category', 'payload' => [
+            'category_id' => 0, 'expected_category_version' => 0, 'parent' => 'office', 'name' => '垫付办公耗材', 'is_enabled' => 1]]);
+        self::assertNotFalse($category, FinanceBusinessLogic::getError()); $categoryId = $category['confirmed_result']['category']['id']; $records = [];
+        foreach (['300', '500'] as $index => $amount) {
+            $data = ['subject_id' => $employee['id'], 'actual_date' => date('Y-m-d'), 'benefit_month' => date('Y-m'), 'amount' => $amount,
+                'source_reference' => 'EMP-38-' . $index, 'reason' => '员工已代门店支付实际耗材', 'advance_verified' => 1,
+                'material_status' => 'missing', 'material_verified' => 1, 'missing_material_reason' => '经手人与员工核对真实垫付',
+                'lines' => [['category_id' => $categoryId, 'expected_category_version' => 1, 'amount' => $amount, 'reason' => '本月耗用']]];
+            $command = $this->command(0) + ['type' => 'employee_expense', 'payload' => $data];
+            $record = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($record, FinanceBusinessLogic::getError());
+            self::assertSame($record, FinanceBusinessLogic::action('record', $command)); $records[] = $record;
+            self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'employee_expense', 'payload' => $data]), '同员工同来源垫付不能重复');
+        }
+        $ledger = new FinanceLedger(self::TENANT_ID); self::assertSame('800.00', $ledger->categoryBalance('reimbursement', $employee['id']));
+        self::assertSame('5000.00', $ledger->account($this->accountId)['balance']);
+        $first = $records[0]['confirmed_result']['created_sources'][0]; $second = $records[1]['confirmed_result']['created_sources'][0];
+        $payment = ['subject_id' => $employee['id'], 'account_id' => $this->accountId, 'actual_date' => date('Y-m-d'), 'amount' => '600', 'reason' => '两笔垫付合并分次报销',
+            'allocations' => [['source' => $first, 'amount' => '300'], ['source' => $second, 'amount' => '300']]];
+        $command = $this->command(0) + ['type' => 'reimbursement_payment', 'payload' => $payment];
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($command + ['action' => 'record']);
+        self::assertNotContains('expense', array_column($preview['impacts'], 'metric'), '报销付款不重复计费');
+        $paid = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($paid, FinanceBusinessLogic::getError()); self::assertSame($paid, FinanceBusinessLogic::action('record', $command));
+        self::assertSame('0.00', $ledger->source($first)['balance']); self::assertSame('200.00', $ledger->source($second)['balance']);
+        $payment['amount'] = '201'; $payment['allocations'] = [['source' => $second, 'amount' => '201']];
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'reimbursement_payment', 'payload' => $payment]));
+        $payment['amount'] = '200'; $payment['allocations'][0]['amount'] = '200';
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'salary_payment', 'payload' => $payment]), '工资不得核销垫付');
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'reimbursement_payment', 'payload' => $payment]), FinanceBusinessLogic::getError());
+        self::assertSame('0.00', $ledger->categoryBalance('reimbursement', $employee['id'])); self::assertSame('4200.00', $ledger->account($this->accountId)['balance']);
+        self::assertSame($records[1]['confirmed_result'], FinanceBusinessLogic::detail(['id' => $records[1]['id']])['confirmed_result']);
+        self::assertSame([], FinanceBusinessLogic::options(['type' => 'employee_expense', 'original_expense_document_id' => $records[1]['id']])['current_sources']);
+    }
 
     public function test_recurring_paid_expense_can_be_cancelled_and_restated_without_recreating_payment(): void
     {
@@ -3272,7 +3338,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     private function clean(): void
     {
         foreach (['finance_recurring_month_revision', 'finance_recurring_expense_month', 'finance_recurring_expense_plan'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
-        foreach (['finance_expense_estimate_resolution', 'finance_deferred_amortization', 'finance_expense_identity', 'finance_expense_revision', 'finance_expense_bill', 'finance_expense_category'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
+        foreach (['finance_employee_expense', 'finance_expense_estimate_resolution', 'finance_deferred_amortization', 'finance_expense_identity', 'finance_expense_revision', 'finance_expense_bill', 'finance_expense_category'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         foreach (['finance_inventory_loss_resolution', 'finance_inventory_loss'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         Db::name('finance_purchase_arrival_loss')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_purchase_difference_review')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();

@@ -61,7 +61,7 @@ final class FinanceExpenses
         return $result;
     }
 
-    private static function material(array $data): array
+    public static function material(array $data, string $documentType = 'expense'): array
     {
         $status = $data['material_status'] ?? null;
         if ($status === 'missing') {
@@ -73,8 +73,8 @@ final class FinanceExpenses
         if ($status !== 'provided' || !is_array($input) || !array_is_list($input) || !$input || count($input) > 10) { throw new \DomainException('请选择一至十份内部核验材料，或明确无凭证原因'); }
         $evidence = []; $seen = [];
         foreach ($input as $value) {
-            $id = FinanceValue::id($value); $row = Db::name('finance_evidence')->where('tenant_id', FinanceAccess::tenant())->where('id', $id)->where('document_type', 'expense')->find();
-            if (!$row || isset($seen[$id])) { throw new \DomainException('核验材料不存在、重复或不属于本门店普通费用'); }
+            $id = FinanceValue::id($value); $row = Db::name('finance_evidence')->where('tenant_id', FinanceAccess::tenant())->where('id', $id)->where('document_type', $documentType)->find();
+            if (!$row || isset($seen[$id])) { throw new \DomainException('核验材料不存在、重复或不属于本门店本类费用'); }
             $seen[$id] = true; $evidence[] = FinanceEvidence::metadata($row);
         }
         return ['material_status' => $status, 'missing_material_reason' => '', 'material_verified' => 0, 'evidence' => $evidence];

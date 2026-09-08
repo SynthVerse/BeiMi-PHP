@@ -123,6 +123,7 @@ final class FinanceBusinessLogic extends BaseLogic
             if ($type === 'supplier_credit_allocate' && ($params['role'] ?? '') === 'fund') { $categories = ['supplier_refund']; }
             $page = max(1, FinanceValue::id($params['page'] ?? 1));
             $sources = match ($type) {
+                'employee_expense' => !empty($params['original_expense_document_id']) ? FinanceEmployeeExpenses::outstanding(FinanceValue::id($params['original_expense_document_id'])) : FinanceExpenseCategories::options(),
                 'expense_recurring_plan', 'expense_recurring_none', 'expense_recurring_correct' => FinanceRecurringExpenses::options($subjectId, $params),
                 'deferred_amortization' => FinanceDeferredExpenses::options($ledger, $subjectId, $params),
                 'deferred_expense' => FinanceExpenseCategories::options(),
