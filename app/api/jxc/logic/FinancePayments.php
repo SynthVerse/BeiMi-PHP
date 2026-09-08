@@ -15,6 +15,7 @@ final class FinancePayments
     {
         $type = $document['type']; $policy = FinanceDocumentPolicy::authorize($type, true);
         $data = FinanceValue::decode($document['payload']);
+        if ($type === 'expense_estimate_final') { return FinanceExpenseEstimates::confirm($this->ledger, $document, $data); }
         if ($type === 'deferred_amortization') { return FinanceDeferredExpenses::confirm($this->ledger, $document, $data); }
         if ($type === 'expense_adjustment') { return FinanceExpenseAdjustments::confirm($this->ledger, $document, $data); }
         if (in_array($type, ['expense', 'deferred_expense'], true)) { return FinanceExpenses::confirm($this->ledger, $document, $data); }

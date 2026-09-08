@@ -50,6 +50,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000027_finance_expense.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000028_finance_expense_revision.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000029_finance_deferred_amortization.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000030_finance_expense_estimate_resolution.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -61,6 +62,81 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
 
     public static function deferredClosureCases(): array { return [[false], [true]]; }
+
+    public static function estimateFinalAmounts(): array { return [['1000.00', '0.00', '200.00', '0.00'], ['1100.00', '100.00', '300.00', '0.00'], ['700.00', '-300.00', '0.00', '100.00']]; }
+
+    /** @dataProvider estimateFinalAmounts */
+    public function test_closed_expense_estimate_resolves_in_parts_and_posts_only_final_difference(string $final, string $delta, string $payable, string $refund): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '分项暂估服务方']); $lines = [];
+        foreach (['水表费用' => '1000', '电表费用' => '500'] as $name => $amount) {
+            $category = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_category', 'payload' => [
+                'category_id' => 0, 'expected_category_version' => 0, 'parent' => 'maintenance', 'name' => $name, 'is_enabled' => 1]]);
+            self::assertNotFalse($category, FinanceBusinessLogic::getError());
+            $lines[] = ['category_id' => $category['confirmed_result']['category']['id'], 'expected_category_version' => 1, 'amount' => $amount, 'reason' => '依据计量数据暂估'];
+        }
+        $data = ['subject_id' => $vendor, 'actual_date' => $month . '-05', 'benefit_month' => $month, 'amount' => '1500',
+            'due_mode' => 'unspecified', 'source_reference' => 'EST-34-PART', 'reason' => '服务已发生，正式账单待取得',
+            'material_status' => 'missing', 'material_verified' => 1, 'missing_material_reason' => '原始读数已核对',
+            'amount_status' => 'estimated', 'estimate_basis_type' => 'measurement', 'estimate_basis' => '两只仪表实际用量与合同单价', 'lines' => $lines];
+        $original = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense', 'payload' => $data]); self::assertNotFalse($original, FinanceBusinessLogic::getError());
+        $payment = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'supplier_payment', 'payload' => ['subject_id' => $vendor,
+            'account_id' => $this->accountId, 'actual_date' => date('Y-m-d'), 'amount' => '1300', 'reason' => '分次费用先付',
+            'allocations' => [['source' => $original['confirmed_result']['created_sources'][0], 'amount' => '1300']]]]); self::assertNotFalse($payment, FinanceBusinessLogic::getError());
+        Db::name('finance_period')->insert(['tenant_id' => self::TENANT_ID, 'month' => $month, 'status' => 'closed', 'snapshot' => '{}', 'closed_by' => '{}', 'closed_at' => time()]);
+        $base = ['subject_id' => $vendor, 'original_expense_document_id' => $original['id'], 'expected_revision_id' => 0, 'expected_resolution_id' => 0, 'final_verified' => 1,
+            'reason' => '正式账单已取得', 'resolutions' => [['category_id' => $lines[1]['category_id'], 'final_amount' => '500', 'confirmation_basis' => '最终电费账单与原估计一致']]];
+        $firstCommand = $this->command(0) + ['type' => 'expense_estimate_final', 'payload' => $base];
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($firstCommand + ['action' => 'record']);
+        self::assertSame([], $preview['impacts']); self::assertSame([], $preview['balances']);
+        $first = FinanceBusinessLogic::action('record', $firstCommand); self::assertNotFalse($first, FinanceBusinessLogic::getError());
+        self::assertSame($first, FinanceBusinessLogic::action('record', $firstCommand));
+        $options = FinanceBusinessLogic::options(['type' => 'expense_estimate_final', 'original_expense_document_id' => $original['id']]);
+        self::assertSame(['pending', 'resolved'], array_column($options['bills'][0]['estimate_items'], 'status'));
+        self::assertSame(0, $options['bills'][0]['expected_revision_id'], '零差额不生成费用调整版本');
+        $generic = ['subject_id' => $vendor, 'new_subject_id' => $vendor, 'original_expense_document_id' => $original['id'], 'expected_revision_id' => 0,
+            'new_amount' => '1501', 'benefit_month' => $month, 'reason' => '绕过暂估核实', 'adjustment_verified' => 1, 'confirmation_basis' => '任意依据',
+            'lines' => [array_replace($lines[0], ['amount' => '1001']), $lines[1]]];
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_adjustment', 'payload' => $generic]));
+        $base['resolutions'] = [['category_id' => $lines[0]['category_id'], 'final_amount' => $final, 'confirmation_basis' => '最终水费账单原件已核对']];
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_estimate_final', 'payload' => $base]), '零差额核实后旧待办版本也必须失效');
+        $base['expected_resolution_id'] = $options['bills'][0]['expected_resolution_id'];
+        $command = $this->command(0) + ['type' => 'expense_estimate_final', 'payload' => $base];
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($command + ['action' => 'record']);
+        self::assertSame($delta === '0.00' ? [] : [['metric' => 'expense', 'posting_month' => date('Y-m'), 'amount' => $delta]], $preview['impacts']);
+        $resolved = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($resolved, FinanceBusinessLogic::getError());
+        self::assertSame($resolved, FinanceBusinessLogic::action('record', $command));
+        self::assertSame($delta, $resolved['confirmed_result']['amount_change']);
+        self::assertSame(0, $resolved['confirmed_result']['pending_count']);
+        $ledger = new FinanceLedger(self::TENANT_ID); self::assertSame($payable, $ledger->categoryBalance('expense_payable', $vendor));
+        self::assertSame($refund, $ledger->categoryBalance('expense_refund', $vendor)); self::assertSame('3700.00', $ledger->account($this->accountId)['balance']);
+        self::assertSame($original['confirmed_result'], FinanceBusinessLogic::detail(['id' => $original['id']])['confirmed_result']);
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_estimate_final', 'payload' => $base]), '同一项目不能重复核实');
+    }
+
+    public function test_expense_estimate_requires_reliable_basis_and_keeps_each_original_scope(): void
+    {
+        $this->activate(); $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '费用暂估服务方']);
+        $category = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_category', 'payload' => [
+            'category_id' => 0, 'expected_category_version' => 0, 'parent' => 'maintenance', 'name' => '计量服务', 'is_enabled' => 1]]);
+        self::assertNotFalse($category, FinanceBusinessLogic::getError()); $categoryId = $category['confirmed_result']['category']['id'];
+        $data = ['subject_id' => $vendor, 'actual_date' => date('Y-m-d'), 'benefit_month' => date('Y-m'), 'amount' => '1000',
+            'due_mode' => 'unspecified', 'source_reference' => 'EST-34-1', 'reason' => '本月服务已发生',
+            'material_status' => 'missing', 'material_verified' => 1, 'missing_material_reason' => '最终账单待取得',
+            'amount_status' => 'estimated', 'estimate_basis_type' => 'measurement', 'estimate_basis' => '',
+            'lines' => [['category_id' => $categoryId, 'expected_category_version' => 1, 'amount' => '1000', 'reason' => '本月仪表用量已核对']]];
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense', 'payload' => $data]), '暂估必须有可靠依据');
+        $data['estimate_basis'] = '已核对本月仪表用量和约定单价';
+        $original = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense', 'payload' => $data]);
+        self::assertNotFalse($original, FinanceBusinessLogic::getError());
+        self::assertSame('estimated', $original['confirmed_result']['amount_status']);
+        $options = FinanceBusinessLogic::options(['type' => 'expense_estimate_final', 'original_expense_document_id' => $original['id']]);
+        self::assertNotFalse($options, FinanceBusinessLogic::getError());
+        self::assertSame('pending', $options['bills'][0]['estimate_items'][0]['status']);
+        self::assertSame('1000.00', $options['bills'][0]['estimate_items'][0]['estimated_amount']);
+        self::assertSame('0.00', (new FinanceLedger(self::TENANT_ID))->categoryBalance('expense_refund', $vendor));
+    }
 
     public function test_new_deferred_obligation_keeps_future_service_out_of_profit_and_payment_separate(): void
     {
@@ -2989,7 +3065,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
     private function clean(): void
     {
-        foreach (['finance_deferred_amortization', 'finance_expense_identity', 'finance_expense_revision', 'finance_expense_bill', 'finance_expense_category'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
+        foreach (['finance_expense_estimate_resolution', 'finance_deferred_amortization', 'finance_expense_identity', 'finance_expense_revision', 'finance_expense_bill', 'finance_expense_category'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         foreach (['finance_inventory_loss_resolution', 'finance_inventory_loss'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         Db::name('finance_purchase_arrival_loss')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_purchase_difference_review')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();

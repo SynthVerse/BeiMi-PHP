@@ -38,12 +38,13 @@ final class FinanceExpenseAdjustments
             ->leftJoin('finance_expense_revision r', 'r.id=v.revision_id AND r.tenant_id=b.tenant_id')->where('b.tenant_id', FinanceAccess::tenant())
             ->whereLike('b.source_reference', '%' . $keyword . '%');
         $query->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(b.snapshot,'$.type'))=?", ['expense']);
+        if (($params['type'] ?? '') === 'expense_estimate_final') { $query->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(b.snapshot,'$.amount_status'))=?", ['estimated']); }
         if (!empty($params['original_expense_document_id'])) { $query->where('b.document_id', FinanceValue::id($params['original_expense_document_id'])); }
         else { $query->whereRaw("COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(r.snapshot,'$.expense.subject_id')) AS UNSIGNED),b.vendor_id)=?", [$vendor]); }
         $rows = $query->field('b.*')->order('b.id', 'desc')->limit(($page - 1) * 20, 21)->select()->toArray(); $choices = [];
         foreach (array_slice($rows, 0, 20) as $bill) {
             $current = self::current((int)$bill['document_id'], !empty($params['original_expense_document_id']) ? 0 : $vendor);
-            $choices[] = ['original_expense_document_id' => (int)$bill['document_id'], 'expected_revision_id' => $current['expected_revision_id'], 'expense' => $current['expense']];
+            $choices[] = ['original_expense_document_id' => (int)$bill['document_id'], 'expected_revision_id' => $current['expected_revision_id'], 'expense' => $current['expense'], 'estimate_items' => FinanceExpenseEstimates::items($bill), 'expected_resolution_id' => FinanceExpenseEstimates::version($bill)];
         }
         return FinanceExpenseCategories::options() + ['bills' => $choices, 'bill_has_more' => count($rows) > 20];
     }
@@ -53,6 +54,7 @@ final class FinanceExpenseAdjustments
         FinanceAccess::require('', true); $tenant = FinanceAccess::tenant(); $id = (int)$document['id'];
         $vendor = FinanceValue::id($data['subject_id'] ?? null); $originalId = FinanceValue::id($data['original_expense_document_id'] ?? null);
         $current = self::current($originalId, $vendor); $before = $current['expense'];
+        if (array_filter(FinanceExpenseEstimates::items($current['bill']), static fn(array $item): bool => $item['status'] === 'pending')) { throw new \DomainException('原费用仍有暂估待核实项目，请先从暂估分项核实处理'); }
         if ($before['type'] !== 'expense') { throw new \DomainException('待摊计划须通过专用关联调整，不能作为当期普通费用更正'); }
         if (FinanceValue::id($data['expected_revision_id'] ?? null, true) !== $current['expected_revision_id']) { throw new \DomainException('费用已有后续调整，请重新核对最新记录'); }
         if (($data['adjustment_verified'] ?? null) !== 1) { throw new \DomainException('请明确核实原费用、本次调整内容及依据'); }
@@ -132,7 +134,7 @@ final class FinanceExpenseAdjustments
         return $lines;
     }
 
-    private static function settle(FinanceLedger $ledger, int $id, int $vendor, string $delta, array $refs, array $snapshot, ?string $due): array
+    public static function settle(FinanceLedger $ledger, int $id, int $vendor, string $delta, array $refs, array $snapshot, ?string $due): array
     {
         $increase = bccomp($delta, '0', 2) > 0; $remaining = $increase ? $delta : bcsub('0', $delta, 2); $date = $snapshot['obligation_date'];
         foreach ($refs as $ref) {

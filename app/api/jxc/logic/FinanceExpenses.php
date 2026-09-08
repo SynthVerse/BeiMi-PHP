@@ -39,6 +39,7 @@ final class FinanceExpenses
             'actual_date' => $date, 'benefit_month' => $benefit, 'posting_month' => $month, 'due_mode' => $dueMode, 'due_date' => $due,
             'source_reference' => $reference, 'reason' => $reason, 'lines' => $lines, 'confirmed_by' => FinanceAccess::actor(), 'confirmed_at' => time()] + $material;
         if ($deferred) { $snapshot += ['details' => $details, 'plan_verified' => 1]; }
+        else { $snapshot += FinanceExpenseEstimates::declaration($data); }
         $source = $ledger->createSource($id, 'expense_payable', $vendor, $amount, $date, $due, $snapshot);
         foreach ($lines as $line) {
             if (!$deferred) { $ledger->add($id, 'expense', $vendor, $line['amount'], $date, $month, 'ordinary_expense', $source, null,

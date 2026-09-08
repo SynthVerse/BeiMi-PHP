@@ -125,7 +125,7 @@ final class FinanceBusinessLogic extends BaseLogic
             $sources = match ($type) {
                 'deferred_amortization' => FinanceDeferredExpenses::options($ledger, $subjectId, $params),
                 'deferred_expense' => FinanceExpenseCategories::options(),
-                'expense_adjustment' => FinanceExpenseAdjustments::options($subjectId, $params),
+                'expense_adjustment', 'expense_estimate_final' => FinanceExpenseAdjustments::options($subjectId, $params),
                 'expense' => !empty($params['original_expense_document_id']) ? FinanceExpenseAdjustments::outstanding(FinanceValue::id($params['original_expense_document_id'])) : FinanceExpenseCategories::options(),
                 'expense_category' => FinanceExpenseCategories::options(true),
                 'legacy_return_cost' => FinanceLegacyReturnCosts::options($params),
