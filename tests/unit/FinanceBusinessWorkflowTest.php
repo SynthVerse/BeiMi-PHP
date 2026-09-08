@@ -157,6 +157,39 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertNull($balance['value']); self::assertSame('4.000000000000', $balance['pending_quantity']);
         self::assertCount(1, $active['cost_bootstrap']['pending_flow_ids']);
         self::assertSame('0.000000000000', $cost->destination($warehouse, $sku, 'sale', 'sales_order:' . $sale)['quantity']);
+        self::assertTrue(\app\api\jxc\logic\StockService::outbound($warehouse, $goods, '104', 98628, 'sales', 'RESALE-AFTER-BOOTSTRAP', '', $sku));
+        self::assertNull($cost->destination($warehouse, $sku, 'sale', 'sales_order:98628')['cost']);
+        $options = FinanceBusinessLogic::options(['type' => 'legacy_return_cost']);
+        self::assertNotFalse($options, FinanceBusinessLogic::getError()); self::assertCount(1, $options['cost_sources']);
+        $source = $options['cost_sources'][0];
+        $payload = ['stock_flow_id' => $source['stock_flow_id'], 'expected_cost_event_id' => $source['expected_cost_event_id'],
+            'amount' => '40.00', 'source_reference' => '旧销售原采购成本凭据', 'reason' => '核实这四单位退回商品原成本四十元', 'cost_verified' => 1];
+        $request = $this->command(0) + ['type' => 'legacy_return_cost', 'payload' => $payload];
+        foreach ([['cost_verified' => 0], ['amount' => '-1'], ['stock_flow_id' => 999999]] as $invalid) {
+            self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'legacy_return_cost', 'payload' => array_merge($payload, $invalid)]));
+            self::assertNull($cost->destination($warehouse, $sku, 'sale', 'sales_order:98628')['cost']);
+        }
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($request + ['action' => 'record']);
+        self::assertNotFalse($preview, FinanceBusinessLogic::getError());
+        self::assertNull($cost->destination($warehouse, $sku, 'sale', 'sales_order:98628')['cost']);
+        $confirmed = FinanceBusinessLogic::action('record', $request);
+        self::assertNotFalse($confirmed, FinanceBusinessLogic::getError());
+        self::assertSame($confirmed, FinanceBusinessLogic::action('record', $request));
+        self::assertSame('240.000000', $cost->destination($warehouse, $sku, 'sale', 'sales_order:98628')['cost']);
+        self::assertSame('0.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $sku));
+        self::assertSame([], $confirmed['confirmed_result']['created_sources']);
+        self::assertSame('40.00', $confirmed['confirmed_result']['amount']);
+        $payload['amount'] = '44.00';
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'legacy_return_cost', 'payload' => $payload]));
+        self::assertStringContainsString('已更新', FinanceBusinessLogic::getError());
+        $latest = FinanceBusinessLogic::options(['type' => 'legacy_return_cost'])['cost_sources'][0];
+        $payload['expected_cost_event_id'] = $latest['expected_cost_event_id'];
+        $revised = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'legacy_return_cost', 'payload' => $payload]);
+        self::assertNotFalse($revised, FinanceBusinessLogic::getError());
+        self::assertSame('244.000000', $cost->destination($warehouse, $sku, 'sale', 'sales_order:98628')['cost']);
+        self::assertSame('40.00', FinanceBusinessLogic::detail(['id' => $confirmed['id']])['confirmed_result']['amount']);
+        $this->prepareCustomerReportRequestContext(self::OTHER_TENANT_ID);
+        self::assertSame([], FinanceBusinessLogic::options(['type' => 'legacy_return_cost'])['cost_sources']);
     }
 
     public static function unresolvedBootstrapFlows(): array { return [['purchase', true], ['warehouse-transfer', false]]; }

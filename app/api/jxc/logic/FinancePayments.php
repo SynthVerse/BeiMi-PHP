@@ -15,6 +15,7 @@ final class FinancePayments
     {
         $type = $document['type']; $policy = FinanceDocumentPolicy::authorize($type, true);
         $data = FinanceValue::decode($document['payload']);
+        if ($type === 'legacy_return_cost') { return FinanceLegacyReturnCosts::confirm($this->ledger, $document, $data); }
         if ($type === 'inventory_loss') { return FinanceInventoryLosses::confirm($this->ledger, $document, $data); }
         if ($type === 'inventory_loss_resolution') { return FinanceInventoryLosses::resolve($this->ledger, $document, $data); }
         if ($type === 'purchase_arrival_loss') { return FinancePurchaseArrivalLosses::confirm($this->ledger, $document, $data); }
