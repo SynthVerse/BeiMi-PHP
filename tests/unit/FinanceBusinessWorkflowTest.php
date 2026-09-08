@@ -62,6 +62,66 @@ final class FinanceBusinessWorkflowTest extends TestCase
 
     public static function deferredClosureCases(): array { return [[false], [true]]; }
 
+    public function test_new_deferred_obligation_keeps_future_service_out_of_profit_and_payment_separate(): void
+    {
+        $this->activate(); $month = date('Y-m'); $next = date('Y-m', strtotime('first day of next month'));
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '新租赁服务方']);
+        $category = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_category', 'payload' => ['category_id' => 0,
+            'expected_category_version' => 0, 'parent' => 'premises', 'name' => '场地服务', 'is_enabled' => 1]]);
+        self::assertNotFalse($category, FinanceBusinessLogic::getError());
+        $lines = [['category_id' => $category['confirmed_result']['category']['id'], 'expected_category_version' => 1, 'amount' => '3000.00', 'reason' => '两月合同租金']];
+        $data = ['subject_id' => $vendor, 'actual_date' => date('Y-m-d'), 'amount' => '3000.00', 'source_reference' => 'DEFERRED-33-1',
+            'due_mode' => 'unspecified', 'due_date' => null, 'reason' => '合同服务义务已确认', 'material_status' => 'missing', 'material_verified' => 1,
+            'missing_material_reason' => '经办人核实合同，原件待补', 'plan_verified' => 1, 'service_start' => $month, 'service_end' => $next,
+            'schedule' => [['month' => $month, 'amount' => '1500.00'], ['month' => $next, 'amount' => '1500.00']], 'lines' => $lines];
+        $command = $this->command(0) + ['type' => 'deferred_expense', 'payload' => $data];
+        foreach ([array_replace($data, ['plan_verified' => 0]), array_replace($data, ['schedule' => [['month' => $month, 'amount' => '3000.00']]]),
+            array_replace($data, ['schedule' => [['month' => $month, 'amount' => '1500.00'], ['month' => $month, 'amount' => '1500.00']]]),
+            array_replace($data, ['schedule' => [['month' => $month, 'amount' => '1500.00'], ['month' => $next, 'amount' => '1600.00']]])] as $invalid) {
+            self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'deferred_expense', 'payload' => $invalid]));
+        }
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($command + ['action' => 'record']);
+        self::assertSame([], $preview['impacts']); self::assertEqualsCanonicalizing(['expense_payable', 'deferred'], array_column($preview['balances'], 'category'));
+        $result = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($result, FinanceBusinessLogic::getError());
+        self::assertSame($result, FinanceBusinessLogic::action('record', $command));
+        $duplicate = $data; $duplicate['benefit_month'] = $month;
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense', 'payload' => $duplicate]));
+        self::assertStringContainsString('来源已登记', FinanceBusinessLogic::getError());
+        self::assertSame([], FinanceBusinessLogic::options(['type' => 'expense_adjustment', 'subject_id' => $vendor])['bills']);
+        $ledger = new FinanceLedger(self::TENANT_ID); $payable = $result['confirmed_result']['created_sources'][0]; $deferred = $result['confirmed_result']['deferred_source'];
+        self::assertSame('3000.00', $ledger->source($deferred)['balance']);
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'supplier_payment', 'payload' => ['subject_id' => $vendor,
+            'account_id' => $this->accountId, 'amount' => '1000.00', 'actual_date' => date('Y-m-d'), 'reason' => '实际支付首期租金', 'allocations' => [['source' => $payable, 'amount' => '1000.00']]]]), FinanceBusinessLogic::getError());
+        self::assertSame('3000.00', $ledger->source($deferred)['balance']); self::assertSame('2000.00', $ledger->source($payable)['balance']);
+        $otherCategory = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_category', 'payload' => ['category_id' => 0,
+            'expected_category_version' => 0, 'parent' => 'office', 'name' => '办公支出', 'is_enabled' => 1]]);
+        self::assertNotFalse($otherCategory, FinanceBusinessLogic::getError());
+        $wrong = $lines; $wrong[0]['category_id'] = $otherCategory['confirmed_result']['category']['id']; $wrong[0]['amount'] = '1500.00';
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'deferred_amortization', 'payload' => ['source' => $deferred,
+            'subject_id' => $vendor, 'benefit_month' => $month, 'amortization_verified' => 1, 'reason' => '错误类别不应改变原租金分类', 'lines' => $wrong]]));
+        self::assertStringContainsString('原计划类别', FinanceBusinessLogic::getError());
+        $split = $data; $split['source_reference'] = 'DEFERRED-33-2'; $split['lines'][0]['amount'] = '1000.00';
+        $split['lines'][] = ['category_id' => $otherCategory['confirmed_result']['category']['id'], 'expected_category_version' => 1, 'amount' => '2000.00', 'reason' => '合同同时包含办公服务'];
+        $splitPlan = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'deferred_expense', 'payload' => $split]);
+        self::assertNotFalse($splitPlan, FinanceBusinessLogic::getError());
+        $over = $lines; $over[0]['amount'] = '1500.00';
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'deferred_amortization', 'payload' => ['source' => $splitPlan['confirmed_result']['deferred_source'],
+            'subject_id' => $vendor, 'benefit_month' => $month, 'amortization_verified' => 1, 'reason' => '单类别不能超过原拆分', 'lines' => $over]]));
+        self::assertStringContainsString('类别剩余', FinanceBusinessLogic::getError());
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_category', 'payload' => ['category_id' => $lines[0]['category_id'],
+            'expected_category_version' => 1, 'parent' => 'premises', 'name' => '场地服务', 'is_enabled' => 0]]), FinanceBusinessLogic::getError());
+        $lines[0]['amount'] = '1500.00';
+        $amortized = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'deferred_amortization', 'payload' => ['source' => $deferred,
+            'subject_id' => $vendor, 'benefit_month' => $month, 'amortization_verified' => 1, 'reason' => '本月服务已取得', 'lines' => $lines]]);
+        self::assertNotFalse($amortized, FinanceBusinessLogic::getError());
+        self::assertSame('1500.00', $ledger->source($deferred)['balance']); self::assertSame('2000.00', $ledger->source($payable)['balance']);
+        self::assertSame('4000.00', $ledger->account($this->accountId)['balance']);
+        $remaining = FinanceBusinessLogic::options(['type' => 'deferred_amortization', 'subject_id' => $vendor, 'source' => $deferred]);
+        self::assertSame('1500.00', $remaining['selected_deferred']['category_remaining'][0]['remaining']);
+        self::assertSame(1, $remaining['selected_deferred']['category_remaining'][0]['category_version']);
+        self::assertSame($result['confirmed_result'], FinanceBusinessLogic::detail(['id' => $result['id']])['confirmed_result']);
+    }
+
     /** @dataProvider deferredClosureCases */
     public function test_opening_deferred_schedule_recognizes_one_elapsed_month_without_repeating_payment(bool $closed): void
     {
@@ -97,6 +157,13 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertFalse(FinanceBusinessLogic::action('record', $command)); self::assertStringContainsString('未来', FinanceBusinessLogic::getError());
         $command['idempotency_key'] = $this->command(0)['idempotency_key']; $command['payload']['subject_id'] = $vendor + 1;
         self::assertFalse(FinanceBusinessLogic::action('record', $command)); self::assertStringContainsString('本对象', FinanceBusinessLogic::getError());
+        if ($closed) {
+            $command['idempotency_key'] = $this->command(0)['idempotency_key']; $command['payload']['subject_id'] = $vendor; $command['payload']['benefit_month'] = $next;
+            self::assertNotFalse(FinanceBusinessLogic::action('record', $command), FinanceBusinessLogic::getError());
+            $completed = FinanceBusinessLogic::options(['type' => 'deferred_amortization', 'subject_id' => $vendor, 'source' => 'o:' . $sourceId]);
+            self::assertNotFalse($completed, FinanceBusinessLogic::getError()); self::assertSame('0.00', $completed['selected_deferred']['balance']);
+            self::assertSame(['confirmed', 'confirmed'], array_column($completed['selected_deferred']['schedule'], 'status'));
+        }
     }
 
     public function test_cost_events_survive_reload_replay_once_and_roll_back_with_business_transaction(): void

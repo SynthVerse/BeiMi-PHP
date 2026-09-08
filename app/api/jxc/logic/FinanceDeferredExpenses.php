@@ -27,6 +27,7 @@ final class FinanceDeferredExpenses
             ->column('document_id', 'benefit_month');
         $source['schedule'] = array_map(static fn(array $row): array => $row + ['status' => isset($confirmed[$row['month']]) ? 'confirmed' : ($row['month'] > date('Y-m') ? 'future' : 'pending'),
             'document_id' => isset($confirmed[$row['month']]) ? (int)$confirmed[$row['month']] : null], $source['snapshot']['details']['schedule'] ?? []);
+        if (($source['snapshot']['type'] ?? '') === 'deferred_expense') { $source['category_remaining'] = FinanceDeferredPlans::categories($source); }
         return $source;
     }
 
@@ -47,7 +48,8 @@ final class FinanceDeferredExpenses
         $amount = FinanceValue::money($rows[0]['amount']);
         if (bccomp($amount, $source['balance'], 2) > 0) { throw new \DomainException('待摊余额不足，请核对来源后续处理'); }
         if (($data['amortization_verified'] ?? null) !== 1) { throw new \DomainException('请明确核实本月服务受益及费用组成'); }
-        $reason = FinanceValue::text($data['reason'] ?? null, 1000); $lines = FinanceExpenseCategories::lines($data['lines'] ?? null, $amount);
+        $reason = FinanceValue::text($data['reason'] ?? null, 1000);
+        $lines = ($source['snapshot']['type'] ?? '') === 'deferred_expense' ? FinanceDeferredPlans::monthlyLines($source, $data['lines'] ?? null, $amount) : FinanceExpenseCategories::lines($data['lines'] ?? null, $amount);
         $activation = (string)Db::name('finance_preparation')->where('tenant_id', $tenant)->value('activation_date');
         if ($benefit < substr($activation, 0, 7)) { throw new \DomainException('启用前已摊费用不能重复确认'); }
         $date = max($benefit . '-01', $activation); $posting = $ledger->postingMonth($date);

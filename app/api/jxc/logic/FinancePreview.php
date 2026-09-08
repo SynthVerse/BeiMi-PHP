@@ -50,7 +50,7 @@ final class FinancePreview
             $result = $document['confirmed_result'];
             return ['tenant_id' => $tenant, 'balances' => $balances, 'impacts' => array_values($periods), 'posting_months' => $months,
                 ...($document['type'] === 'sales_batch' ? ['sales' => $result] : []),
-                ...(in_array($document['type'], ['expense', 'expense_category', 'expense_adjustment', 'deferred_amortization'], true) ? ['expense' => $result] : []),
+                ...(in_array($document['type'], ['expense', 'expense_category', 'expense_adjustment', 'deferred_amortization', 'deferred_expense'], true) ? ['expense' => $result] : []),
                 ...(in_array($document['type'], ['legacy_return_cost', 'inventory_loss', 'inventory_loss_resolution', 'purchase_arrival_loss', 'purchase_difference', 'purchase_return_resolution', 'purchase_return_acceptance', 'purchase_return_actual', 'purchase_arrival', 'purchase_settlement', 'purchase_extra_cost', 'purchase_adjustment', 'purchase_extra_adjustment'], true) ? ['purchase' => $result, 'cost_impacts' => $costImpacts] : []),
                 ...($document['type'] === 'purchase_rules' ? ['purchase_rule' => $result] : []),
                 'old_due_date' => $result['old_due_date'] ?? null, 'new_due_date' => $result['new_due_date'] ?? null];

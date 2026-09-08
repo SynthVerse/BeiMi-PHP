@@ -17,7 +17,7 @@ final class FinancePayments
         $data = FinanceValue::decode($document['payload']);
         if ($type === 'deferred_amortization') { return FinanceDeferredExpenses::confirm($this->ledger, $document, $data); }
         if ($type === 'expense_adjustment') { return FinanceExpenseAdjustments::confirm($this->ledger, $document, $data); }
-        if ($type === 'expense') { return FinanceExpenses::confirm($this->ledger, $document, $data); }
+        if (in_array($type, ['expense', 'deferred_expense'], true)) { return FinanceExpenses::confirm($this->ledger, $document, $data); }
         if ($type === 'expense_category') { return FinanceExpenseCategories::confirm($document, $data); }
         if ($type === 'legacy_return_cost') { return FinanceLegacyReturnCosts::confirm($this->ledger, $document, $data); }
         if ($type === 'inventory_loss') { return FinanceInventoryLosses::confirm($this->ledger, $document, $data); }

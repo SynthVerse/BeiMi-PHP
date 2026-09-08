@@ -16,12 +16,16 @@ final class FinanceExpenses
         $name = Db::name('vendor')->where('tenant_id', $tenant)->where('id', $vendor)->value('supplier_name');
         if ($name === null) { throw new \DomainException('请选择本门店费用收款对象'); }
         $date = FinanceValue::date($data['actual_date'] ?? null); $ledger->postingMonth($date);
-        $benefit = FinanceValue::text($data['benefit_month'] ?? null, 7);
-        FinanceValue::date($benefit . '-01');
+        $deferred = $document['type'] === 'deferred_expense';
+        $amount = FinanceValue::money($data['amount'] ?? null);
         $activation = (string)Db::name('finance_preparation')->where('tenant_id', $tenant)->value('activation_date');
-        if ($benefit < substr($activation, 0, 7) || $benefit > date('Y-m')) { throw new \DomainException('普通费用归属须为启用后已发生的服务月份，未来受益请使用待摊费用'); }
-        $month = $ledger->postingMonth(max($benefit . '-01', $activation));
-        $amount = FinanceValue::money($data['amount'] ?? null); $reference = FinanceValue::text($data['source_reference'] ?? null, 160);
+        $details = $deferred ? FinanceDeferredPlans::details($data, $amount, $activation) : null; $benefit = null;
+        if (!$deferred) {
+            $benefit = FinanceValue::text($data['benefit_month'] ?? null, 7); FinanceValue::date($benefit . '-01');
+            if ($benefit < substr($activation, 0, 7) || $benefit > date('Y-m')) { throw new \DomainException('普通费用归属须为启用后已发生的服务月份，未来受益请使用待摊费用'); }
+        }
+        $month = $ledger->postingMonth($deferred ? $date : max($benefit . '-01', $activation));
+        $reference = FinanceValue::text($data['source_reference'] ?? null, 160);
         if (Db::name('finance_expense_bill')->where('tenant_id', $tenant)->where('vendor_id', $vendor)->where('source_reference', $reference)->lock(true)->find()) {
             throw new \DomainException('该收款对象的费用来源已登记，请打开原费用关联调整');
         }
@@ -31,19 +35,25 @@ final class FinanceExpenses
         }
         $reason = FinanceValue::text($data['reason'] ?? null, 1000); $material = self::material($data);
         $lines = FinanceExpenseCategories::lines($data['lines'] ?? null, $amount);
-        $snapshot = ['type' => 'expense', 'subject_id' => $vendor, 'subject_name' => $name, 'amount' => $amount,
+        $snapshot = ['type' => $document['type'], 'subject_id' => $vendor, 'subject_name' => $name, 'amount' => $amount,
             'actual_date' => $date, 'benefit_month' => $benefit, 'posting_month' => $month, 'due_mode' => $dueMode, 'due_date' => $due,
             'source_reference' => $reference, 'reason' => $reason, 'lines' => $lines, 'confirmed_by' => FinanceAccess::actor(), 'confirmed_at' => time()] + $material;
+        if ($deferred) { $snapshot += ['details' => $details, 'plan_verified' => 1]; }
         $source = $ledger->createSource($id, 'expense_payable', $vendor, $amount, $date, $due, $snapshot);
         foreach ($lines as $line) {
-            $ledger->add($id, 'expense', $vendor, $line['amount'], $date, $month, 'ordinary_expense', $source, null,
-                $line + ['benefit_month' => $benefit, 'material_status' => $material['material_status']]);
+            if (!$deferred) { $ledger->add($id, 'expense', $vendor, $line['amount'], $date, $month, 'ordinary_expense', $source, null,
+                $line + ['benefit_month' => $benefit, 'material_status' => $material['material_status']]); }
             Db::name('finance_expense_category')->where('tenant_id', $tenant)->where('id', $line['category_id'])->update(['used_at' => time()]);
         }
         $bill = (int)Db::name('finance_expense_bill')->insertGetId(['tenant_id' => $tenant, 'document_id' => $id, 'vendor_id' => $vendor,
             'source_reference' => $reference, 'source_ref' => $source, 'amount' => $amount, 'snapshot' => FinanceValue::json($snapshot), 'create_time' => time()]);
         FinanceExpenseIdentities::claim($vendor, $reference, $bill, $id);
-        return $snapshot + ['bill_id' => $bill, 'created_sources' => [$source]];
+        $result = $snapshot + ['bill_id' => $bill, 'created_sources' => [$source]];
+        if ($deferred) {
+            $result['deferred_source'] = $ledger->createSource($id, 'deferred', $vendor, $amount, $date, null, $snapshot + ['payable_source' => $source]);
+            $result['created_sources'][] = $result['deferred_source'];
+        }
+        return $result;
     }
 
     private static function material(array $data): array

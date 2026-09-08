@@ -37,6 +37,7 @@ final class FinanceExpenseAdjustments
         $query = Db::name('finance_expense_bill')->alias('b')->leftJoin([$latest => 'v'], 'v.bill_id=b.id')
             ->leftJoin('finance_expense_revision r', 'r.id=v.revision_id AND r.tenant_id=b.tenant_id')->where('b.tenant_id', FinanceAccess::tenant())
             ->whereLike('b.source_reference', '%' . $keyword . '%');
+        $query->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(b.snapshot,'$.type'))=?", ['expense']);
         if (!empty($params['original_expense_document_id'])) { $query->where('b.document_id', FinanceValue::id($params['original_expense_document_id'])); }
         else { $query->whereRaw("COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(r.snapshot,'$.expense.subject_id')) AS UNSIGNED),b.vendor_id)=?", [$vendor]); }
         $rows = $query->field('b.*')->order('b.id', 'desc')->limit(($page - 1) * 20, 21)->select()->toArray(); $choices = [];
@@ -52,6 +53,7 @@ final class FinanceExpenseAdjustments
         FinanceAccess::require('', true); $tenant = FinanceAccess::tenant(); $id = (int)$document['id'];
         $vendor = FinanceValue::id($data['subject_id'] ?? null); $originalId = FinanceValue::id($data['original_expense_document_id'] ?? null);
         $current = self::current($originalId, $vendor); $before = $current['expense'];
+        if ($before['type'] !== 'expense') { throw new \DomainException('待摊计划须通过专用关联调整，不能作为当期普通费用更正'); }
         if (FinanceValue::id($data['expected_revision_id'] ?? null, true) !== $current['expected_revision_id']) { throw new \DomainException('费用已有后续调整，请重新核对最新记录'); }
         if (($data['adjustment_verified'] ?? null) !== 1) { throw new \DomainException('请明确核实原费用、本次调整内容及依据'); }
         $newVendor = FinanceValue::id($data['new_subject_id'] ?? null);

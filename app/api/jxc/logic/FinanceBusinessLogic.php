@@ -124,6 +124,7 @@ final class FinanceBusinessLogic extends BaseLogic
             $page = max(1, FinanceValue::id($params['page'] ?? 1));
             $sources = match ($type) {
                 'deferred_amortization' => FinanceDeferredExpenses::options($ledger, $subjectId, $params),
+                'deferred_expense' => FinanceExpenseCategories::options(),
                 'expense_adjustment' => FinanceExpenseAdjustments::options($subjectId, $params),
                 'expense' => !empty($params['original_expense_document_id']) ? FinanceExpenseAdjustments::outstanding(FinanceValue::id($params['original_expense_document_id'])) : FinanceExpenseCategories::options(),
                 'expense_category' => FinanceExpenseCategories::options(true),
@@ -165,7 +166,7 @@ final class FinanceBusinessLogic extends BaseLogic
             }
             if (!empty($params['source']) && $type !== 'receipt_return') {
                 $selected = $ledger->source(FinanceValue::text($params['source'], 40));
-                if (!in_array($selected['category'], $categories, true) || $selected['subject_id'] !== $subjectId || bccomp($selected['balance'], '0', 2) <= 0) { throw new \DomainException('指定来源已结清或不属于本对象和业务类型'); }
+                if (!in_array($selected['category'], $categories, true) || $selected['subject_id'] !== $subjectId || ($type !== 'deferred_amortization' && bccomp($selected['balance'], '0', 2) <= 0)) { throw new \DomainException('指定来源已结清或不属于本对象和业务类型'); }
                 $sources['selected_source'] = $selected;
             }
             if ($type === 'supplier_payment') {
