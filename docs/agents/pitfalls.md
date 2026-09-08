@@ -2,6 +2,34 @@
 
 按根因去重。每条记录必须指向实际防线；仅有“不要这样做”的提醒不算已防护。
 
+## PIT-0062：Excel 单元格容量造成导出依据静默截断
+
+日期：2026-09-09
+
+### 报告来源
+
+- 生成原因：工作流要求
+- 主工作流：Matt Pocock
+- 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`用户级自定义 / impeccable`、`Matt Pocock / code-review`、`用户级自定义 / prevent-repeat-pitfalls`、`Matt Pocock / diagnosing-bugs`（第58批自动调用）。
+- 说明：财务报表导出测试确认截断后保留防线；原任务恢复位置为完成导出页面审查并继续原凭据追溯。已具备最小失败测试及库源码证据，诊断未重复猜测和插入日志。
+
+- 状态：已防护；首次／最近发生：2026-09-09；复发次数：0。
+- 适用范围：六类报表 XLSX、冻结月份原文及嵌套组成；相关问题：无。
+- 触发场景：冻结依据或嵌套 JSON 超过 Excel 单元格的字符串容量。
+- 根因：PhpSpreadsheet `DataType::checkString()` 按 `MAX_STRING_LENGTH=32767` 截断，并不会因数据不完整而使导出失败。
+- 错误做法：仅验证文件可打开，把成功写入单元格当作全文保留。
+- 正确做法：超过安全长度的内容分段写入“长文本续页”，原单元格保留明确工作表与单元格定位；所有业务原文显式按字符串写入。
+- 防线：`FinanceReportExports::longText()` 保留按序片段，超出工作表总行数则明确失败；`FinanceBusinessWorkflowTest::test_report_export_preserves_long_frozen_evidence_and_never_executes_formula_text` 从正式导出接口生成实际 XLSX，重新打开后重组长文本并校验哈希，检查全部单元格都不是公式类型。
+- 已验证事实：`.scratch/finance-58-long-red.log` 缺完整续页失败；修复后 `.scratch/finance-58-long-green.log` 1 test、369 assertions 通过；报表相关回归 `.scratch/finance-58-php-final.log` 6 tests、569 assertions 通过。
+- 尚未验证：业务库部署、微信真机预览和手动转发。
+- 后续建议：其他新增导出也应重新打开实际文件验证业务关键内容，不仅检查文件头或 HTTP 成功。
+
+### 发生记录
+
+| 日期 | 任务 | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-09-09 | 财务一期第58批 | 导出包含超长原始依据的冻结月报 | 首个测试只验证短金额和文件可打开，没有覆盖库的单元格容量。 |
+
 ## PIT-0061：新增展示元数据改变历史核对的业务指纹
 
 日期：2026-09-09

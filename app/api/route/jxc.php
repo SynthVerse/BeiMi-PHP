@@ -48,6 +48,8 @@ Route::group('', function () {
     Route::get('finance/business/catalog', 'jxc.FinanceBusiness/catalog');
     Route::get('finance/business/closingChecklist', 'jxc.FinanceBusiness/closingChecklist');
     Route::get('finance/business/monthlyReport', 'jxc.FinanceBusiness/monthlyReport');
+    Route::post('finance/business/prepareReportExport', 'jxc.FinanceBusiness/prepareReportExport');
+    Route::get('finance/business/reportExportContent', 'jxc.FinanceBusiness/reportExportContent');
     Route::get('finance/business/periodPreview', 'jxc.FinanceBusiness/periodPreview');
     Route::post('finance/business/closePeriod', 'jxc.FinanceBusiness/closePeriod');
     Route::get('finance/business/periodHistory', 'jxc.FinanceBusiness/periodHistory');

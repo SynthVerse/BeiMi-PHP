@@ -34,6 +34,17 @@ final class FinanceBusinessLogic extends BaseLogic
         } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
     }
 
+    public static function reportExport(string $action, array $params): array|false
+    {
+        self::clearError();
+        try {
+            return Db::transaction(static function () use ($action, $params): array {
+                $ledger = new FinanceLedger(FinanceAccess::tenant()); $ledger->lockBook();
+                return FinanceReportExports::execute($ledger, $action, $params);
+            });
+        } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
+    }
+
     public static function closingChecklist(array $params): array|false
     {
         self::clearError();

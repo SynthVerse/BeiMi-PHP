@@ -63,6 +63,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000040_finance_account_transfer.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000041_finance_account_reconciliation.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000042_finance_transit_reconciliation.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260909_000043_finance_report_export.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -106,6 +107,68 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertFalse(FinanceBusinessLogic::monthlyReport(['period_type' => 'year', 'period' => substr($month, 0, 4), 'report' => 'cash']));
         Db::name('employee_permission')->insert(['tenant_id' => self::TENANT_ID, 'employee_id' => $employee['id'], 'permission_key' => 'finance.salary.view']);
         $visible = FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => 'expense']); self::assertNotFalse($visible, FinanceBusinessLogic::getError()); self::assertCount(1, $visible['data']['entries']);
+    }
+
+    public function test_report_export_freezes_requested_version_retries_once_and_audits_private_download(): void
+    {
+        $this->activate(); $month = date('Y-m');
+        $query = $this->command(0) + ['report' => 'cash', 'period_type' => 'month', 'period' => $month];
+        $export = FinanceBusinessLogic::reportExport('prepare', $query); self::assertNotFalse($export, FinanceBusinessLogic::getError());
+        self::assertSame($export, FinanceBusinessLogic::reportExport('prepare', $query)); self::assertSame(1, Db::name('finance_report_export')->where('tenant_id', self::TENANT_ID)->count());
+        $snapshot = json_decode(Db::name('finance_report_export')->where('id', $export['id'])->value('snapshot'), true); self::assertSame('5000.00', $snapshot['data']['summary']['closing_accounts']);
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $this->receipt('100', '100')]), FinanceBusinessLogic::getError());
+        $content = FinanceBusinessLogic::reportExport('content', ['id' => $export['id']]); self::assertNotFalse($content, FinanceBusinessLogic::getError());
+        self::assertSame($snapshot, json_decode(Db::name('finance_report_export')->where('id', $export['id'])->value('snapshot'), true));
+        self::assertSame('PK', substr(base64_decode($content['base64']), 0, 2)); self::assertSame(1, Db::name('finance_report_export_access')->where('tenant_id', self::TENANT_ID)->where('export_id', $export['id'])->count());
+        $file = tempnam(sys_get_temp_dir(), 'finance-xlsx-');
+        try {
+            file_put_contents($file, base64_decode($content['base64'])); $book = \PhpOffice\PhpSpreadsheet\IOFactory::load($file);
+            self::assertStringContainsString('5000.00', json_encode($book->getSheetByName('报表汇总')->toArray(), JSON_UNESCAPED_UNICODE));
+            self::assertGreaterThanOrEqual(3, $book->getSheetCount()); $book->disconnectWorksheets();
+        } finally { unlink($file); }
+        $new = FinanceBusinessLogic::reportExport('prepare', array_replace($query, ['idempotency_key' => $this->command(0)['idempotency_key']])); self::assertNotFalse($new); self::assertNotSame($export['snapshot_hash'], $new['snapshot_hash']);
+        request()->adminInfo = ['root' => 1, 'tenant_id' => self::OTHER_TENANT_ID];
+        self::assertFalse(FinanceBusinessLogic::reportExport('content', ['id' => $export['id']]));
+    }
+
+    public function test_report_export_rechecks_view_export_salary_and_actor_permissions(): void
+    {
+        $this->activate();
+        $employee = WorkforceLogic::saveEmployee(['name' => '报表导出员工', 'mobile' => '13800009952', 'bind_user_id' => 996952, 'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => []]); self::assertNotFalse($employee, WorkforceLogic::getError());
+        $grant = static function (string $key) use ($employee): void { Db::name('employee_permission')->insert(['tenant_id' => self::TENANT_ID, 'employee_id' => $employee['id'], 'permission_key' => $key]); };
+        $revoke = static function (string $key) use ($employee): void { Db::name('employee_permission')->where('tenant_id', self::TENANT_ID)->where('employee_id', $employee['id'])->where('permission_key', $key)->delete(); };
+        $grant('finance.report.expense.view');
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996952; request()->adminId = 0;
+        $query = $this->command(0) + ['report' => 'expense', 'period_type' => 'month', 'period' => date('Y-m')];
+        self::assertFalse(FinanceBusinessLogic::reportExport('prepare', $query));
+        $grant('finance.report.expense.export'); $grant('finance.salary.view');
+        $export = FinanceBusinessLogic::reportExport('prepare', $query); self::assertNotFalse($export, FinanceBusinessLogic::getError());
+        foreach (['finance.report.expense.export', 'finance.report.expense.view', 'finance.salary.view'] as $permission) {
+            $revoke($permission); self::assertFalse(FinanceBusinessLogic::reportExport('content', ['id' => $export['id']])); self::assertFalse(FinanceBusinessLogic::reportExport('prepare', $query)); $grant($permission);
+        }
+        self::assertNotFalse(FinanceBusinessLogic::reportExport('content', ['id' => $export['id']]), FinanceBusinessLogic::getError());
+        $this->prepareCustomerReportRequestContext();
+        self::assertFalse(FinanceBusinessLogic::reportExport('content', ['id' => $export['id']])); self::assertStringContainsString('操作人', FinanceBusinessLogic::getError());
+    }
+
+    public function test_report_export_preserves_long_frozen_evidence_and_never_executes_formula_text(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
+        $report = FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => 'cash']); self::assertNotFalse($report);
+        $text = '=SUM(1,2)' . str_repeat('原始依据', 9000) . '证据末尾';
+        $report['data']['entries'][] = ['reason' => $text, 'amount' => '0.00']; $report['closing_status'] = 'closed'; $report['stage'] = false;
+        Db::name('finance_period')->insert(['tenant_id' => self::TENANT_ID, 'month' => $month, 'status' => 'closed', 'snapshot' => json_encode(['reports' => ['cash' => $report], 'unresolved' => []]), 'closed_by' => '{}', 'closed_at' => time()]);
+        $export = FinanceBusinessLogic::reportExport('prepare', $this->command(0) + ['report' => 'cash', 'period' => $month]); self::assertNotFalse($export, FinanceBusinessLogic::getError());
+        $content = FinanceBusinessLogic::reportExport('content', ['id' => $export['id']]); self::assertNotFalse($content, FinanceBusinessLogic::getError());
+        $file = tempnam(sys_get_temp_dir(), 'finance-xlsx-');
+        try {
+            file_put_contents($file, base64_decode($content['base64'])); $book = \PhpOffice\PhpSpreadsheet\IOFactory::load($file);
+            $sheet = $book->getSheetByName('长文本续页'); self::assertNotNull($sheet, '超过 Excel 单元格容量的依据必须完整续写');
+            $parts = []; foreach (array_slice($sheet->toArray(), 1) as $row) { if ($row[0] === '金额流水') { $parts[] = $row[3]; } }
+            self::assertSame(hash('sha256', $text), hash('sha256', implode('', $parts)));
+            foreach ($book->getAllSheets() as $part) { foreach ($part->getCoordinates() as $coordinate) { self::assertNotSame('f', $part->getCell($coordinate)->getDataType()); } }
+            $book->disconnectWorksheets();
+        } finally { unlink($file); }
     }
 
     public function test_year_reports_sum_flows_keep_last_balances_and_preserve_frozen_months(): void
@@ -4542,6 +4605,8 @@ final class FinanceBusinessWorkflowTest extends TestCase
     private function clean(): void
     {
         Db::name('finance_transit_reconciliation')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
+        Db::name('finance_report_export_access')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
+        Db::name('finance_report_export')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_cash_shortage_application')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_account_reconciliation')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         foreach (['finance_recurring_month_revision', 'finance_recurring_expense_month', 'finance_recurring_expense_plan'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
