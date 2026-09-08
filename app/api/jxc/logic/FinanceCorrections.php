@@ -14,6 +14,7 @@ final class FinanceCorrections
     public function replace(array $original, array $replacement, string $reason, int $duplicateOf = 0, bool $reverseOnly = false): array
     {
         $policy = FinanceDocumentPolicy::authorize($original['type'], true);
+        if (str_starts_with($original['type'], 'inventory_count')) { throw new \DomainException('盘点快照与确认事实必须保留，请关联取消或反向调整，不能覆盖历史'); }
         if ($original['type'] === 'transit_reconcile') { throw new \DomainException('在途核对须追加新的核实结论，不能覆盖或撤销原历史'); }
         if ($original['type'] === 'account_reconcile') { throw new \DomainException('月末核对须按最新历史追加核对记录，不能覆盖或撤销原核对'); }
         if (in_array($original['type'], ['account_transfer_out', 'account_transfer_arrival', 'account_transfer_return'], true)) { throw new \DomainException('互转更正须关联两端账户、在途及后续到账，不能直接覆盖或撤销一端资金'); }

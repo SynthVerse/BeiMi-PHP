@@ -56,6 +56,10 @@ final class FinancePeriodChecklist
             }
         }
         self::costItems($items, $cutoff);
+        foreach (FinanceInventoryCounts::unresolved($cutoff) as $count) {
+            $items[] = self::item('inventory_count', (string)$count['document_id'], '盘点差异原因或截止成本仍待核实', 'blocking',
+                $count + ['route' => '/sub-finance/inventory/count?type=inventory_count&id=' . $count['document_id']]);
+        }
         self::purchaseItems($items, $cutoff);
         self::disputeItems($items, $ledger, $cutoff);
         self::unclaimedItems($items, $ledger, $cutoff);

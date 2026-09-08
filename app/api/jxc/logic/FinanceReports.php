@@ -75,7 +75,7 @@ final class FinanceReports
             ->field('e.origin_key,e.warehouse_id,e.sku_id,e.bucket,e.reference,SUM(e.quantity_delta) AS quantity')->group('e.origin_key,e.warehouse_id,e.sku_id,e.bucket,e.reference')->select()->toArray();
         foreach ($rows as $row) {
             $key = FinanceValue::json([$row['origin_key'], $row['warehouse_id'], $row['sku_id'], $row['bucket'], $row['reference']]);
-            if (isset($affected[$key]) && bccomp($row['quantity'], '0', 12) > 0) { $pending[$row['bucket']] = true; }
+            if (isset($affected[$key]) && bccomp($row['quantity'], '0', 12) !== 0) { $pending[$row['bucket']] = true; }
         }
         return $pending;
     }

@@ -121,6 +121,7 @@ final class FinanceBusinessLogic extends BaseLogic
                 if (in_array($action, ['save', 'prepare', 'record', 'correct', 'reverse_duplicate', 'reverse'], true)) {
                     if ($document && $document['status'] !== 'draft') { throw new \DomainException('请先退回草稿再修改'); }
                     $payload = in_array($action, ['reverse_duplicate', 'reverse'], true) ? FinanceValue::decode($original['payload']) : ($params['payload'] ?? null);
+                    if (is_array($payload)) { $payload = FinanceInventoryCounts::input($type, $payload); }
                     if (!is_array($payload) || strlen(FinanceValue::json($payload)) > 65536) { throw new \DomainException('草稿内容格式无效或超过容量限制'); }
                     $document = array_merge($document ?? ['tenant_id' => $tenantId, 'type' => $type, 'created_by' => FinanceValue::json(FinanceAccess::actor()),
                         'create_time' => time(), 'confirmed_at' => 0, 'confirmed_by' => '{}', 'confirmed_result' => '{}'],
@@ -133,6 +134,7 @@ final class FinanceBusinessLogic extends BaseLogic
                     $document['status'] = 'draft';
                 }
                 if (!$id || $original) { $document['id'] = (int)Db::name('finance_document')->insertGetId($document + ['version' => 1, 'last_modified_by' => FinanceValue::json(FinanceAccess::actor()), 'update_time' => time()]); }
+                FinanceInventoryCounts::prepare($document, $action);
                 if (in_array($action, ['confirm', 'record', 'correct', 'reverse_duplicate', 'reverse'], true)) {
                     if ($document['status'] !== 'pending') { throw new \DomainException('请先提交草稿再确认'); }
                     $ledger = new FinanceLedger($tenantId); $ledger->lockBook();
@@ -212,6 +214,8 @@ final class FinanceBusinessLogic extends BaseLogic
                 'expense' => !empty($params['original_expense_document_id']) ? FinanceExpenseAdjustments::outstanding(FinanceValue::id($params['original_expense_document_id'])) : FinanceExpenseCategories::options(),
                 'expense_category' => FinanceExpenseCategories::options(true),
                 'legacy_return_cost' => FinanceLegacyReturnCosts::options($params),
+                'inventory_count_start' => FinancePurchaseArrivals::options(0, $params),
+                'inventory_count', 'inventory_count_cancel' => FinanceInventoryCounts::options($params),
                 'inventory_loss' => FinancePurchaseArrivals::options(0, $params),
                 'inventory_loss_resolution' => FinanceInventoryLosses::options($params),
                 'purchase_arrival_loss' => FinancePurchaseReviews::options($subjectId, $params, true),
@@ -268,7 +272,7 @@ final class FinanceBusinessLogic extends BaseLogic
             return ['tenant_id' => FinanceAccess::tenant(), 'type' => $type, 'policy' => $policy,
                 'active' => Db::name('finance_opening_book')->where('tenant_id', FinanceAccess::tenant())->value('status') === 'active',
                 'can_confirm' => FinanceAccess::owner() || (!$policy['owner'] && FinanceAccess::has($policy['confirm'])),
-                'can_prepare' => in_array($type, ['salary_expense', 'salary_payment', 'salary_adjustment'], true) ? FinanceAccess::has('finance.salary.prepare') : ($type !== 'sales_batch' || FinanceAccess::has('settlement.bill')),
+                'can_prepare' => str_starts_with($type, 'inventory_count') ? FinanceAccess::has($policy['prepare']) : (in_array($type, ['salary_expense', 'salary_payment', 'salary_adjustment'], true) ? FinanceAccess::has('finance.salary.prepare') : ($type !== 'sales_batch' || FinanceAccess::has('settlement.bill'))),
                 'can_return_receipt' => $type === 'receipt' && FinanceAccess::has('finance.refund.prepare'),
                 'accounts' => $accounts] + $sources;
         } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
@@ -278,6 +282,7 @@ final class FinanceBusinessLogic extends BaseLogic
     {
         foreach (['payload', 'confirmed_result', 'created_by', 'last_modified_by', 'confirmed_by'] as $key) { $document[$key] = FinanceValue::decode($document[$key]); }
         $document['id'] = (int)$document['id']; $document['version'] = (int)$document['version'];
+        $document = FinanceInventoryCounts::present($document);
         if ($document['type'] === 'sales_batch' && $document['status'] === 'confirmed' && FinanceAccess::has('settlement.view')) { $document['output'] = FinanceSalesOutput::document(['id' => $document['id']]); }
         return $document;
     }
@@ -286,7 +291,7 @@ final class FinanceBusinessLogic extends BaseLogic
     {
         $types = [];
         foreach (FinanceDocumentPolicy::TYPES as $type => $policy) {
-            try { FinanceDocumentPolicy::read($type); $types[] = ['type' => $type, 'title' => $policy['title'], 'subject' => $policy['subject'], 'can_prepare' => in_array($type, ['salary_expense', 'salary_payment', 'salary_adjustment'], true) ? FinanceAccess::has('finance.salary.prepare') : ($type !== 'sales_batch' || FinanceAccess::has('settlement.bill'))]; }
+            try { FinanceDocumentPolicy::read($type); $types[] = ['type' => $type, 'title' => $policy['title'], 'subject' => $policy['subject'], 'can_prepare' => str_starts_with($type, 'inventory_count') ? FinanceAccess::has($policy['prepare']) : (in_array($type, ['salary_expense', 'salary_payment', 'salary_adjustment'], true) ? FinanceAccess::has('finance.salary.prepare') : ($type !== 'sales_batch' || FinanceAccess::has('settlement.bill')))]; }
             catch (\DomainException) { continue; }
         }
         return ['tenant_id' => FinanceAccess::tenant(), 'types' => $types,

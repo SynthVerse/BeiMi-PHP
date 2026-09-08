@@ -31,9 +31,9 @@ final class FinanceCostLedger
         $ledger->postingMonth($date);
         $stored = $this->load($sku); $before = $this->withOpening($stored, $sku);
         $this->persist($stored, $before, []);
-        $replayed = !in_array($event['type'], ['adjust', 'reestimate'], true)
+        $replayed = $event['type'] === 'count' || (!in_array($event['type'], ['adjust', 'reestimate'], true)
             && $this->query('finance_cost_event')->where('sku_id', $sku)->whereIn('event_type', ['receive', 'issue', 'restore', 'transfer', 'reclassify', 'excluded_loss'])
-                ->where('business_date', '>', $date)->lock(true)->find();
+                ->where('business_date', '>', $date)->lock(true)->find());
         $result = $replayed ? $this->replay($sku, $event) : $this->applyEvent($before, $event);
         $effectTotals = $result['effect_totals'] ?? null; unset($result['effect_totals']);
         $after = $result['state']; unset($result['state']);
@@ -72,6 +72,9 @@ final class FinanceCostLedger
     {
         $sku = FinanceValue::id($event['sku_id']); $warehouse = FinanceValue::id($event['warehouse_id']);
         return match ($event['type'] ?? '') {
+            'count' => $event['direction'] === 'out'
+                ? FinanceCostAllocation::issue($before, $warehouse, $sku, $event['quantity'], $event['bucket'], $event['target_reference'])
+                : FinanceCostAllocation::receive($before, $event['origin'], $warehouse, $sku, $event['quantity'], $event['amount']),
             'excluded_loss' => FinanceCostAllocation::recognizeExcludedLoss($before, FinanceValue::text($event['origin'] ?? null, 160), $warehouse, $sku, $event['quantity'] ?? '', $event['amount'] ?? null, $event['target_reference'] ?? ''),
             'reclassify' => FinanceCostAllocation::reclassify($before, $warehouse, $sku, $event['quantity'] ?? '', $event['bucket'] ?? '', $event['target_reference'] ?? '', $event['to_bucket'] ?? '', $event['to_reference'] ?? ''),
             'receive' => FinanceCostAllocation::receive($before, FinanceValue::text($event['origin'] ?? null, 160), $warehouse, $sku, $event['quantity'] ?? '', $event['amount'] ?? null),
@@ -89,17 +92,13 @@ final class FinanceCostLedger
     /** 实物按实际日期、同日按确认顺序重放；后续确认的成本沿重新分配后的来源去向补差。 */
     private function replay(int $sku, array $incoming): array
     {
-        $physical = []; $adjustments = [];
+        $events = [];
         foreach ($this->query('finance_cost_event')->where('sku_id', $sku)->order('id')->lock(true)->select()->toArray() as $row) {
-            $event = FinanceValue::decode($row['snapshot']);
-            if (in_array($event['type'], ['adjust', 'reestimate'], true)) { $adjustments[] = $event; }
-            else { $physical[] = $event; }
+            $events[] = FinanceValue::decode($row['snapshot']) + ['_journal_id' => (int)$row['id']];
         }
-        $physical[] = $incoming;
-        // PHP 的稳定排序保留同日原始确认顺序，新补录同日事实追加在已有事实之后。
-        usort($physical, static fn(array $a, array $b): int => strcmp($a['business_date'], $b['business_date']));
+        $events[] = $incoming + ['_journal_id' => PHP_INT_MAX];
         $state = $this->withOpening(FinanceCostAllocation::empty(), $sku); $result = []; $totals = []; $firstDates = [];
-        foreach (array_merge($physical, $adjustments) as $event) {
+        foreach (FinanceCostReplayOrder::ordered($events) as $event) {
             $applied = $this->applyEvent($state, $event);
             $rows = $this->effectChanges($event, $state, $applied['state'], static function (array $row) use (&$firstDates): ?string {
                 return $firstDates[FinanceValue::json([$row['warehouse_id'], $row['sku_id'], $row['bucket'], $row['reference']])] ?? null;
@@ -271,6 +270,13 @@ final class FinanceCostLedger
     private static function effectRows(array $state): array
     {
         $rows = $state['positions'];
+        foreach ($state['origins'] as $key => $origin) {
+            if (!preg_match('/^inventory-count-gain:([1-9][0-9]*):([1-9][0-9]*):([1-9][0-9]*)$/D', $key, $match)) { continue; }
+            // 盘盈增加资产并减少损耗；对方价值跟随该来源补价，之后调拨不会迁移原盘盈仓库。
+            $rows['count-gain:' . $key] = ['origin' => $key, 'warehouse_id' => (int)$match[2], 'sku_id' => (int)$match[3],
+                'bucket' => 'loss', 'reference' => 'inventory-count:' . $match[1] . ':' . $match[3],
+                'quantity' => bcsub('0', $origin['quantity'], 12), 'value' => bcsub('0', $origin['amount'] ?? '0', 6)];
+        }
         foreach ($state['shortages'] as $key => $shortage) {
             $rows['shortage:' . $key] = $shortage + ['origin' => '', 'value' => '0.000000'];
             $inventoryKey = 'negative:' . FinanceValue::json([$shortage['warehouse_id'], $shortage['sku_id']]);

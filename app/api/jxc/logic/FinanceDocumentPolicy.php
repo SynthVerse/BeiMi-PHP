@@ -7,6 +7,9 @@ namespace app\api\jxc\logic;
 final class FinanceDocumentPolicy
 {
     public const TYPES = [
+        'inventory_count' => ['title' => '盘点实盘与差异确认', 'prepare' => 'finance.inventory.count', 'confirm' => 'finance.inventory.confirm', 'owner' => false, 'subject' => 'none', 'sources' => [], 'direction' => 'none'],
+        'inventory_count_start' => ['title' => '建立盘点截止快照', 'prepare' => 'finance.inventory.count', 'confirm' => 'finance.inventory.count', 'owner' => false, 'subject' => 'none', 'sources' => [], 'direction' => 'none'],
+        'inventory_count_cancel' => ['title' => '取消未完成盘点', 'prepare' => 'finance.inventory.count', 'confirm' => 'finance.inventory.count', 'owner' => false, 'subject' => 'none', 'sources' => [], 'direction' => 'none'],
         'transit_reconcile' => ['title' => '月末在途资金核对', 'prepare' => 'finance.reconcile.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'account', 'sources' => [], 'direction' => 'none'],
         'cash_shortage' => ['title' => '核实现金短款损失', 'prepare' => 'finance.reconcile.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'account', 'sources' => [], 'direction' => 'none'],
         'account_reconcile' => ['title' => '账户月末核对', 'prepare' => 'finance.reconcile.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'account', 'sources' => [], 'direction' => 'none'],
@@ -87,6 +90,7 @@ final class FinanceDocumentPolicy
 
     public static function read(string $type): array
     {
+        if (in_array($type, ['inventory_count_start', 'inventory_count_cancel'], true) && FinanceAccess::has('finance.inventory.confirm')) { return self::type($type); }
         if (in_array($type, ['salary_expense', 'salary_payment', 'salary_adjustment'], true)) { FinanceAccess::require('finance.salary.view'); return self::type($type); }
         if ($type === 'sales_batch' && FinanceAccess::has('settlement.view')) { return self::type($type); }
         return self::authorize($type);

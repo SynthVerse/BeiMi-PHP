@@ -15,6 +15,9 @@ final class FinancePayments
     {
         $type = $document['type']; $policy = FinanceDocumentPolicy::authorize($type, true);
         $data = FinanceValue::decode($document['payload']);
+        if ($type === 'inventory_count_start') { return FinanceInventoryCounts::start($this->ledger, $document, $data); }
+        if ($type === 'inventory_count') { return FinanceInventoryCounts::confirm($this->ledger, $document, $data); }
+        if ($type === 'inventory_count_cancel') { return FinanceInventoryCounts::cancel($document, $data); }
         if ($type === 'transit_reconcile') { return FinanceTransitReviews::confirm($this->ledger, $document, $data); }
         if ($type === 'cash_shortage') { return FinanceReconciliations::shortage($this->ledger, $document, $data, $correctingDocument); }
         if ($type === 'account_reconcile') { return FinanceReconciliations::confirm($this->ledger, $document, $data); }

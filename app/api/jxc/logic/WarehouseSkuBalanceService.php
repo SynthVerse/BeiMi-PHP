@@ -51,6 +51,13 @@ class WarehouseSkuBalanceService
         return $quantity === false ? false : self::changeWithinTransaction($warehouseId, $skuId, '-' . $quantity, '0.0000', true);
     }
 
+    /** 实盘截止差额不取消已有预留；调用方必须为新增真负现存量建立来源待办。 */
+    public static function inventoryCountWithinTransaction(int $warehouseId, int $skuId, string $difference): array|false
+    {
+        return self::isSignedDecimal($difference)
+            ? self::changeWithinTransaction($warehouseId, $skuId, $difference, '0.0000', true) : false;
+    }
+
     public static function reserve(int $warehouseId, int $skuId, string $quantity)
     {
         $quantity = self::normalizeQuantity($quantity);

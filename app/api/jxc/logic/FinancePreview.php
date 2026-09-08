@@ -50,6 +50,8 @@ final class FinancePreview
             $result = $document['confirmed_result'];
             return ['tenant_id' => $tenant, 'balances' => $balances, 'impacts' => array_values($periods), 'posting_months' => $months,
                 ...(in_array($document['type'], ['account_reconcile', 'cash_shortage', 'transit_reconcile'], true) ? ['reconciliation' => $result] : []),
+                ...(str_starts_with($document['type'], 'inventory_count') ? ['inventory_count' => $result,
+                    'cost_impacts' => $result['cost_impacts'] ?? []] : []),
                 ...($document['type'] === 'sales_batch' ? ['sales' => $result] : []),
                 ...($document['type'] === 'unclaimed_receipt' || isset(FinanceUnclaimed::CLAIM_TYPES[$document['type']]) ? ['unclaimed' => $result] : []),
                 ...(in_array($document['type'], ['account_transfer_out', 'account_transfer_arrival', 'account_transfer_return'], true) ? ['transfer' => $result] : []),

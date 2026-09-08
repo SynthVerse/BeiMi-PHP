@@ -46,7 +46,7 @@ final class FinanceReportTrace
                     if (in_array((int)$link['original_document_id'], $documentIds, true) || in_array((int)$link['replacement_document_id'], $documentIds, true)) { $documentIds[] = (int)$link['original_document_id']; $documentIds[] = (int)$link['replacement_document_id']; }
                 }
                 $documentIds = array_values(array_unique($documentIds));
-                $relationKeys = ['corrects_document_id', 'reversal_of', 'receipt_id', 'original_document_id', 'original_expense_document_id', 'original_equipment_document_id', 'original_refund_document_id', 'original_cost_document_id'];
+                $relationKeys = ['count_document_id', 'corrects_document_id', 'reversal_of', 'receipt_id', 'original_document_id', 'original_expense_document_id', 'original_equipment_document_id', 'original_refund_document_id', 'original_cost_document_id'];
                 foreach (Db::name('finance_document')->where('tenant_id', $tenant)->whereIn('id', $documentIds)->column('confirmed_result') as $json) {
                     $fact = FinanceValue::decode($json);
                     foreach ($relationKeys as $key) { if (isset($fact[$key]) && filter_var($fact[$key], FILTER_VALIDATE_INT) > 0) { $documentIds[] = (int)$fact[$key]; } }

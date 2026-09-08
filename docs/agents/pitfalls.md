@@ -2,6 +2,44 @@
 
 按根因去重。每条记录必须指向实际防线；仅有“不要这样做”的提醒不算已防护。
 
+## PIT-0065：展示快照随写入命令回传耗尽单据容量
+
+日期：2026-09-09
+
+### 报告来源
+
+- 生成原因：工作流要求
+- 主工作流：Matt Pocock
+- 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`用户级自定义 / impeccable`、`Matt Pocock / code-review`、`Matt Pocock / diagnosing-bugs`、`用户级自定义 / prevent-repeat-pitfalls`（自动调用）。
+- 说明：第62批 Standards 审查发现全SKU盘点容量边界；保留当前盘点交付位置，建立规模防线后继续财务一期后续核实与关联反向开发。
+
+- 状态：已防护；首次／最近发生：2026-09-09；复发次数：0。
+- 触发场景：建立250个SKU范围后，页面把商品名、账面数量、成本和截止事件编号等展示依据连同实盘输入全部回传。
+- 根因：读模型直接用作写命令，未先检查新建范围的输入容量；范围占用后才触发通用65536字节上限。
+- 防线：前端 `businessPayload` 同时投影预览与保存输入；服务端 `FinanceInventoryCounts::input()` 再次裁剪，`present()` 从原截止快照补齐可信展示；建立范围前检查合法数量及简短说明的输入容量，超大范围明确要求分批且不产生占用。
+- 已验证事实：真实页面方法250行输出114404字节；前端容量测试稳定失败。PHP `.scratch/finance-62-capacity-red.log` 1 test、27 assertions复现保存超限。最终 `.scratch/finance-62-final-php.log` 12 tests、471 assertions通过，包含250SKU全部范围保存提交和750SKU建立前无占用拒绝；前端财务脚本171 tests通过。Standards复审已关闭本项。
+- 尚未验证：原生长列表、键盘与触控、业务库迁移和部署。容量检查保证基本输入可提交，不保证任意多行都能填满1000字原因；较长说明仍受单据总容量限制，输入不静默截断。
+- 后续建议：新建会占用业务资源的大范围操作，应同时覆盖建立、录入、提交与退出的容量边界。
+
+## PIT-0064：未知成本判断只覆盖正向数量
+
+日期：2026-09-09
+
+### 报告来源
+
+- 生成原因：工作流要求
+- 主工作流：Matt Pocock
+- 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`用户级自定义 / impeccable`、`Matt Pocock / code-review`、`Matt Pocock / diagnosing-bugs`、`用户级自定义 / prevent-repeat-pitfalls`（自动调用）。
+- 说明：第62批盘点实现的提前审查发现负向盘盈分录未继承未知成本标记；通过公开业务入口复现并修复，随后返回盘点页面开发。
+
+- 状态：已防护；首次／最近发生：2026-09-09；复发次数：0。
+- 触发场景：原可靠单位成本缺失，确认盘盈后生成负数量损耗对方分录，来源金额仍为 null。
+- 根因：旧判断仅将正净数量的未知来源视为成本待确认，漏掉新盘盈的负净数量。
+- 防线：`FinanceReports::pendingCost()` 对非零净份额保留未知状态，完全归零不误报；`test_inventory_count_unknown_gain_keeps_profit_and_inventory_cost_pending` 验证实际盘点确认后的利润、损耗和库存金额仍为 null。
+- 已验证事实：`.scratch/finance-62-review-red-final.log` 复现预期 null、实际 0.00；`.scratch/finance-62-review-green.log` 盘点专项9 tests、345 assertions通过。
+- 尚未验证：业务库迁移、部署和原生页面；本记录不代表第62批整体完成。
+- 后续建议：新增反向或对方分录时，同时覆盖正净额、负净额和完全归零的状态判断。
+
 ## PIT-0063：混合短缺分摊把正常允差成本转给异常损失
 
 日期：2026-09-09
@@ -606,11 +644,13 @@
 
 ## PIT-0043：提前截断精度改变金额或阈值判断
 
+第62批补充（2026-09-09）：盘盈来源金额直接截断到分，截止300件共800元、盘盈1件时，库存成本应为1202.67元（含盘点后100件400元入库），却为1202.66元。按现有来源金额精度先四舍五入到分，并保留快照中的六位差额原额。`test_inventory_count_confirmation_applies_cutoff_difference_at_original_cost_after_later_inbound` 的 `rounded_gain` 数据集在 `.scratch/finance-62-review-red-final.log` 稳定复现，修复后盘点专项9 tests、345 assertions通过。最近发生2026-09-09，累计复发次数2；本次实际来源依次为 Matt Pocock / implement、tdd，用户级自定义 / impeccable，Matt Pocock / code-review、diagnosing-bugs，用户级自定义 / prevent-repeat-pitfalls。完成防线后返回盘点前端；业务库与原生仍未验收。
+
 - 状态：已防护
 - 首次发生：2026-09-07
-- 最近发生：2026-09-08
-- 复发次数：1
-- 适用范围：已启用财务的销售逐行金额计算、小程序显示及采购重量差阈值判断
+- 最近发生：2026-09-09
+- 复发次数：2
+- 适用范围：已启用财务的销售逐行金额计算、小程序显示、采购重量差阈值判断及盘盈金额舍入
 - 相关问题：无
 
 ### 触发场景

@@ -86,6 +86,22 @@ class StockService
         return $flow;
     }
 
+    public static function financeInventoryCountWithinTransaction(int $warehouse, array $line, int $document, string $date): int
+    {
+        FinanceIntegration::lock(); $out = bccomp($line['difference_quantity'], '0', 4) < 0;
+        $quantity = ltrim($line['difference_quantity'], '-'); $sku = (int)$line['sku_id'];
+        $movement = WarehouseSkuBalanceService::inventoryCountWithinTransaction($warehouse, $sku, $line['difference_quantity']);
+        if ($movement === false) { throw new \DomainException('盘点差额未能写入库存，请核对当前库存与规格'); }
+        $sn = 'FIN-COUNT-' . $document;
+        $flow = self::writeFlow(['warehouse_id' => $warehouse, 'goods_id' => $line['goods_id'], 'sku_id' => $sku, 'batch_id' => 0,
+            'order_id' => $document, 'order_type' => 'finance_inventory_count', 'order_sn' => $sn, 'flow_type' => $out ? StockFlow::FLOW_OUT : StockFlow::FLOW_IN,
+            'quantity' => $quantity, 'remark' => '盘点截止差额调整'], $movement,
+            ['business_date' => $date, 'document_id' => $document, 'count_line' => $line]);
+        if (!$out) { NegativeInventoryLogic::autoOffsetWithinTransaction($warehouse, $sku, $movement, $document, 'finance_inventory_count', $sn); }
+        else { NegativeInventoryLogic::inventoryCountWithinTransaction($warehouse, (int)$line['goods_id'], $sku, $movement, $document, $date); }
+        return $flow;
+    }
+
     /** 库内实物减少只出库一次；原因未查明时成本仍在待核实去向。 */
     public static function outboundFinanceInventoryLossWithinTransaction(int $warehouse, int $goods, int $sku, string $quantity, int $document, string $date): int
     {

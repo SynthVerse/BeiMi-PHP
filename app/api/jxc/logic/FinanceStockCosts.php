@@ -26,7 +26,16 @@ final class FinanceStockCosts
             $event['business_date'] = FinanceValue::date($context['business_date'] ?? null);
             $event['document_id'] = FinanceValue::id($context['document_id'] ?? null);
         }
-        if ($flow['order_type'] === 'finance_purchase_return_back') {
+        if ($flow['order_type'] === 'finance_inventory_count') {
+            $line = $context['count_line']; $document = FinanceValue::id($context['document_id']);
+            $event['business_date'] = FinanceValue::date($context['business_date']); $event['document_id'] = $document;
+            $target = 'inventory-count:' . $document . ':' . $event['sku_id'];
+            $event += ['type' => 'count', 'direction' => (int)$flow['flow_type'] === 1 ? 'in' : 'out',
+                'count_cutoff_event_id' => $line['last_cost_event_id'],
+                'origin' => 'inventory-count-gain:' . $document . ':' . $event['warehouse_id'] . ':' . $event['sku_id'], 'target_reference' => $target,
+                'bucket' => $line['reason_verified'] ? 'loss' : 'pending',
+                'amount' => $line['difference_amount'] === null ? null : bcadd(ltrim($line['difference_amount'], '-'), '0.005', 2)];
+        } elseif ($flow['order_type'] === 'finance_purchase_return_back') {
             $event['to_warehouse_id'] = $event['warehouse_id']; $event['warehouse_id'] = FinanceValue::id($context['original_warehouse_id'] ?? null);
             $event += ['type' => 'restore', 'bucket' => 'return', 'target_reference' => 'purchase-return:' . FinanceValue::id($context['return_line_id'] ?? null)];
         } elseif ($flow['order_type'] === 'sales_delivery_correction') {
