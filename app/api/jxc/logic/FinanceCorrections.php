@@ -14,6 +14,7 @@ final class FinanceCorrections
     public function replace(array $original, array $replacement, string $reason, int $duplicateOf = 0, bool $reverseOnly = false): array
     {
         $policy = FinanceDocumentPolicy::authorize($original['type'], true);
+        if (in_array($original['type'], ['account_transfer_out', 'account_transfer_arrival', 'account_transfer_return'], true)) { throw new \DomainException('互转更正须关联两端账户、在途及后续到账，不能直接覆盖或撤销一端资金'); }
         if (in_array($original['type'], ['equipment_refund_due', 'equipment_refund_adjustment'], true)) { throw new \DomainException('设备退款约定须从原退款关联调整，不能覆盖实际到账历史'); }
         if (in_array($original['type'], ['equipment_purchase', 'equipment_adjustment'], true)) { throw new \DomainException('设备额度请从原购置记录关联调价或取消未付，不能覆盖已有付款历史'); }
         if (in_array($original['type'], ['salary_expense', 'salary_adjustment'], true)) { throw new \DomainException('工资结果须关联原工资和已发放组成调整，不能覆盖历史'); }

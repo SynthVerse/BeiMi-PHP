@@ -73,6 +73,7 @@ final class WorkforceLogic extends BaseLogic
             ['key' => 'finance.salary.prepare', 'name' => '准备工资与发放草稿（另需工资明细权）'],
             ['key' => 'finance.reimbursement.prepare', 'name' => '准备员工垫付报销（不含付款确认）'],
             ['key' => 'finance.equipment.prepare', 'name' => '准备设备业务（不含确认）'],
+            ['key' => 'finance.transfer.prepare', 'name' => '准备同门店互转、到账、返还及手续费（不含确认）'],
             ['key' => 'finance.refund.prepare', 'name' => '准备退款业务（不含确认）'],
             ['key' => 'finance.recovery.prepare', 'name' => '准备坏账追偿收回（不含确认）'],
         ],

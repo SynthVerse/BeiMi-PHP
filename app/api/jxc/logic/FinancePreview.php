@@ -50,6 +50,7 @@ final class FinancePreview
             $result = $document['confirmed_result'];
             return ['tenant_id' => $tenant, 'balances' => $balances, 'impacts' => array_values($periods), 'posting_months' => $months,
                 ...($document['type'] === 'sales_batch' ? ['sales' => $result] : []),
+                ...(in_array($document['type'], ['account_transfer_out', 'account_transfer_arrival', 'account_transfer_return'], true) ? ['transfer' => $result] : []),
                 ...(in_array($document['type'], ['equipment_purchase', 'equipment_adjustment'], true) ? ['equipment' => $result] : []),
                 ...(in_array($document['type'], ['equipment_refund_due', 'equipment_refund_adjustment'], true) ? ['equipment_refund' => $result] : []),
                 ...(in_array($document['type'], ['salary_adjustment', 'salary_expense', 'employee_expense_adjustment', 'employee_expense', 'expense', 'expense_category', 'expense_adjustment', 'expense_estimate_final', 'expense_recurring_plan', 'expense_recurring_none', 'expense_recurring_correct', 'deferred_amortization', 'deferred_expense'], true) ? ['expense' => $result] : []),

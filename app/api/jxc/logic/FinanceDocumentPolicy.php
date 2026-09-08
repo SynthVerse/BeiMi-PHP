@@ -7,6 +7,9 @@ namespace app\api\jxc\logic;
 final class FinanceDocumentPolicy
 {
     public const TYPES = [
+        'account_transfer_out' => ['title' => '同门店账户实际转出', 'prepare' => 'finance.transfer.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'account', 'sources' => [], 'direction' => 'none'],
+        'account_transfer_arrival' => ['title' => '同门店互转实际到账', 'prepare' => 'finance.transfer.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'account', 'sources' => [], 'direction' => 'none'],
+        'account_transfer_return' => ['title' => '同门店互转实际返还', 'prepare' => 'finance.transfer.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'account', 'sources' => [], 'direction' => 'none'],
         'equipment_refund_due' => ['title' => '设备退款待收确认', 'prepare' => 'finance.equipment.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],
         'equipment_refund_adjustment' => ['title' => '设备退款约定调整', 'prepare' => 'finance.equipment.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],
         'equipment_purchase' => ['title' => '设备购置额度确认', 'prepare' => 'finance.equipment.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],

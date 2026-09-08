@@ -1,0 +1,119 @@
+<?php
+
+declare(strict_types=1);
+
+namespace app\api\jxc\logic;
+
+use think\facade\Db;
+
+/** 同门店互转本金只在账户和在途间移动；明确核实的手续费单独计费。 */
+final class FinanceAccountTransfers
+{
+    public static function out(FinanceLedger $ledger, array $document, array $data): array
+    {
+        FinanceAccess::require('', true); $basis = self::basis($data); $tenant = FinanceAccess::tenant();
+        $account = $ledger->account(FinanceValue::id($data['account_id'] ?? null)); $target = $ledger->account(FinanceValue::id($data['target_account_id'] ?? null));
+        if ((int)$account['id'] === (int)$target['id']) { throw new \DomainException('互转来源和目标须为本门店不同账户'); }
+        $date = FinanceValue::date($data['actual_date'] ?? null); $month = $ledger->postingMonth($date); $amount = FinanceValue::money($data['amount'] ?? null);
+        $reference = FinanceValue::text($data['source_reference'] ?? null, 160);
+        if (Db::name('finance_account_transfer')->where('tenant_id', $tenant)->where('source_account_id', $account['id'])->where('source_reference', $reference)->lock(true)->find()) { throw new \DomainException('此账户的互转来源已登记，请读取原转出记录'); }
+        $fee = self::fee($data, $document['type']); $total = bcadd($amount, $fee['amount'], 2);
+        $money = (new FinanceMoney($tenant, $ledger))->record((int)$document['id'], $document['type'], $data, 'out', $date, $total, $month);
+        $snapshot = ['type' => 'account_transfer_out', 'subject_id' => (int)$account['id'], 'subject_name' => $account['name'],
+            'source_account_id' => (int)$account['id'], 'source_account_name' => $account['name'], 'target_account_id' => (int)$target['id'], 'target_account_name' => $target['name'],
+            'source_reference' => $reference, 'principal' => $amount, 'actual_date' => $date, 'posting_month' => $month, 'extra_fee' => $fee['amount'], 'fee' => $fee,
+            'arrived_amount' => '0.00', 'returned_amount' => '0.00', 'withheld_fee' => '0.00', 'remaining_amount' => $amount, 'internal_principal' => $amount] + $basis;
+        $source = $ledger->createSource((int)$document['id'], 'transit', (int)$account['id'], $amount, $date, null, $snapshot);
+        $ledger->add((int)$document['id'], 'transit', (int)$account['id'], $amount, $date, $month, 'transfer_out', $source, $date, ['internal_transfer' => true]);
+        self::recognizeFee($ledger, $document, $fee, $source, $date, $month);
+        Db::name('finance_account_transfer')->insert(['tenant_id' => $tenant, 'document_id' => $document['id'], 'source_account_id' => $account['id'], 'target_account_id' => $target['id'],
+            'source_reference' => $reference, 'source_ref' => $source, 'snapshot' => FinanceValue::json($snapshot), 'create_time' => time()]);
+        return $snapshot + ['transfer_source' => $source, 'created_sources' => [$source], 'money' => $money];
+    }
+
+    private static function basis(array $data): array
+    {
+        if (($data['transfer_verified'] ?? null) !== 1) { throw new \DomainException('请核实本次互转已经实际发生、两端账户与金额'); }
+        return ['reason' => FinanceValue::text($data['reason'] ?? null, 1000), 'transfer_verified' => 1, 'confirmed_by' => FinanceAccess::actor(), 'confirmed_at' => time()];
+    }
+
+    private static function fee(array $data, string $type): array
+    {
+        $amount = FinanceValue::money($data['fee_amount'] ?? '0', true);
+        if (bccomp($amount, '0', 2) === 0) { return ['amount' => '0.00']; }
+        if (($data['fee_verified'] ?? null) !== 1) { throw new \DomainException('手续费须单独核实真实承担金额，不能用未知差额代替'); }
+        $vendor = FinanceValue::id($data['fee_vendor_id'] ?? null); $name = Db::name('vendor')->where('tenant_id', FinanceAccess::tenant())->where('id', $vendor)->value('supplier_name');
+        if ($name === null) { throw new \DomainException('请选择本门店手续费收款对象'); }
+        $reason = FinanceValue::text($data['fee_basis'] ?? null, 1000);
+        $line = FinanceExpenseCategories::lines([['category_id' => $data['fee_category_id'] ?? null, 'expected_category_version' => $data['expected_fee_category_version'] ?? null, 'amount' => $amount, 'reason' => $reason]], $amount)[0];
+        if ($line['parent'] === 'personnel') { throw new \DomainException('账户互转手续费不能归入人员工资费用'); }
+        $material = FinanceExpenses::material(['material_status' => $data['fee_material_status'] ?? null, 'material_verified' => $data['fee_material_verified'] ?? null,
+            'missing_material_reason' => $data['fee_missing_material_reason'] ?? null, 'evidence_ids' => ($data['fee_material_status'] ?? '') === 'provided' ? ($data['evidence_ids'] ?? []) : []], $type);
+        return $line + $material + ['vendor_id' => $vendor, 'vendor_name' => $name, 'fee_verified' => 1];
+    }
+
+    private static function recognizeFee(FinanceLedger $ledger, array $document, array $fee, string $source, string $date, string $month): void
+    {
+        if (bccomp($fee['amount'], '0', 2) === 0) { return; }
+        $ledger->add((int)$document['id'], 'expense', $fee['vendor_id'], $fee['amount'], $date, $month, 'transfer_fee', '', null,
+            $fee + ['transfer_source' => $source, 'settled_by_transfer' => true, 'benefit_month' => substr($date, 0, 7)]);
+    }
+
+    private static function current(FinanceLedger $ledger, string $reference): array
+    {
+        $source = $ledger->source($reference); $snapshot = $source['snapshot']; $opening = str_starts_with($reference, 'o:');
+        if ($source['category'] !== 'transit' || (!$opening && ($snapshot['type'] ?? '') !== 'account_transfer_out')) { throw new \DomainException('请选择本门店合法互转在途来源'); }
+        if ($opening) {
+            $details = $snapshot['details'] ?? [];
+            foreach (['target_account_id', 'principal', 'arrived_amount', 'returned_amount', 'withheld_fee'] as $key) { if (!isset($details[$key])) { throw new \DomainException('期初在途组成尚未核实，不能结清'); } }
+            $target = $ledger->account(FinanceValue::id($details['target_account_id']), false); $account = $ledger->account($source['subject_id'], false);
+            $snapshot = ['type' => 'opening_transit', 'source_account_id' => $source['subject_id'], 'source_account_name' => $account['name'], 'target_account_id' => (int)$target['id'], 'target_account_name' => $target['name'],
+                'subject_id' => $source['subject_id'], 'subject_name' => $account['name'], 'source_reference' => $snapshot['source_reference'], 'actual_date' => $source['business_date'],
+                'principal' => $details['principal'], 'arrived_amount' => $details['arrived_amount'], 'returned_amount' => $details['returned_amount'], 'withheld_fee' => $details['withheld_fee'],
+                'extra_fee' => null, 'opening_basis' => $snapshot['evidence'] ?? '', 'opening_item_id' => (int)($snapshot['id'] ?? 0)];
+        }
+        $entries = Db::name('finance_transfer_settlement')->where('tenant_id', FinanceAccess::tenant())->where('source_ref', $reference)->order('id')->select()->toArray();
+        foreach ($entries as $entry) {
+            $key = $entry['kind'] === 'arrival' ? 'arrived_amount' : 'returned_amount';
+            $snapshot[$key] = bcadd($snapshot[$key], $entry['amount'], 2); $snapshot['withheld_fee'] = bcadd($snapshot['withheld_fee'], $entry['withheld_fee'], 2);
+        }
+        $remaining = bcsub(bcsub(bcsub($snapshot['principal'], $snapshot['arrived_amount'], 2), $snapshot['returned_amount'], 2), $snapshot['withheld_fee'], 2);
+        if (bccomp($remaining, $source['balance'], 2) !== 0) { throw new \DomainException('互转在途与到账、返还及手续费组成不一致，请核实原来源'); }
+        return array_replace($snapshot, ['transfer_source' => $reference, 'remaining_amount' => $remaining, 'original_document_id' => $source['document_id']]);
+    }
+
+    public static function settle(FinanceLedger $ledger, array $document, array $data): array
+    {
+        FinanceAccess::require('', true); $basis = self::basis($data); $source = FinanceValue::text($data['source'] ?? null, 40); $current = self::current($ledger, $source);
+        $arrival = $document['type'] === 'account_transfer_arrival'; $account = $arrival ? $current['target_account_id'] : $current['source_account_id'];
+        if (FinanceValue::id($data['account_id'] ?? null) !== $account) { throw new \DomainException('到账须进入原目标账户，实际返还须进入原来源账户'); }
+        $date = FinanceValue::date($data['actual_date'] ?? null); $month = $ledger->postingMonth($date);
+        if (!$current['actual_date'] || $date < $current['actual_date']) { throw new \DomainException('到账或返还日期不能早于已核实转出日期'); }
+        $amount = FinanceValue::money($data['amount'] ?? null, $arrival); $fee = self::fee($data, $document['type']);
+        if (!$arrival && bccomp($fee['amount'], '0', 2) !== 0) { throw new \DomainException('返还本金不能夹带未知手续费，原已付未退手续费继续保留'); }
+        $consumed = bcadd($amount, $fee['amount'], 2);
+        if (bccomp($consumed, '0', 2) <= 0 || bccomp($consumed, $current['remaining_amount'], 2) > 0) { throw new \DomainException('本次到账、实际返还与代扣手续费合计须大于零且不能超过剩余在途'); }
+        $money = (new FinanceMoney(FinanceAccess::tenant(), $ledger))->record((int)$document['id'], $document['type'], $data, 'in', $date, $amount, $month);
+        $ledger->add((int)$document['id'], 'balance', $current['source_account_id'], '-' . $consumed, $date, $month, 'transfer_settlement', $source, $date);
+        $ledger->add((int)$document['id'], 'transit', $current['source_account_id'], '-' . $consumed, $date, $month, 'transfer_settlement', $source, $date, ['internal_transfer' => true]);
+        self::recognizeFee($ledger, $document, $fee, $source, $date, $month);
+        $result = ['type' => $document['type'], 'subject_id' => $current['source_account_id'], 'subject_name' => $current['source_account_name'], 'transfer' => $current,
+            'transfer_source' => $source, 'amount' => $amount, 'withheld_fee' => $fee['amount'], 'fee' => $fee, 'consumed_amount' => $consumed,
+            'remaining_amount' => bcsub($current['remaining_amount'], $consumed, 2), 'actual_date' => $date, 'posting_month' => $month,
+            'internal_principal' => $amount, 'money' => $money, 'created_sources' => []] + $basis;
+        Db::name('finance_transfer_settlement')->insert(['tenant_id' => FinanceAccess::tenant(), 'source_ref' => $source, 'document_id' => $document['id'],
+            'kind' => $arrival ? 'arrival' : 'return', 'amount' => $amount, 'withheld_fee' => $fee['amount'], 'snapshot' => FinanceValue::json($result), 'create_time' => time()]);
+        return $result;
+    }
+
+    public static function options(FinanceLedger $ledger, array $params): array
+    {
+        $exact = !empty($params['transfer_source']); $page = FinanceValue::id($params['page'] ?? 1); $account = FinanceValue::id($params['subject_id'] ?? 0, true);
+        $sourcePage = $exact ? ['sources' => [], 'has_more' => false] : $ledger->sourcePage(['transit'], $account, $page);
+        $refs = $exact ? [FinanceValue::text($params['transfer_source'], 40)] : array_column($sourcePage['sources'], 'reference');
+        $rows = array_map(static fn(string $ref): array => self::current($ledger, $ref), $refs);
+        $categories = FinanceExpenseCategories::options();
+        return ['sources' => [], 'has_more' => false, 'transfers' => $rows, 'transfer_has_more' => $sourcePage['has_more'],
+            'selected_transfer' => $exact ? $rows[0] : null] + ['expense_categories' => array_values(array_filter($categories['expense_categories'], static fn(array $row): bool => $row['parent'] !== 'personnel'))];
+    }
+}

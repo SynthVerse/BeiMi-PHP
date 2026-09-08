@@ -123,6 +123,7 @@ final class FinanceBusinessLogic extends BaseLogic
             if ($type === 'supplier_credit_allocate' && ($params['role'] ?? '') === 'fund') { $categories = ['supplier_refund']; }
             $page = max(1, FinanceValue::id($params['page'] ?? 1));
             $sources = match ($type) {
+                'account_transfer_out', 'account_transfer_arrival', 'account_transfer_return' => FinanceAccountTransfers::options($ledger, $params),
                 'equipment_purchase', 'equipment_adjustment' => FinanceEquipment::options($subjectId, $params),
                 'equipment_refund_due', 'equipment_refund_adjustment' => FinanceEquipmentRefunds::options($subjectId, $params),
                 'salary_adjustment' => FinanceSalaries::adjustmentOptions($subjectId, $params),
@@ -235,9 +236,11 @@ final class FinanceBusinessLogic extends BaseLogic
         self::clearError();
         try {
             $policy = FinanceDocumentPolicy::read(FinanceValue::text($params['type'] ?? '', 40));
-            $column = ['customer' => 'customer_name', 'vendor' => 'supplier_name', 'employee' => 'name'][$policy['subject']];
-            $query = Db::name($policy['subject'])->where('tenant_id', FinanceAccess::tenant());
-            if ($policy['subject'] === 'customer') { $query->where('parent_id', 0); }
+            $subject = $policy['subject'] === 'account' ? (($params['role'] ?? '') === 'fee' ? 'vendor' : 'finance_account') : $policy['subject'];
+            $column = ['customer' => 'customer_name', 'vendor' => 'supplier_name', 'employee' => 'name', 'finance_account' => 'name'][$subject];
+            $query = Db::name($subject)->where('tenant_id', FinanceAccess::tenant());
+            if ($subject === 'customer') { $query->where('parent_id', 0); }
+            if ($subject === 'finance_account') { $query->where('is_enabled', 1); }
             if (!empty($params['id'])) { $query->where('id', FinanceValue::id($params['id'])); }
             $keyword = FinanceValue::text($params['keyword'] ?? '', 60, false);
             if ($keyword !== '') { $query->whereLike($column, '%' . addcslashes($keyword, '%_\\') . '%'); }
