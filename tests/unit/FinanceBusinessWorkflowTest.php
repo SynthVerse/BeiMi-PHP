@@ -65,6 +65,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000042_finance_transit_reconciliation.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260909_000043_finance_report_export.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260909_000044_finance_report_export_attempt.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260909_000045_finance_partial_arrival_loss.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -2058,6 +2059,52 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
 
     public static function arrivalLossPrices(): array { return ['已知暂估' => ['2.00'], '未知成本' => [null]]; }
+
+    public function test_arrival_shortage_allows_separate_loss_causes_and_keeps_the_remaining_difference_pending(): void
+    {
+        $this->activate(); $warehouse = $this->createCustomerReportWarehouse('分次损失仓');
+        $goods = $this->createCustomerReportGoods('分次损失商品', 'PARTIAL-ARRIVAL-LOSS'); $sku = $this->customerReportSkuId($goods);
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '分次短缺供方']);
+        $arrival = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival', 'payload' => ['subject_id' => $vendor, 'warehouse_id' => $warehouse,
+            'actual_date' => date('Y-m-d'), 'source_reference' => 'PARTIAL-ARR', 'reason' => '十单位短缺原因待逐项核查', 'lines' => [['sku_id' => $sku, 'actual_quantity' => '90', 'reported_quantity' => '100', 'agreed_price' => '2.00']]]]); self::assertNotFalse($arrival, FinanceBusinessLogic::getError());
+        $id = $arrival['confirmed_result']['lines'][0]['arrival_line_id'];
+        $reviewPayload = ['subject_id' => $vendor, 'arrival_line_id' => $id, 'expected_review_id' => 0, 'classification' => 'dispute', 'reason' => '短缺由不同原因组成，待核查', 'responsibility' => '交接与运输记录待核查', 'review_confirmed' => 1];
+        $review = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_difference', 'payload' => $reviewPayload]); self::assertNotFalse($review, FinanceBusinessLogic::getError());
+        $payload = ['subject_id' => $vendor, 'arrival_line_id' => $id, 'expected_review_id' => $review['confirmed_result']['review_id'], 'quantity' => '4',
+            'excluded_from_received_confirmed' => 1, 'loss_confirmed' => 1, 'source_reference' => 'LOSS-CAUSE-A', 'reason' => '四单位腐坏已从实收排除', 'responsibility' => '核实门店承担，不登记责任应收'];
+        $command = $this->command(0) + ['type' => 'purchase_arrival_loss', 'payload' => $payload];
+        $first = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($first, FinanceBusinessLogic::getError());
+        self::assertSame($first, FinanceBusinessLogic::action('record', $command));
+        self::assertFalse($first['confirmed_result']['resolved']); self::assertTrue($first['confirmed_result']['cost_pending']); self::assertSame('6.0000', $first['confirmed_result']['remaining_quantity']);
+        $remaining = FinanceBusinessLogic::options(['type' => 'purchase_arrival_loss', 'subject_id' => $vendor])['arrivals'][0];
+        self::assertSame('4.0000', $remaining['confirmed_loss_quantity']); self::assertSame('6.0000', $remaining['remaining_quantity']);
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival_loss', 'payload' => $payload]));
+        $payload['expected_review_id'] = $first['confirmed_result']['review_id'];
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival_loss', 'payload' => $payload]), '同一核实记录不能更换请求标识重复确认');
+        $payload['source_reference'] = 'LOSS-CAUSE-B'; $payload['quantity'] = '7';
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival_loss', 'payload' => $payload]));
+        $payload['quantity'] = '2'; $payload['reason'] = '另两单位装卸遗失已经核实';
+        $second = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival_loss', 'payload' => $payload]); self::assertNotFalse($second, FinanceBusinessLogic::getError());
+        self::assertSame('4.0000', $second['confirmed_result']['remaining_quantity']); self::assertFalse($second['confirmed_result']['resolved']);
+        $reviewPayload['expected_review_id'] = $second['confirmed_result']['review_id']; $reviewPayload['classification'] = 'normal'; $reviewPayload['reason'] = '剩余四单位按双方行业允差明确结案';
+        $finished = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_difference', 'payload' => $reviewPayload]); self::assertNotFalse($finished, FinanceBusinessLogic::getError());
+        self::assertTrue($finished['confirmed_result']['resolved']); self::assertSame('4.0000', $finished['confirmed_result']['reviewed_quantity']);
+        self::assertSame('6.0000', $finished['confirmed_result']['confirmed_loss_quantity']);
+        self::assertCount(0, FinanceBusinessLogic::options(['type' => 'purchase_difference', 'subject_id' => $vendor])['arrivals']);
+        $cost = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID);
+        self::assertSame('90.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $sku)); self::assertSame('188.000000', $cost->balance($warehouse, $sku)['value']);
+        self::assertSame('8.000000', $cost->destination($warehouse, $sku, 'loss', 'purchase-arrival-loss:' . $first['id'])['cost']);
+        self::assertSame('4.000000', $cost->destination($warehouse, $sku, 'loss', 'purchase-arrival-loss:' . $second['id'])['cost']);
+        $settled = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_settlement', 'payload' => ['subject_id' => $vendor, 'supplier_confirmed' => 1,
+            'supplier_confirmation' => '确认报重一百按三元计费', 'reason' => '分次损失与剩余允差均已核实', 'lines' => [['arrival_line_id' => $id, 'covered_quantity' => '90',
+                'settlement_quantity' => '100', 'price' => '3.00', 'arrival_difference_confirmed' => 1, 'arrival_difference_class' => 'normal', 'arrival_difference_reason' => '剩余允差已复核',
+                'difference_confirmed' => 1, 'difference_class' => 'normal', 'difference_reason' => '双方明确约定计费重量']]]]); self::assertNotFalse($settled, FinanceBusinessLogic::getError());
+        self::assertSame('282.000000', $cost->balance($warehouse, $sku)['value']);
+        self::assertSame('12.000000', $cost->destination($warehouse, $sku, 'loss', 'purchase-arrival-loss:' . $first['id'])['cost']);
+        self::assertSame('6.000000', $cost->destination($warehouse, $sku, 'loss', 'purchase-arrival-loss:' . $second['id'])['cost']);
+        self::assertSame('300.00', (new FinanceLedger(self::TENANT_ID))->categoryBalance('payable', $vendor));
+        self::assertSame($first['confirmed_result'], FinanceBusinessLogic::detail(['id' => $first['id']])['confirmed_result']);
+    }
 
     /** @dataProvider arrivalLossPrices */
     public function test_confirmed_arrival_loss_excluded_from_stock_splits_cost_and_future_price_changes_without_second_stock_deduction(?string $initialPrice): void

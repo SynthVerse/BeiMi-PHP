@@ -21,13 +21,22 @@ final class FinancePurchaseCosts
         $value['cost_adjustments'] = $extra;
         $value['difference_pending'] = FinancePurchaseReviews::pending($arrival);
         $value['cost_pending'] = $value['cost_pending'] || $value['difference_pending'];
-        $loss = Db::name('finance_purchase_arrival_loss')->where('tenant_id', FinanceAccess::tenant())->where('arrival_line_id', $arrival['id'])->lock(true)->find();
+        $losses = FinancePurchaseArrivalLosses::composition($arrival);
         $value['gross_known_amount'] = $value['known_amount']; $value['loss_known_amount'] = '0.00';
-        $value['loss_document_id'] = (int)($loss['document_id'] ?? 0); $value['loss_quantity'] = $loss['quantity'] ?? '0.0000';
-        if ($loss) {
-            $basis = bcadd($arrival['actual_quantity'], $loss['quantity'], 4);
-            $value['loss_known_amount'] = bcadd(bcdiv(bcmul($value['known_amount'], $loss['quantity'], 6), $basis, 6), '0.005', 2);
+        $value['loss_document_id'] = (int)($losses['losses'][0]['document_id'] ?? 0); $value['loss_quantity'] = $losses['confirmed_loss_quantity']; $value['loss_components'] = [];
+        if ($losses['losses']) {
+            // 正常允差的份额由完好商品承担，不能随已核实损失一起重新归一化。
+            $shortage = FinancePurchaseReviews::assessment($arrival)['absolute'];
+            $basis = bcadd($arrival['actual_quantity'], $shortage, 4);
+            $value['loss_known_amount'] = bcadd(bcdiv(bcmul($value['known_amount'], $value['loss_quantity'], 6), $basis, 6), '0.005', 2);
             $value['known_amount'] = bcsub($value['known_amount'], $value['loss_known_amount'], 2);
+            $remaining = $value['loss_known_amount']; $last = count($losses['losses']) - 1;
+            foreach ($losses['losses'] as $index => $loss) {
+                $amount = $index === $last ? $remaining : bcdiv(bcmul($value['loss_known_amount'], $loss['quantity'], 6), $value['loss_quantity'], 2);
+                $remaining = bcsub($remaining, $amount, 2);
+                $value['loss_components'][] = ['document_id' => (int)$loss['document_id'], 'quantity' => $loss['quantity'], 'known_amount' => $amount,
+                    'source_reference' => $loss['snapshot']['source_reference'], 'reason' => $loss['snapshot']['reason']];
+            }
         }
         return $value;
     }
@@ -46,16 +55,16 @@ final class FinancePurchaseCosts
             'sku_id' => (int)$arrival['sku_id'], 'warehouse_id' => (int)$arrival['warehouse_id'], 'document_id' => (int)$document['id'],
             'business_date' => $arrival['business_date'], 'origin' => 'purchase-arrival:' . $arrival['id'],
             'amount' => $value['known_amount'], 'pending' => $value['cost_pending'], 'snapshot' => $snapshot]);
-        if ($value['loss_document_id']) {
-            $origin = 'purchase-arrival-loss:' . $value['loss_document_id'];
+        foreach ($value['loss_components'] as $loss) {
+            $origin = 'purchase-arrival-loss:' . $loss['document_id'];
             if (!Db::name('finance_cost_origin')->where('tenant_id', $tenant)->where('origin_key', $origin)->lock(true)->find()) {
                 $cost->recordWithinTransaction(['reference' => $origin, 'type' => 'excluded_loss', 'origin' => $origin, 'target_reference' => $origin,
                     'sku_id' => (int)$arrival['sku_id'], 'warehouse_id' => (int)$arrival['warehouse_id'], 'document_id' => (int)$document['id'],
-                    'business_date' => $arrival['business_date'], 'quantity' => $value['loss_quantity'], 'amount' => null, 'snapshot' => $snapshot]);
+                    'business_date' => $arrival['business_date'], 'quantity' => $loss['quantity'], 'amount' => null, 'snapshot' => $snapshot]);
             }
-            $lossEvent = $cost->recordWithinTransaction(['reference' => $reference . ':loss', 'type' => 'reestimate', 'origin' => $origin,
+            $lossEvent = $cost->recordWithinTransaction(['reference' => $reference . ':loss:' . $loss['document_id'], 'type' => 'reestimate', 'origin' => $origin,
                 'sku_id' => (int)$arrival['sku_id'], 'warehouse_id' => (int)$arrival['warehouse_id'], 'document_id' => (int)$document['id'],
-                'business_date' => $arrival['business_date'], 'amount' => $value['loss_known_amount'], 'pending' => $value['cost_pending'], 'snapshot' => $snapshot]);
+                'business_date' => $arrival['business_date'], 'amount' => $loss['known_amount'], 'pending' => $value['cost_pending'], 'snapshot' => $snapshot]);
             foreach ($lossEvent['changes'] as $bucket => $amount) { $event['changes'][$bucket] = bcadd($event['changes'][$bucket] ?? '0', $amount, 6); }
         }
         return $value + ['cost_changes' => $event['changes']];

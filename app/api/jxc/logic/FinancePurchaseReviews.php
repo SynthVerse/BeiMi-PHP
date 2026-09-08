@@ -41,11 +41,13 @@ final class FinancePurchaseReviews
         $more = count($rows) > 20; $arrivals = [];
         foreach (array_slice($rows, 0, 20) as $row) {
             $basis = FinanceValue::decode($row['snapshot']);
+            $losses = FinancePurchaseArrivalLosses::composition($row);
             $arrivals[] = array_merge($basis, ['arrival_line_id' => (int)$row['id'], 'arrival_document_id' => (int)$row['document_id'],
                 'subject_id' => $vendor, 'actual_date' => $row['business_date'], 'warehouse_id' => (int)$row['warehouse_id'],
                 'warehouse_name' => $basis['warehouse_name'] ?? (Db::name('warehouse')->where('tenant_id', $tenant)->where('id', $row['warehouse_id'])->value('name') ?: '名称未留存'),
                 'expected_review_id' => (int)($row['review_id'] ?? 0), 'classification' => $row['classification'] ?? '',
-                'assessment' => self::assessment($row), 'latest_review' => $row['review_snapshot'] ? FinanceValue::decode($row['review_snapshot']) : null]);
+                'assessment' => self::assessment($row), 'latest_review' => $row['review_snapshot'] ? FinanceValue::decode($row['review_snapshot']) : null,
+                'confirmed_loss_quantity' => $losses['confirmed_loss_quantity'], 'remaining_quantity' => $losses['remaining_quantity']]);
         }
         return ['sources' => [], 'has_more' => false, 'arrivals' => $arrivals, 'arrival_has_more' => $more, 'can_review_escalation' => FinanceAccess::owner()];
     }
@@ -72,8 +74,10 @@ final class FinancePurchaseReviews
         if (($data['review_confirmed'] ?? null) !== 1) { throw new \DomainException('非零到货差须由人员明确复核，不能自动结案'); }
         $reason = FinanceValue::text($data['reason'] ?? null, 1000);
         $responsibility = FinanceValue::text($data['responsibility'] ?? '', 1000, in_array($class, ['loss', 'dispute'], true));
+        $losses = FinancePurchaseArrivalLosses::composition($arrival);
         $result = self::append($arrival, $document, $assessment + ['classification' => $class, 'reason' => $reason, 'responsibility' => $responsibility,
-            'actor' => FinanceAccess::actor(), 'confirmed_at' => time()]);
+            'actor' => FinanceAccess::actor(), 'confirmed_at' => time(), 'reviewed_quantity' => $losses['remaining_quantity'],
+            'confirmed_loss_quantity' => $losses['confirmed_loss_quantity'], 'remaining_quantity' => in_array($class, ['normal', 'supplier'], true) ? '0.0000' : $losses['remaining_quantity']]);
         $cost = FinancePurchaseCosts::revalue($arrival, $document, $result);
         $basis = FinanceValue::decode($arrival['snapshot']);
         $line = array_merge($basis, $result, $cost, ['arrival_line_id' => $id, 'warehouse_id' => (int)$arrival['warehouse_id'], 'actual_date' => $arrival['business_date']]);
@@ -88,7 +92,7 @@ final class FinancePurchaseReviews
             FinanceAccess::require('', true);
             if ($document['type'] !== 'purchase_arrival_loss' || $review['classification'] !== 'loss') { throw new \DomainException('异常损耗须通过关联损失确认结案'); }
         }
-        $resolved = $lossConfirmed || in_array($review['classification'], ['normal', 'supplier'], true);
+        $resolved = $lossConfirmed ? bccomp($review['remaining_quantity'] ?? '0', '0', 4) === 0 : in_array($review['classification'], ['normal', 'supplier'], true);
         $review += ['resolved' => $resolved, 'previous_review_id' => (int)(self::latest((int)$arrival['id'])['id'] ?? 0)];
         $id = (int)Db::name('finance_purchase_difference_review')->insertGetId(['tenant_id' => FinanceAccess::tenant(), 'document_id' => $document['id'],
             'arrival_line_id' => $arrival['id'], 'classification' => $review['classification'], 'resolved' => $resolved ? 1 : 0,
