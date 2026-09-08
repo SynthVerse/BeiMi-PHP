@@ -215,6 +215,7 @@ final class FinanceBusinessLogic extends BaseLogic
                 'expense_category' => FinanceExpenseCategories::options(true),
                 'legacy_return_cost' => FinanceLegacyReturnCosts::options($params),
                 'inventory_count_start' => FinancePurchaseArrivals::options(0, $params),
+                'inventory_count_review' => FinanceInventoryCountReviews::options($params),
                 'inventory_count', 'inventory_count_cancel' => FinanceInventoryCounts::options($params),
                 'inventory_loss' => FinancePurchaseArrivals::options(0, $params),
                 'inventory_loss_resolution' => FinanceInventoryLosses::options($params),
@@ -283,6 +284,7 @@ final class FinanceBusinessLogic extends BaseLogic
         foreach (['payload', 'confirmed_result', 'created_by', 'last_modified_by', 'confirmed_by'] as $key) { $document[$key] = FinanceValue::decode($document[$key]); }
         $document['id'] = (int)$document['id']; $document['version'] = (int)$document['version'];
         $document = FinanceInventoryCounts::present($document);
+        $document = FinanceInventoryCountReviews::present($document);
         if ($document['type'] === 'sales_batch' && $document['status'] === 'confirmed' && FinanceAccess::has('settlement.view')) { $document['output'] = FinanceSalesOutput::document(['id' => $document['id']]); }
         return $document;
     }

@@ -67,6 +67,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260909_000044_finance_report_export_attempt.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260909_000045_finance_partial_arrival_loss.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260909_000046_finance_inventory_count.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260909_000047_finance_inventory_count_review.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -2203,6 +2204,125 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertStringContainsString('分批', FinanceBusinessLogic::getError());
         self::assertSame($before, Db::name('finance_inventory_count')->where('tenant_id', self::TENANT_ID)->count());
         self::assertSame(0, Db::name('finance_inventory_count_line')->where('tenant_id', self::TENANT_ID)->where('active_slot', 1)->count());
+    }
+
+    public static function inventoryCountReviewCases(): array
+    {
+        return ['known_loss' => [false, '2.00'], 'unknown_loss' => [false, null], 'known_gain' => [true, '2.00'], 'unknown_gain' => [true, null]];
+    }
+
+    /** @dataProvider inventoryCountReviewCases */
+    public function test_inventory_count_review_confirms_original_loss_without_moving_stock_or_replacing_snapshot(bool $gain, ?string $price): void
+    {
+        $this->activate(); $warehouse = $this->createCustomerReportWarehouse('盘点后续核实仓');
+        $goods = $this->createCustomerReportGoods('盘点后续核实商品', 'COUNT-REVIEW'); $sku = $this->customerReportSkuId($goods);
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '盘点后续核实供方']);
+        $arrival = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival', 'payload' => ['subject_id' => $vendor, 'warehouse_id' => $warehouse,
+            'actual_date' => date('Y-m-d'), 'source_reference' => 'COUNT-REVIEW-A', 'reason' => '盘点前实物', 'lines' => [['sku_id' => $sku, 'actual_quantity' => '100', 'reported_quantity' => '100'] + ($price === null ? [] : ['agreed_price' => $price])]]]); self::assertNotFalse($arrival, FinanceBusinessLogic::getError());
+        $count = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'inventory_count_start', 'payload' => ['warehouse_id' => $warehouse, 'scope' => 'selected', 'sku_ids' => [$sku], 'reason' => '原实盘截止']]); self::assertNotFalse($count, FinanceBusinessLogic::getError());
+        $confirmed = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'inventory_count', 'payload' => ['count_document_id' => $count['id'], 'reason' => '差额原因待后续核实',
+            'lines' => [['sku_id' => $sku, 'counted_quantity' => $gain ? '110' : '90', 'reason' => '实物差额已确认，原因待查', 'reason_verified' => 0]]]]); self::assertNotFalse($confirmed, FinanceBusinessLogic::getError());
+        $flows = Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->where('sku_id', $sku)->count();
+        $options = FinanceBusinessLogic::options(['type' => 'inventory_count_review', 'count_result_document_id' => $confirmed['id']]); self::assertNotFalse($options, FinanceBusinessLogic::getError());
+        $source = $options['differences'][0]; self::assertSame($price === null ? null : '20.000000', $source['current_cost']); self::assertFalse($source['resolved']);
+        $payload = ['count_result_document_id' => $confirmed['id'], 'sku_id' => $sku, 'expected_review_id' => 0, 'expected_cost_event_id' => $source['expected_cost_event_id'],
+            'reason_verified' => 1, 'reason_kind' => $gain ? 'physical_gain' : 'physical_loss', 'cost_verified' => 1, 'reason' => $gain ? '已查明为真实盘盈' : '已查明为门店搬运损失', 'cost_basis' => '按原截止来源金额核对'];
+        foreach (['omitted_sale', 'omitted_purchase', 'omitted_return', 'omitted_transfer'] as $kind) {
+            self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'inventory_count_review', 'payload' => array_replace($payload, ['reason_kind' => $kind, 'cost_verified' => 0])]), '漏业务必须保留未决并关联纠正');
+        }
+        self::assertSame(0, Db::name('finance_inventory_count_review')->where('tenant_id', self::TENANT_ID)->where('count_result_document_id', $confirmed['id'])->count());
+        if ($price === null && !$gain) {
+            self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'inventory_count_review', 'payload' => $payload]));
+            self::assertStringContainsString('原盘亏来源成本仍未知', FinanceBusinessLogic::getError());
+            $partial = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'inventory_count_review', 'payload' => array_replace($payload, ['cost_verified' => 0])]); self::assertNotFalse($partial, FinanceBusinessLogic::getError());
+            self::assertFalse($partial['confirmed_result']['resolved']); self::assertNull($partial['confirmed_result']['current_cost']);
+            $settled = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_settlement', 'payload' => ['subject_id' => $vendor, 'supplier_confirmed' => 1,
+                'supplier_confirmation' => '原采购正式价格每单位二元', 'reason' => '补齐原来源成本', 'lines' => [['arrival_line_id' => $arrival['confirmed_result']['lines'][0]['arrival_line_id'], 'covered_quantity' => '100', 'settlement_quantity' => '100', 'price' => '2.00']]]]); self::assertNotFalse($settled, FinanceBusinessLogic::getError());
+            $source = FinanceBusinessLogic::options(['type' => 'inventory_count_review', 'count_result_document_id' => $confirmed['id']])['differences'][0];
+            self::assertFalse($source['resolved']); self::assertSame('20.000000', $source['current_cost']);
+            $payload['expected_review_id'] = $source['expected_review_id']; $payload['expected_cost_event_id'] = $source['expected_cost_event_id'];
+            self::assertNull(FinanceBusinessLogic::detail(['id' => $partial['id']])['confirmed_result']['current_cost']);
+        } elseif ($price === null) { $payload['cost_amount'] = '20.00'; $payload['cost_basis'] = '经原截止进货依据核实十单位共二十元'; }
+        $command = $this->command(0) + ['type' => 'inventory_count_review', 'payload' => $payload];
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'inventory_count_review', 'payload' => array_replace($payload, ['expected_cost_event_id' => 0])]), '过期成本版本不能确认');
+        $draft = FinanceBusinessLogic::action('save', $this->command(0) + ['type' => 'inventory_count_review', 'payload' => $payload + ['selected_difference' => ['goods_name' => '伪造商品', 'current_cost' => '999.00']]]); self::assertNotFalse($draft, FinanceBusinessLogic::getError());
+        self::assertSame('盘点后续核实商品', $draft['payload']['selected_difference']['goods_name']);
+        self::assertArrayNotHasKey('selected_difference', json_decode(Db::name('finance_document')->where('id', $draft['id'])->value('payload'), true));
+        $review = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($review, FinanceBusinessLogic::getError());
+        self::assertSame($review, FinanceBusinessLogic::action('record', $command)); self::assertTrue($review['confirmed_result']['resolved']);
+        self::assertSame('20.000000', $review['confirmed_result']['current_cost']);
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'inventory_count_review', 'payload' => $payload]));
+        self::assertSame($flows, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->where('sku_id', $sku)->count());
+        self::assertSame($gain ? '110.0000' : '90.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $sku));
+        $cost = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID); $reference = 'inventory-count:' . $confirmed['id'] . ':' . $sku;
+        if (!$gain) { self::assertSame('20.000000', $cost->destination($warehouse, $sku, 'loss', $reference)['cost']); }
+        self::assertSame('0.000000000000', $cost->destination($warehouse, $sku, 'pending', $reference)['quantity']);
+        self::assertSame($confirmed['confirmed_result'], FinanceBusinessLogic::detail(['id' => $confirmed['id']])['confirmed_result']);
+        self::assertSame([], FinanceBusinessLogic::options(['type' => 'inventory_count_review'])['differences']);
+        $check = FinanceBusinessLogic::closingChecklist(['month' => date('Y-m')]);
+        self::assertCount(0, array_filter($check['items'], static fn(array $item): bool => $item['category'] === 'inventory_count'));
+        if ($gain) {
+            $trace = FinanceBusinessLogic::reportTrace(['report' => 'inventory', 'period_type' => 'month', 'period' => date('Y-m'), 'target_kind' => 'cost', 'target' => 'inventory-count-gain:' . $confirmed['id'] . ':' . $warehouse . ':' . $sku]);
+            self::assertNotFalse($trace, FinanceBusinessLogic::getError()); self::assertContains($review['id'], array_column($trace['documents'], 'id'));
+            self::assertContains($count['id'], array_column($trace['documents'], 'id')); self::assertContains($confirmed['id'], array_column($trace['documents'], 'id'));
+        }
+        $employee = WorkforceLogic::saveEmployee(['name' => '盘点核实人员', 'mobile' => '13800009964', 'bind_user_id' => 996964, 'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['finance.inventory.confirm']]); self::assertNotFalse($employee, WorkforceLogic::getError());
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996964; request()->adminId = 0;
+        $savedCommand = $this->command(0) + ['type' => 'inventory_count_review', 'payload' => $payload];
+        self::assertNotFalse(FinanceBusinessLogic::action('save', $savedCommand), FinanceBusinessLogic::getError());
+        Db::name('employee_permission')->where('tenant_id', self::TENANT_ID)->where('employee_id', $employee['id'])->delete();
+        self::assertFalse(FinanceBusinessLogic::action('save', $savedCommand), '撤权后不得通过旧命令读取核实依据');
+        self::assertFalse(FinanceBusinessLogic::detail(['id' => $review['id']]));
+        foreach (['finance_preparation', 'finance_opening_book'] as $table) {
+            $fixture = Db::name($table)->where('tenant_id', self::TENANT_ID)->find(); unset($fixture['id']); $fixture['tenant_id'] = self::OTHER_TENANT_ID; Db::name($table)->insert($fixture);
+        }
+        $this->prepareCustomerReportRequestContext(self::OTHER_TENANT_ID);
+        self::assertFalse(FinanceBusinessLogic::action('record', array_replace($this->command(0), ['expected_tenant_id' => self::OTHER_TENANT_ID, 'type' => 'inventory_count_review', 'payload' => $payload])));
+        self::assertStringContainsString('本门店已确认的原盘点差额', FinanceBusinessLogic::getError());
+        $foreign = FinanceBusinessLogic::options(['type' => 'inventory_count_review', 'count_result_document_id' => $confirmed['id']]); self::assertNotFalse($foreign, FinanceBusinessLogic::getError());
+        self::assertSame([], $foreign['differences']);
+    }
+
+    public function test_inventory_count_review_tracks_partial_closed_month_and_zero_cost_without_rewriting_history(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
+        $warehouse = $this->createCustomerReportWarehouse('跨月核实仓'); $goods = $this->createCustomerReportGoods('跨月核实商品', 'COUNT-REVIEW-CLOSED'); $sku = $this->customerReportSkuId($goods);
+        $count = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'inventory_count_start', 'payload' => ['warehouse_id' => $warehouse, 'scope' => 'selected', 'sku_ids' => [$sku], 'reason' => '原月盘点范围']]); self::assertNotFalse($count, FinanceBusinessLogic::getError());
+        // 模拟上月已经建立的零库存范围，仅移动时钟，不补造数量或成本。
+        $basis = $count['confirmed_result']; $basis['cutoff_at'] = $month . '-15 12:00:00'; $basis['actual_date'] = $month . '-15';
+        Db::name('finance_inventory_count')->where('tenant_id', self::TENANT_ID)->where('document_id', $count['id'])->update(['snapshot' => json_encode($basis)]);
+        Db::name('finance_document')->where('tenant_id', self::TENANT_ID)->where('id', $count['id'])->update(['confirmed_result' => json_encode($basis)]);
+        $confirmed = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'inventory_count', 'payload' => ['count_document_id' => $count['id'], 'reason' => '原月盘盈待查',
+            'lines' => [['sku_id' => $sku, 'counted_quantity' => '5', 'reason' => '原月原因与成本均未知', 'reason_verified' => 0]]]]); self::assertNotFalse($confirmed, FinanceBusinessLogic::getError());
+        $preview = FinanceBusinessLogic::periodAction('preview', ['month' => $month]); self::assertNotFalse($preview, FinanceBusinessLogic::getError());
+        self::assertNotFalse(FinanceBusinessLogic::periodAction('close', $this->command(0) + ['month' => $month, 'mode' => 'estimated', 'acknowledge_unresolved' => 1, 'expected_fingerprint' => $preview['fingerprint'], 'reason' => '保留盘盈未核实的原月清单']), FinanceBusinessLogic::getError());
+        $frozen = Db::name('finance_period')->where('tenant_id', self::TENANT_ID)->where('month', $month)->value('snapshot');
+        $source = FinanceBusinessLogic::options(['type' => 'inventory_count_review', 'count_result_document_id' => $confirmed['id']])['differences'][0];
+        $payload = ['count_result_document_id' => $confirmed['id'], 'sku_id' => $sku, 'expected_review_id' => 0, 'expected_cost_event_id' => $source['expected_cost_event_id'],
+            'reason_verified' => 0, 'reason_kind' => 'physical_gain', 'cost_verified' => 0, 'reason' => '已查明属于有凭据的无偿样品'];
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'inventory_count_review', 'payload' => $payload]), '两项均未新增核实不能制造空进度');
+        $payload['reason_verified'] = 1;
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'inventory_count_review', 'payload' => $payload + ['cost_amount' => '20.00']]), '未核实成本时金额不能被静默忽略');
+        $partial = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'inventory_count_review', 'payload' => $payload]); self::assertNotFalse($partial, FinanceBusinessLogic::getError());
+        $tracking = FinanceBusinessLogic::periodAction('followups', ['month' => $month]); self::assertNotFalse($tracking, FinanceBusinessLogic::getError());
+        $item = array_values(array_filter($tracking['items'], static fn(array $row): bool => $row['original']['category'] === 'inventory_count'))[0];
+        self::assertSame('partial', $item['current']['status']); self::assertCount(1, $item['current']['evidence']);
+        self::assertFalse($item['original']['details']['lines'][0]['reason_verified']);
+        $source = FinanceBusinessLogic::options(['type' => 'inventory_count_review', 'count_result_document_id' => $confirmed['id']])['differences'][0];
+        $payload = array_replace($payload, ['expected_review_id' => $source['expected_review_id'], 'expected_cost_event_id' => $source['expected_cost_event_id'], 'cost_verified' => 1, 'cost_amount' => '0.00', 'cost_basis' => '无偿样品原始赠送单证明取得成本为零']);
+        $review = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'inventory_count_review', 'payload' => $payload]); self::assertNotFalse($review, FinanceBusinessLogic::getError());
+        self::assertTrue($review['confirmed_result']['resolved']); self::assertSame('0.000000', $review['confirmed_result']['current_cost']);
+        $tracking = FinanceBusinessLogic::periodAction('followups', ['month' => $month]);
+        foreach ($tracking['items'] as $item) {
+            if (!in_array($item['original']['category'], ['inventory_count', 'cost_pending'], true)) { continue; }
+            self::assertSame('resolved', $item['current']['status']);
+            foreach ($item['current']['cost_adjustments'] as $effect) { self::assertSame(date('Y-m'), $effect['posting_month']); }
+        }
+        self::assertSame($frozen, Db::name('finance_period')->where('tenant_id', self::TENANT_ID)->where('month', $month)->value('snapshot'));
+        self::assertSame('5.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $sku));
+        self::assertSame(0, Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('document_id', $review['id'])->count());
+        self::assertNull(FinanceBusinessLogic::detail(['id' => $partial['id']])['confirmed_result']['current_cost']);
+        self::assertSame($confirmed['confirmed_result'], FinanceBusinessLogic::detail(['id' => $confirmed['id']])['confirmed_result']);
     }
 
     public function test_inventory_count_unknown_gain_keeps_profit_and_inventory_cost_pending(): void
@@ -4979,6 +5099,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         Db::name('finance_purchase_arrival_loss')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_inventory_count_line')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_inventory_count_measurement')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
+        Db::name('finance_inventory_count_review')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_inventory_count')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_purchase_difference_review')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         foreach (['finance_purchase_cost_revision', 'finance_purchase_cost_change', 'finance_purchase_cost_bill'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }

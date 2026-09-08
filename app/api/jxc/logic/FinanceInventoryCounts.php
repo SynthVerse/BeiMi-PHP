@@ -11,6 +11,7 @@ final class FinanceInventoryCounts
 {
     public static function input(string $type, array $payload): array
     {
+        if ($type === 'inventory_count_review') { return array_intersect_key($payload, array_flip(['count_result_document_id', 'sku_id', 'expected_review_id', 'expected_cost_event_id', 'reason_verified', 'reason_kind', 'cost_verified', 'reason', 'cost_basis', 'cost_amount'])); }
         if (!in_array($type, ['inventory_count_start', 'inventory_count', 'inventory_count_cancel'], true)) { return $payload; }
         if ($type === 'inventory_count_start') { return array_intersect_key($payload, array_flip(['warehouse_id', 'scope', 'sku_ids', 'reason'])); }
         $input = array_intersect_key($payload, array_flip(['count_document_id', 'reason']));
@@ -193,7 +194,7 @@ final class FinanceInventoryCounts
         foreach ($rows as $row) {
             $result = FinanceValue::decode($row['confirmed_result']);
             if ($result['actual_date'] > $cutoff) { continue; }
-            $lines = array_values(array_filter($result['lines'], static fn(array $line): bool => bccomp($line['difference_quantity'], '0', 4) !== 0 && (!$line['reason_verified'] || $line['cost_pending'])));
+            $lines = array_values(array_filter(FinanceInventoryCountReviews::lines((int)$row['id'], $result), static fn(array $line): bool => !$line['resolved']));
             if ($lines) { $items[] = array_replace($result, ['document_id' => (int)$row['id'], 'lines' => $lines]); }
         }
         return $items;

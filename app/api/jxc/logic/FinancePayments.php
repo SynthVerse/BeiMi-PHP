@@ -15,6 +15,7 @@ final class FinancePayments
     {
         $type = $document['type']; $policy = FinanceDocumentPolicy::authorize($type, true);
         $data = FinanceValue::decode($document['payload']);
+        if ($type === 'inventory_count_review') { return FinanceInventoryCountReviews::confirm($this->ledger, $document, $data); }
         if ($type === 'inventory_count_start') { return FinanceInventoryCounts::start($this->ledger, $document, $data); }
         if ($type === 'inventory_count') { return FinanceInventoryCounts::confirm($this->ledger, $document, $data); }
         if ($type === 'inventory_count_cancel') { return FinanceInventoryCounts::cancel($document, $data); }

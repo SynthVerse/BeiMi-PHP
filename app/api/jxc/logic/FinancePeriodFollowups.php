@@ -78,6 +78,19 @@ final class FinancePeriodFollowups
                 $resolved = bccomp($state['remaining_quantity'], '0', 4) === 0; $partial = !$resolved && bccomp($state['remaining_quantity'], $details['remaining_quantity'], 4) < 0;
                 $evidence = self::records('finance_purchase_return_resolution', 'return_line_id', $row['id']);
             }
+        } elseif ($item['category'] === 'inventory_count') {
+            $id = (int)$details['document_id'];
+            $row = Db::name('finance_document')->where('tenant_id', $tenant)->where('id', $id)->where('type', 'inventory_count')->where('status', 'confirmed')->find();
+            if ($row) {
+                $lines = array_column(FinanceInventoryCountReviews::lines($id, FinanceValue::decode($row['confirmed_result'])), null, 'sku_id');
+                $resolved = true;
+                foreach ($details['lines'] as $original) {
+                    $line = $lines[$original['sku_id']] ?? null;
+                    if (!$line || !$line['resolved']) { $resolved = false; }
+                    if ($line && ($line['expected_review_id'] > ($original['expected_review_id'] ?? 0) || $line['resolved'])) { $partial = true; }
+                }
+                $evidence = self::records('finance_inventory_count_review', 'count_result_document_id', $id);
+            }
         } elseif ($item['category'] === 'inventory_loss') {
             $incident = (int)$details['incident_document_id'];
             $row = Db::name('finance_inventory_loss')->where('tenant_id', $tenant)->where('document_id', $incident)->find();

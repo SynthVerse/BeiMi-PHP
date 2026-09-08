@@ -58,7 +58,7 @@ final class FinancePeriodChecklist
         self::costItems($items, $cutoff);
         foreach (FinanceInventoryCounts::unresolved($cutoff) as $count) {
             $items[] = self::item('inventory_count', (string)$count['document_id'], '盘点差异原因或截止成本仍待核实', 'blocking',
-                $count + ['route' => '/sub-finance/inventory/count?type=inventory_count&id=' . $count['document_id']]);
+                $count + ['route' => '/sub-finance/inventory/review?type=inventory_count_review&count_result_document_id=' . $count['document_id']]);
         }
         self::purchaseItems($items, $cutoff);
         self::disputeItems($items, $ledger, $cutoff);
@@ -88,6 +88,9 @@ final class FinancePeriodChecklist
             $route = ($source['cost_basis_pending'] ?? null) === 'pre_cutoff_sales_return'
                 ? '/sub-finance/inventory/cost?type=legacy_return_cost&stock_flow_id=' . (int)$source['stock_flow_id']
                 : '/sub-finance/business/index?type=purchase_settlement';
+            if (preg_match('/^inventory-count-gain:(\d+):/', $origin['origin_key'], $match)) {
+                $route = '/sub-finance/inventory/review?type=inventory_count_review&count_result_document_id=' . $match[1];
+            }
             $items[] = self::item('cost_pending', $origin['origin_key'], '原入库或退回来源成本待确认', 'blocking', $origin + ['route' => $route]);
         }
         $references = [];

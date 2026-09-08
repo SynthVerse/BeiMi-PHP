@@ -7,6 +7,7 @@ namespace app\api\jxc\logic;
 final class FinanceDocumentPolicy
 {
     public const TYPES = [
+        'inventory_count_review' => ['title' => '核实原盘点差额', 'prepare' => 'finance.inventory.confirm', 'confirm' => 'finance.inventory.confirm', 'owner' => false, 'subject' => 'none', 'sources' => [], 'direction' => 'none'],
         'inventory_count' => ['title' => '盘点实盘与差异确认', 'prepare' => 'finance.inventory.count', 'confirm' => 'finance.inventory.confirm', 'owner' => false, 'subject' => 'none', 'sources' => [], 'direction' => 'none'],
         'inventory_count_start' => ['title' => '建立盘点截止快照', 'prepare' => 'finance.inventory.count', 'confirm' => 'finance.inventory.count', 'owner' => false, 'subject' => 'none', 'sources' => [], 'direction' => 'none'],
         'inventory_count_cancel' => ['title' => '取消未完成盘点', 'prepare' => 'finance.inventory.count', 'confirm' => 'finance.inventory.count', 'owner' => false, 'subject' => 'none', 'sources' => [], 'direction' => 'none'],
