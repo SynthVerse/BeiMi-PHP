@@ -81,6 +81,13 @@ final class FinanceExpenseAdjustments
         $month = $ledger->postingMonth(max($benefit . '-01', $activation));
         $reverseMonth = $ledger->postingMonth(max($before['posting_month'] . '-01', $activation));
         $lines = self::lines($data['lines'] ?? null, $amount, $before['lines']);
+        if (!empty($before['recurring_plan_id'])) {
+            $plan = FinanceRecurringExpenses::plan((int)$before['recurring_plan_id']);
+            if ($newVendor !== $plan['subject_id'] || $benefit !== $before['benefit_month'] || bccomp($amount, '0', 2) === 0
+                || count($lines) !== 1 || $lines[0]['category_id'] !== $plan['category_id']) {
+                throw new \DomainException('周期费用改变对象、类别、月份或取消须关联原周期重新核实；普通调整仅可修订原范围内金额与说明');
+            }
+        }
         if ($newVendor === $vendor && bccomp($delta, '0', 2) === 0 && $benefit === $before['benefit_month'] && $lines === $before['lines']) { throw new \DomainException('费用金额、归属与明细均未变化'); }
         $reason = FinanceValue::text($data['reason'] ?? null, 1000); $basis = FinanceValue::text($data['confirmation_basis'] ?? null, 1000);
         $expense = array_replace($before, ['amount' => $amount, 'subject_id' => $newVendor, 'subject_name' => $newName,

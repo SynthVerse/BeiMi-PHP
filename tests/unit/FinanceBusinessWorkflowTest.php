@@ -51,6 +51,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000028_finance_expense_revision.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000029_finance_deferred_amortization.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000030_finance_expense_estimate_resolution.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000031_finance_recurring_expense.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -63,7 +64,80 @@ final class FinanceBusinessWorkflowTest extends TestCase
 
     public static function deferredClosureCases(): array { return [[false], [true]]; }
 
+    public function test_recurring_expense_plan_lists_due_months_without_posting_or_paying(): void
+    {
+        $this->activate(); $month = date('Y-m'); $next = date('Y-m', strtotime('first day of next month'));
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '周期服务方']);
+        $category = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_category', 'payload' => [
+            'category_id' => 0, 'expected_category_version' => 0, 'parent' => 'utilities', 'name' => '周期用水', 'is_enabled' => 1]]);
+        self::assertNotFalse($category, FinanceBusinessLogic::getError());
+        $command = $this->command(0) + ['type' => 'expense_recurring_plan', 'payload' => ['subject_id' => $vendor,
+            'category_id' => $category['confirmed_result']['category']['id'], 'expected_category_version' => 1,
+            'source_reference' => 'CYCLE-35-1', 'service_start' => $month, 'service_end' => $next, 'interval_months' => 1,
+            'reason' => '每月核实实际水费', 'plan_verified' => 1]];
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($command + ['action' => 'record']);
+        self::assertSame([], $preview['impacts']); self::assertSame([], $preview['balances']);
+        $plan = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($plan, FinanceBusinessLogic::getError());
+        self::assertSame($plan, FinanceBusinessLogic::action('record', $command));
+        $options = FinanceBusinessLogic::options(['type' => 'expense_recurring_plan', 'recurring_plan_id' => $plan['confirmed_result']['plan_id']]);
+        self::assertNotFalse($options, FinanceBusinessLogic::getError());
+        self::assertSame([$month, $next], array_column($options['selected_plan']['months'], 'month'));
+        self::assertSame(['pending', 'future'], array_column($options['selected_plan']['months'], 'status'));
+        $ledger = new FinanceLedger(self::TENANT_ID); self::assertSame('0.00', $ledger->categoryBalance('expense_payable', $vendor));
+        self::assertSame('5000.00', $ledger->account($this->accountId)['balance']);
+    }
+
     public static function estimateFinalAmounts(): array { return [['1000.00', '0.00', '200.00', '0.00'], ['1100.00', '100.00', '300.00', '0.00'], ['700.00', '-300.00', '0.00', '100.00']]; }
+
+    public static function recurringAmountStates(): array { return [['final'], ['estimated']]; }
+
+    /** @dataProvider recurringAmountStates */
+    public function test_recurring_month_requires_expense_estimate_or_reasoned_none_and_cannot_be_consumed_twice(string $amountStatus): void
+    {
+        $previous = date('Y-m', strtotime('first day of last month')); $month = date('Y-m'); $next = date('Y-m', strtotime('first day of next month'));
+        $this->activate('cash', $previous . '-01');
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '周期费用核实方']);
+        $category = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_category', 'payload' => [
+            'category_id' => 0, 'expected_category_version' => 0, 'parent' => 'utilities', 'name' => '周期电费', 'is_enabled' => 1]]);
+        self::assertNotFalse($category, FinanceBusinessLogic::getError()); $categoryId = $category['confirmed_result']['category']['id'];
+        $plan = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_recurring_plan', 'payload' => ['subject_id' => $vendor,
+            'category_id' => $categoryId, 'expected_category_version' => 1, 'source_reference' => 'CYCLE-35-2',
+            'service_start' => $previous, 'service_end' => $next, 'interval_months' => 1, 'reason' => '按月核实费用', 'plan_verified' => 1]]);
+        self::assertNotFalse($plan, FinanceBusinessLogic::getError()); $planId = $plan['confirmed_result']['plan_id'];
+        $none = ['subject_id' => $vendor, 'recurring_plan_id' => $planId, 'expected_plan_version' => 1, 'benefit_month' => $month,
+            'reason' => '本月停业未用电，已核对表数', 'none_verified' => 1];
+        $command = $this->command(0) + ['type' => 'expense_recurring_none', 'payload' => $none];
+        $result = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($result, FinanceBusinessLogic::getError());
+        self::assertSame($result, FinanceBusinessLogic::action('record', $command));
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_recurring_none', 'payload' => $none]));
+        foreach ([array_replace($none, ['benefit_month' => $next]), array_replace($none, ['benefit_month' => $previous, 'reason' => '']), array_replace($none, ['benefit_month' => $previous, 'none_verified' => 0])] as $invalid) {
+            self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_recurring_none', 'payload' => $invalid]));
+        }
+        $expense = ['subject_id' => $vendor, 'recurring_plan_id' => $planId, 'expected_plan_version' => 1, 'benefit_month' => $month,
+            'actual_date' => date('Y-m-d'), 'amount' => '800', 'source_reference' => 'CYCLE-35-2/' . $month, 'reason' => '本期用电',
+            'due_mode' => 'unspecified', 'material_status' => 'missing', 'missing_material_reason' => '按计量记录人工核实', 'material_verified' => 1,
+            'amount_status' => $amountStatus, 'estimate_basis_type' => 'measurement', 'estimate_basis' => '表数及合同单价',
+            'lines' => [['category_id' => $categoryId, 'expected_category_version' => 1, 'amount' => '800', 'reason' => '该月用电费用']]];
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense', 'payload' => $expense]), '已确认不发生的月份不得再消费为费用');
+        $expense['benefit_month'] = $previous; $expense['source_reference'] = 'CYCLE-35-2/' . $previous;
+        $paid = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense', 'payload' => $expense]); self::assertNotFalse($paid, FinanceBusinessLogic::getError());
+        $options = FinanceBusinessLogic::options(['type' => 'expense_recurring_plan', 'recurring_plan_id' => $planId]);
+        self::assertSame([$amountStatus === 'estimated' ? 'estimated' : 'expense', 'none', 'future'], array_column($options['selected_plan']['months'], 'status'));
+        self::assertSame($paid['id'], $options['selected_plan']['months'][0]['document_id']);
+        self::assertSame('800.00', (new FinanceLedger(self::TENANT_ID))->categoryBalance('expense_payable', $vendor));
+        if ($amountStatus === 'estimated') {
+            $pending = FinanceBusinessLogic::options(['type' => 'expense_estimate_final', 'original_expense_document_id' => $paid['id']]);
+            self::assertSame('pending', $pending['bills'][0]['estimate_items'][0]['status']);
+        } else {
+            $adjustment = ['subject_id' => $vendor, 'new_subject_id' => $vendor, 'original_expense_document_id' => $paid['id'], 'expected_revision_id' => 0,
+                'new_amount' => '800', 'benefit_month' => $month, 'reason' => '把原计划费用移到别月', 'adjustment_verified' => 1, 'confirmation_basis' => '普通更正试图改变周期范围', 'lines' => $expense['lines']];
+            self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_adjustment', 'payload' => $adjustment]), '不能保留已处理月份状态却移走其费用');
+            $adjustment['benefit_month'] = $previous; $adjustment['new_amount'] = '0'; $adjustment['lines'] = [];
+            self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_adjustment', 'payload' => $adjustment]), '取消须关联周期重新核实该月');
+            $adjustment['new_amount'] = '900'; $adjustment['lines'] = [array_replace($expense['lines'][0], ['amount' => '900'])];
+            self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_adjustment', 'payload' => $adjustment]), FinanceBusinessLogic::getError());
+        }
+    }
 
     /** @dataProvider estimateFinalAmounts */
     public function test_closed_expense_estimate_resolves_in_parts_and_posts_only_final_difference(string $final, string $delta, string $payable, string $refund): void
@@ -3065,6 +3139,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
     private function clean(): void
     {
+        foreach (['finance_recurring_expense_month', 'finance_recurring_expense_plan'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         foreach (['finance_expense_estimate_resolution', 'finance_deferred_amortization', 'finance_expense_identity', 'finance_expense_revision', 'finance_expense_bill', 'finance_expense_category'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         foreach (['finance_inventory_loss_resolution', 'finance_inventory_loss'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         Db::name('finance_purchase_arrival_loss')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();

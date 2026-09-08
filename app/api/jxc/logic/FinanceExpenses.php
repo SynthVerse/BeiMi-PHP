@@ -35,11 +35,14 @@ final class FinanceExpenses
         }
         $reason = FinanceValue::text($data['reason'] ?? null, 1000); $material = self::material($data);
         $lines = FinanceExpenseCategories::lines($data['lines'] ?? null, $amount);
+        if ($deferred && !empty($data['recurring_plan_id'])) { throw new \DomainException('周期月份须确认为已受益费用或有依据暂估，不能改为未来待摊'); }
+        $recurring = !$deferred ? FinanceRecurringExpenses::expenseContext($data, $lines) : null;
         $snapshot = ['type' => $document['type'], 'subject_id' => $vendor, 'subject_name' => $name, 'amount' => $amount,
             'actual_date' => $date, 'benefit_month' => $benefit, 'posting_month' => $month, 'due_mode' => $dueMode, 'due_date' => $due,
             'source_reference' => $reference, 'reason' => $reason, 'lines' => $lines, 'confirmed_by' => FinanceAccess::actor(), 'confirmed_at' => time()] + $material;
         if ($deferred) { $snapshot += ['details' => $details, 'plan_verified' => 1]; }
         else { $snapshot += FinanceExpenseEstimates::declaration($data); }
+        if ($recurring) { $snapshot += ['recurring_plan_id' => $recurring['plan_id'], 'recurring_plan_document_id' => $recurring['document_id'], 'recurring_plan_reference' => $recurring['source_reference'], 'recurring_plan_version' => $recurring['version']]; }
         $source = $ledger->createSource($id, 'expense_payable', $vendor, $amount, $date, $due, $snapshot);
         foreach ($lines as $line) {
             if (!$deferred) { $ledger->add($id, 'expense', $vendor, $line['amount'], $date, $month, 'ordinary_expense', $source, null,
@@ -49,6 +52,7 @@ final class FinanceExpenses
         $bill = (int)Db::name('finance_expense_bill')->insertGetId(['tenant_id' => $tenant, 'document_id' => $id, 'vendor_id' => $vendor,
             'source_reference' => $reference, 'source_ref' => $source, 'amount' => $amount, 'snapshot' => FinanceValue::json($snapshot), 'create_time' => time()]);
         FinanceExpenseIdentities::claim($vendor, $reference, $bill, $id);
+        if ($recurring) { FinanceRecurringExpenses::complete($document, $recurring, $snapshot['amount_status'] === 'estimated' ? 'estimated' : 'expense', $snapshot); }
         $result = $snapshot + ['bill_id' => $bill, 'created_sources' => [$source]];
         if ($deferred) {
             $result['deferred_source'] = $ledger->createSource($id, 'deferred', $vendor, $amount, $date, null, $snapshot + ['payable_source' => $source]);
