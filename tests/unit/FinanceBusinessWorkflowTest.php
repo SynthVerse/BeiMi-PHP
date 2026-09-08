@@ -105,6 +105,57 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $visible = FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => 'expense']); self::assertNotFalse($visible, FinanceBusinessLogic::getError()); self::assertCount(1, $visible['data']['entries']);
     }
 
+    public function test_period_close_freezes_six_reports_and_carries_balances_without_new_revenue(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
+        $cutoff = date('Y-m-t', strtotime($month . '-01'));
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_reconcile', 'payload' => ['account_id' => $this->accountId, 'month' => $month, 'actual_cutoff' => $cutoff . ' 23:59:59', 'actual_balance' => '5000', 'expected_book_balance' => '5000', 'reconciliation_verified' => 1, 'expected_reconciliation_id' => 0, 'reason' => '实点月末资金']]), FinanceBusinessLogic::getError());
+        $preview = FinanceBusinessLogic::periodAction('preview', ['month' => $month]); self::assertNotFalse($preview, FinanceBusinessLogic::getError());
+        self::assertTrue($preview['checklist']['ordinary_ready']);
+        $command = $this->command(0) + ['month' => $month, 'mode' => 'ordinary', 'expected_fingerprint' => $preview['fingerprint'], 'reason' => '逐项核对后正式月结'];
+        $closed = FinanceBusinessLogic::periodAction('close', $command); self::assertNotFalse($closed, FinanceBusinessLogic::getError());
+        self::assertSame($closed, FinanceBusinessLogic::periodAction('close', $command)); self::assertCount(6, $closed['snapshot']['reports']);
+        self::assertSame('ordinary', $closed['snapshot']['mode']); self::assertSame(1, Db::name('finance_period')->where('tenant_id', self::TENANT_ID)->count());
+        $frozen = FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => 'cash']); self::assertFalse($frozen['stage']); self::assertSame('closed', $frozen['closing_status']);
+        $receipt = $this->receipt('100', '100'); $receipt['actual_date'] = $month . '-02';
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $receipt]), FinanceBusinessLogic::getError());
+        self::assertSame($frozen, FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => 'cash']));
+        $current = FinanceBusinessLogic::monthlyReport(['month' => date('Y-m'), 'report' => 'cash']); self::assertSame('5000.00', $current['data']['summary']['opening_accounts']); self::assertSame('5100.00', $current['data']['summary']['closing_accounts']);
+        self::assertSame('0.00', FinanceBusinessLogic::monthlyReport(['month' => date('Y-m'), 'report' => 'profit'])['data']['summary']['revenue']);
+        self::assertFalse(FinanceBusinessLogic::periodAction('close', array_replace($command, ['idempotency_key' => $this->command(0)['idempotency_key']])));
+    }
+
+    public function test_period_estimated_close_requires_acknowledgement_and_preserves_unresolved_snapshot(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
+        $preview = FinanceBusinessLogic::periodAction('preview', ['month' => $month]); self::assertNotFalse($preview, FinanceBusinessLogic::getError());
+        self::assertFalse($preview['checklist']['ordinary_ready']); self::assertTrue($preview['checklist']['estimated_ready']);
+        $command = $this->command(0) + ['month' => $month, 'mode' => 'ordinary', 'expected_fingerprint' => $preview['fingerprint'], 'reason' => '尚未取得最终月末核对依据'];
+        self::assertFalse(FinanceBusinessLogic::periodAction('close', $command)); $command['mode'] = 'estimated';
+        self::assertFalse(FinanceBusinessLogic::periodAction('close', $command)); $command['acknowledge_unresolved'] = 1;
+        $closed = FinanceBusinessLogic::periodAction('close', $command); self::assertNotFalse($closed, FinanceBusinessLogic::getError());
+        self::assertSame('estimated', $closed['snapshot']['mode']); self::assertNotEmpty($closed['snapshot']['unresolved']);
+        self::assertSame('not_fully_verified', $closed['snapshot']['reports']['profit']['verification']['status']);
+        self::assertSame('estimated', Db::name('finance_period')->where('tenant_id', self::TENANT_ID)->where('month', $month)->value('status'));
+    }
+
+    public function test_period_close_rejects_stale_preview_future_month_skipped_month_and_non_owner(): void
+    {
+        $month = date('Y-m', strtotime('first day of -2 months')); $this->activate('cash', $month . '-01');
+        $preview = FinanceBusinessLogic::periodAction('preview', ['month' => $month]); self::assertNotFalse($preview, FinanceBusinessLogic::getError());
+        $receipt = $this->receipt('100', '100'); $receipt['actual_date'] = $month . '-02';
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $receipt]), FinanceBusinessLogic::getError());
+        $command = $this->command(0) + ['month' => $month, 'mode' => 'estimated', 'acknowledge_unresolved' => 1, 'expected_fingerprint' => $preview['fingerprint'], 'reason' => '预览后业务发生变化'];
+        self::assertFalse(FinanceBusinessLogic::periodAction('close', $command)); self::assertStringContainsString('变化', FinanceBusinessLogic::getError());
+        foreach ([date('Y-m'), date('Y-m', strtotime('first day of last month'))] as $invalid) {
+            $next = FinanceBusinessLogic::periodAction('preview', ['month' => $invalid]); self::assertNotFalse($next, FinanceBusinessLogic::getError());
+            self::assertFalse(FinanceBusinessLogic::periodAction('close', array_replace($command, ['month' => $invalid, 'expected_fingerprint' => $next['fingerprint']])));
+        }
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996952; request()->adminId = 0;
+        self::assertFalse(FinanceBusinessLogic::periodAction('preview', ['month' => $month])); self::assertFalse(FinanceBusinessLogic::periodAction('close', $command));
+        self::assertSame(0, Db::name('finance_period')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
     public function test_monthly_inventory_report_preserves_unknown_historical_cost_after_later_pricing(): void
     {
         $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');

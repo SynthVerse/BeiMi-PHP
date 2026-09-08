@@ -130,6 +130,12 @@ final class FinanceReports
             'entries' => $period, 'external_money' => $external, 'internal_transfers' => $internal, 'adjustments' => $adjustments];
     }
 
+    public static function closingBalances(string $month): array
+    {
+        FinanceAccess::require('', true);
+        return self::balances($month, ['receivable', 'advance', 'customer_refund', 'recovery', 'payable', 'supplier_refund', 'expense_payable', 'expense_refund', 'salary', 'reimbursement', 'deferred', 'equipment', 'equipment_refund', 'unclaimed', 'transit']);
+    }
+
     private static function balances(string $month, array $categories): array
     {
         $tenant = FinanceAccess::tenant(); $activation = substr((string)Db::name('finance_preparation')->where('tenant_id', $tenant)->value('activation_date'), 0, 7);
