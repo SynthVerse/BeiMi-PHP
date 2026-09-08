@@ -105,6 +105,31 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $visible = FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => 'expense']); self::assertNotFalse($visible, FinanceBusinessLogic::getError()); self::assertCount(1, $visible['data']['entries']);
     }
 
+    public function test_closed_transit_followup_distinguishes_later_arrival_from_backdated_adjustment(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $cutoff = date('Y-m-t', strtotime($month . '-01')); $this->activate('cash', $month . '-01');
+        $target = FinanceSetupLogic::saveAccount($this->command(0) + ['name' => '目标现金', 'account_type' => 'cash']); self::assertNotFalse($target);
+        $out = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_out', 'payload' => ['account_id' => $this->accountId, 'target_account_id' => (int)$target['id'], 'actual_date' => $cutoff, 'amount' => '1000', 'source_reference' => '已结月在途55', 'transfer_verified' => 1, 'reason' => '月底实际转出']]); self::assertNotFalse($out, FinanceBusinessLogic::getError()); $source = $out['confirmed_result']['transfer_source'];
+        $preview = FinanceBusinessLogic::periodAction('preview', ['month' => $month]);
+        $closed = FinanceBusinessLogic::periodAction('close', $this->command(0) + ['month' => $month, 'mode' => 'estimated', 'acknowledge_unresolved' => 1, 'expected_fingerprint' => $preview['fingerprint'], 'reason' => '在途凭据待复核']); self::assertNotFalse($closed, FinanceBusinessLogic::getError());
+        $options = FinanceBusinessLogic::options(['type' => 'transit_reconcile', 'month' => $month, 'transfer_source' => $source]); self::assertTrue($options['closed_followup_allowed']); $before = $options['selected_transfer'];
+        $payload = ['month' => $month, 'transfer_source' => $source, 'actual_cutoff' => $cutoff . ' 23:59:59', 'expected_fingerprint' => $before['fingerprint'], 'expected_reconciliation_id' => 0, 'review_state' => 'normal', 'transfer_verified' => 1, 'reason' => '银行凭据查明原月末正常在途'];
+        $count = Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->count();
+        $review = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'transit_reconcile', 'payload' => $payload]); self::assertNotFalse($review, FinanceBusinessLogic::getError());
+        self::assertSame($count, Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->count());
+        $state = static function (string $month): array { return array_values(array_filter(FinanceBusinessLogic::periodAction('followups', ['month' => $month])['items'], static fn(array $item): bool => $item['original']['category'] === 'transit_reconciliation'))[0]['current']; };
+        self::assertSame('resolved', $state($month)['status']);
+        $arrival = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_arrival', 'payload' => ['source' => $source, 'account_id' => (int)$target['id'], 'actual_date' => date('Y-m-d'), 'amount' => '400', 'transfer_verified' => 1, 'reason' => '下月实际到账']]); self::assertNotFalse($arrival, FinanceBusinessLogic::getError());
+        self::assertSame('resolved', $state($month)['status']);
+        $returned = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_return', 'payload' => ['source' => $source, 'account_id' => $this->accountId, 'actual_date' => $cutoff, 'amount' => '100', 'transfer_verified' => 1, 'reason' => '补录原月末返还']]); self::assertNotFalse($returned, FinanceBusinessLogic::getError());
+        $current = FinanceBusinessLogic::options(['type' => 'transit_reconcile', 'month' => $month, 'transfer_source' => $source])['selected_transfer'];
+        self::assertSame('900.00', $current['remaining_amount']); self::assertSame('1000.00', $current['frozen_remaining_amount']); self::assertSame('needs_review', $current['state']); self::assertSame('pending', $state($month)['status']);
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'transit_reconcile', 'payload' => array_replace($payload, ['expected_reconciliation_id' => $review['id']])]));
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'transit_reconcile', 'payload' => array_replace($payload, ['expected_reconciliation_id' => $review['id'], 'expected_fingerprint' => $current['fingerprint']])]), FinanceBusinessLogic::getError());
+        self::assertSame('resolved', $state($month)['status']); self::assertNotEmpty($state($month)['adjustments']);
+        self::assertSame($closed['snapshot'], FinanceBusinessLogic::periodAction('detail', ['month' => $month])['snapshot']);
+    }
+
     public function test_closed_account_followup_verifies_zero_difference_without_rewriting_snapshot_or_creating_money(): void
     {
         $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
@@ -457,6 +482,12 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $payload = ['month' => $month, 'transfer_source' => $source, 'actual_cutoff' => $cutoff . ' 23:59:59', 'expected_fingerprint' => $before['fingerprint'], 'expected_reconciliation_id' => 0, 'review_state' => 'normal', 'transfer_verified' => 1, 'reason' => '转账凭据与对方月末未到账均已核对，正常跨月在途'];
         $review = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'transit_reconcile', 'payload' => $payload]); self::assertNotFalse($review, FinanceBusinessLogic::getError());
         self::assertTrue($review['confirmed_result']['ordinary_close_allowed']);
+        // 模拟升级前已保存的核对，新增展示字段不能使无业务变化的历史结论失效。
+        $legacy = $review['confirmed_result']; $legacyTransfer = $legacy['transfer'];
+        unset($legacyTransfer['fingerprint'], $legacyTransfer['closed_period_followup'], $legacyTransfer['frozen_remaining_amount'], $legacyTransfer['post_close_adjustments']);
+        $legacyTransfer['fingerprint'] = hash('sha256', \app\api\jxc\logic\FinanceValue::json($legacyTransfer)); $legacy['transfer'] = $legacyTransfer;
+        Db::name('finance_transit_reconciliation')->where('tenant_id', self::TENANT_ID)->where('document_id', $review['id'])->update(['snapshot' => \app\api\jxc\logic\FinanceValue::json($legacy)]);
+        self::assertSame('normal', FinanceBusinessLogic::options(['type' => 'transit_reconcile', 'month' => $month, 'transfer_source' => $source])['selected_transfer']['state']);
         $arrival = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_arrival', 'payload' => ['source' => $source, 'account_id' => (int)$target['id'], 'actual_date' => date('Y-m-d'), 'amount' => '400', 'transfer_verified' => 1, 'reason' => '下月实际到账']]); self::assertNotFalse($arrival, FinanceBusinessLogic::getError());
         $options = FinanceBusinessLogic::options(['type' => 'transit_reconcile', 'month' => $month, 'transfer_source' => $source]); self::assertSame('normal', $options['selected_transfer']['state']); self::assertSame('1000.00', $options['selected_transfer']['remaining_amount']);
         $returned = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_return', 'payload' => ['source' => $source, 'account_id' => $this->accountId, 'actual_date' => $cutoff, 'amount' => '100', 'transfer_verified' => 1, 'reason' => '补录月末已实际返还']]); self::assertNotFalse($returned, FinanceBusinessLogic::getError());

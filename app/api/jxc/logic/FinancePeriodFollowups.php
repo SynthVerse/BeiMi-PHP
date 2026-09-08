@@ -33,6 +33,10 @@ final class FinancePeriodFollowups
             $check = FinanceReconciliations::followup((int)$details['account_id'], $month);
             if ($check['latest']) { $evidence[] = $check['latest']; }
             $resolved = $check['state'] === 'matched' && ($check['latest']['closed_period_followup'] ?? false);
+        } elseif ($item['category'] === 'transit_reconciliation') {
+            $check = FinanceTransitReviews::followup(new FinanceLedger($tenant), $details['transfer_source'], $month);
+            if ($check['latest']) { $evidence[] = $check['latest']; }
+            $resolved = $check['state'] === 'normal' && ($check['latest']['closed_period_followup'] ?? false);
         } elseif ($item['category'] === 'expense_estimate') {
             [$bill, $category] = explode(':', $item['reference']);
             $row = Db::name('finance_expense_estimate_resolution')->where('tenant_id', $tenant)->where('bill_id', (int)$bill)->where('category_id', (int)$category)->find();
@@ -114,6 +118,8 @@ final class FinancePeriodFollowups
         $adjustments = $documents ? Db::name('finance_entry')->where('tenant_id', $tenant)->whereIn('document_id', $documents)->where('posting_month', '>', $month)->order('id')->select()->toArray() : [];
         if ($item['category'] === 'account_reconciliation') {
             $adjustments = Db::name('finance_entry')->where('tenant_id', $tenant)->where('metric', 'cash')->where('subject_id', $details['account_id'])->where('business_date', '<=', date('Y-m-t', strtotime($month . '-01')))->where('posting_month', '>', $month)->order('id')->select()->toArray();
+        } elseif ($item['category'] === 'transit_reconciliation') {
+            $adjustments = Db::name('finance_entry')->where('tenant_id', $tenant)->where('metric', 'balance')->where('source_ref', $details['transfer_source'])->where('business_date', '<=', date('Y-m-t', strtotime($month . '-01')))->where('posting_month', '>', $month)->order('id')->select()->toArray();
         }
         foreach ($adjustments as &$entry) { $entry['details'] = FinanceValue::decode($entry['details']); } unset($entry);
         if ($item['category'] === 'expense_estimate') {
