@@ -2,6 +2,42 @@
 
 按根因去重。每条记录必须指向实际防线；仅有“不要这样做”的提醒不算已防护。
 
+## PIT-0052：期初投影遗漏已有核实字段，错误开放重新填写
+
+日期：2026-09-08
+
+### 报告来源
+
+- 生成原因：工作流要求
+- 主工作流：Matt Pocock
+- 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`用户级自定义 / impeccable`、`Matt Pocock / code-review`、`Matt Pocock / diagnosing-bugs`、`用户级自定义 / prevent-repeat-pitfalls`（按本批顺序自动调用）。
+- 说明：第49批审查在途投影，直接入口回归已定位字段映射遗漏，未增加临时日志；防护完成后继续月结开发。
+
+- 状态：已防护；首次／最近发生：2026-09-08；复发次数：0。
+- 根因：将期初额外手续费统一投影为 `null`，遗漏合法的 `details.additional_fee`，导致已知金额也可被新核对输入替代。
+- 防线：`FinanceTransitReviews::atMonth` 优先保留已知额外手续费；仅缺失时允许补核实，确认结果不会用客户端冲突值覆盖已知值。
+- 已验证事实：`test_transit_reconciliation_preserves_known_opening_extra_fee_and_zero_does_not_hide_unknown_facts` 修复前为 `null` 对预期 `5.00`；修复后原值5不受输入0覆盖。最终在途、互转、账户及短款专项 11 tests、430 assertions 通过。
+- 尚未验证：当前小程序实际构建、原生布局与触控，HBuilderX 已退出。
+- 后续建议：历史来源的投影按实际期初字段逐项映射，不能以“历史来源”统一推断未知。
+
+## PIT-0053：零余额状态绕过业务事实完整性的核实门槛
+
+日期：2026-09-08
+
+### 报告来源
+
+- 生成原因：工作流要求
+- 主工作流：Matt Pocock
+- 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`用户级自定义 / impeccable`、`Matt Pocock / code-review`、`Matt Pocock / diagnosing-bugs`、`用户级自定义 / prevent-repeat-pitfalls`（按本批顺序自动调用）。
+- 说明：与 PIT-0052 同批，但根因为完成状态推导遗漏知识完整性，独立记录；防护后继续月结。
+
+- 状态：已防护；首次／最近发生：2026-09-08；复发次数：0。
+- 根因：没有核对历史时，只依据剩余在途为零自动判为已结清，忽略来源组成和手续费仍可能未知，绕过普通月结的核实要求。
+- 防线：自动已结清必须同时满足组成已知、额外手续费已知、余额为零；其他情形仍保留未核对。已知金额和知识状态分别参与判定。
+- 已验证事实：上述真实入口回归第二阶段复现 `ordinary_close_allowed=true` 对预期false；修复后零余额未知来源仍为 `unreviewed`。最终专项 11 tests、430 assertions 通过。
+- 尚未验证：完整月结集成属后续批次，不能把本批允许标志视为月结全流程已完成；实际构建与原生验收仍受限。
+- 后续建议：任何“余额清零即完成”的状态转换，单独检查证据与组成是否仍有未知项。
+
 ## PIT-0051：核对差额处置只限制原记录金额，忽略后续账面与核对版本
 
 日期：2026-09-08

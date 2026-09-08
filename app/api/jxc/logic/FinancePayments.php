@@ -15,6 +15,7 @@ final class FinancePayments
     {
         $type = $document['type']; $policy = FinanceDocumentPolicy::authorize($type, true);
         $data = FinanceValue::decode($document['payload']);
+        if ($type === 'transit_reconcile') { return FinanceTransitReviews::confirm($this->ledger, $document, $data); }
         if ($type === 'cash_shortage') { return FinanceReconciliations::shortage($this->ledger, $document, $data, $correctingDocument); }
         if ($type === 'account_reconcile') { return FinanceReconciliations::confirm($this->ledger, $document, $data); }
         if ($type === 'unclaimed_receipt') { return FinanceUnclaimed::receipt($this->ledger, $document, $data, $originalTransaction); }
