@@ -24,6 +24,7 @@ final class FinanceSetupLogic extends BaseLogic
         return [
             'tenant_id' => self::tenantId(),
             'operator_id' => self::operatorId(),
+            'reports' => array_values(array_filter(array_map(static fn(string $key, string $name): array => ['key' => $key, 'name' => $name, 'can_view' => FinanceAccess::has('finance.report.' . $key . '.view'), 'can_export' => FinanceAccess::has('finance.report.' . $key . '.export')], array_keys(FinanceReports::TYPES), array_values(FinanceReports::TYPES)), static fn(array $row): bool => $row['can_view'])),
             'capabilities' => [
                 'close_month' => $owner,
                 'manage_accounts' => $owner,

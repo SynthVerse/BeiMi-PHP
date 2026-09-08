@@ -47,6 +47,7 @@ Route::group('', function () {
     Route::post('finance/opening/confirm', 'jxc.FinanceSetup/confirmOpening');
     Route::get('finance/business/catalog', 'jxc.FinanceBusiness/catalog');
     Route::get('finance/business/closingChecklist', 'jxc.FinanceBusiness/closingChecklist');
+    Route::get('finance/business/monthlyReport', 'jxc.FinanceBusiness/monthlyReport');
     Route::get('finance/business/lists', 'jxc.FinanceBusiness/lists');
     Route::get('finance/business/detail', 'jxc.FinanceBusiness/detail');
     Route::get('finance/business/options', 'jxc.FinanceBusiness/options');

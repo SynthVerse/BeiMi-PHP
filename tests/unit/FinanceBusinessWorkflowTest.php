@@ -75,6 +75,102 @@ final class FinanceBusinessWorkflowTest extends TestCase
 
     public static function deferredClosureCases(): array { return [[false], [true]]; }
 
+    public function test_monthly_reports_keep_closed_snapshots_and_show_later_correction_without_new_external_receipt(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
+        $payload = array_replace($this->receipt('100', '100'), ['actual_date' => $month . '-10']);
+        $original = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $payload]); self::assertNotFalse($original, FinanceBusinessLogic::getError());
+        $reports = [];
+        foreach (['cash', 'customer'] as $kind) { $reports[$kind] = FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => $kind]); self::assertNotFalse($reports[$kind], FinanceBusinessLogic::getError()); $reports[$kind]['closing_status'] = 'closed'; $reports[$kind]['stage'] = false; }
+        Db::name('finance_period')->insert(['tenant_id' => self::TENANT_ID, 'month' => $month, 'status' => 'closed', 'snapshot' => json_encode(['reports' => $reports]), 'closed_by' => '{}', 'closed_at' => time()]);
+        $changed = FinanceBusinessLogic::action('correct', $this->command($original['version']) + ['id' => $original['id'], 'correction_reason' => '原到账为120，20明确留预收', 'payload' => array_replace($payload, ['amount' => '120', 'advance_amount' => '20'])]); self::assertNotFalse($changed, FinanceBusinessLogic::getError());
+        foreach ($reports as $kind => $expected) { self::assertSame($expected, FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => $kind])); }
+        $cash = FinanceBusinessLogic::monthlyReport(['month' => date('Y-m'), 'report' => 'cash']); self::assertNotFalse($cash, FinanceBusinessLogic::getError()); self::assertSame('0.00', $cash['data']['summary']['external_in']); self::assertSame('20.00', $cash['data']['summary']['cash_adjustment']); self::assertSame('5120.00', $cash['data']['summary']['closing_accounts']);
+        $customer = FinanceBusinessLogic::monthlyReport(['month' => date('Y-m'), 'report' => 'customer']); self::assertSame('20.00', array_column($customer['data']['categories'], 'closing', 'category')['advance']);
+    }
+
+    public function test_monthly_report_permissions_are_independent_and_salary_details_require_an_additional_grant(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
+        $employee = WorkforceLogic::saveEmployee(['name' => '月报工资私密员工', 'mobile' => '13800009951', 'bind_user_id' => 996951, 'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => []]); self::assertNotFalse($employee, WorkforceLogic::getError());
+        $category = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_category', 'payload' => ['category_id' => 0, 'expected_category_version' => 0, 'parent' => 'personnel', 'name' => '月报工资', 'is_enabled' => 1]]); self::assertNotFalse($category, FinanceBusinessLogic::getError());
+        $salary = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'salary_expense', 'payload' => ['subject_id' => $employee['id'], 'benefit_month' => $month, 'actual_date' => $month . '-20', 'amount' => '100', 'source_reference' => 'REPORT-SALARY-51', 'reason' => '工资私密依据', 'confirmation_basis' => '工资私密依据', 'salary_verified' => 1, 'material_status' => 'missing', 'material_verified' => 1, 'missing_material_reason' => '工资私密依据', 'lines' => [['category_id' => $category['confirmed_result']['category']['id'], 'expected_category_version' => 1, 'amount' => '100', 'reason' => '工资私密依据']]]]); self::assertNotFalse($salary, FinanceBusinessLogic::getError());
+        foreach (['finance.report.profit.view', 'finance.report.expense.view'] as $permission) { Db::name('employee_permission')->insert(['tenant_id' => self::TENANT_ID, 'employee_id' => $employee['id'], 'permission_key' => $permission]); }
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996951; request()->adminId = 0;
+        $profit = FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => 'profit']); self::assertNotFalse($profit, FinanceBusinessLogic::getError()); self::assertSame('100.00', $profit['data']['summary']['expense']); self::assertSame([], $profit['data']['entries']);
+        self::assertFalse(FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => 'cash']));
+        $expense = FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => 'expense']); self::assertNotFalse($expense, FinanceBusinessLogic::getError()); self::assertSame('100.00', $expense['data']['summary']['amount']); self::assertSame([], $expense['data']['entries']); self::assertSame([], $expense['data']['obligations']['sources']); self::assertSame([], $expense['data']['obligations']['subjects']);
+        self::assertStringNotContainsString('工资私密依据', json_encode($expense, JSON_UNESCAPED_UNICODE));
+        Db::name('employee_permission')->insert(['tenant_id' => self::TENANT_ID, 'employee_id' => $employee['id'], 'permission_key' => 'finance.salary.view']);
+        $visible = FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => 'expense']); self::assertNotFalse($visible, FinanceBusinessLogic::getError()); self::assertCount(1, $visible['data']['entries']);
+    }
+
+    public function test_monthly_inventory_report_preserves_unknown_historical_cost_after_later_pricing(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
+        $warehouse = $this->createCustomerReportWarehouse('历史未知成本仓'); $goods = $this->createCustomerReportGoods('历史待核成本', 'REPORT-PENDING-51'); $sku = $this->customerReportSkuId($goods);
+        $cost = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID);
+        foreach ([['reference' => 'report-unknown', 'type' => 'receive', 'business_date' => $month . '-02', 'quantity' => '10', 'amount' => null], ['reference' => 'report-priced', 'type' => 'adjust', 'business_date' => date('Y-m-d'), 'amount' => '100']] as $event) {
+            Db::transaction(fn() => $cost->recordWithinTransaction($event + ['origin' => 'report-unknown', 'warehouse_id' => $warehouse, 'sku_id' => $sku]));
+        }
+        $old = FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => 'inventory']); self::assertNotFalse($old, FinanceBusinessLogic::getError());
+        self::assertTrue($old['data']['positions'][0]['cost_pending']); self::assertNull($old['data']['positions'][0]['cost']);
+        $current = FinanceBusinessLogic::monthlyReport(['month' => date('Y-m'), 'report' => 'inventory']); self::assertSame('100.00', $current['data']['positions'][0]['cost']);
+    }
+
+    public function test_monthly_expense_report_classifies_correction_reversal_using_original_expense(): void
+    {
+        $this->activate(); $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '报表设备方']);
+        $source = (new FinanceLedger(self::TENANT_ID))->createSource(1000, 'equipment', $vendor, '100', date('Y-m-d'), null, []);
+        $payload = ['subject_id' => $vendor, 'account_id' => $this->accountId, 'actual_date' => date('Y-m-d'), 'amount' => '100', 'reason' => '核实设备付款', 'allocations' => [['source' => $source, 'amount' => '100']]];
+        $original = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'equipment_payment', 'payload' => $payload]); self::assertNotFalse($original, FinanceBusinessLogic::getError());
+        $payload['amount'] = '80'; $payload['allocations'][0]['amount'] = '80';
+        $corrected = FinanceBusinessLogic::action('correct', $this->command($original['version']) + ['id' => $original['id'], 'correction_reason' => '原付款多记20元', 'payload' => $payload]); self::assertNotFalse($corrected, FinanceBusinessLogic::getError());
+        $report = FinanceBusinessLogic::monthlyReport(['month' => date('Y-m'), 'report' => 'expense']); self::assertNotFalse($report, FinanceBusinessLogic::getError());
+        self::assertCount(1, $report['data']['categories']); self::assertSame('设备实际支出', $report['data']['categories'][0]['name']); self::assertSame('80.00', $report['data']['categories'][0]['amount']);
+    }
+
+    public function test_monthly_inventory_report_uses_month_end_positions_instead_of_current_stock(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
+        $warehouse = $this->createCustomerReportWarehouse('月报库存仓'); $goods = $this->createCustomerReportGoods('月报库存商品', 'REPORT-STOCK-51'); $sku = $this->customerReportSkuId($goods);
+        $cost = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID);
+        foreach ([['reference' => 'report-stock-receive', 'type' => 'receive', 'business_date' => $month . '-02', 'quantity' => '10', 'origin' => 'report-stock-receive', 'amount' => '100'], ['reference' => 'report-stock-sale', 'type' => 'issue', 'business_date' => $month . '-03', 'quantity' => '3', 'bucket' => 'sale', 'target_reference' => 'report-stock-sale'], ['reference' => 'report-stock-next', 'type' => 'receive', 'business_date' => date('Y-m-d'), 'quantity' => '10', 'origin' => 'report-stock-next', 'amount' => '200']] as $event) {
+            Db::transaction(fn() => $cost->recordWithinTransaction($event + ['warehouse_id' => $warehouse, 'sku_id' => $sku]));
+        }
+        $report = FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => 'inventory']); self::assertNotFalse($report, FinanceBusinessLogic::getError());
+        self::assertCount(1, $report['data']['positions']); self::assertSame('7.0000', $report['data']['positions'][0]['quantity']); self::assertSame('70.00', $report['data']['positions'][0]['cost']);
+        $current = FinanceBusinessLogic::monthlyReport(['month' => date('Y-m'), 'report' => 'inventory']); self::assertSame('17.0000', $current['data']['positions'][0]['quantity']); self::assertSame('270.00', $current['data']['positions'][0]['cost']);
+    }
+
+    public function test_monthly_customer_report_keeps_opening_debt_and_explicit_advance_separate_from_revenue(): void
+    {
+        $this->activate(); $receipt = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $this->receipt('120', '100', '20')]); self::assertNotFalse($receipt, FinanceBusinessLogic::getError());
+        $report = FinanceBusinessLogic::monthlyReport(['month' => date('Y-m'), 'report' => 'customer']); self::assertNotFalse($report, FinanceBusinessLogic::getError());
+        $rows = array_column($report['data']['categories'], null, 'category');
+        self::assertSame('1000.00', $rows['receivable']['opening']); self::assertSame('0.00', $rows['receivable']['new_sources']); self::assertSame('-100.00', $rows['receivable']['entries_change']); self::assertSame('900.00', $rows['receivable']['closing']);
+        self::assertSame('20.00', $rows['advance']['closing']); self::assertCount(2, $report['data']['sources']);
+        $cash = FinanceBusinessLogic::monthlyReport(['month' => date('Y-m'), 'report' => 'cash']); self::assertSame('120.00', $cash['data']['summary']['external_in']);
+        $profit = FinanceBusinessLogic::monthlyReport(['month' => date('Y-m'), 'report' => 'profit']); self::assertSame('0.00', $profit['data']['summary']['revenue']);
+    }
+
+    public function test_monthly_profit_report_keeps_unknown_sales_cost_null_then_uses_confirmed_cost_without_counting_purchase_as_expense(): void
+    {
+        $this->activate(); $sale = $this->deliveredSale(); $delivery = (int)Db::name('fulfillment_delivery_item')->where('delivery_event_id', $sale['event_id'])->value('id');
+        $confirmed = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'sales_batch', 'payload' => ['subject_id' => $this->customerId, 'reason' => '月报正式收入', 'rounding_amount' => '0', 'precision_mode' => 'cents', 'lines' => [['delivery_item_id' => $delivery, 'covered_weight' => '2', 'settlement_weight' => '2', 'price' => '10']]]]); self::assertNotFalse($confirmed, FinanceBusinessLogic::getError());
+        $report = FinanceBusinessLogic::monthlyReport(['month' => date('Y-m'), 'report' => 'profit']); self::assertNotFalse($report, FinanceBusinessLogic::getError());
+        self::assertSame('20.00', $report['data']['summary']['revenue']); self::assertNull($report['data']['summary']['sales_cost']); self::assertNull($report['data']['summary']['profit']); self::assertSame('0.00', $report['data']['summary']['known_sales_cost']);
+        self::assertTrue($report['verification']['has_unresolved']);
+        $item = Db::name('fulfillment_delivery_item')->where('delivery_event_id', $sale['event_id'])->find(); $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '月报成本供方']);
+        $arrival = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival', 'payload' => ['subject_id' => $vendor, 'warehouse_id' => $item['warehouse_id'], 'actual_date' => date('Y-m-d'), 'source_reference' => 'REPORT-COST-51', 'reason' => '核实漏记的实际入库来源', 'lines' => [['sku_id' => $item['sku_id'], 'actual_quantity' => '2', 'reported_quantity' => '2', 'agreed_price' => '3']]]]); self::assertNotFalse($arrival, FinanceBusinessLogic::getError());
+        $supplier = FinanceBusinessLogic::monthlyReport(['month' => date('Y-m'), 'report' => 'vendor']); self::assertNotFalse($supplier, FinanceBusinessLogic::getError());
+        self::assertCount(1, $supplier['data']['pending_arrivals']); self::assertSame('0.00', array_column($supplier['data']['categories'], 'closing', 'category')['payable']);
+        $settled = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_settlement', 'payload' => ['subject_id' => $vendor, 'supplier_confirmed' => 1, 'supplier_confirmation' => '全部价款正式确认', 'reason' => '月报正式采购成本', 'lines' => [['arrival_line_id' => $arrival['confirmed_result']['lines'][0]['arrival_line_id'], 'covered_quantity' => '2', 'settlement_quantity' => '2', 'price' => '3']]]]); self::assertNotFalse($settled, FinanceBusinessLogic::getError());
+        $supplier = FinanceBusinessLogic::monthlyReport(['month' => date('Y-m'), 'report' => 'vendor']); self::assertSame([], $supplier['data']['pending_arrivals']); self::assertSame('6.00', array_column($supplier['data']['categories'], 'closing', 'category')['payable']);
+        $after = FinanceBusinessLogic::monthlyReport(['month' => date('Y-m'), 'report' => 'profit']); self::assertNotFalse($after, FinanceBusinessLogic::getError());
+        self::assertSame('6.00', $after['data']['summary']['sales_cost']); self::assertSame('14.00', $after['data']['summary']['profit']); self::assertSame('0.00', $after['data']['summary']['expense']); self::assertNotEmpty($after['data']['entries']); self::assertNotEmpty($after['data']['cost_effects']);
+    }
+
     public function test_period_checklist_accepts_formal_opening_unclaimed_acknowledgement_and_keeps_unknown_date_blocking(): void
     {
         $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
@@ -145,6 +241,11 @@ final class FinanceBusinessWorkflowTest extends TestCase
             'actual_date' => $month . '-05', 'amount' => '100', 'source_reference' => 'CYCLE-CLOSE-50/' . $month, 'due_mode' => 'unspecified', 'reason' => '依据本月表数合理暂估', 'amount_status' => 'estimated', 'estimate_basis_type' => 'measurement', 'estimate_basis' => '本月已使用表数与合同单价', 'material_status' => 'missing', 'material_verified' => 1, 'missing_material_reason' => '账单尚未取得', 'lines' => [['category_id' => $categoryId, 'expected_category_version' => 1, 'amount' => '100', 'reason' => '本月水费']]]]); self::assertNotFalse($expense, FinanceBusinessLogic::getError());
         $after = FinanceBusinessLogic::closingChecklist(['month' => $month]); self::assertNotContains('recurring_expense', array_column($after['items'], 'category'));
         $estimates = array_values(array_filter($after['items'], static fn(array $item): bool => $item['category'] === 'expense_estimate')); self::assertCount(1, $estimates); self::assertSame('estimate', $estimates[0]['severity']); self::assertSame('100.00', $estimates[0]['details']['estimated_amount']);
+        $report = FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => 'expense']); self::assertNotFalse($report, FinanceBusinessLogic::getError());
+        self::assertSame('100.00', $report['data']['summary']['amount']); self::assertSame('100.00', $report['data']['categories'][0]['amount']);
+        self::assertTrue($report['verification']['has_estimates']);
+        self::assertSame('本月水费', $report['data']['entries'][0]['details']['reason']); self::assertSame('estimated', $report['data']['entries'][0]['document']['amount_status']);
+        self::assertSame('100.00', array_column($report['data']['obligations']['categories'], 'closing', 'category')['expense_payable']);
     }
 
     public function test_period_checklist_delivered_unconfirmed_sales_block_estimated_close_until_formal_amount_is_confirmed(): void
@@ -558,6 +659,16 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $state = FinanceBusinessLogic::options(['type' => 'account_transfer_arrival', 'transfer_source' => $source]); self::assertNotFalse($state, FinanceBusinessLogic::getError());
         self::assertSame('600.00', $state['selected_transfer']['arrived_amount']); self::assertSame('395.00', $state['selected_transfer']['returned_amount']);
         self::assertSame('5.00', $state['selected_transfer']['withheld_fee']); self::assertSame('0.00', $state['selected_transfer']['remaining_amount']);
+        $report = FinanceBusinessLogic::monthlyReport(['month' => date('Y-m'), 'report' => 'cash']); self::assertNotFalse($report, FinanceBusinessLogic::getError());
+        self::assertSame('0.00', $report['data']['summary']['external_in']); self::assertSame('15.00', $report['data']['summary']['external_out']);
+        self::assertSame('4985.00', $report['data']['summary']['closing_accounts']); self::assertSame('0.00', $report['data']['summary']['closing_transit']);
+        self::assertCount(3, $report['data']['internal_transfers']);
+        $data['amount'] = '10'; $data['fee_amount'] = '0'; $data['source_reference'] = 'TRANSFER-FULL-FEE-51';
+        $feeOnlyOut = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_out', 'payload' => $data]); self::assertNotFalse($feeOnlyOut, FinanceBusinessLogic::getError());
+        $arrival['source'] = $feeOnlyOut['confirmed_result']['created_sources'][0]; $arrival['amount'] = '0'; $arrival['fee_amount'] = '10';
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_arrival', 'payload' => $arrival]), FinanceBusinessLogic::getError());
+        $report = FinanceBusinessLogic::monthlyReport(['month' => date('Y-m'), 'report' => 'cash']);
+        self::assertSame('25.00', $report['data']['summary']['external_out']); self::assertCount(5, $report['data']['internal_transfers']);
     }
 
     public function test_opening_equipment_adjustments_preserve_the_original_proof_and_historical_paid_amount(): void

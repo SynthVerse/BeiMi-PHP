@@ -10,6 +10,18 @@ use think\facade\Db;
 /** 门店锁串行确认与期间关闭，命令结果和所有正式影响在同一事务提交。 */
 final class FinanceBusinessLogic extends BaseLogic
 {
+    public static function monthlyReport(array $params): array|false
+    {
+        self::clearError();
+        try {
+            FinanceReports::authorize($params);
+            return Db::transaction(static function () use ($params): array {
+                $ledger = new FinanceLedger(FinanceAccess::tenant()); $ledger->lockBook();
+                return FinanceReports::monthly($ledger, $params);
+            });
+        } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
+    }
+
     public static function closingChecklist(array $params): array|false
     {
         self::clearError();

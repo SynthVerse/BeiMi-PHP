@@ -11,6 +11,7 @@ class FinanceBusinessController extends BaseJxcController
     public function detail() { return $this->respond(FinanceBusinessLogic::detail($this->request->get())); }
     public function options() { return $this->respond(FinanceBusinessLogic::options($this->request->get())); }
     public function closingChecklist() { return $this->respond(FinanceBusinessLogic::closingChecklist($this->request->get())); }
+    public function monthlyReport() { return $this->respond(FinanceBusinessLogic::monthlyReport($this->request->get())); }
     public function subjects() { return $this->respond(FinanceBusinessLogic::subjects($this->request->get())); }
     public function salesOutput() { return $this->salesOutputAction('document', $this->request->get()); }
     public function prepareSalesPrint() { return $this->salesOutputAction('prepare', $this->request->post()); }
