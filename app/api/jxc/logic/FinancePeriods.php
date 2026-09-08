@@ -12,6 +12,7 @@ final class FinancePeriods
     public static function execute(FinanceLedger $ledger, string $action, array $params): array
     {
         FinanceAccess::require('', true);
+        if ($action === 'followups') { return FinancePeriodFollowups::read(FinanceValue::text($params['month'] ?? null, 7)); }
         if ($action === 'detail') {
             $month = FinanceValue::text($params['month'] ?? null, 7);
             $row = Db::name('finance_period')->where('tenant_id', FinanceAccess::tenant())->where('month', $month)->find();

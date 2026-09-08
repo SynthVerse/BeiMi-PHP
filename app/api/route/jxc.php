@@ -52,6 +52,7 @@ Route::group('', function () {
     Route::post('finance/business/closePeriod', 'jxc.FinanceBusiness/closePeriod');
     Route::get('finance/business/periodHistory', 'jxc.FinanceBusiness/periodHistory');
     Route::get('finance/business/periodDetail', 'jxc.FinanceBusiness/periodDetail');
+    Route::get('finance/business/periodFollowups', 'jxc.FinanceBusiness/periodFollowups');
     Route::get('finance/business/lists', 'jxc.FinanceBusiness/lists');
     Route::get('finance/business/detail', 'jxc.FinanceBusiness/detail');
     Route::get('finance/business/options', 'jxc.FinanceBusiness/options');

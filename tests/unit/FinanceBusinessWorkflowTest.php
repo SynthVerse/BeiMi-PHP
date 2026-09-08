@@ -105,6 +105,49 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $visible = FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => 'expense']); self::assertNotFalse($visible, FinanceBusinessLogic::getError()); self::assertCount(1, $visible['data']['entries']);
     }
 
+    /** @dataProvider expenseClosureCases */
+    public function test_period_followups_keep_shortage_pending_until_all_replacement_origins_have_known_cost(bool $reclassified): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
+        $warehouse = $this->createCustomerReportWarehouse('遗留负库存仓'); $goods = $this->createCustomerReportGoods('遗留负库存商品', 'FOLLOWUP-SHORT-53'); $sku = $this->customerReportSkuId($goods);
+        $cost = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID);
+        Db::transaction(fn() => $cost->recordWithinTransaction(['reference' => 'followup-short-53', 'type' => 'issue', 'business_date' => $month . '-02', 'warehouse_id' => $warehouse, 'sku_id' => $sku, 'quantity' => '10', 'bucket' => 'pending', 'target_reference' => 'followup-short-53']));
+        $preview = FinanceBusinessLogic::periodAction('preview', ['month' => $month]);
+        $closed = FinanceBusinessLogic::periodAction('close', $this->command(0) + ['month' => $month, 'mode' => 'estimated', 'acknowledge_unresolved' => 1, 'expected_fingerprint' => $preview['fingerprint'], 'reason' => '负库存来源需继续核实']); self::assertNotFalse($closed, FinanceBusinessLogic::getError());
+        if ($reclassified) {
+            Db::transaction(fn() => $cost->recordWithinTransaction(['reference' => 'followup-classify-53', 'type' => 'reclassify', 'business_date' => date('Y-m-d'), 'warehouse_id' => $warehouse, 'sku_id' => $sku, 'quantity' => '10', 'bucket' => 'pending', 'target_reference' => 'followup-short-53', 'to_bucket' => 'loss', 'to_reference' => 'followup-loss-53']));
+            $tracking = FinanceBusinessLogic::periodAction('followups', ['month' => $month]);
+            $item = array_values(array_filter($tracking['items'], static fn(array $row): bool => str_starts_with($row['original']['reference'], 'shortage:')))[0];
+            self::assertSame('pending', $item['current']['status'], '责任已确定不等于成本来源已核实');
+        }
+        foreach ([['6', '60', 'partial'], ['4', '40', 'resolved']] as [$quantity, $amount, $state]) {
+            Db::transaction(fn() => $cost->recordWithinTransaction(['reference' => 'followup-fill-' . $quantity, 'origin' => 'followup-fill-' . $quantity, 'type' => 'receive', 'business_date' => date('Y-m-d'), 'warehouse_id' => $warehouse, 'sku_id' => $sku, 'quantity' => $quantity, 'amount' => $amount]));
+            $tracking = FinanceBusinessLogic::periodAction('followups', ['month' => $month]);
+            $item = array_values(array_filter($tracking['items'], static fn(array $row): bool => str_starts_with($row['original']['reference'], 'shortage:')))[0];
+            self::assertSame($state, $item['current']['status']); self::assertNotEmpty($item['current']['cost_adjustments']);
+        }
+        self::assertSame($closed['snapshot'], FinanceBusinessLogic::periodAction('detail', ['month' => $month])['snapshot']);
+    }
+
+    public function test_period_followups_track_partial_purchase_confirmation_without_changing_closed_estimates(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
+        $warehouse = $this->createCustomerReportWarehouse('遗留采购仓'); $goods = $this->createCustomerReportGoods('遗留采购商品', 'FOLLOWUP-PURCHASE-53'); $sku = $this->customerReportSkuId($goods);
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '遗留采购方']);
+        $arrival = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival', 'payload' => ['subject_id' => $vendor, 'warehouse_id' => $warehouse, 'actual_date' => $month . '-02', 'source_reference' => 'FOLLOWUP-PURCHASE-53', 'reason' => '到货暂估待正式确认', 'lines' => [['sku_id' => $sku, 'actual_quantity' => '10', 'reported_quantity' => '10', 'agreed_price' => '2']]]]); self::assertNotFalse($arrival, FinanceBusinessLogic::getError());
+        $preview = FinanceBusinessLogic::periodAction('preview', ['month' => $month]);
+        $closed = FinanceBusinessLogic::periodAction('close', $this->command(0) + ['month' => $month, 'mode' => 'estimated', 'acknowledge_unresolved' => 1, 'expected_fingerprint' => $preview['fingerprint'], 'reason' => '保留原到货暂估范围']); self::assertNotFalse($closed, FinanceBusinessLogic::getError());
+        foreach ([['4', 'partial'], ['6', 'resolved']] as [$quantity, $state]) {
+            $confirmed = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_settlement', 'payload' => ['subject_id' => $vendor, 'supplier_confirmed' => 1, 'supplier_confirmation' => '双方核实本次数量单价', 'reason' => '分次核实遗留到货', 'lines' => [['arrival_line_id' => $arrival['confirmed_result']['lines'][0]['arrival_line_id'], 'covered_quantity' => $quantity, 'settlement_quantity' => $quantity, 'price' => '3']]]]); self::assertNotFalse($confirmed, FinanceBusinessLogic::getError());
+            $tracking = FinanceBusinessLogic::periodAction('followups', ['month' => $month]); self::assertNotFalse($tracking, FinanceBusinessLogic::getError());
+            $item = array_values(array_filter($tracking['items'], static fn(array $row): bool => $row['original']['category'] === 'purchase_cost'))[0];
+            self::assertSame($state, $item['current']['status']); self::assertNotEmpty($item['current']['evidence']); self::assertNotEmpty($item['current']['cost_adjustments']);
+            self::assertSame('20.00', $item['original']['details']['estimated_amount']);
+        }
+        self::assertSame($closed['snapshot'], FinanceBusinessLogic::periodAction('detail', ['month' => $month])['snapshot']);
+        $this->prepareCustomerReportRequestContext(self::OTHER_TENANT_ID); self::assertFalse(FinanceBusinessLogic::periodAction('followups', ['month' => $month]));
+    }
+
     public function test_period_close_freezes_six_reports_and_carries_balances_without_new_revenue(): void
     {
         $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
@@ -1234,7 +1277,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
 
     public function test_recurring_estimate_must_be_resolved_before_cancellation_even_when_final_is_zero(): void
     {
-        $this->activate(); $month = date('Y-m');
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
         $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '周期暂估取消方']);
         $category = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_category', 'payload' => [
             'category_id' => 0, 'expected_category_version' => 0, 'parent' => 'utilities', 'name' => '周期暂估核实', 'is_enabled' => 1]]);
@@ -1243,6 +1286,8 @@ final class FinanceBusinessWorkflowTest extends TestCase
             'category_id' => $categoryId, 'expected_category_version' => 1, 'source_reference' => 'CYCLE-37-ZERO', 'service_start' => $month, 'service_end' => $month,
             'interval_months' => 1, 'reason' => '按月核实', 'plan_verified' => 1]]);
         self::assertNotFalse($plan, FinanceBusinessLogic::getError()); $planId = $plan['confirmed_result']['plan_id'];
+        $closing = FinanceBusinessLogic::periodAction('preview', ['month' => $month]);
+        $closed = FinanceBusinessLogic::periodAction('close', $this->command(0) + ['month' => $month, 'mode' => 'estimated', 'acknowledge_unresolved' => 1, 'expected_fingerprint' => $closing['fingerprint'], 'reason' => '周期费用待最终核实']); self::assertNotFalse($closed, FinanceBusinessLogic::getError());
         $base = ['subject_id' => $vendor, 'recurring_plan_id' => $planId, 'expected_plan_version' => 1, 'expected_month_revision_id' => 0, 'benefit_month' => $month];
         $expense = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense', 'payload' => $base + [
             'actual_date' => date('Y-m-d'), 'amount' => '300', 'amount_status' => 'estimated', 'estimate_basis_type' => 'history', 'estimate_basis' => '上月实际用量',
@@ -1250,12 +1295,17 @@ final class FinanceBusinessWorkflowTest extends TestCase
             'material_status' => 'missing', 'material_verified' => 1, 'missing_material_reason' => '等正式账单',
             'lines' => [['category_id' => $categoryId, 'expected_category_version' => 1, 'amount' => '300', 'reason' => '暂估']]]]);
         self::assertNotFalse($expense, FinanceBusinessLogic::getError());
+        $tracking = FinanceBusinessLogic::periodAction('followups', ['month' => $month]);
+        $item = array_values(array_filter($tracking['items'], static fn(array $row): bool => $row['original']['category'] === 'recurring_expense'))[0]; self::assertSame('partial', $item['current']['status']);
         $data = $base + ['correction_mode' => 'cancel_expense', 'correction_verified' => 1, 'expected_expense_revision_id' => 0, 'reason' => '本月未发生'];
         self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_recurring_correct', 'payload' => $data]));
         $resolved = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_estimate_final', 'payload' => [
             'subject_id' => $vendor, 'original_expense_document_id' => $expense['id'], 'expected_revision_id' => 0, 'expected_resolution_id' => 0,
             'final_verified' => 1, 'reason' => '本月停业账单为零', 'resolutions' => [['category_id' => $categoryId, 'final_amount' => '0', 'confirmation_basis' => '最终账单']]]]);
         self::assertNotFalse($resolved, FinanceBusinessLogic::getError());
+        $tracking = FinanceBusinessLogic::periodAction('followups', ['month' => $month]);
+        $item = array_values(array_filter($tracking['items'], static fn(array $row): bool => $row['original']['category'] === 'recurring_expense'))[0]; self::assertSame('resolved', $item['current']['status']);
+        self::assertCount(2, $item['current']['evidence']); self::assertSame($closed['snapshot'], FinanceBusinessLogic::periodAction('detail', ['month' => $month])['snapshot']);
         $row = FinanceBusinessLogic::options(['type' => 'expense_recurring_plan', 'recurring_plan_id' => $planId])['selected_plan']['months'][0];
         $data['expected_expense_revision_id'] = $row['expected_expense_revision_id'];
         $command = $this->command(0) + ['type' => 'expense_recurring_correct', 'payload' => $data];
@@ -1394,7 +1444,12 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $payment = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'supplier_payment', 'payload' => ['subject_id' => $vendor,
             'account_id' => $this->accountId, 'actual_date' => date('Y-m-d'), 'amount' => '1300', 'reason' => '分次费用先付',
             'allocations' => [['source' => $original['confirmed_result']['created_sources'][0], 'amount' => '1300']]]]); self::assertNotFalse($payment, FinanceBusinessLogic::getError());
-        Db::name('finance_period')->insert(['tenant_id' => self::TENANT_ID, 'month' => $month, 'status' => 'closed', 'snapshot' => '{}', 'closed_by' => '{}', 'closed_at' => time()]);
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_reconcile', 'payload' => ['account_id' => $this->accountId, 'month' => $month, 'actual_cutoff' => date('Y-m-t', strtotime($month . '-01')) . ' 23:59:59', 'actual_balance' => '5000', 'expected_book_balance' => '5000', 'reconciliation_verified' => 1, 'expected_reconciliation_id' => 0, 'reason' => '月末余额已核实']]), FinanceBusinessLogic::getError());
+        $closing = FinanceBusinessLogic::periodAction('preview', ['month' => $month]); self::assertNotFalse($closing, FinanceBusinessLogic::getError());
+        $closed = FinanceBusinessLogic::periodAction('close', $this->command(0) + ['month' => $month, 'mode' => 'ordinary', 'expected_fingerprint' => $closing['fingerprint'], 'reason' => '合理费用暂估进入普通月结']); self::assertNotFalse($closed, FinanceBusinessLogic::getError());
+        $frozen = $closed['snapshot'];
+        $tracking = FinanceBusinessLogic::periodAction('followups', ['month' => $month]); self::assertNotFalse($tracking, FinanceBusinessLogic::getError());
+        self::assertSame('ordinary', $tracking['original_mode']); self::assertSame(2, $tracking['summary']['pending']); self::assertFalse($tracking['all_resolved']);
         $base = ['subject_id' => $vendor, 'original_expense_document_id' => $original['id'], 'expected_revision_id' => 0, 'expected_resolution_id' => 0, 'final_verified' => 1,
             'reason' => '正式账单已取得', 'resolutions' => [['category_id' => $lines[1]['category_id'], 'final_amount' => '500', 'confirmation_basis' => '最终电费账单与原估计一致']]];
         $firstCommand = $this->command(0) + ['type' => 'expense_estimate_final', 'payload' => $base];
@@ -1402,6 +1457,9 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertSame([], $preview['impacts']); self::assertSame([], $preview['balances']);
         $first = FinanceBusinessLogic::action('record', $firstCommand); self::assertNotFalse($first, FinanceBusinessLogic::getError());
         self::assertSame($first, FinanceBusinessLogic::action('record', $firstCommand));
+        $tracking = FinanceBusinessLogic::periodAction('followups', ['month' => $month]); self::assertSame(1, $tracking['summary']['resolved']); self::assertSame(1, $tracking['summary']['pending']);
+        $verified = array_values(array_filter($tracking['items'], static fn(array $item): bool => $item['current']['status'] === 'resolved'))[0];
+        self::assertSame('0.00', $verified['current']['evidence'][0]['amount_change']); self::assertSame([], $verified['current']['adjustments']);
         $options = FinanceBusinessLogic::options(['type' => 'expense_estimate_final', 'original_expense_document_id' => $original['id']]);
         self::assertSame(['pending', 'resolved'], array_column($options['bills'][0]['estimate_items'], 'status'));
         self::assertSame(0, $options['bills'][0]['expected_revision_id'], '零差额不生成费用调整版本');
@@ -1422,6 +1480,12 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $ledger = new FinanceLedger(self::TENANT_ID); self::assertSame($payable, $ledger->categoryBalance('expense_payable', $vendor));
         self::assertSame($refund, $ledger->categoryBalance('expense_refund', $vendor)); self::assertSame('3700.00', $ledger->account($this->accountId)['balance']);
         self::assertSame($original['confirmed_result'], FinanceBusinessLogic::detail(['id' => $original['id']])['confirmed_result']);
+        $tracking = FinanceBusinessLogic::periodAction('followups', ['month' => $month]); self::assertTrue($tracking['all_resolved']); self::assertSame(2, $tracking['summary']['resolved']);
+        self::assertSame('ordinary', $tracking['original_mode']); self::assertSame('not_fully_verified', $tracking['original_verification']['status']);
+        $water = array_values(array_filter($tracking['items'], static fn(array $item): bool => $item['original']['details']['category_id'] === $lines[0]['category_id']))[0];
+        self::assertSame($delta, $water['current']['evidence'][0]['amount_change']);
+        self::assertSame($delta === '0.00' ? [] : [date('Y-m')], array_values(array_unique(array_column($water['current']['adjustments'], 'posting_month'))));
+        self::assertSame($frozen, FinanceBusinessLogic::periodAction('detail', ['month' => $month])['snapshot']);
         self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_estimate_final', 'payload' => $base]), '同一项目不能重复核实');
     }
 
