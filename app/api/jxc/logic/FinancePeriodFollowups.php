@@ -29,7 +29,11 @@ final class FinancePeriodFollowups
     private static function current(array $item, string $month): array
     {
         $details = $item['details']; $tenant = FinanceAccess::tenant(); $evidence = []; $eventIds = []; $resolved = false; $partial = false;
-        if ($item['category'] === 'expense_estimate') {
+        if ($item['category'] === 'account_reconciliation') {
+            $check = FinanceReconciliations::followup((int)$details['account_id'], $month);
+            if ($check['latest']) { $evidence[] = $check['latest']; }
+            $resolved = $check['state'] === 'matched' && ($check['latest']['closed_period_followup'] ?? false);
+        } elseif ($item['category'] === 'expense_estimate') {
             [$bill, $category] = explode(':', $item['reference']);
             $row = Db::name('finance_expense_estimate_resolution')->where('tenant_id', $tenant)->where('bill_id', (int)$bill)->where('category_id', (int)$category)->find();
             if ($row) { $evidence[] = FinanceValue::decode($row['snapshot']); $resolved = true; }
@@ -108,6 +112,9 @@ final class FinancePeriodFollowups
         }
         $documents = array_values(array_unique(array_filter(array_map(static fn(array $row): int => (int)($row['document_id'] ?? 0), $evidence))));
         $adjustments = $documents ? Db::name('finance_entry')->where('tenant_id', $tenant)->whereIn('document_id', $documents)->where('posting_month', '>', $month)->order('id')->select()->toArray() : [];
+        if ($item['category'] === 'account_reconciliation') {
+            $adjustments = Db::name('finance_entry')->where('tenant_id', $tenant)->where('metric', 'cash')->where('subject_id', $details['account_id'])->where('business_date', '<=', date('Y-m-t', strtotime($month . '-01')))->where('posting_month', '>', $month)->order('id')->select()->toArray();
+        }
         foreach ($adjustments as &$entry) { $entry['details'] = FinanceValue::decode($entry['details']); } unset($entry);
         if ($item['category'] === 'expense_estimate') {
             $adjustments = array_values(array_filter($adjustments, static fn(array $row): bool => $row['metric'] === 'expense' && (int)($row['details']['category_id'] ?? 0) === (int)$details['category_id']));

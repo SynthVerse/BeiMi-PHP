@@ -105,6 +105,45 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $visible = FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => 'expense']); self::assertNotFalse($visible, FinanceBusinessLogic::getError()); self::assertCount(1, $visible['data']['entries']);
     }
 
+    public function test_closed_account_followup_verifies_zero_difference_without_rewriting_snapshot_or_creating_money(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
+        $preview = FinanceBusinessLogic::periodAction('preview', ['month' => $month]);
+        $closed = FinanceBusinessLogic::periodAction('close', $this->command(0) + ['month' => $month, 'mode' => 'estimated', 'acknowledge_unresolved' => 1, 'expected_fingerprint' => $preview['fingerprint'], 'reason' => '月末证明待取得']); self::assertNotFalse($closed, FinanceBusinessLogic::getError());
+        $options = FinanceBusinessLogic::options(['type' => 'account_reconcile', 'month' => $month]); self::assertTrue($options['closed_followup_allowed']);
+        $before = Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->count();
+        $confirmed = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_reconcile', 'payload' => ['account_id' => $this->accountId, 'month' => $month, 'actual_cutoff' => date('Y-m-t', strtotime($month . '-01')) . ' 23:59:59', 'actual_balance' => '5000', 'expected_book_balance' => '5000', 'reconciliation_verified' => 1, 'expected_reconciliation_id' => 0, 'reason' => '取得原月末现金盘点签字单']]); self::assertNotFalse($confirmed, FinanceBusinessLogic::getError());
+        self::assertTrue($confirmed['confirmed_result']['closed_period_followup']); self::assertSame('5000.00', $confirmed['confirmed_result']['frozen_book_balance']);
+        self::assertSame($before, Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->count());
+        $followups = FinanceBusinessLogic::periodAction('followups', ['month' => $month]); self::assertTrue($followups['all_resolved']); self::assertSame('estimated', $followups['original_mode']);
+        $receipt = $this->receipt('10', '10'); $receipt['actual_date'] = date('Y-m-d');
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $receipt]), FinanceBusinessLogic::getError());
+        self::assertTrue(FinanceBusinessLogic::periodAction('followups', ['month' => $month])['all_resolved'], '当前月新收款不能混入原月末核对');
+        self::assertSame($closed['snapshot'], FinanceBusinessLogic::periodAction('detail', ['month' => $month])['snapshot']);
+    }
+
+    public function test_closed_account_shortage_is_adjusted_in_current_month_and_requires_final_reverification(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01'); $cutoff = date('Y-m-t', strtotime($month . '-01'));
+        $preview = FinanceBusinessLogic::periodAction('preview', ['month' => $month]);
+        $closed = FinanceBusinessLogic::periodAction('close', $this->command(0) + ['month' => $month, 'mode' => 'estimated', 'acknowledge_unresolved' => 1, 'expected_fingerprint' => $preview['fingerprint'], 'reason' => '原月末现金事实待核实']); self::assertNotFalse($closed, FinanceBusinessLogic::getError());
+        $payload = ['account_id' => $this->accountId, 'month' => $month, 'actual_cutoff' => $cutoff . ' 23:59:59', 'actual_balance' => '4900', 'expected_book_balance' => '5000', 'reconciliation_verified' => 1, 'expected_reconciliation_id' => 0, 'reason' => '原月末签字盘点查明短款100'];
+        $first = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_reconcile', 'payload' => $payload]); self::assertNotFalse($first, FinanceBusinessLogic::getError());
+        foreach (['70', '30'] as $amount) {
+            $loss = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'cash_shortage', 'payload' => ['reconciliation_document_id' => $first['id'], 'actual_date' => $cutoff, 'amount' => $amount, 'loss_verified' => 1, 'reason' => '分次查明现金遗失原因']]); self::assertNotFalse($loss, FinanceBusinessLogic::getError());
+            self::assertSame(date('Y-m'), $loss['confirmed_result']['posting_month']);
+        }
+        self::assertFalse(FinanceBusinessLogic::periodAction('followups', ['month' => $month])['all_resolved'], '差额入账后必须复核原月末事实');
+        $options = FinanceBusinessLogic::options(['type' => 'account_reconcile', 'month' => $month]); self::assertSame('4900.00', $options['checks'][0]['book_balance']); self::assertSame('5000.00', $options['checks'][0]['frozen_book_balance']);
+        $payload['expected_book_balance'] = '4900'; $payload['expected_reconciliation_id'] = $first['id']; $payload['reason'] = '原月末余额与后续合法调整逐笔勾稽';
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_reconcile', 'payload' => $payload]), FinanceBusinessLogic::getError());
+        self::assertTrue(FinanceBusinessLogic::periodAction('followups', ['month' => $month])['all_resolved']);
+        $receipt = $this->receipt('10', '10'); $receipt['actual_date'] = $cutoff;
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $receipt]), FinanceBusinessLogic::getError());
+        self::assertFalse(FinanceBusinessLogic::periodAction('followups', ['month' => $month])['all_resolved'], '再次补录原月资金后核实进度须失效');
+        self::assertSame($closed['snapshot'], FinanceBusinessLogic::periodAction('detail', ['month' => $month])['snapshot']);
+    }
+
     /** @dataProvider expenseClosureCases */
     public function test_period_followups_keep_shortage_pending_until_all_replacement_origins_have_known_cost(bool $reclassified): void
     {
