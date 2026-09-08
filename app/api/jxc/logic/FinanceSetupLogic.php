@@ -25,6 +25,7 @@ final class FinanceSetupLogic extends BaseLogic
             'tenant_id' => self::tenantId(),
             'operator_id' => self::operatorId(),
             'capabilities' => [
+                'close_month' => $owner,
                 'manage_accounts' => $owner,
                 'confirm_opening' => $owner,
                 'view_opening_salary' => self::salaryAccess()['view'],

@@ -2,6 +2,44 @@
 
 按根因去重。每条记录必须指向实际防线；仅有“不要这样做”的提醒不算已防护。
 
+## PIT-0054：汇总读取使用不可变原对象限制已更正的当前费用
+
+日期：2026-09-08
+
+### 报告来源
+
+- 生成原因：工作流要求
+- 主工作流：Matt Pocock
+- 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`用户级自定义 / impeccable`、`Matt Pocock / code-review`、`Matt Pocock / diagnosing-bugs`、`用户级自定义 / prevent-repeat-pitfalls`（本批按此顺序自动调用）。
+- 说明：第50批 Spec 审查后用原费用更正测试复现；防护后恢复月结开发。
+
+- 状态：已防护；首次／最近发生：2026-09-08；复发次数：0。
+- 触发场景：费用已关联更正收款对象，随后读取任意月份的整店月结清单。
+- 根因：把原账单 vendor_id 传给 current 的当前对象校验，历史身份被误用为当前读取约束。
+- 防线：整店聚合调用 current(documentId, 0)，租户范围仍由领域查询保证；操作入口的当前对象校验不放宽。
+- 已验证事实：原费用更正测试的未结／已结两组均稳定失败，修复后通过；第50最终相关 PHP 回归 21 tests、853 assertions。
+- 尚未验证：业务库部署与完整六报表月结闭环。
+- 后续建议：聚合读取与特定对象操作分别使用正确身份，不以不可变历史字段断言当前对象未改变。
+
+## PIT-0055：统一未决清单把不同成本来源导向同一业务入口
+
+日期：2026-09-08
+
+### 报告来源
+
+- 生成原因：工作流要求
+- 主工作流：Matt Pocock
+- 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`用户级自定义 / impeccable`、`Matt Pocock / code-review`、`Matt Pocock / diagnosing-bugs`、`用户级自定义 / prevent-repeat-pitfalls`（本批按此顺序自动调用）。
+- 说明：第50批旧售退回成本的处理路由回归；防护完成后返回月结与快照开发。
+
+- 状态：已防护；首次／最近发生：2026-09-08；复发次数：0。
+- 触发场景：启用承接了原售价日期已知或未知的旧售退回，原成本仍待核实。
+- 根因：汇总依据共同的成本未决状态指定采购结算入口，忽略来源是旧售退回。
+- 防线：按来源快照 cost_basis_pending 选择 legacy_return_cost，携带 stock_flow_id；前端精确读取该来源且保留已有单据和选择。
+- 已验证事实：两组原启用承接测试修复前均定位到错误路由；修复后 PHP 最终相关回归 21 tests、853 assertions，前端 164 tests 与源码完整性检查通过。
+- 尚未验证：小程序原生深链操作；HBuilderX 已退出。
+- 后续建议：未决事项的业务分类同时约束展示、处理入口及来源身份。
+
 ## PIT-0052：期初投影遗漏已有核实字段，错误开放重新填写
 
 日期：2026-09-08
@@ -19,6 +57,8 @@
 - 已验证事实：`test_transit_reconciliation_preserves_known_opening_extra_fee_and_zero_does_not_hide_unknown_facts` 修复前为 `null` 对预期 `5.00`；修复后原值5不受输入0覆盖。最终在途、互转、账户及短款专项 11 tests、430 assertions 通过。
 - 尚未验证：当前小程序实际构建、原生布局与触控，HBuilderX 已退出。
 - 后续建议：历史来源的投影按实际期初字段逐项映射，不能以“历史来源”统一推断未知。
+
+第50批补充（2026-09-08）：同类期初字段映射错误在待认领月结聚合中复现，合法 `account_inclusion` 值为字符串 `confirmed`，误按整数1判断导致已核实资金被阻断。改用正式枚举，新增 `test_period_checklist_accepts_formal_opening_unclaimed_acknowledgement_and_keeps_unknown_date_blocking` 验证合法已知日期为提醒、日期未知仍阻断；修复前稳定失败，最终相关 PHP 21 tests、853 assertions 通过。本次来源为 Matt Pocock 的 implement、tdd、code-review、diagnosing-bugs，用户级 impeccable、prevent-repeat-pitfalls；仍未完成原生与业务库验收。
 
 ## PIT-0053：零余额状态绕过业务事实完整性的核实门槛
 

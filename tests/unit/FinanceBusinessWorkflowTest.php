@@ -75,6 +75,103 @@ final class FinanceBusinessWorkflowTest extends TestCase
 
     public static function deferredClosureCases(): array { return [[false], [true]]; }
 
+    public function test_period_checklist_accepts_formal_opening_unclaimed_acknowledgement_and_keeps_unknown_date_blocking(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
+        foreach ([995050 => date('Y-m-d', strtotime($month . '-01 -1 day')), 995051 => null] as $item => $date) {
+            Db::name('finance_opening_source')->insert(['tenant_id' => self::TENANT_ID, 'activation_date' => $month . '-01', 'opening_item_id' => $item, 'category' => 'unclaimed', 'subject_id' => $this->accountId, 'amount' => '250', 'source_snapshot' => json_encode(['id' => $item, 'historical_date' => $date, 'subject_name' => '期初账户', 'source_reference' => '原到账-' . $item, 'details' => ['original_amount' => '400', 'claimed_amount' => '150', 'account_inclusion' => 'confirmed']]), 'create_time' => time()]);
+        }
+        $check = FinanceBusinessLogic::closingChecklist(['month' => $month]); self::assertNotFalse($check, FinanceBusinessLogic::getError());
+        $funds = array_values(array_filter($check['items'], static fn(array $item): bool => $item['category'] === 'unclaimed')); self::assertCount(2, $funds); self::assertSame('warning', $funds[0]['severity']); self::assertSame('blocking', $funds[1]['severity']);
+    }
+
+    public function test_period_checklist_keeps_month_end_unclaimed_money_after_later_claim_without_blocking_verified_funds(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
+        $receipt = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'unclaimed_receipt', 'payload' => ['account_id' => $this->accountId, 'actual_date' => $month . '-10', 'amount' => '300', 'funds_verified' => 1, 'reason' => '到账已核实，用途尚未确认']]); self::assertNotFalse($receipt, FinanceBusinessLogic::getError());
+        $source = $receipt['confirmed_result']['unclaimed_source'];
+        $check = FinanceBusinessLogic::closingChecklist(['month' => $month]); self::assertNotFalse($check, FinanceBusinessLogic::getError());
+        $funds = array_values(array_filter($check['items'], static fn(array $item): bool => $item['category'] === 'unclaimed')); self::assertCount(1, $funds); self::assertSame('warning', $funds[0]['severity']); self::assertSame('300.00', $funds[0]['details']['remaining_amount']);
+        Db::name('finance_period')->insert(['tenant_id' => self::TENANT_ID, 'month' => $month, 'status' => 'estimated', 'snapshot' => '{}', 'closed_by' => '{}', 'closed_at' => time()]);
+        $claim = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'unclaimed_customer_claim', 'payload' => ['unclaimed_source' => $source, 'subject_id' => $this->customerId, 'amount' => '300', 'allocations' => [['source' => $this->receivable, 'amount' => '300']], 'claim_verified' => 1, 'reason' => '结账后查明付款客户']]); self::assertNotFalse($claim, FinanceBusinessLogic::getError());
+        $after = FinanceBusinessLogic::closingChecklist(['month' => $month]); $funds = array_values(array_filter($after['items'], static fn(array $item): bool => $item['category'] === 'unclaimed')); self::assertCount(1, $funds); self::assertSame('300.00', $funds[0]['details']['remaining_amount']);
+    }
+
+    public function test_period_checklist_retains_unresolved_arrival_differences_physical_returns_and_inventory_losses(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
+        $warehouse = $this->createCustomerReportWarehouse('月结争议仓'); $goods = $this->createCustomerReportGoods('月结争议商品', 'CLOSE-DIFF-50'); $sku = $this->customerReportSkuId($goods);
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '月结争议供方']);
+        $arrival = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival', 'payload' => ['subject_id' => $vendor, 'warehouse_id' => $warehouse, 'actual_date' => $month . '-02', 'source_reference' => 'CLOSE-DIFF-50', 'reason' => '报量实收差待双方核实', 'lines' => [['sku_id' => $sku, 'actual_quantity' => '10', 'reported_quantity' => '11', 'agreed_price' => '2']]]]); self::assertNotFalse($arrival, FinanceBusinessLogic::getError());
+        $returned = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_return_actual', 'payload' => ['subject_id' => $vendor, 'warehouse_id' => $warehouse, 'actual_date' => $month . '-03', 'source_reference' => 'CLOSE-RETURN-50', 'reason' => '实物已退离，供方金额尚未认可', 'lines' => [['arrival_line_id' => $arrival['confirmed_result']['lines'][0]['arrival_line_id'], 'quantity' => '2']]]]); self::assertNotFalse($returned, FinanceBusinessLogic::getError());
+        $loss = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'inventory_loss', 'payload' => ['warehouse_id' => $warehouse, 'sku_id' => $sku, 'actual_date' => $month . '-04', 'quantity' => '1', 'physical_confirmed' => 1, 'source_reference' => 'CLOSE-LOSS-50', 'responsibility' => '待核实', 'reason' => '实际减少，责任尚未核实']]); self::assertNotFalse($loss, FinanceBusinessLogic::getError());
+        $check = FinanceBusinessLogic::closingChecklist(['month' => $month]); self::assertNotFalse($check, FinanceBusinessLogic::getError());
+        foreach (['purchase_difference', 'purchase_return', 'inventory_loss'] as $category) { self::assertContains($category, array_column($check['items'], 'category')); }
+        self::assertTrue($check['estimated_ready']); self::assertFalse($check['ordinary_ready']);
+    }
+
+    public function test_period_checklist_only_blocks_statement_disputes_with_uncertain_ledger_facts(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
+        $statement = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['customer_id' => $this->customerId]);
+        \app\api\jxc\logic\FinanceStatements::action('reply', $this->command(0) + ['id' => $statement['id'], 'response' => 'disputed', 'respondent' => '客户负责人', 'response_date' => date('Y-m-d'), 'evidence' => '逐笔核实期初应收', 'items' => [['source' => $this->receivable, 'amount' => '100', 'reason' => '原交付金额待核对', 'ledger_uncertain' => true]]]);
+        $check = FinanceBusinessLogic::closingChecklist(['month' => $month]); self::assertNotFalse($check, FinanceBusinessLogic::getError()); self::assertContains('statement_dispute', array_column($check['items'], 'category'));
+        $dispute = \app\api\jxc\logic\FinanceStatements::openDisputes([$this->receivable])[0];
+        \app\api\jxc\logic\FinanceStatements::action('resolve', $this->command(1) + ['id' => $statement['id'], 'dispute_id' => $dispute['id'], 'resolution' => 'ledger_verified', 'reason' => '账内金额与归属无误，保留客户外部争议']);
+        $after = FinanceBusinessLogic::closingChecklist(['month' => $month]); self::assertNotFalse($after, FinanceBusinessLogic::getError()); self::assertNotContains('statement_dispute', array_column($after['items'], 'category'));
+    }
+
+    public function test_period_checklist_keeps_priced_but_unsettled_purchase_cost_pending_until_formal_coverage(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
+        $warehouse = $this->createCustomerReportWarehouse('月结采购仓'); $goods = $this->createCustomerReportGoods('月结采购商品', 'CLOSE-50'); $sku = $this->customerReportSkuId($goods);
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '月结采购供方']);
+        $arrival = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival', 'payload' => ['subject_id' => $vendor, 'warehouse_id' => $warehouse, 'actual_date' => $month . '-02', 'source_reference' => 'CLOSE-ARR-50', 'reason' => '本月已入库尚未正式结算', 'lines' => [['sku_id' => $sku, 'actual_quantity' => '10', 'reported_quantity' => '10', 'agreed_price' => '2']]]]);
+        self::assertNotFalse($arrival, FinanceBusinessLogic::getError()); $arrivalId = $arrival['confirmed_result']['lines'][0]['arrival_line_id'];
+        $check = FinanceBusinessLogic::closingChecklist(['month' => $month]); self::assertNotFalse($check, FinanceBusinessLogic::getError()); self::assertContains('purchase_cost', array_column($check['items'], 'category'));
+        $settlement = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_settlement', 'payload' => ['subject_id' => $vendor, 'supplier_confirmed' => 1, 'supplier_confirmation' => '双方确认全部到货价款', 'reason' => '本月成本正式核实', 'lines' => [['arrival_line_id' => $arrivalId, 'covered_quantity' => '10', 'settlement_quantity' => '10', 'price' => '2']]]]);
+        self::assertNotFalse($settlement, FinanceBusinessLogic::getError());
+        $after = FinanceBusinessLogic::closingChecklist(['month' => $month]); self::assertNotContains('purchase_cost', array_column($after['items'], 'category'));
+    }
+
+    public function test_period_checklist_requires_recurring_month_outcome_but_keeps_reasonable_expense_estimates_as_tracking_items(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '月结周期服务方']);
+        $category = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_category', 'payload' => ['category_id' => 0, 'expected_category_version' => 0, 'parent' => 'utilities', 'name' => '月结水费', 'is_enabled' => 1]]); self::assertNotFalse($category, FinanceBusinessLogic::getError()); $categoryId = $category['confirmed_result']['category']['id'];
+        $plan = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_recurring_plan', 'payload' => ['subject_id' => $vendor, 'category_id' => $categoryId, 'expected_category_version' => 1, 'source_reference' => 'CYCLE-CLOSE-50', 'service_start' => $month, 'service_end' => $month, 'interval_months' => 1, 'reason' => '本月应核对周期水费', 'plan_verified' => 1]]); self::assertNotFalse($plan, FinanceBusinessLogic::getError());
+        $check = FinanceBusinessLogic::closingChecklist(['month' => $month]); self::assertContains('recurring_expense', array_column($check['items'], 'category'));
+        $expense = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense', 'payload' => ['subject_id' => $vendor, 'recurring_plan_id' => $plan['confirmed_result']['plan_id'], 'expected_plan_version' => 1, 'expected_month_revision_id' => 0, 'benefit_month' => $month,
+            'actual_date' => $month . '-05', 'amount' => '100', 'source_reference' => 'CYCLE-CLOSE-50/' . $month, 'due_mode' => 'unspecified', 'reason' => '依据本月表数合理暂估', 'amount_status' => 'estimated', 'estimate_basis_type' => 'measurement', 'estimate_basis' => '本月已使用表数与合同单价', 'material_status' => 'missing', 'material_verified' => 1, 'missing_material_reason' => '账单尚未取得', 'lines' => [['category_id' => $categoryId, 'expected_category_version' => 1, 'amount' => '100', 'reason' => '本月水费']]]]); self::assertNotFalse($expense, FinanceBusinessLogic::getError());
+        $after = FinanceBusinessLogic::closingChecklist(['month' => $month]); self::assertNotContains('recurring_expense', array_column($after['items'], 'category'));
+        $estimates = array_values(array_filter($after['items'], static fn(array $item): bool => $item['category'] === 'expense_estimate')); self::assertCount(1, $estimates); self::assertSame('estimate', $estimates[0]['severity']); self::assertSame('100.00', $estimates[0]['details']['estimated_amount']);
+    }
+
+    public function test_period_checklist_delivered_unconfirmed_sales_block_estimated_close_until_formal_amount_is_confirmed(): void
+    {
+        $start = date('Y-m-01', strtotime('first day of last month')); $month = substr($start, 0, 7); $this->activate('cash', $start); $sale = $this->deliveredSale($start);
+        $check = FinanceBusinessLogic::closingChecklist(['month' => $month]); self::assertNotFalse($check, FinanceBusinessLogic::getError()); self::assertFalse($check['estimated_ready']); self::assertContains('unconfirmed_delivery', array_column($check['items'], 'category'));
+        $delivery = (int)Db::name('fulfillment_delivery_item')->where('delivery_event_id', $sale['event_id'])->value('id');
+        $confirmed = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'sales_batch', 'payload' => ['subject_id' => $this->customerId, 'reason' => '已交付金额正式核实', 'rounding_amount' => '0', 'precision_mode' => 'cents', 'lines' => [['delivery_item_id' => $delivery, 'covered_weight' => '2', 'settlement_weight' => '2', 'price' => '10']]]]); self::assertNotFalse($confirmed, FinanceBusinessLogic::getError());
+        $after = FinanceBusinessLogic::closingChecklist(['month' => $month]); self::assertTrue($after['estimated_ready']); self::assertNotContains('unconfirmed_delivery', array_column($after['items'], 'category'));
+        self::assertContains('cost_pending', array_column($after['items'], 'category'), '负库存来源成本尚未核实，只能保留为暂估未决事项');
+    }
+
+    public function test_period_checklist_distinguishes_draft_reminders_pending_documents_and_normal_unpaid_balances(): void
+    {
+        $start = date('Y-m-01', strtotime('first day of last month')); $month = substr($start, 0, 7); $cutoff = date('Y-m-t', strtotime($start)); $this->activate('cash', $start);
+        $initial = FinanceBusinessLogic::closingChecklist(['month' => $month]); self::assertNotFalse($initial, FinanceBusinessLogic::getError()); self::assertFalse($initial['ordinary_ready']); self::assertTrue($initial['estimated_ready']);
+        self::assertContains('account_reconciliation', array_column($initial['items'], 'category'));
+        $reconciliation = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_reconcile', 'payload' => ['account_id' => $this->accountId, 'month' => $month, 'actual_cutoff' => $cutoff . ' 23:59:59', 'actual_balance' => '5000', 'expected_book_balance' => '5000', 'reconciliation_verified' => 1, 'expected_reconciliation_id' => 0, 'reason' => '月末现金实点已核对']]); self::assertNotFalse($reconciliation, FinanceBusinessLogic::getError());
+        $draft = FinanceBusinessLogic::action('save', $this->command(0) + ['type' => 'receipt', 'payload' => array_replace($this->receipt('100', '100'), ['actual_date' => $cutoff])]); self::assertNotFalse($draft, FinanceBusinessLogic::getError());
+        $withDraft = FinanceBusinessLogic::closingChecklist(['month' => $month]); self::assertNotFalse($withDraft, FinanceBusinessLogic::getError()); self::assertTrue($withDraft['ordinary_ready'], '未收期初应收与未提交草稿不阻止普通月结');
+        self::assertSame('warning', array_values(array_filter($withDraft['items'], static fn(array $row): bool => $row['category'] === 'draft'))[0]['severity']);
+        $submitted = FinanceBusinessLogic::action('submit', $this->command($draft['version']) + ['id' => $draft['id']]); self::assertNotFalse($submitted, FinanceBusinessLogic::getError());
+        $withPending = FinanceBusinessLogic::closingChecklist(['month' => $month]); self::assertFalse($withPending['ordinary_ready']); self::assertTrue($withPending['estimated_ready']); self::assertContains('pending_document', array_column($withPending['items'], 'category'));
+        $current = FinanceBusinessLogic::closingChecklist(['month' => date('Y-m')]); self::assertNotFalse($current, FinanceBusinessLogic::getError()); self::assertFalse($current['ordinary_ready']); self::assertFalse($current['estimated_ready']); self::assertContains('month_not_ended', array_column($current['items'], 'category'));
+        self::assertSame(0, Db::name('finance_period')->where('tenant_id', self::TENANT_ID)->count(), '检查不能自动结账');
+    }
+
     public function test_transit_reconciliation_preserves_known_opening_extra_fee_and_zero_does_not_hide_unknown_facts(): void
     {
         $start = date('Y-m-01', strtotime('first day of last month')); $month = substr($start, 0, 7); $this->activate('cash', $start);
@@ -1399,6 +1496,9 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $options = FinanceBusinessLogic::options(['type' => 'legacy_return_cost']);
         self::assertNotFalse($options, FinanceBusinessLogic::getError()); self::assertCount(1, $options['cost_sources']);
         $source = $options['cost_sources'][0];
+        $check = FinanceBusinessLogic::closingChecklist(['month' => date('Y-m')]); self::assertNotFalse($check, FinanceBusinessLogic::getError());
+        $pending = array_values(array_filter($check['items'], static fn(array $item): bool => $item['category'] === 'cost_pending' && $item['reference'] === 'stock:' . $source['stock_flow_id']));
+        self::assertCount(1, $pending); self::assertSame('/sub-finance/inventory/cost?type=legacy_return_cost&stock_flow_id=' . $source['stock_flow_id'], $pending[0]['details']['route']);
         $payload = ['stock_flow_id' => $source['stock_flow_id'], 'expected_cost_event_id' => $source['expected_cost_event_id'],
             'amount' => '40.00', 'source_reference' => '旧销售原采购成本凭据', 'reason' => '核实这四单位退回商品原成本四十元', 'cost_verified' => 1];
         $request = $this->command(0) + ['type' => 'legacy_return_cost', 'payload' => $payload];
@@ -2782,6 +2882,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $reassign['reason'] = '原收款对象登记错误，关联真实服务方'; $reassign['new_due_mode'] = 'unspecified';
         $reassigned = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_adjustment', 'payload' => $reassign]);
         self::assertNotFalse($reassigned, FinanceBusinessLogic::getError());
+        self::assertNotFalse(FinanceBusinessLogic::closingChecklist(['month' => $serviceMonth]), '更正收款对象后，整店月结清单仍须能读取：' . FinanceBusinessLogic::getError());
         $enabled = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_category', 'payload' => [
             'category_id' => $categoryId, 'expected_category_version' => 2, 'parent' => 'maintenance', 'name' => '修理服务', 'is_enabled' => 1]]);
         self::assertNotFalse($enabled, FinanceBusinessLogic::getError());
@@ -4059,12 +4160,12 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertFalse(SalesSettlementLogic::detail(['id' => $sale['order_id']])['finance']['preserves_legacy_coverage']);
     }
 
-    private function deliveredSale(): array
+    private function deliveredSale(?string $businessDate = null): array
     {
         $unit = $this->createCustomerReportUnit('斤');
         $warehouse = $this->createCustomerReportWarehouse('已交付核算仓');
         $goods = $this->createCustomerReportGoods('已交付商品', 'FINANCE-SALE', '斤');
-        $sku = $this->customerReportSkuId($goods); $now = time();
+        $sku = $this->customerReportSkuId($goods); $now = $businessDate ? strtotime($businessDate . ' 12:00:00') : time();
         Db::name('goods')->where('id', $goods)->update(['unit_id' => $unit]);
         Db::name('goods_sku')->where('id', $sku)->update(['base_unit_id' => $unit, 'base_unit_name' => '斤']);
         Db::name('goods_units_binding')->insert(['tenant_id' => self::TENANT_ID, 'goods_id' => $goods, 'unit_id' => $unit, 'unit_name' => '斤', 'is_base_unit' => 1, 'sort' => 0, 'status' => 1, 'create_time' => $now, 'update_time' => $now]);
