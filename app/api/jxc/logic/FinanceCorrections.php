@@ -14,6 +14,7 @@ final class FinanceCorrections
     public function replace(array $original, array $replacement, string $reason, int $duplicateOf = 0, bool $reverseOnly = false): array
     {
         $policy = FinanceDocumentPolicy::authorize($original['type'], true);
+        if (in_array($original['type'], ['equipment_purchase', 'equipment_adjustment'], true)) { throw new \DomainException('设备额度请从原购置记录关联调价或取消未付，不能覆盖已有付款历史'); }
         if (in_array($original['type'], ['salary_expense', 'salary_adjustment'], true)) { throw new \DomainException('工资结果须关联原工资和已发放组成调整，不能覆盖历史'); }
         if (in_array($original['type'], ['employee_expense', 'employee_expense_adjustment'], true)) { throw new \DomainException('员工垫付须关联原费用与已报销组成调整，不能覆盖历史'); }
         if (in_array($original['type'], ['expense_recurring_plan', 'expense_recurring_none', 'expense_recurring_correct'], true)) { throw new \DomainException('周期计划及逐月处理须关联原计划更正，不能覆盖已有待办或确认结果'); }

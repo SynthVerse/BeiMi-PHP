@@ -123,6 +123,7 @@ final class FinanceBusinessLogic extends BaseLogic
             if ($type === 'supplier_credit_allocate' && ($params['role'] ?? '') === 'fund') { $categories = ['supplier_refund']; }
             $page = max(1, FinanceValue::id($params['page'] ?? 1));
             $sources = match ($type) {
+                'equipment_purchase', 'equipment_adjustment' => FinanceEquipment::options($subjectId, $params),
                 'salary_adjustment' => FinanceSalaries::adjustmentOptions($subjectId, $params),
                 'salary_expense' => FinanceSalaries::options($params),
                 'employee_expense_adjustment' => FinanceEmployeeExpenses::options($subjectId, $params),
