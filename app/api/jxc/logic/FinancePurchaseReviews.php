@@ -22,7 +22,7 @@ final class FinancePurchaseReviews
         return $review !== null && !(bool)$review['resolved'];
     }
 
-    public static function options(int $vendor, array $params): array
+    public static function options(int $vendor, array $params, bool $onlyLoss = false): array
     {
         $tenant = FinanceAccess::tenant(); $page = max(1, FinanceValue::id($params['page'] ?? 1));
         $latest = Db::name('finance_purchase_difference_review')->where('tenant_id', $tenant)->field('arrival_line_id,MAX(id) AS id')->group('arrival_line_id')->buildSql();
@@ -31,6 +31,10 @@ final class FinancePurchaseReviews
             ->where('a.tenant_id', $tenant)->where('a.vendor_id', $vendor)
             ->whereRaw("CAST(JSON_UNQUOTE(JSON_EXTRACT(a.snapshot,'$.arrival_difference')) AS DECIMAL(18,4))<>0")
             ->whereRaw('(d.id IS NULL OR d.resolved=0)');
+        if ($onlyLoss) {
+            $query->whereIn('d.classification', ['loss', 'dispute'])->whereRaw("CAST(JSON_UNQUOTE(JSON_EXTRACT(a.snapshot,'$.arrival_difference')) AS DECIMAL(18,4))<0");
+            if (!empty($params['arrival_line_id'])) { $query->where('a.id', FinanceValue::id($params['arrival_line_id'])); }
+        }
         $keyword = FinanceValue::text($params['keyword'] ?? '', 60, false);
         if ($keyword !== '') { $query->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(a.snapshot,'$.goods_name')) LIKE ?", ['%' . addcslashes($keyword, '%_\\') . '%']); }
         $rows = $query->field('a.*,d.id AS review_id,d.classification,d.snapshot AS review_snapshot')->order('a.business_date,a.id')->limit(($page - 1) * 20, 21)->select()->toArray();
@@ -77,9 +81,13 @@ final class FinancePurchaseReviews
             'created_sources' => [], 'posting_months' => [$ledger->postingMonth($arrival['business_date'])], 'lines' => [$line]];
     }
 
-    public static function append(array $arrival, array $document, array $review): array
+    public static function append(array $arrival, array $document, array $review, bool $lossConfirmed = false): array
     {
-        $resolved = in_array($review['classification'], ['normal', 'supplier'], true);
+        if ($lossConfirmed) {
+            FinanceAccess::require('', true);
+            if ($document['type'] !== 'purchase_arrival_loss' || $review['classification'] !== 'loss') { throw new \DomainException('异常损耗须通过关联损失确认结案'); }
+        }
+        $resolved = $lossConfirmed || in_array($review['classification'], ['normal', 'supplier'], true);
         $review += ['resolved' => $resolved, 'previous_review_id' => (int)(self::latest((int)$arrival['id'])['id'] ?? 0)];
         $id = (int)Db::name('finance_purchase_difference_review')->insertGetId(['tenant_id' => FinanceAccess::tenant(), 'document_id' => $document['id'],
             'arrival_line_id' => $arrival['id'], 'classification' => $review['classification'], 'resolved' => $resolved ? 1 : 0,

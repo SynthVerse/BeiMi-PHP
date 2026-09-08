@@ -9,6 +9,19 @@ use PHPUnit\Framework\TestCase;
 
 final class FinanceCostAllocationTest extends TestCase
 {
+    public function test_loss_already_excluded_from_received_quantity_creates_cost_destination_without_removing_stock(): void
+    {
+        $state = FinanceCostAllocation::receive(FinanceCostAllocation::empty(), 'goods', 10, 20, '499', '998.00')['state'];
+        $loss = FinanceCostAllocation::recognizeExcludedLoss($state, 'missing', 10, 20, '1', '2.00', 'loss-document');
+        self::assertSame(FinanceCostAllocation::balance($state, 10, 20), FinanceCostAllocation::balance($loss['state'], 10, 20));
+        self::assertSame('1.000000', FinanceCostAllocation::adjust($loss['state'], 'missing', '3.00')['changes']['loss']);
+        $unknown = FinanceCostAllocation::recognizeExcludedLoss($state, 'unpriced-missing', 10, 20, '1', null, 'unknown-loss');
+        self::assertTrue($unknown['pending']);
+        self::assertSame('2.000000', FinanceCostAllocation::adjust($unknown['state'], 'unpriced-missing', '2.00')['changes']['loss']);
+        $this->expectException(\DomainException::class);
+        FinanceCostAllocation::recognizeExcludedLoss($loss['state'], 'missing', 10, 20, '1', '2.00', 'duplicate');
+    }
+
     public function test_reclassifying_return_dispute_to_loss_preserves_stock_and_unknown_origin_cost(): void
     {
         $state = FinanceCostAllocation::receive(FinanceCostAllocation::empty(), 'arrival', 10, 20, '100', '200.00')['state'];

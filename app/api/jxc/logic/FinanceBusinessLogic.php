@@ -123,6 +123,7 @@ final class FinanceBusinessLogic extends BaseLogic
             if ($type === 'supplier_credit_allocate' && ($params['role'] ?? '') === 'fund') { $categories = ['supplier_refund']; }
             $page = max(1, FinanceValue::id($params['page'] ?? 1));
             $sources = match ($type) {
+                'purchase_arrival_loss' => FinancePurchaseReviews::options($subjectId, $params, true),
                 'purchase_difference' => FinancePurchaseReviews::options($subjectId, $params),
                 'purchase_return_resolution' => FinancePurchaseReturnResolutions::options($subjectId, $params),
                 'purchase_return_acceptance' => ($params['role'] ?? '') === 'credit' ? $ledger->sourcePage($categories, $subjectId, $page) : FinancePurchaseReturnAcceptances::options($subjectId, $params),

@@ -9,6 +9,17 @@ final class FinanceCostAllocation
 {
     public static function empty(): array { return ['origins' => [], 'positions' => [], 'shortages' => []]; }
 
+    /** 验收入库量已经排除的异常损失，独立持有成本份额，不再流经现存库存。 */
+    public static function recognizeExcludedLoss(array $state, string $origin, int $warehouse, int $sku, string $quantity, ?string $amount, string $reference): array
+    {
+        self::dimension($warehouse, $sku); $quantity = self::quantity($quantity); FinanceValue::text($origin, 160); FinanceValue::text($reference, 160);
+        if (str_starts_with($origin, 'pending-return:') || isset($state['origins'][$origin])) { throw new \DomainException('损失成本来源无效或已存在'); }
+        $amount = $amount === null ? null : FinanceValue::money($amount, true);
+        $state['origins'][$origin] = ['quantity' => $quantity, 'amount' => $amount, 'sku_id' => $sku];
+        self::put($state, $origin, $warehouse, $sku, 'loss', $reference, $quantity, bcadd($amount ?? '0', '0', 6));
+        return ['state' => $state, 'pending' => $amount === null];
+    }
+
     public static function receive(array $state, string $origin, int $warehouse, int $sku, string $quantity, ?string $amount): array
     {
         $quantity = self::quantity($quantity); self::dimension($warehouse, $sku); FinanceValue::text($origin, 160);

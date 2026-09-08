@@ -44,6 +44,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000021_finance_purchase_return.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000022_finance_purchase_return_resolution.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000023_finance_purchase_difference_review.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260908_000024_finance_purchase_arrival_loss.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -81,6 +82,63 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $event['amount'] = '1001.00';
         $this->expectException(\DomainException::class);
         Db::transaction(fn() => $cost->recordWithinTransaction($event));
+    }
+
+    public static function arrivalLossPrices(): array { return ['已知暂估' => ['2.00'], '未知成本' => [null]]; }
+
+    /** @dataProvider arrivalLossPrices */
+    public function test_confirmed_arrival_loss_excluded_from_stock_splits_cost_and_future_price_changes_without_second_stock_deduction(?string $initialPrice): void
+    {
+        $this->activate(); $warehouse = $this->createCustomerReportWarehouse('异常到货损耗仓');
+        $goods = $this->createCustomerReportGoods('实收已扣损失商品', 'FIN-ARRIVAL-LOSS'); $sku = $this->customerReportSkuId($goods);
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '异常到货损耗供方']);
+        $arrival = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival', 'payload' => ['subject_id' => $vendor,
+            'warehouse_id' => $warehouse, 'actual_date' => date('Y-m-d'), 'source_reference' => 'LOSS-ARR', 'reason' => '实收只含完好商品',
+            'lines' => [['sku_id' => $sku, 'actual_quantity' => '499', 'reported_quantity' => '500'] + ($initialPrice === null ? [] : ['agreed_price' => $initialPrice])]]]); self::assertNotFalse($arrival);
+        $arrivalId = $arrival['confirmed_result']['lines'][0]['arrival_line_id'];
+        self::assertTrue(\app\api\jxc\logic\StockService::outbound($warehouse, $goods, '100', 909, 'sales', 'SALE-BEFORE-LOSS', '', $sku));
+        $review = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_difference', 'payload' => ['subject_id' => $vendor,
+            'arrival_line_id' => $arrivalId, 'expected_review_id' => 0, 'classification' => 'loss', 'reason' => '装卸遗失需核实', 'responsibility' => '交接记录待确认', 'review_confirmed' => 1]]); self::assertNotFalse($review);
+        $payload = ['subject_id' => $vendor, 'arrival_line_id' => $arrivalId, 'expected_review_id' => $review['confirmed_result']['review_id'],
+            'quantity' => '1', 'excluded_from_received_confirmed' => 1, 'loss_confirmed' => 1, 'source_reference' => 'LOSS-HANDOFF',
+            'reason' => '核实一单位装卸遗失，原实收量已排除', 'responsibility' => '最高权限确认门店承担，不登记责任应收'];
+        $command = $this->command(0) + ['type' => 'purchase_arrival_loss', 'payload' => $payload];
+        $bad = $payload; $bad['excluded_from_received_confirmed'] = 0;
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival_loss', 'payload' => $bad]));
+        $bad = $payload; $bad['quantity'] = '2';
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival_loss', 'payload' => $bad]));
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($this->command(0) + ['type' => 'purchase_arrival_loss', 'action' => 'record', 'payload' => $payload]);
+        self::assertSame($initialPrice === null, $preview['purchase']['cost_pending']);
+        $loss = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($loss, FinanceBusinessLogic::getError());
+        self::assertSame($loss, FinanceBusinessLogic::action('record', $command));
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival_loss', 'payload' => $payload]));
+        self::assertSame($initialPrice === null ? '0.00' : '2.00', $loss['confirmed_result']['loss_known_amount']);
+        self::assertSame($initialPrice === null, $loss['confirmed_result']['cost_pending']);
+        self::assertSame($preview['cost_impacts'], $loss['confirmed_result']['cost_impacts']);
+        self::assertSame($preview['posting_months'], $loss['confirmed_result']['posting_months']);
+        $cost = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID);
+        self::assertSame('399.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $sku));
+        self::assertSame($initialPrice === null ? null : '798.000000', $cost->balance($warehouse, $sku)['value']);
+        self::assertSame($initialPrice === null ? null : '200.000000', $cost->destination($warehouse, $sku, 'sale', 'sales_order:909')['cost']);
+        self::assertSame($initialPrice === null ? null : '2.000000', $cost->destination($warehouse, $sku, 'loss', 'purchase-arrival-loss:' . $loss['id'])['cost']);
+        self::assertCount(0, FinanceBusinessLogic::options(['type' => 'purchase_difference', 'subject_id' => $vendor])['arrivals']);
+        self::assertSame('0.00', (new FinanceLedger(self::TENANT_ID))->categoryBalance('payable', $vendor));
+        $settled = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_settlement', 'payload' => ['subject_id' => $vendor,
+            'supplier_confirmed' => 1, 'supplier_confirmation' => '供方确认计费五百、单价三元', 'reason' => '异常损失已独立确认',
+            'lines' => [['arrival_line_id' => $arrivalId, 'covered_quantity' => '499', 'settlement_quantity' => '500', 'price' => '3.00',
+                'arrival_difference_confirmed' => 1, 'arrival_difference_class' => 'loss', 'arrival_difference_reason' => '关联已确认损失',
+                'difference_confirmed' => 1, 'difference_class' => 'normal', 'difference_reason' => '按双方约定报量计费']]]]); self::assertNotFalse($settled, FinanceBusinessLogic::getError());
+        self::assertSame('1197.000000', $cost->balance($warehouse, $sku)['value']);
+        self::assertSame('300.000000', $cost->destination($warehouse, $sku, 'sale', 'sales_order:909')['cost']);
+        self::assertSame('3.000000', $cost->destination($warehouse, $sku, 'loss', 'purchase-arrival-loss:' . $loss['id'])['cost']);
+        self::assertSame('1500.00', (new FinanceLedger(self::TENANT_ID))->categoryBalance('payable', $vendor));
+        $freight = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_extra_cost', 'payload' => ['subject_id' => $vendor,
+            'cost_kind' => 'freight', 'necessary_confirmed' => 1, 'amount' => '500.00', 'actual_date' => date('Y-m-d'), 'source_reference' => 'LOSS-FREIGHT',
+            'reason' => '本批直接必要运输', 'attribution_basis' => '全部归属本次到货', 'lines' => [['arrival_line_id' => $arrivalId, 'amount' => '500.00']]]]);
+        self::assertNotFalse($freight, FinanceBusinessLogic::getError());
+        self::assertSame('1596.000000', $cost->balance($warehouse, $sku)['value']);
+        self::assertSame('400.000000', $cost->destination($warehouse, $sku, 'sale', 'sales_order:909')['cost']);
+        self::assertSame('4.000000', $cost->destination($warehouse, $sku, 'loss', 'purchase-arrival-loss:' . $loss['id'])['cost']);
     }
 
     public function test_purchase_arrival_difference_queue_retains_dispute_and_original_rule_until_explicit_resolution(): void
@@ -2384,6 +2442,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
     private function clean(): void
     {
+        Db::name('finance_purchase_arrival_loss')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_purchase_difference_review')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         foreach (['finance_purchase_cost_revision', 'finance_purchase_cost_change', 'finance_purchase_cost_bill'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         foreach (['finance_supplier_terms', 'finance_purchase_difference_rule', 'finance_purchase_settlement_line', 'finance_purchase_arrival_line', 'finance_purchase_price'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }

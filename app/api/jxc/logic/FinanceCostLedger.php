@@ -32,7 +32,7 @@ final class FinanceCostLedger
         $stored = $this->load($sku); $before = $this->withOpening($stored, $sku);
         $this->persist($stored, $before, []);
         $replayed = !in_array($event['type'], ['adjust', 'reestimate'], true)
-            && $this->query('finance_cost_event')->where('sku_id', $sku)->whereIn('event_type', ['receive', 'issue', 'restore', 'transfer', 'reclassify'])
+            && $this->query('finance_cost_event')->where('sku_id', $sku)->whereIn('event_type', ['receive', 'issue', 'restore', 'transfer', 'reclassify', 'excluded_loss'])
                 ->where('business_date', '>', $date)->lock(true)->find();
         $result = $replayed ? $this->replay($sku, $event) : $this->applyEvent($before, $event);
         $effectTotals = $result['effect_totals'] ?? null; unset($result['effect_totals']);
@@ -48,10 +48,31 @@ final class FinanceCostLedger
         return $result;
     }
 
+    /** 确认记录和预览共用同一单据成本影响口径，未知金额保留已知部分。 */
+    public function documentImpacts(int $document, array $pendingSkus = []): array
+    {
+        return $this->readConsistently(function () use ($document, $pendingSkus): array {
+            $ids = $this->query('finance_cost_event')->where('document_id', $document)->column('id');
+            if (!$ids) { return []; }
+            $rows = $this->query('finance_cost_effect')->whereIn('event_id', $ids)
+                ->field('warehouse_id,sku_id,bucket,posting_month,SUM(quantity_delta) AS quantity_delta,SUM(value_delta) AS value_delta')
+                ->group('warehouse_id,sku_id,bucket,posting_month')->order('posting_month,warehouse_id,sku_id,bucket')->select()->toArray();
+            foreach ($rows as &$row) {
+                $row['warehouse_id'] = (int)$row['warehouse_id']; $row['sku_id'] = (int)$row['sku_id'];
+                $row['quantity_delta'] = bcadd((string)$row['quantity_delta'], '0', 12);
+                $row['value_delta'] = $row['value_delta'] === null ? null : bcadd((string)$row['value_delta'], '0', 6);
+                $row['cost_pending'] = isset($pendingSkus[$row['sku_id']]); $row['known_value_delta'] = $row['value_delta'];
+                if ($row['cost_pending']) { $row['value_delta'] = null; }
+            } unset($row);
+            return $rows;
+        });
+    }
+
     private function applyEvent(array $before, array $event): array
     {
         $sku = FinanceValue::id($event['sku_id']); $warehouse = FinanceValue::id($event['warehouse_id']);
         return match ($event['type'] ?? '') {
+            'excluded_loss' => FinanceCostAllocation::recognizeExcludedLoss($before, FinanceValue::text($event['origin'] ?? null, 160), $warehouse, $sku, $event['quantity'] ?? '', $event['amount'] ?? null, $event['target_reference'] ?? ''),
             'reclassify' => FinanceCostAllocation::reclassify($before, $warehouse, $sku, $event['quantity'] ?? '', $event['bucket'] ?? '', $event['target_reference'] ?? '', $event['to_bucket'] ?? '', $event['to_reference'] ?? ''),
             'receive' => FinanceCostAllocation::receive($before, FinanceValue::text($event['origin'] ?? null, 160), $warehouse, $sku, $event['quantity'] ?? '', $event['amount'] ?? null),
             'issue' => FinanceCostAllocation::issue($before, $warehouse, $sku, $event['quantity'] ?? '', $event['bucket'] ?? '', $event['target_reference'] ?? ''),

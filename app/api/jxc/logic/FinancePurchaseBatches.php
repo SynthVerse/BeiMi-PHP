@@ -26,10 +26,12 @@ final class FinancePurchaseBatches
         foreach ($rows as $row) {
             $snapshot = FinanceValue::decode($row['snapshot']);
             $rule = FinancePurchaseRuleBook::threshold($vendor, (int)$row['sku_id'], (int)($snapshot['category_id'] ?? 0));
+            $review = FinancePurchaseReviews::latest((int)$row['id']);
             $arrivals[] = array_merge($snapshot, ['arrival_line_id' => (int)$row['id'], 'arrival_document_id' => (int)$row['document_id'], 'subject_id' => $vendor,
                 'warehouse_id' => (int)$row['warehouse_id'], 'actual_date' => $row['business_date'],
                 'covered_quantity' => bcadd($row['covered_quantity'], '0', 4), 'pending_quantity' => bcadd($row['pending_quantity'], '0', 4),
-                'terms' => FinancePurchaseRuleBook::terms($vendor, $row['business_date']), 'settlement_difference_rule' => $rule]);
+                'terms' => FinancePurchaseRuleBook::terms($vendor, $row['business_date']), 'settlement_difference_rule' => $rule,
+                'arrival_review' => $review ? FinanceValue::decode($review['snapshot']) : null]);
         }
         return ['sources' => [], 'has_more' => false, 'arrivals' => $arrivals, 'arrival_has_more' => $more,
             'can_override_due' => FinanceAccess::has('finance.purchase.due_override'), 'can_confirm_difference' => FinanceAccess::owner()];
@@ -59,11 +61,17 @@ final class FinancePurchaseBatches
             $price = FinanceValue::money($item['price'] ?? null, true);
             $lineAmount = FinanceValue::money(bcadd(bcmul($quantity, $price, 6), '0.005', 2), true);
             $zeroReason = bccomp($price, '0', 2) === 0 ? FinanceValue::text($item['zero_price_reason'] ?? null, 500) : '';
-            $arrivalReview = self::difference($snapshot['arrival_difference'] ?? '0', $snapshot['reported_quantity'] ?? $arrival['actual_quantity'], $snapshot['difference_rule'] ?? null, $item, 'arrival_');
-            if ($arrivalReview['requires_confirmation']) {
-                $previousReview = FinancePurchaseReviews::latest($arrivalId);
-                if ($previousReview && !(bool)$previousReview['resolved']) { throw new \DomainException('本到货有未结争议或异常损耗，请先从到货差待办完成关联处理'); }
-                $arrivalReview = FinancePurchaseReviews::append($arrival, $document, $arrivalReview);
+            $previousReview = FinancePurchaseReviews::latest($arrivalId);
+            if ($previousReview && (bool)$previousReview['resolved'] && $previousReview['classification'] === 'loss') {
+                if (($item['arrival_difference_class'] ?? '') !== 'loss' || ($item['arrival_difference_confirmed'] ?? null) !== 1) { throw new \DomainException('请核对并关联原到货已确认的异常损失，不得改写为正常允差'); }
+                $arrivalReview = FinanceValue::decode($previousReview['snapshot']) + ['reviewed' => true, 'review_id' => (int)$previousReview['id']];
+                FinancePurchaseReviews::reauthorize($arrivalReview);
+            } else {
+                $arrivalReview = self::difference($snapshot['arrival_difference'] ?? '0', $snapshot['reported_quantity'] ?? $arrival['actual_quantity'], $snapshot['difference_rule'] ?? null, $item, 'arrival_');
+                if ($arrivalReview['requires_confirmation']) {
+                    if ($previousReview && !(bool)$previousReview['resolved']) { throw new \DomainException('本到货有未结争议或异常损耗，请先从到货差待办完成关联处理'); }
+                    $arrivalReview = FinancePurchaseReviews::append($arrival, $document, $arrivalReview);
+                }
             }
             $costValue = FinancePurchaseCosts::value($arrival, $covered, $lineAmount);
             $differenceRule = FinancePurchaseRuleBook::threshold($vendor, (int)$arrival['sku_id'], (int)($snapshot['category_id'] ?? 0));
@@ -84,11 +92,8 @@ final class FinancePurchaseBatches
                 'confirmed_by' => FinanceAccess::actor(), 'confirmed_at' => time()]);
             $source = '';
             if (bccomp($lineAmount, '0', 2) > 0) { $source = $ledger->createSource($id, 'payable', $vendor, $lineAmount, $arrival['business_date'], $due, $line); $created[] = $source; }
-            $cost = (new FinanceCostLedger($tenant))->recordWithinTransaction(['reference' => 'purchase-settlement:' . $id . ':' . $arrivalId, 'type' => 'reestimate',
-                'sku_id' => (int)$arrival['sku_id'], 'warehouse_id' => (int)$arrival['warehouse_id'], 'document_id' => $id,
-                'business_date' => $arrival['business_date'], 'origin' => 'purchase-arrival:' . $arrivalId, 'amount' => $costValue['known_amount'],
-                'pending' => $costValue['cost_pending'], 'snapshot' => $line]);
-            $line['payable_source'] = $source; $line['cost_changes'] = $cost['changes'];
+            $cost = FinancePurchaseCosts::recordValue($arrival, $document, $line, $costValue, 'purchase-settlement:' . $id . ':' . $arrivalId);
+            $line['payable_source'] = $source; $line['cost_changes'] = $cost['cost_changes'];
             Db::name('finance_purchase_settlement_line')->insert(['tenant_id' => $tenant, 'document_id' => $id, 'arrival_line_id' => $arrivalId,
                 'covered_quantity' => $covered, 'settlement_quantity' => $quantity, 'price' => $price, 'amount' => $lineAmount, 'payable_source' => $source,
                 'snapshot' => FinanceValue::json($line), 'create_time' => time()]);
@@ -115,7 +120,7 @@ final class FinancePurchaseBatches
     public static function reauthorize(array $result): void
     {
         foreach ($result['lines'] ?? [] as $line) {
-            if (!empty($line['arrival_review']['requires_owner']) || !empty($line['settlement_review']['requires_owner'])) { FinanceAccess::require('', true); }
+            if (!empty($line['arrival_review']['requires_owner']) || !empty($line['settlement_review']['requires_owner']) || ($line['arrival_review']['classification'] ?? '') === 'loss') { FinanceAccess::require('', true); }
             if (!empty($line['due_override_applied'])) { FinanceAccess::require('finance.purchase.due_override'); }
         }
     }

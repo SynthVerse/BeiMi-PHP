@@ -48,17 +48,7 @@ final class FinancePurchaseReturnResolutions
                 'snapshot' => ['return_line_id' => $line, 'reason' => $reason, 'source_reference' => $reference]]);
             $cost = $costLedger->destination($warehouse, $sku, 'loss', 'purchase-return-loss:' . $document['id']);
         }
-        $events = Db::name('finance_cost_event')->where('tenant_id', $tenant)->where('document_id', $document['id'])->column('id');
-        $impacts = $events ? Db::name('finance_cost_effect')->where('tenant_id', $tenant)->whereIn('event_id', $events)
-            ->field('warehouse_id,sku_id,bucket,posting_month,SUM(quantity_delta) AS quantity_delta,SUM(value_delta) AS value_delta')
-            ->group('warehouse_id,sku_id,bucket,posting_month')->order('posting_month,warehouse_id,sku_id,bucket')->select()->toArray() : [];
-        foreach ($impacts as &$impact) {
-            $impact['warehouse_id'] = (int)$impact['warehouse_id']; $impact['sku_id'] = (int)$impact['sku_id'];
-            $impact['quantity_delta'] = bcadd((string)$impact['quantity_delta'], '0', 12);
-            $impact['cost_pending'] = $cost['pending'];
-            $impact['known_value_delta'] = $impact['value_delta'] === null ? null : bcadd((string)$impact['value_delta'], '0', 6);
-            $impact['value_delta'] = $cost['pending'] ? null : $impact['known_value_delta'];
-        } unset($impact);
+        $impacts = $costLedger->documentImpacts((int)$document['id'], $cost['pending'] ? [$sku => true] : []);
         $months = array_values(array_unique(array_merge([$month], array_column($impacts, 'posting_month')))); sort($months);
         $snapshot = array_merge($basis, ['type' => 'purchase_return_resolution', 'kind' => $kind, 'return_line_id' => $line,
             'return_document_id' => (int)$returned['document_id'], 'subject_id' => $vendor,
