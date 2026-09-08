@@ -7,6 +7,7 @@ namespace app\api\jxc\logic;
 final class FinanceDocumentPolicy
 {
     public const TYPES = [
+        'salary_expense' => ['title' => '外部最终工资确认', 'prepare' => 'finance.salary.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'employee', 'sources' => [], 'direction' => 'none'],
         'employee_expense_adjustment' => ['title' => '员工垫付关联调整', 'prepare' => 'finance.reimbursement.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'employee', 'sources' => [], 'direction' => 'none'],
         'employee_expense' => ['title' => '员工实际垫付确认', 'prepare' => 'finance.reimbursement.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'employee', 'sources' => [], 'direction' => 'none'],
         'expense_recurring_correct' => ['title' => '周期费用月份关联更正', 'prepare' => 'finance.expense.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],
@@ -61,7 +62,7 @@ final class FinanceDocumentPolicy
     public static function authorize(string $type, bool $confirm = false): array
     {
         $policy = self::type($type);
-        if ($type === 'salary_payment') { FinanceAccess::require('finance.salary.view'); }
+        if (in_array($type, ['salary_payment', 'salary_expense'], true)) { FinanceAccess::require('finance.salary.view'); }
         if ($confirm) { FinanceAccess::require($policy['confirm'], $policy['owner']); }
         elseif (!FinanceAccess::has($policy['prepare']) && !($policy['confirm'] && FinanceAccess::has($policy['confirm']))) { FinanceAccess::require($policy['prepare']); }
         return $policy;
@@ -69,6 +70,7 @@ final class FinanceDocumentPolicy
 
     public static function read(string $type): array
     {
+        if (in_array($type, ['salary_expense', 'salary_payment'], true)) { FinanceAccess::require('finance.salary.view'); return self::type($type); }
         if ($type === 'sales_batch' && FinanceAccess::has('settlement.view')) { return self::type($type); }
         return self::authorize($type);
     }
