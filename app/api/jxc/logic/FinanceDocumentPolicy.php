@@ -7,6 +7,7 @@ namespace app\api\jxc\logic;
 final class FinanceDocumentPolicy
 {
     public const TYPES = [
+        'employee_expense_adjustment' => ['title' => '员工垫付关联调整', 'prepare' => 'finance.reimbursement.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'employee', 'sources' => [], 'direction' => 'none'],
         'employee_expense' => ['title' => '员工实际垫付确认', 'prepare' => 'finance.reimbursement.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'employee', 'sources' => [], 'direction' => 'none'],
         'expense_recurring_correct' => ['title' => '周期费用月份关联更正', 'prepare' => 'finance.expense.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],
         'expense_recurring_none' => ['title' => '周期费用本期不发生', 'prepare' => 'finance.expense.prepare', 'confirm' => 'finance.expense.confirm', 'owner' => false, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],

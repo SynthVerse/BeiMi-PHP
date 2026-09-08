@@ -152,7 +152,7 @@ final class FinanceExpenseAdjustments
         return $result + ['revision_id' => $revision];
     }
 
-    private static function lines(mixed $input, string $amount, array $before): array
+    public static function lines(mixed $input, string $amount, array $before): array
     {
         if (!is_array($input) || !array_is_list($input) || count($input) > 100 || (bccomp($amount, '0', 2) === 0 && $input)) { throw new \DomainException('请核对调整后的费用明细，全部取消时明细应为空'); }
         $previous = array_column($before, null, 'category_id'); $total = '0.00'; $lines = []; $seen = [];
