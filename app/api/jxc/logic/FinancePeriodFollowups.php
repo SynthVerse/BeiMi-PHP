@@ -45,8 +45,13 @@ final class FinancePeriodFollowups
             $row = Db::name('finance_document')->where('tenant_id', $tenant)->where('id', $details['document_id'])->where('status', 'confirmed')->find();
             if ($row) { $evidence[] = FinanceValue::decode($row['confirmed_result']) + ['document_id' => (int)$row['id']]; $resolved = true; }
         } elseif ($item['category'] === 'deferred_amortization') {
-            $row = Db::name('finance_deferred_amortization')->where('tenant_id', $tenant)->where('source_ref', $details['source'])->where('benefit_month', $details['month'])->find();
-            if ($row) { $evidence[] = FinanceValue::decode($row['snapshot']) + ['document_id' => (int)$row['document_id']]; $resolved = true; }
+            $row = FinanceDeferredAmortizations::months($details['source'])[$details['month']] ?? null;
+            if ($row) {
+                $resolved = $row['status'] === 'confirmed';
+                foreach (Db::name('finance_document')->where('tenant_id', $tenant)->whereIn('id', array_column($row['history'], 'document_id'))->order('id')->field('id,confirmed_result')->select()->toArray() as $record) {
+                    $evidence[] = FinanceValue::decode($record['confirmed_result']) + ['document_id' => (int)$record['id']];
+                }
+            }
         } elseif ($item['category'] === 'recurring_expense') {
             $plan = FinanceRecurringExpenses::plan((int)$details['plan_id']);
             $part = array_values(array_filter($plan['months'], static fn(array $row): bool => $row['month'] === $details['month']))[0] ?? null;

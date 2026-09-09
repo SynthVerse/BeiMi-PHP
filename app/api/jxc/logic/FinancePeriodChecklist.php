@@ -130,8 +130,8 @@ final class FinancePeriodChecklist
                 $reference = $kind . ':' . $id; $source = $ledger->source($reference);
                 foreach ($source['snapshot']['details']['schedule'] ?? [] as $part) {
                     if ($part['month'] !== $month || bccomp($part['amount'], '0', 2) === 0) { continue; }
-                    $confirmed = Db::name('finance_deferred_amortization')->where('tenant_id', $tenant)->where('source_ref', $reference)->where('benefit_month', $month)->find();
-                    if (!$confirmed) { $items[] = self::item('deferred_amortization', $reference . ':' . $month, '本月待摊计划尚未确认摊销', 'blocking',
+                    $confirmed = FinanceDeferredAmortizations::months($reference)[$month] ?? null;
+                    if (($confirmed['status'] ?? null) !== 'confirmed') { $items[] = self::item('deferred_amortization', $reference . ':' . $month, '本月待摊计划尚未确认摊销', 'blocking',
                         ['source' => $reference, 'subject_id' => $source['subject_id'], 'month' => $month, 'amount' => $part['amount'], 'route' => '/sub-finance/expense/deferred?type=deferred_amortization&subject_id=' . $source['subject_id'] . '&source=' . rawurlencode($reference)]); }
                 }
             }

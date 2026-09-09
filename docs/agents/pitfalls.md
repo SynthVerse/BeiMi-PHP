@@ -2,6 +2,27 @@
 
 按根因去重。每条记录必须指向实际防线；仅有“不要这样做”的提醒不算已防护。
 
+## PIT-0071：用最新处理结果替代完整月结调整证据链
+
+日期：2026-09-09
+
+### 报告来源
+
+- 生成原因：工作流要求
+- 主工作流：Matt Pocock
+- 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`用户级自定义 / impeccable`、`Matt Pocock / code-review`、`Matt Pocock / diagnosing-bugs`、`用户级自定义 / prevent-repeat-pitfalls`（自动调用）。
+- 说明：第71批误摊取消审查发现历史流水展示缺口；修复后返回摊销取消交付，继续未摊计划调整。
+
+- 状态：已防护；首次／最近发生：2026-09-09；复发次数：0。
+- 触发场景：旧月带未摊事项结账，后续先确认摊销、再取消，随后重新确认。
+- 根因：遗留状态与证据共用最新月份结果，只读取最后一笔单据；后续调整流水查询依据这些单据ID，较早的正反变化因此消失。
+- 错误做法：认为当前余额和状态正确就可以省略历史处理链。
+- 正确做法：状态由最新月份结果判断；证据取该来源月份完整历史链，再按这些单据读取跨期分录。原结账快照保持不变。
+- 自动防线：`FinanceBusinessWorkflowTest::test_deferred_amortization_cancellation_restores_balance_and_reconfirmation_preserves_history` 检查取消后的两份证据、再确认后的三份证据及各阶段调整单据ID全集。
+- 已验证事实：`finance-71-followup-red.log` 为1 test、46 assertions、1 failure，证据实际1份而应2份；修复后 `finance-71-php-final.log` 29 tests、1112 assertions通过，exit 0。Spec定点复审关闭本项。
+- 尚未验证：业务库迁移、原生页面与生产历史规模。
+- 后续建议：新增可反复处理的月结事项时，分别验证当前状态、有效余额和完整追溯链。
+
 ## PIT-0070：未来规则待确认沿用操作日期，误阻止历史月结账
 
 日期：2026-09-09

@@ -23,10 +23,9 @@ final class FinanceDeferredExpenses
 
     private static function present(array $source): array
     {
-        $confirmed = Db::name('finance_deferred_amortization')->where('tenant_id', FinanceAccess::tenant())->where('source_ref', $source['reference'])
-            ->column('document_id', 'benefit_month');
-        $source['schedule'] = array_map(static fn(array $row): array => $row + ['status' => isset($confirmed[$row['month']]) ? 'confirmed' : ($row['month'] > date('Y-m') ? 'future' : 'pending'),
-            'document_id' => isset($confirmed[$row['month']]) ? (int)$confirmed[$row['month']] : null], $source['snapshot']['details']['schedule'] ?? []);
+        $confirmed = FinanceDeferredAmortizations::months($source['reference']);
+        $source['schedule'] = array_map(static fn(array $row): array => $row + ['status' => $confirmed[$row['month']]['status'] ?? ($row['month'] > date('Y-m') ? 'future' : 'pending'),
+            'document_id' => $confirmed[$row['month']]['document_id'] ?? null, 'history' => $confirmed[$row['month']]['history'] ?? []], $source['snapshot']['details']['schedule'] ?? []);
         if (($source['snapshot']['type'] ?? '') === 'deferred_expense') { $source['category_remaining'] = FinanceDeferredPlans::categories($source); }
         return $source;
     }
@@ -39,9 +38,11 @@ final class FinanceDeferredExpenses
         if ($source['category'] !== 'deferred' || $source['subject_id'] !== $vendor) { throw new \DomainException('请选择本对象的合法待摊费用来源'); }
         $benefit = FinanceValue::text($data['benefit_month'] ?? null, 7); FinanceValue::date($benefit . '-01');
         if ($benefit > date('Y-m')) { throw new \DomainException('未来月份尚未受益，不能提前摊销'); }
-        if (Db::name('finance_deferred_amortization')->where('tenant_id', $tenant)->where('source_ref', $ref)->where('benefit_month', $benefit)->lock(true)->find()) {
+        $current = FinanceDeferredAmortizations::months($ref)[$benefit] ?? null;
+        if (($current['status'] ?? null) === 'confirmed') {
             throw new \DomainException('该来源本月已摊销，请查看原确认记录');
         }
+        if (FinanceValue::id($data['expected_amortization_document_id'] ?? 0, true) !== ($current['document_id'] ?? 0)) { throw new \DomainException('本月已有后续处理，请核实最新摊销记录'); }
         $schedule = $source['snapshot']['details']['schedule'] ?? [];
         $rows = array_values(array_filter($schedule, static fn(array $row): bool => $row['month'] === $benefit));
         if (count($rows) !== 1) { throw new \DomainException('所选月份没有唯一已核实的待摊计划'); }
@@ -63,8 +64,9 @@ final class FinanceDeferredExpenses
             $ledger->add($id, 'expense', $vendor, $line['amount'], $date, $posting, 'deferred_amortization', $ref, null, $line + ['benefit_month' => $benefit]);
             Db::name('finance_expense_category')->where('tenant_id', $tenant)->where('id', $line['category_id'])->update(['used_at' => time()]);
         }
-        Db::name('finance_deferred_amortization')->insert(['tenant_id' => $tenant, 'document_id' => $id, 'source_ref' => $ref,
-            'benefit_month' => $benefit, 'amount' => $amount, 'snapshot' => FinanceValue::json($result), 'create_time' => time()]);
+        if ($current) { FinanceDeferredAmortizations::append($document, $result, $current['document_id'], 'confirmed'); }
+        else { Db::name('finance_deferred_amortization')->insert(['tenant_id' => $tenant, 'document_id' => $id, 'source_ref' => $ref,
+            'benefit_month' => $benefit, 'amount' => $amount, 'snapshot' => FinanceValue::json($result), 'create_time' => time()]); }
         return $result;
     }
 }

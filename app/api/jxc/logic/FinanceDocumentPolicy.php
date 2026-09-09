@@ -40,6 +40,7 @@ final class FinanceDocumentPolicy
         'expense_estimate_final' => ['title' => '费用暂估分项核实', 'prepare' => 'finance.expense.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],
         'deferred_expense' => ['title' => '新待摊费用计划确认', 'prepare' => 'finance.expense.prepare', 'confirm' => 'finance.expense.confirm', 'owner' => false, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],
         'deferred_amortization' => ['title' => '待摊费用逐月确认', 'prepare' => 'finance.expense.prepare', 'confirm' => 'finance.expense.confirm', 'owner' => false, 'subject' => 'vendor', 'sources' => ['deferred'], 'direction' => 'none'],
+        'deferred_amortization_cancel' => ['title' => '误摊费用退回待核实', 'prepare' => 'finance.expense.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => ['deferred'], 'direction' => 'none'],
         'expense_adjustment' => ['title' => '普通费用关联调整', 'prepare' => 'finance.expense.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],
         'expense' => ['title' => '普通费用确认', 'prepare' => 'finance.expense.prepare', 'confirm' => 'finance.expense.confirm', 'owner' => false, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],
         'expense_category' => ['title' => '费用二级类别维护', 'prepare' => '', 'confirm' => '', 'owner' => true, 'subject' => 'none', 'sources' => [], 'direction' => 'none'],

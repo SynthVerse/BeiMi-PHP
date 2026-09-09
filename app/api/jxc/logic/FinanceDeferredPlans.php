@@ -13,9 +13,9 @@ final class FinanceDeferredPlans
     {
         $categories = array_column($source['snapshot']['lines'], null, 'category_id');
         foreach ($categories as &$category) { $category['remaining'] = $category['amount']; } unset($category);
-        $used = Db::name('finance_deferred_amortization')->where('tenant_id', FinanceAccess::tenant())->where('source_ref', $source['reference'])->column('snapshot');
-        foreach ($used as $snapshot) {
-            foreach (FinanceValue::decode($snapshot)['lines'] as $line) {
+        foreach (FinanceDeferredAmortizations::months($source['reference']) as $month) {
+            if ($month['status'] !== 'confirmed') { continue; }
+            foreach ($month['result']['lines'] as $line) {
                 $category = &$categories[$line['category_id']]; $category['remaining'] = bcsub($category['remaining'], $line['amount'], 2); unset($category);
             }
         }
