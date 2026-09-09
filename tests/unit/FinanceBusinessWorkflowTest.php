@@ -72,6 +72,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260909_000049_finance_customer_return.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260909_000050_finance_recurring_plan_change.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260909_000051_finance_deferred_amortization_revision.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260909_000052_finance_deferred_plan_revision.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -85,6 +86,60 @@ final class FinanceBusinessWorkflowTest extends TestCase
     public static function deferredClosureCases(): array { return [[false], [true]]; }
 
     public static function customerRefundSaleCases(): array { return [[false], [true]]; }
+
+    public function test_deferred_plan_adjustment_preserves_recognized_months_and_turns_paid_reduction_into_refund(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01'); $next = date('Y-m');
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '待摊合同调整服务方']);
+        $category = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_category', 'payload' => ['category_id' => 0, 'expected_category_version' => 0, 'parent' => 'premises', 'name' => '调整租金', 'is_enabled' => 1]]); self::assertNotFalse($category, FinanceBusinessLogic::getError());
+        $lines = [['category_id' => $category['confirmed_result']['category']['id'], 'expected_category_version' => 1, 'amount' => '3000.00', 'reason' => '两月租金']];
+        $input = ['subject_id' => $vendor, 'actual_date' => date('Y-m-d'), 'amount' => '3000', 'source_reference' => 'DEFERRED-72', 'due_mode' => 'unspecified', 'due_date' => null,
+            'reason' => '原合同义务', 'material_status' => 'missing', 'material_verified' => 1, 'missing_material_reason' => '已核实合同', 'plan_verified' => 1,
+            'service_start' => $month, 'service_end' => $next, 'schedule' => [['month' => $month, 'amount' => '1000'], ['month' => $next, 'amount' => '2000']], 'lines' => $lines];
+        $original = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'deferred_expense', 'payload' => $input]); self::assertNotFalse($original, FinanceBusinessLogic::getError());
+        $source = $original['confirmed_result']['deferred_source']; $payable = $original['confirmed_result']['created_sources'][0]; $ledger = new FinanceLedger(self::TENANT_ID);
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'supplier_payment', 'payload' => ['subject_id' => $vendor, 'account_id' => $this->accountId, 'amount' => '2500', 'actual_date' => date('Y-m-d'), 'reason' => '已付大部租金', 'allocations' => [['source' => $payable, 'amount' => '2500']]]]), FinanceBusinessLogic::getError());
+        $monthlyLines = $lines; $monthlyLines[0]['amount'] = '1000';
+        $check = \app\api\jxc\logic\FinancePeriodChecklist::collect($ledger, ['month' => $month]);
+        $periodSnapshot = json_encode(['unresolved' => array_values(array_filter($check['items'], static fn(array $item): bool => $item['category'] === 'deferred_amortization'))]);
+        Db::name('finance_period')->insert(['tenant_id' => self::TENANT_ID, 'month' => $month, 'status' => 'closed_estimated', 'snapshot' => $periodSnapshot, 'closed_by' => '{}', 'closed_at' => time()]);
+        $amortized = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'deferred_amortization', 'payload' => ['subject_id' => $vendor, 'source' => $source,
+            'benefit_month' => $month, 'amortization_verified' => 1, 'reason' => '本月确已受益', 'lines' => $monthlyLines]]); self::assertNotFalse($amortized, FinanceBusinessLogic::getError());
+        $lines[0]['amount'] = '1800';
+        $adjust = ['subject_id' => $vendor, 'source' => $source, 'expected_deferred_revision' => 0, 'new_amount' => '1800', 'plan_verified' => 1, 'reason' => '后续服务缩减已核实',
+            'service_start' => $month, 'service_end' => $next, 'schedule' => [['month' => $month, 'amount' => '1000'], ['month' => $next, 'amount' => '800']], 'lines' => $lines];
+        foreach ([['plan_verified' => 0], ['subject_id' => $vendor + 999999], ['expected_deferred_revision' => 99], ['new_amount' => '0', 'schedule' => [], 'lines' => []],
+            ['schedule' => [['month' => $month, 'amount' => '900'], ['month' => $next, 'amount' => '900']]]] as $invalid) {
+            self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'deferred_plan_adjustment', 'payload' => array_replace($adjust, $invalid)]));
+        }
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($this->command(0) + ['action' => 'record', 'type' => 'deferred_plan_adjustment', 'payload' => $adjust]);
+        self::assertSame([], $preview['impacts']); self::assertSame('800.00', $preview['expense']['after_balance']); self::assertSame('2000.00', $ledger->source($source)['balance']);
+        $employee = WorkforceLogic::saveEmployee(['name' => '待摊调整经办', 'mobile' => '13800009972', 'bind_user_id' => 996972, 'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['finance.expense.prepare']]); self::assertNotFalse($employee, WorkforceLogic::getError());
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996972; request()->adminId = 0;
+        $draft = FinanceBusinessLogic::action('prepare', $this->command(0) + ['type' => 'deferred_plan_adjustment', 'payload' => $adjust]); self::assertNotFalse($draft, FinanceBusinessLogic::getError());
+        self::assertFalse(FinanceBusinessLogic::action('confirm', $this->command($draft['version']) + ['id' => $draft['id']])); $this->prepareCustomerReportRequestContext();
+        $changed = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'deferred_plan_adjustment', 'payload' => $adjust]); self::assertNotFalse($changed, FinanceBusinessLogic::getError());
+        self::assertSame('800.00', $ledger->source($source)['balance']); self::assertSame('0.00', $ledger->source($payable)['balance']);
+        self::assertSame('2500.00', $ledger->account($this->accountId)['balance']);
+        $refunds = $ledger->sources('expense_refund', $vendor); self::assertCount(1, $refunds); self::assertSame('700.00', $refunds[0]['balance']);
+        self::assertSame(0, Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('document_id', $changed['id'])->whereIn('metric', ['cash', 'expense'])->count());
+        $current = FinanceBusinessLogic::options(['type' => 'deferred_amortization', 'subject_id' => $vendor, 'source' => $source])['selected_deferred'];
+        self::assertSame(['1000.00', '800.00'], array_column($current['schedule'], 'amount')); self::assertSame('confirmed', $current['schedule'][0]['status']);
+        self::assertSame($original['confirmed_result'], FinanceBusinessLogic::detail(['id' => $original['id']])['confirmed_result']);
+        self::assertSame($amortized['confirmed_result'], FinanceBusinessLogic::detail(['id' => $amortized['id']])['confirmed_result']);
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'deferred_plan_adjustment', 'payload' => $adjust]));
+        $cancelled = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'deferred_amortization_cancel', 'payload' => ['subject_id' => $vendor, 'source' => $source,
+            'benefit_month' => $month, 'expected_amortization_document_id' => $amortized['id'], 'cancellation_verified' => 1, 'reason' => '已核实原摊销也不发生']]); self::assertNotFalse($cancelled, FinanceBusinessLogic::getError());
+        $adjust = array_replace($adjust, ['expected_deferred_revision' => $changed['confirmed_result']['revision_id'], 'new_amount' => '0', 'schedule' => [], 'lines' => []]);
+        $zero = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'deferred_plan_adjustment', 'payload' => $adjust]); self::assertNotFalse($zero, FinanceBusinessLogic::getError());
+        self::assertSame('0.00', $ledger->source($source)['balance']); self::assertSame('2500.00', $ledger->categoryBalance('expense_refund', $vendor));
+        self::assertSame([], FinanceBusinessLogic::options(['type' => 'deferred_amortization', 'subject_id' => $vendor, 'source' => $source])['selected_deferred']['schedule']);
+        $followup = \app\api\jxc\logic\FinancePeriodFollowups::read($month)['items'][0]['current'];
+        self::assertSame('resolved', $followup['status'], '旧月未摊事项由已确认计划取消解决');
+        self::assertContains($zero['id'], array_column($followup['evidence'], 'document_id'));
+        self::assertContains($zero['id'], array_map('intval', array_column($followup['adjustments'], 'document_id')));
+        $this->prepareCustomerReportRequestContext(self::OTHER_TENANT_ID); self::assertFalse(FinanceBusinessLogic::options(['type' => 'deferred_plan_adjustment', 'subject_id' => $vendor, 'source' => $source])); $this->prepareCustomerReportRequestContext();
+    }
 
     public function test_deferred_amortization_cancellation_restores_balance_and_reconfirmation_preserves_history(): void
     {
@@ -5821,6 +5876,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
     private function clean(): void
     {
+        Db::name('finance_deferred_plan_revision')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_deferred_amortization_revision')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_recurring_plan_change')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_transit_reconciliation')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();

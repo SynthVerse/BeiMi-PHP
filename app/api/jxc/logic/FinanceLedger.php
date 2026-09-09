@@ -43,11 +43,11 @@ final class FinanceLedger
         $originalDue = $opening ? ($snapshot['due_date'] ?? null) : $row['due_date'];
         $revision = $row['category'] === 'advance' ? (FinanceAdvanceRevisions::latest($this->tenantId, [$reference])[$reference] ?? null) : null;
         $originalDate = $opening ? ($snapshot['historical_date'] ?? null) : $row['business_date'];
-        return ['reference' => $reference, 'category' => $row['category'], 'subject_id' => (int)$row['subject_id'],
+        return FinanceDeferredPlanChanges::project($this->tenantId, ['reference' => $reference, 'category' => $row['category'], 'subject_id' => (int)$row['subject_id'],
             'subject_name' => $snapshot['subject_name'] ?? '', 'confirmed_amount' => $revision['new_amount'] ?? $row['amount'], 'original_amount' => $row['amount'],
             'balance' => bcadd($row['amount'], $change, 2), 'business_date' => $revision['new_business_date'] ?? $originalDate, 'original_business_date' => $originalDate, 'advance_revision' => (int)($revision['id'] ?? 0),
             'due_date' => $due ? $due['new_due_date'] : $originalDue, 'original_due_date' => $originalDue, 'due_revision' => (int)($due['id'] ?? 0), 'snapshot' => $snapshot,
-            'document_id' => $opening ? null : (int)$row['document_id']];
+            'document_id' => $opening ? null : (int)$row['document_id']]);
     }
 
     public function sources(string $category, int $subjectId = 0): array
@@ -98,6 +98,7 @@ final class FinanceLedger
             $row['original_due_date'] = $row['due_date']; $row['due_revision'] = (int)($dueDates[$row['reference']]['id'] ?? 0);
             if ($row['due_revision']) { $row['due_date'] = $dueDates[$row['reference']]['new_due_date']; }
             unset($row['source_kind'], $row['source_id']);
+            $row = FinanceDeferredPlanChanges::project($this->tenantId, $row);
         }
         return ['sources' => $rows, 'has_more' => $more];
     }

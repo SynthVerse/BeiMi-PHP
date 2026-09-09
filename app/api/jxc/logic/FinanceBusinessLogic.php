@@ -209,7 +209,7 @@ final class FinanceBusinessLogic extends BaseLogic
                 'employee_expense_adjustment' => FinanceEmployeeExpenses::options($subjectId, $params),
                 'employee_expense' => !empty($params['original_expense_document_id']) ? FinanceEmployeeExpenses::outstanding(FinanceValue::id($params['original_expense_document_id'])) : FinanceExpenseCategories::options(),
                 'expense_recurring_plan', 'expense_recurring_plan_change', 'expense_recurring_none', 'expense_recurring_correct' => FinanceRecurringExpenses::options($subjectId, $params),
-                'deferred_amortization', 'deferred_amortization_cancel' => FinanceDeferredExpenses::options($ledger, $subjectId, $params),
+                'deferred_amortization', 'deferred_amortization_cancel', 'deferred_plan_adjustment' => FinanceDeferredExpenses::options($ledger, $subjectId, $params),
                 'deferred_expense' => FinanceExpenseCategories::options(),
                 'expense_adjustment', 'expense_estimate_final' => FinanceExpenseAdjustments::options($subjectId, $params),
                 'expense' => !empty($params['original_expense_document_id']) ? FinanceExpenseAdjustments::outstanding(FinanceValue::id($params['original_expense_document_id'])) : FinanceExpenseCategories::options(),
@@ -258,7 +258,7 @@ final class FinanceBusinessLogic extends BaseLogic
             }
             if (!empty($params['source']) && $type !== 'receipt_return') {
                 $selected = $ledger->source(FinanceValue::text($params['source'], 40));
-                if (!in_array($selected['category'], $categories, true) || $selected['subject_id'] !== $subjectId || (!in_array($type, ['deferred_amortization', 'deferred_amortization_cancel'], true) && bccomp($selected['balance'], '0', 2) <= 0)) { throw new \DomainException('指定来源已结清或不属于本对象和业务类型'); }
+                if (!in_array($selected['category'], $categories, true) || $selected['subject_id'] !== $subjectId || (!in_array($type, ['deferred_amortization', 'deferred_amortization_cancel', 'deferred_plan_adjustment'], true) && bccomp($selected['balance'], '0', 2) <= 0)) { throw new \DomainException('指定来源已结清或不属于本对象和业务类型'); }
                 $sources['selected_source'] = $selected;
             }
             if (in_array($type, ['customer_return_actual', 'customer_refund'], true) && !empty($params['return_document_id'])) {

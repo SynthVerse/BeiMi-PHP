@@ -52,6 +52,13 @@ final class FinancePeriodFollowups
                     $evidence[] = FinanceValue::decode($record['confirmed_result']) + ['document_id' => (int)$record['id']];
                 }
             }
+            $plans = self::records('finance_deferred_plan_revision', 'source_ref', $details['source']);
+            if ($plans) {
+                $evidence = array_merge($evidence, $plans);
+                $latest = $plans[count($plans) - 1];
+                $planned = array_filter($latest['plan']['details']['schedule'], static fn(array $part): bool => $part['month'] === $details['month']);
+                if (!$planned) { $resolved = true; }
+            }
         } elseif ($item['category'] === 'recurring_expense') {
             $plan = FinanceRecurringExpenses::plan((int)$details['plan_id']);
             $part = array_values(array_filter($plan['months'], static fn(array $row): bool => $row['month'] === $details['month']))[0] ?? null;

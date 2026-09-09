@@ -36,6 +36,7 @@ final class FinanceDeferredExpenses
         $vendor = FinanceValue::id($data['subject_id'] ?? null); $ref = FinanceValue::text($data['source'] ?? null, 40);
         $source = $ledger->source($ref);
         if ($source['category'] !== 'deferred' || $source['subject_id'] !== $vendor) { throw new \DomainException('请选择本对象的合法待摊费用来源'); }
+        if (FinanceValue::id($data['expected_deferred_revision'] ?? 0, true) !== $source['expected_deferred_revision']) { throw new \DomainException('待摊计划已有调整，请核对最新逐月金额'); }
         $benefit = FinanceValue::text($data['benefit_month'] ?? null, 7); FinanceValue::date($benefit . '-01');
         if ($benefit > date('Y-m')) { throw new \DomainException('未来月份尚未受益，不能提前摊销'); }
         $current = FinanceDeferredAmortizations::months($ref)[$benefit] ?? null;
