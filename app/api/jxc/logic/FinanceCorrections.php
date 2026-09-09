@@ -14,7 +14,6 @@ final class FinanceCorrections
     public function replace(array $original, array $replacement, string $reason, int $duplicateOf = 0, bool $reverseOnly = false): array
     {
         $policy = FinanceDocumentPolicy::authorize($original['type'], true);
-        if ($original['type'] === 'customer_return_actual') { throw new \DomainException('实际退回必须保留原验收与成本，请通过关联实物更正处理'); }
         if (str_starts_with($original['type'], 'inventory_count')) { throw new \DomainException('盘点快照与确认事实必须保留，请关联取消或反向调整，不能覆盖历史'); }
         if ($original['type'] === 'transit_reconcile') { throw new \DomainException('在途核对须追加新的核实结论，不能覆盖或撤销原历史'); }
         if ($original['type'] === 'account_reconcile') { throw new \DomainException('月末核对须按最新历史追加核对记录，不能覆盖或撤销原核对'); }
@@ -49,6 +48,7 @@ final class FinanceCorrections
         $reason = FinanceValue::text($reason, 1000);
         $originalResult = FinanceValue::decode($original['confirmed_result']);
         if (!empty($originalResult['duplicate_of']) || !empty($originalResult['reversal_of'])) { throw new \DomainException('反向凭据不是原业务，不能再次冲销或替代'); }
+        if ($original['type'] === 'customer_return_actual') { return FinanceCustomerReturnCorrections::replace($this->ledger, $original, $replacement, $reason, $duplicateOf, $reverseOnly); }
         if ($duplicateOf) { $this->validateDuplicate($original, $originalResult, $duplicateOf); }
         $preservedAdvance = $original['type'] === 'receipt' && !$duplicateOf ? FinanceAdvanceRevisions::preserve($this->ledger, $original, FinanceValue::decode($replacement['payload'])) : null;
         if ($preservedAdvance) { $preservedAdvance['revision_reason'] = $reason; }

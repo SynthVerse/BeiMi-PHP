@@ -74,11 +74,14 @@ final class FinanceCustomerReturns
         if (bccomp($flowQuantity, $actual, 4) < 0) { $actual = $flowQuantity; }
         if (bccomp($actual, '0', 4) < 0) { throw new \DomainException('原销售实物数量异常，请先核对'); }
         $records = Db::name('finance_customer_return')->where('tenant_id', $tenant)->where('sales_order_id', $orderId)->where('sku_id', $sku)->order('id')->lock(true)->select()->toArray();
+        $replaced = $records ? array_fill_keys(Db::name('finance_correction')->where('tenant_id', $tenant)->whereIn('original_document_id', array_column($records, 'document_id'))->column('original_document_id'), true) : [];
         $legacy = self::legacyReturns($orderId, $sku); $returned = $legacy['total']; $latest = 0;
         $preActual = bccomp($actual, $preCutoff, 4) < 0 ? $actual : $preCutoff;
         $periods = ['pre_cutoff' => ['actual_quantity' => bcadd($preActual, '0', 4), 'returned_quantity' => $legacy['pre_cutoff']],
             'current' => ['actual_quantity' => bcsub($actual, $preActual, 4), 'returned_quantity' => $legacy['current']]];
         foreach ($records as $record) {
+            $latest = (int)$record['id'];
+            if (isset($replaced[$record['document_id']])) { continue; }
             $fact = FinanceValue::decode($record['snapshot']); $scope = ($fact['cost_basis'] ?? '') === 'pre_cutoff' ? 'pre_cutoff' : 'current';
             $returned = bcadd($returned, $record['quantity'], 4); $latest = (int)$record['id'];
             $periods[$scope]['returned_quantity'] = bcadd($periods[$scope]['returned_quantity'], $record['quantity'], 4);
@@ -135,7 +138,8 @@ final class FinanceCustomerReturns
         if (!FinanceIntegration::active()) { return; }
         $deltas = []; foreach ($corrections as $line) { $deltas[$line['sku_id']] = bcadd($deltas[$line['sku_id']] ?? '0', $line['actual_delivery_delta'], 4); }
         foreach ($deltas as $sku => $delta) {
-            $returned = bcadd(self::legacyReturns((int)$order['id'], (int)$sku)['total'], (string)Db::name('finance_customer_return')->where('tenant_id', FinanceAccess::tenant())->where('sales_order_id', $order['id'])->where('sku_id', $sku)->sum('quantity'), 4);
+            $replaced = Db::name('finance_correction')->where('tenant_id', FinanceAccess::tenant())->field('original_document_id')->buildSql();
+            $returned = bcadd(self::legacyReturns((int)$order['id'], (int)$sku)['total'], (string)Db::name('finance_customer_return')->where('tenant_id', FinanceAccess::tenant())->where('sales_order_id', $order['id'])->where('sku_id', $sku)->whereRaw('document_id NOT IN ' . $replaced)->sum('quantity'), 4);
             $actual = (string)Db::name('order_goods')->where('tenant_id', FinanceAccess::tenant())->where('order_id', $order['id'])->where('order_type', 'sales')->where('sku_id', $sku)->sum('base_quantity');
             if (bccomp(bcadd($actual, $delta, 4), $returned, 4) < 0) { throw new \DomainException('原销售实重不能低于已实际退回数量，请先核对退货及关联实物更正'); }
             if (bccomp($returned, '0', 4) > 0 && bccomp($delta, '0', 4) < 0) {

@@ -14,6 +14,9 @@ final class FinanceLegacyReturnCosts
         $page = FinanceValue::id($params['page'] ?? 1);
         $query = Db::name('finance_cost_event')->where('tenant_id', FinanceAccess::tenant())->where('event_type', 'receive')
             ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(snapshot,'$.snapshot.cost_basis_pending')) = 'pre_cutoff_sales_return'");
+        $voids = Db::name('finance_cost_event')->where('tenant_id', FinanceAccess::tenant())->where('event_type', 'customer_return_void')
+            ->field("JSON_UNQUOTE(JSON_EXTRACT(snapshot,'$.return_reference'))")->buildSql();
+        $query->whereRaw('reference NOT IN ' . $voids);
         if (!empty($params['stock_flow_id'])) { $query->where('reference', 'stock:' . FinanceValue::id($params['stock_flow_id'])); }
         $rows = $query->order('id desc')->limit(($page - 1) * 20, 21)->select()->toArray(); $sources = [];
         foreach (array_slice($rows, 0, 20) as $row) {
@@ -30,6 +33,7 @@ final class FinanceLegacyReturnCosts
         $event = $row ? FinanceValue::decode($row['snapshot']) : [];
         $customerReturn = false;
         if (($event['snapshot']['order_type'] ?? '') === 'finance_customer_return') {
+            FinanceCustomerReturnCorrections::assertCurrent((int)$row['document_id']);
             $document = Db::name('finance_document')->where('tenant_id', $tenant)->where('id', $row['document_id'])->where('type', 'customer_return_actual')->where('status', 'confirmed')->lock($lock)->find();
             $record = Db::name('finance_customer_return')->where('tenant_id', $tenant)->where('document_id', $row['document_id'])->where('sku_id', $row['sku_id'])->where('warehouse_id', $event['warehouse_id'])->lock($lock)->find();
             $fact = $record ? FinanceValue::decode($record['snapshot']) : [];

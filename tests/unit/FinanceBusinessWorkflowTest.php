@@ -84,6 +84,48 @@ final class FinanceBusinessWorkflowTest extends TestCase
 
     public static function customerRefundSaleCases(): array { return [[false], [true]]; }
 
+    /** @dataProvider customerRefundSaleCases */
+    public function test_customer_actual_return_correction_replaces_physical_fact_atomically_without_credit_or_cash(bool $moveWarehouse): void
+    {
+        $this->activate(); $warehouse = $this->createCustomerReportWarehouse('退回更正仓'); $targetWarehouse = $moveWarehouse ? $this->createCustomerReportWarehouse('录错退回仓') : $warehouse;
+        $goods = $this->createCustomerReportGoods('退回更正商品', 'RETURN-CORRECT', '斤'); $sku = $this->customerReportSkuId($goods);
+        $unit = $this->createCustomerReportUnit('斤'); Db::name('goods')->where('id', $goods)->update(['unit_id' => $unit]);
+        Db::name('goods_sku')->where('id', $sku)->update(['base_unit_id' => $unit, 'base_unit_name' => '斤']);
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '退回更正供方']);
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival', 'payload' => ['subject_id' => $vendor,
+            'warehouse_id' => $warehouse, 'actual_date' => date('Y-m-d'), 'source_reference' => 'RETURN-CORRECT-STOCK', 'reason' => '核对原库存',
+            'lines' => [['sku_id' => $sku, 'actual_quantity' => '100', 'agreed_price' => '2']]]]), FinanceBusinessLogic::getError());
+        $sale = $this->deliveredSale(null, ['warehouse' => $warehouse, 'goods' => $goods, 'quantity' => '10', 'unit_id' => $unit]);
+        $query = ['type' => 'customer_return_actual', 'subject_id' => $this->customerId, 'original_sales_order_id' => $sale['order_id'], 'sku_id' => $sku];
+        $source = FinanceBusinessLogic::options($query)['selected_sale'];
+        $input = array_intersect_key($source, array_flip(['subject_id', 'original_sales_order_id', 'sku_id', 'expected_return_id', 'expected_sales_version', 'expected_cost_event_id', 'delivery_period']))
+            + ['warehouse_id' => $targetWarehouse, 'actual_date' => date('Y-m-d'), 'quantity' => '4', 'received_verified' => 1, 'source_reference' => 'RETURN-CORRECT-RECEIPT', 'reason' => '录入退回四斤'];
+        $original = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'customer_return_actual', 'payload' => $input]); self::assertNotFalse($original, FinanceBusinessLogic::getError());
+        $source = FinanceBusinessLogic::options($query)['selected_sale'];
+        $replacement = array_replace($input, array_intersect_key($source, array_flip(['expected_return_id', 'expected_sales_version', 'expected_cost_event_id'])), ['warehouse_id' => $warehouse, 'quantity' => '2', 'reason' => '复核实际仅退回两斤']);
+        $command = $this->command($original['version']) + ['id' => $original['id'], 'correction_reason' => '原实物验收数量录错', 'payload' => $replacement];
+        $entries = Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->count();
+        $invalid = $command; $invalid['idempotency_key'] = $this->command(0)['idempotency_key']; $invalid['payload']['quantity'] = '11';
+        self::assertFalse(FinanceBusinessLogic::action('correct', $invalid));
+        self::assertSame($moveWarehouse ? '4.0000' : '94.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($targetWarehouse, $sku));
+        self::assertSame(0, Db::name('finance_correction')->where('tenant_id', self::TENANT_ID)->where('original_document_id', $original['id'])->count());
+        $corrected = FinanceBusinessLogic::action('correct', $command); self::assertNotFalse($corrected, FinanceBusinessLogic::getError());
+        self::assertSame('92.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $sku));
+        if ($moveWarehouse) { self::assertSame('0.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($targetWarehouse, $sku)); }
+        $cost = new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID);
+        self::assertSame('184.000000', $cost->balance($warehouse, $sku)['value']);
+        self::assertSame('16.000000', $cost->destination($warehouse, $sku, 'sale', 'sales_order:' . $sale['order_id'])['known_cost']);
+        self::assertSame('2.0000', FinanceBusinessLogic::options($query)['selected_sale']['returned_quantity']);
+        self::assertSame($entries, Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame($original['confirmed_result'], \app\api\jxc\logic\FinanceValue::decode(Db::name('finance_document')->where('tenant_id', self::TENANT_ID)->where('id', $original['id'])->value('confirmed_result')));
+        self::assertSame($corrected['id'], FinanceBusinessLogic::action('correct', $command)['id']);
+        $reversed = FinanceBusinessLogic::action('reverse', $this->command($corrected['version']) + ['id' => $corrected['id'], 'correction_reason' => '复核没有实际返回，撤销错误验收']); self::assertNotFalse($reversed, FinanceBusinessLogic::getError());
+        self::assertSame('90.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $sku));
+        self::assertSame('180.000000', $cost->balance($warehouse, $sku)['value']);
+        self::assertSame('0.0000', FinanceBusinessLogic::options($query)['selected_sale']['returned_quantity']);
+        self::assertSame($corrected['id'], $reversed['confirmed_result']['reversal_of']);
+    }
+
     public function test_unknown_date_customer_credit_keeps_effective_date_unknown_and_limits_staff_foreign_and_excess_allocations(): void
     {
         $activation = date('Y-m-01', strtotime('first day of last month')); $this->activate('cash', $activation);
@@ -189,6 +231,12 @@ final class FinanceBusinessWorkflowTest extends TestCase
             'reason' => '已实际退还本次退货款', 'return_document_id' => $returned['id'], 'return_link_verified' => 0];
         self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'customer_refund', 'payload' => $payload]));
         $payload['return_link_verified'] = 1;
+        $voidSource = FinanceBusinessLogic::options(['type' => 'customer_return_actual', 'subject_id' => $this->customerId, 'original_sales_order_id' => $sale['order_id'], 'sku_id' => $sku])['selected_sale'];
+        $voidReturn = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'customer_return_actual', 'payload' => array_replace($voidSource, ['warehouse_id' => $warehouse,
+            'actual_date' => date('Y-m-d'), 'quantity' => '1', 'received_verified' => 1, 'source_reference' => 'RETURN-REFUND-VOID', 'reason' => '待复核的验收录入'])]); self::assertNotFalse($voidReturn, FinanceBusinessLogic::getError());
+        $pendingRefund = FinanceBusinessLogic::action('prepare', $this->command(0) + ['type' => 'customer_refund', 'payload' => array_replace($payload, ['return_document_id' => $voidReturn['id']])]); self::assertNotFalse($pendingRefund, FinanceBusinessLogic::getError());
+        self::assertNotFalse(FinanceBusinessLogic::action('reverse', $this->command($voidReturn['version']) + ['id' => $voidReturn['id'], 'correction_reason' => '复核未实际返回，撤销错误验收']), FinanceBusinessLogic::getError());
+        self::assertFalse(FinanceBusinessLogic::action('confirm', $this->command($pendingRefund['version']) + ['id' => $pendingRefund['id']]), '退款草稿不能继续绑定已撤销验收');
         self::assertFalse(FinanceBusinessLogic::options(['type' => 'customer_refund', 'subject_id' => $this->createCustomer('不相关客户'), 'return_document_id' => $returned['id']]));
         $unrelated = (new FinanceLedger(self::TENANT_ID))->createSource((int)$credit['document_id'], 'customer_refund', $this->customerId, '200', date('Y-m-d'), null, ['sales_order_id' => $sale['order_id'] + 100000]);
         self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'customer_refund', 'payload' => array_replace($payload, ['allocations' => [['source' => $unrelated, 'amount' => '200']]])]));
@@ -388,6 +436,10 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $source = FinanceBusinessLogic::options(['type' => 'customer_return_actual', 'subject_id' => $this->customerId, 'original_sales_order_id' => $sale['order_id'], 'sku_id' => $sku]); self::assertNotFalse($source, FinanceBusinessLogic::getError());
         $returned = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'customer_return_actual', 'payload' => array_replace($source['selected_sale'], ['warehouse_id' => $warehouse,
             'actual_date' => date('Y-m-d'), 'quantity' => '4', 'received_verified' => 1, 'source_reference' => 'RETURN-COUNT-ACCEPT', 'reason' => '补录截止前真实验收'])]); self::assertNotFalse($returned, FinanceBusinessLogic::getError());
+        $voidSource = FinanceBusinessLogic::options(['type' => 'customer_return_actual', 'subject_id' => $this->customerId, 'original_sales_order_id' => $sale['order_id'], 'sku_id' => $sku])['selected_sale'];
+        $voidReturn = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'customer_return_actual', 'payload' => array_replace($voidSource, ['warehouse_id' => $warehouse,
+            'actual_date' => date('Y-m-d'), 'quantity' => '1', 'received_verified' => 1, 'source_reference' => 'RETURN-COUNT-VOID', 'reason' => '重复补录验收'])]); self::assertNotFalse($voidReturn, FinanceBusinessLogic::getError());
+        self::assertNotFalse(FinanceBusinessLogic::action('reverse', $this->command($voidReturn['version']) + ['id' => $voidReturn['id'], 'correction_reason' => '撤销重复实物验收']), FinanceBusinessLogic::getError());
         $options = FinanceBusinessLogic::options(['type' => 'inventory_count_correction', 'count_result_document_id' => $confirmed['id'], 'sku_id' => $sku]); self::assertNotFalse($options, FinanceBusinessLogic::getError());
         self::assertCount(1, $options['business_choices']); self::assertSame('omitted_return', $options['business_choices'][0]['reason_kind']);
         $source = $options['selected_difference'];
@@ -395,14 +447,15 @@ final class FinanceBusinessWorkflowTest extends TestCase
             'stock_flow_id' => $returned['confirmed_result']['stock_flow_id'], 'quantity' => '4', 'expected_correction_id' => $source['expected_correction_id'], 'expected_cost_event_id' => $source['expected_cost_event_id'],
             'reason_kind' => 'omitted_return', 'occurred_before_cutoff' => 1, 'reason' => '反向重复盘盈四单位']]); self::assertNotFalse($linked, FinanceBusinessLogic::getError());
         self::assertSame($returned['id'], $linked['confirmed_result']['real_business']['document_id']);
+        self::assertFalse(FinanceBusinessLogic::action('reverse', $this->command($returned['version']) + ['id' => $returned['id'], 'correction_reason' => '已有盘点关联时不能直接撤销']));
         self::assertSame('94.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $sku));
         self::assertSame('188.000000', (new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID))->balance($warehouse, $sku)['value']);
     }
 
     public function test_pre_cutoff_customer_sale_returns_with_unknown_original_cost_then_verifies_without_new_stock(): void
     {
-        $this->activate(); $warehouse = $this->createCustomerReportWarehouse('截点前销售退回仓'); $goods = $this->createCustomerReportGoods('旧售退回商品', 'RETURN-PRE-CUTOFF', '斤'); $sku = $this->customerReportSkuId($goods);
-        $before = strtotime('last day of last month 12:00:00');
+        $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01'); $warehouse = $this->createCustomerReportWarehouse('截点前销售退回仓'); $goods = $this->createCustomerReportGoods('旧售退回商品', 'RETURN-PRE-CUTOFF', '斤'); $sku = $this->customerReportSkuId($goods);
+        $before = strtotime($month . '-01') - 43200;
         $order = (int)Db::name('sales_order')->insertGetId(['tenant_id' => self::TENANT_ID, 'customer_id' => $this->customerId, 'warehouse_id' => $warehouse,
             'order_sn' => 'PRE-CUTOFF-SALE', 'datetimesingle' => $before, 'create_time' => $before]);
         Db::name('order_goods')->insert(['tenant_id' => self::TENANT_ID, 'order_id' => $order, 'order_type' => 'sales', 'goods_id' => $goods, 'sku_id' => $sku, 'name' => '旧售退回商品', 'units' => '斤', 'number' => '5', 'base_quantity' => '5']);
@@ -410,14 +463,25 @@ final class FinanceBusinessWorkflowTest extends TestCase
             'flow_type' => 2, 'quantity' => '5', 'create_time' => $before]);
         $source = FinanceBusinessLogic::options(['type' => 'customer_return_actual', 'subject_id' => $this->customerId, 'original_sales_order_id' => $order, 'sku_id' => $sku]); self::assertNotFalse($source, FinanceBusinessLogic::getError());
         $returned = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'customer_return_actual', 'payload' => array_replace($source['selected_sale'], ['warehouse_id' => $warehouse,
-            'actual_date' => date('Y-m-d'), 'quantity' => '2', 'received_verified' => 1, 'source_reference' => 'PRE-CUTOFF-RETURN', 'reason' => '实收旧销售退回，原成本另核'])]);
+            'actual_date' => $month . '-02', 'quantity' => '2', 'received_verified' => 1, 'source_reference' => 'PRE-CUTOFF-RETURN', 'reason' => '实收旧销售退回，原成本另核'])]);
         self::assertNotFalse($returned, FinanceBusinessLogic::getError()); self::assertNull($returned['confirmed_result']['return_cost']); self::assertTrue($returned['confirmed_result']['cost_pending']);
+        $preview = FinanceBusinessLogic::periodAction('preview', ['month' => $month]);
+        $closed = FinanceBusinessLogic::periodAction('close', $this->command(0) + ['month' => $month, 'mode' => 'estimated', 'acknowledge_unresolved' => 1, 'expected_fingerprint' => $preview['fingerprint'], 'reason' => '原退回成本继续核实']); self::assertNotFalse($closed, FinanceBusinessLogic::getError());
         $costSource = FinanceBusinessLogic::options(['type' => 'legacy_return_cost', 'stock_flow_id' => $returned['confirmed_result']['stock_flow_id']]); self::assertNotFalse($costSource, FinanceBusinessLogic::getError()); self::assertCount(1, $costSource['cost_sources']);
         $verified = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'legacy_return_cost', 'payload' => ['stock_flow_id' => $returned['confirmed_result']['stock_flow_id'],
             'expected_cost_event_id' => $costSource['cost_sources'][0]['expected_cost_event_id'], 'amount' => '6', 'cost_verified' => 1, 'source_reference' => 'PRE-CUTOFF-COST-EVIDENCE', 'reason' => '核实退回两单位原成本六元']]);
         self::assertNotFalse($verified, FinanceBusinessLogic::getError()); self::assertSame('2.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $sku));
         self::assertSame('6.000000', (new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID))->balance($warehouse, $sku)['value']);
         self::assertNull(FinanceBusinessLogic::detail(['id' => $returned['id']])['confirmed_result']['return_cost'], '确认时未知成本的原验收快照保持不变');
+        $cancelled = FinanceBusinessLogic::action('reverse', $this->command($returned['version']) + ['id' => $returned['id'], 'correction_reason' => '已核实为旧退货重复验收']); self::assertNotFalse($cancelled, FinanceBusinessLogic::getError());
+        self::assertSame('0.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $sku));
+        self::assertSame('0.000000', (new \app\api\jxc\logic\FinanceCostLedger(self::TENANT_ID))->balance($warehouse, $sku)['value']);
+        $choices = FinanceBusinessLogic::options(['type' => 'legacy_return_cost']); self::assertNotFalse($choices, FinanceBusinessLogic::getError()); self::assertSame([], $choices['cost_sources']);
+        $tracking = FinanceBusinessLogic::periodAction('followups', ['month' => $month]);
+        $item = array_values(array_filter($tracking['items'], static fn(array $row): bool => $row['original']['reference'] === 'stock:' . $returned['confirmed_result']['stock_flow_id']))[0];
+        self::assertSame('resolved', $item['current']['status']);
+        self::assertContains($cancelled['id'], array_column($item['current']['evidence'], 'document_id'));
+        self::assertSame($closed['snapshot'], FinanceBusinessLogic::periodAction('detail', ['month' => $month])['snapshot']);
     }
 
     public function test_monthly_reports_keep_closed_snapshots_and_show_later_correction_without_new_external_receipt(): void

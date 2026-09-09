@@ -72,6 +72,7 @@ final class FinanceCustomerReturnRefunds
     {
         if (empty($data['return_document_id'])) { return []; }
         $return = self::context(FinanceValue::id($data['return_document_id']), FinanceValue::id($data['subject_id'] ?? null));
+        FinanceCustomerReturnCorrections::assertCurrent($return['document_id']);
         if (($data['return_link_verified'] ?? null) !== 1) { throw new \DomainException('请人工核实本次退款的销售贷项确实对应所选实物退货'); }
         $references = [];
         foreach ($data['allocations'] ?? [] as $line) {

@@ -31,7 +31,7 @@ final class FinanceCostLedger
         $ledger->postingMonth($date);
         $stored = $this->load($sku); $before = $this->withOpening($stored, $sku);
         $this->persist($stored, $before, []);
-        $replayed = in_array($event['type'], ['count', 'count_reverse'], true) || (!in_array($event['type'], ['adjust', 'reestimate'], true)
+        $replayed = in_array($event['type'], ['count', 'count_reverse', 'customer_return_void'], true) || (!in_array($event['type'], ['adjust', 'reestimate'], true)
             && $this->query('finance_cost_event')->where('sku_id', $sku)->whereIn('event_type', ['receive', 'issue', 'restore', 'transfer', 'reclassify', 'excluded_loss'])
                 ->where('business_date', '>', $date)->lock(true)->find());
         $result = $replayed ? $this->replay($sku, $event) : $this->applyEvent($before, $event);
@@ -74,7 +74,7 @@ final class FinanceCostLedger
         if ($event['type'] === 'reclassify' && ($event['skip_count_reclassification'] ?? false)) { return ['state' => $before]; }
         return match ($event['type'] ?? '') {
             'count' => FinanceCostAllocation::inventoryCount($before, $event),
-            'count_reverse' => ['state' => $before],
+            'count_reverse', 'customer_return_void' => ['state' => $before],
             'excluded_loss' => FinanceCostAllocation::recognizeExcludedLoss($before, FinanceValue::text($event['origin'] ?? null, 160), $warehouse, $sku, $event['quantity'] ?? '', $event['amount'] ?? null, $event['target_reference'] ?? ''),
             'reclassify' => FinanceCostAllocation::reclassify($before, $warehouse, $sku, $event['quantity'] ?? '', $event['bucket'] ?? '', $event['target_reference'] ?? '', $event['to_bucket'] ?? '', $event['to_reference'] ?? ''),
             'receive' => FinanceCostAllocation::receive($before, FinanceValue::text($event['origin'] ?? null, 160), $warehouse, $sku, $event['quantity'] ?? '', $event['amount'] ?? null),
@@ -194,7 +194,7 @@ final class FinanceCostLedger
             }
         }
         foreach (array_diff_key($before['origins'], $after['origins']) as $key => $_) {
-            if (!str_starts_with($key, 'pending-return:')) { throw new \DomainException('成本重放不能丢弃正式入库来源'); }
+            if (!str_starts_with($key, 'pending-return:') && !$this->voidedReturnOrigin($key)) { throw new \DomainException('成本重放不能丢弃正式入库来源'); }
             $this->query('finance_cost_origin')->where('origin_key', $key)->delete();
         }
         foreach (['positions' => 'finance_cost_position', 'shortages' => 'finance_cost_shortage'] as $kind => $table) {
@@ -206,6 +206,13 @@ final class FinanceCostLedger
             }
             foreach (array_diff_key($before[$kind], $after[$kind]) as $key => $_) { $this->query($table)->where('position_key', hash('sha256', $key))->delete(); }
         }
+    }
+
+    /** 只移除已关联撤销的派生投影；原验收、补价和冲回事件仍在不可变成本日志中。 */
+    private function voidedReturnOrigin(string $origin): bool
+    {
+        return (bool)$this->query('finance_cost_event')->where('event_type', 'customer_return_void')
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(snapshot,'$.return_reference'))=?", [$origin])->find();
     }
 
     private function effects(FinanceLedger $ledger, int $eventId, array $event, array $before, array $after): void

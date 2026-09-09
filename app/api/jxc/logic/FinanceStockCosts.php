@@ -26,7 +26,10 @@ final class FinanceStockCosts
             $event['business_date'] = FinanceValue::date($context['business_date'] ?? null);
             $event['document_id'] = FinanceValue::id($context['document_id'] ?? null);
         }
-        if ($flow['order_type'] === 'finance_customer_return') {
+        if ($flow['order_type'] === 'finance_return_void') {
+            $event['business_date'] = FinanceValue::date($context['business_date']); $event['document_id'] = FinanceValue::id($context['document_id']);
+            $event += ['type' => 'customer_return_void', 'return_reference' => 'stock:' . FinanceValue::id($context['original_flow_id'])];
+        } elseif ($flow['order_type'] === 'finance_customer_return') {
             $event['business_date'] = FinanceValue::date($context['business_date']); $event['document_id'] = FinanceValue::id($context['document_id']);
             $event['to_warehouse_id'] = $event['warehouse_id']; $event['warehouse_id'] = FinanceValue::id($context['original_warehouse_id']);
             $event += ['type' => 'restore', 'bucket' => 'sale', 'target_reference' => 'sales_order:' . FinanceValue::id($context['original_sales_order_id'])];

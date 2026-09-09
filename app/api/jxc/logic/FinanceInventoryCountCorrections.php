@@ -247,6 +247,7 @@ final class FinanceInventoryCountCorrections
             $returned = Db::name('finance_purchase_return_line')->where('tenant_id', $tenant)->where('id', $returnId)->where('document_id', $flow['order_id'])->where('warehouse_id', $line['warehouse_id'])->where('sku_id', $line['sku_id'])->lock(true)->find();
             if (!$document || !$returned || (int)$event['document_id'] !== (int)$document['id'] || bccomp($returned['quantity'], $flow['quantity'], 4) !== 0) { throw new \DomainException('实际退离须关联已确认的原退货明细'); }
         } elseif ($flow['order_type'] === 'finance_customer_return') {
+            FinanceCustomerReturnCorrections::assertCurrent((int)$flow['order_id']);
             $document = Db::name('finance_document')->where('tenant_id', $tenant)->where('id', $flow['order_id'])->where('type', 'customer_return_actual')->where('status', 'confirmed')->lock(true)->find();
             $returned = Db::name('finance_customer_return')->where('tenant_id', $tenant)->where('document_id', $flow['order_id'])->where('warehouse_id', $line['warehouse_id'])->where('sku_id', $line['sku_id'])->lock(true)->find();
             $fact = $returned ? FinanceValue::decode($returned['snapshot']) : [];

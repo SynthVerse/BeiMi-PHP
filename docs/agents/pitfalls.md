@@ -55,13 +55,22 @@
 - 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`用户级自定义 / impeccable`、`Matt Pocock / code-review`、`Matt Pocock / diagnosing-bugs`、`用户级自定义 / prevent-repeat-pitfalls`（自动调用）。
 - 说明：第64批 Spec 审查发现销售实重已更正但盘点关联仍引用原流水数量；固定当前盘点关联交付位置，建立真实业务回归后继续完整财务验证。
 
-- 状态：已防护；首次／最近发生：2026-09-09；复发次数：0。
+第69批补充来源：财务一期实物退货更正，实际使用 `Matt Pocock / implement`、`Matt Pocock / tdd`、`用户级自定义 / impeccable`、`Matt Pocock / code-review`、`Matt Pocock / diagnosing-bugs`、`用户级自定义 / prevent-repeat-pitfalls`。两轴审查发现新增撤销能力未同步到原事实消费者；补齐当前有效性检查后继续实物更正验证与提交。
+
+- 状态：已防护；首次／最近发生：2026-09-09；复发次数：1。
 - 根因：原库存流水为不可变事实；直接用其数量，或仅用订单SKU总实重减已关联量，均不能表达某次交付被后续实重更正冲回的份额。
 - 触发场景：原出库10改为4后仍可关联10；更隐蔽的情况是原截止前已出库6，后来补录4又把总实重10改8，后补可关联量应为2而不是4。
 - 防线：`FinanceInventoryCountCorrections::salesQuantities()` 顺序投影每次真实出库，减少实重从最近有效交付扣减，后来新交付独立保留；原单当前总实重再作上限。确认关联和后续销售实重更正均逐流水检查有效数量与已关联份额。受影响份额先追加撤回记录，原业务流水保持不变。
 - 已验证事实：单交付红测 `.scratch/finance-64-sale-correction-red.log` 为3 tests、132 assertions、1 failure；多交付红测 `.scratch/finance-64-multi-sale-red.log` 为1 test、32 assertions、1 failure。最终专项 `.scratch/finance-64-final-targeted.log` 为27 tests、566 assertions通过，覆盖真实交付、实重更正、分次关联、撤回、跨月及成本重放；Spec 对销售有效量投影定点复审 clear。
 - 尚未验证：业务库迁移、部署、原生页面和生产并发，专项不代表全仓通过。
 - 后续建议：任何消耗历史业务份额的功能，都应同时验证“原事实量”“当前有效量”“此前已使用量”，并包含同一订单多次交付。
+
+第69批发生记录：实物退货更正保留原验收 `confirmed` 与原流水，但其当前有效量已被冲回。原防线仅覆盖销售实重变化；退款草稿确认、盘点关联、旧售成本候选及已结月待补成本仍按原事实读取。现由 `FinanceCustomerReturnCorrections::assertCurrent` 统一约束新业务确认，候选排除撤销来源；历史查询保留；月结遗留把匹配的撤销事件作为解决证据，不伪造已补价。
+
+- 已验证事实：`finance-69-stale-source-red.log` 为3 tests、110 assertions、3 failures，覆盖退款草稿及盘点候选；`finance-69-return-boundary.log` 为2 tests、81 assertions、1 failure，复现成本候选阻断；修复后 `finance-69-return-boundary-green.log` 为5 tests、233 assertions通过。
+- 已验证事实：月结遗留红测 `finance-69-followup-red.log` 为1 test、41 assertions、1 failure；`finance-69-followup-green.log` 为3 tests、104 assertions通过，原月冻结快照不变。客户退货与纯成本回归 `finance-69-return-regression.log` 为32 tests、670 assertions通过。两轴复审发现均关闭。
+- 完整回归：`finance-69-finance-full.log` 为336 tests、10935 assertions、1 skipped，退出码0；跳过项不计通过。业务库、部署及原生客户端未验收。
+- 后续建议：新建“冲回原事实”能力时，除正向阻止已有下游，还需校验相反操作顺序、当前候选及旧月遗留，不把原单永久保留等同于原单仍可消耗。
 
 ## PIT-0066：新库存流水类型超过既有数据库字段长度
 

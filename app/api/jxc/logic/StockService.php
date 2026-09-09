@@ -83,6 +83,18 @@ class StockService
         return $flow;
     }
 
+    /** 内部录错冲回原入库，保留独立流水；真实再次退离不能走此入口。 */
+    public static function voidFinanceCustomerReturnWithinTransaction(array $fact, int $document): int
+    {
+        FinanceIntegration::lock();
+        $movement = WarehouseSkuBalanceService::outboundWithinTransaction((int)$fact['warehouse_id'], (int)$fact['sku_id'], $fact['quantity']);
+        if ($movement === false) { throw new \DomainException('原验收仓可用库存不足，请先核对后续出库或预留，再关联更正退货'); }
+        return self::writeFlow(['warehouse_id' => $fact['warehouse_id'], 'goods_id' => $fact['goods_id'], 'sku_id' => $fact['sku_id'], 'batch_id' => 0,
+            'order_id' => $document, 'order_type' => 'finance_return_void', 'order_sn' => 'FIN-RETURN-VOID-' . $document,
+            'flow_type' => StockFlow::FLOW_OUT, 'quantity' => $fact['quantity'], 'remark' => '原客户验收录错关联冲回'], $movement,
+            ['business_date' => $fact['actual_date'], 'document_id' => $document, 'original_flow_id' => $fact['stock_flow_id']]);
+    }
+
     /** 财务到货入口；调用方持有财务单据事务，不在这里另开事务。 */
     public static function inboundFinancePurchaseWithinTransaction(int $warehouseId, int $goodsId, int $skuId, string $quantity,
         int $documentId, int $arrivalLineId, string $date, ?string $amount, array $basis): int

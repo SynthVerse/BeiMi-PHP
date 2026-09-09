@@ -113,12 +113,15 @@ final class FinancePeriodFollowups
             $resolved = bccomp($remaining, '0', 12) === 0 && (bool)$evidence;
         } elseif ($item['category'] === 'cost_pending') {
             $amount = Db::name('finance_cost_origin')->where('tenant_id', $tenant)->where('origin_key', $item['reference'])->value('current_amount');
-            foreach (Db::name('finance_cost_event')->where('tenant_id', $tenant)->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(snapshot,'$.origin')) = ?", [$item['reference']])->order('id')->select()->toArray() as $event) {
+            $voidedReturn = false;
+            foreach (Db::name('finance_cost_event')->where('tenant_id', $tenant)
+                ->whereRaw("(JSON_UNQUOTE(JSON_EXTRACT(snapshot,'$.origin')) = ? OR (event_type='customer_return_void' AND JSON_UNQUOTE(JSON_EXTRACT(snapshot,'$.return_reference')) = ?))", [$item['reference'], $item['reference']])->order('id')->select()->toArray() as $event) {
                 $eventIds[] = (int)$event['id'];
+                $voidedReturn = $voidedReturn || $event['event_type'] === 'customer_return_void';
                 $basis = FinanceValue::decode($event['snapshot']);
                 $evidence[] = $basis + ['document_id' => (int)$event['document_id'], 'confirmed_at' => (int)$event['create_time'], 'confirmed_by' => FinanceValue::decode($event['actor'])];
             }
-            $resolved = $amount !== null && (bool)$evidence;
+            $resolved = ($amount !== null || $voidedReturn) && (bool)$evidence;
             if (preg_match('/^inventory-count-gain:(\d+):(\d+):(\d+)$/D', $item['reference'], $countOrigin)) {
                 $corrections = array_values(array_filter(self::records('finance_inventory_count_correction', 'count_result_document_id', (int)$countOrigin[1]), static fn(array $row): bool => (int)$row['sku_id'] === (int)$countOrigin[3]));
                 $evidence = array_merge($evidence, $corrections); $partial = (bool)$corrections;

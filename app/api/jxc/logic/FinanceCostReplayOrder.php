@@ -9,6 +9,22 @@ final class FinanceCostReplayOrder
 {
     public static function ordered(array $events): array
     {
+        $voids = []; $origins = [];
+        foreach ($events as $event) {
+            if ($event['type'] !== 'customer_return_void') { continue; }
+            $reference = $event['return_reference'];
+            if (isset($voids[$reference])) { throw new \DomainException('同一退货成本不能重复撤销'); }
+            $voids[$reference] = true;
+        }
+        foreach ($events as $event) {
+            if (!isset($voids[$event['reference']])) { continue; }
+            if (($event['snapshot']['order_type'] ?? '') !== 'finance_customer_return' || !in_array($event['type'], ['receive', 'restore'], true)) { throw new \DomainException('只能关联冲回客户实物验收成本'); }
+            if ($event['type'] === 'receive') { $origins[$event['origin']] = true; }
+            $voids[$event['reference']] = false;
+        }
+        if (in_array(true, $voids, true)) { throw new \DomainException('撤销缺少原客户退货成本事件'); }
+        $events = array_values(array_filter($events, static fn(array $event): bool => !array_key_exists($event['reference'], $voids)
+            && !(in_array($event['type'], ['adjust', 'reestimate'], true) && isset($origins[$event['origin']]))));
         $reversals = []; $targets = [];
         foreach ($events as $event) {
             if ($event['type'] === 'count_reverse') { $reversals[$event['count_reference']] = bcadd($reversals[$event['count_reference']] ?? '0', $event['quantity'], 12); }
