@@ -105,12 +105,12 @@ final class FinanceRecurringExpenses
     {
         $row = Db::name('finance_recurring_expense_plan')->where('tenant_id', FinanceAccess::tenant())->where('id', $id)->lock(true)->find();
         if (!$row) { throw new \DomainException('周期计划不存在或不属于本门店'); }
-        $plan = FinanceValue::decode($row['snapshot']); $months = [];
+        $plan = FinanceRecurringPlanChanges::project(FinanceValue::decode($row['snapshot']), $id); $months = [];
         $done = Db::name('finance_recurring_expense_month')->where('tenant_id', FinanceAccess::tenant())->where('plan_id', $id)->select()->toArray();
         $revisions = Db::name('finance_recurring_month_revision')->where('tenant_id', FinanceAccess::tenant())->where('plan_id', $id)->order('id')->select()->toArray();
         $byRevisionMonth = []; foreach ($revisions as $revision) { $byRevisionMonth[$revision['benefit_month']][] = $revision; }
-        $byMonth = array_column($done, null, 'benefit_month'); $cursor = new \DateTimeImmutable($plan['service_start'] . '-01');
-        while (($month = $cursor->format('Y-m')) <= $plan['service_end']) {
+        $byMonth = array_column($done, null, 'benefit_month');
+        foreach ($plan['scheduled_months'] as $month) {
             $result = isset($byMonth[$month]) ? FinanceValue::decode($byMonth[$month]['snapshot']) : null;
             $currentDocument = (int)($byMonth[$month]['document_id'] ?? 0); $revisionId = 0; $history = [];
             if ($result) { $history[] = ['document_id' => $currentDocument, 'type' => $result['result']['type'], 'outcome' => $result['outcome']]; }
@@ -125,7 +125,6 @@ final class FinanceRecurringExpenses
                 'expense_document_id' => $expenseId, 'expected_expense_revision_id' => $expense['expected_revision_id'] ?? 0,
                 'expense_amount' => $expense['expense']['amount'] ?? null,
                 'result' => $result, 'document_id' => $currentDocument, 'month_revision_id' => $revisionId, 'history' => $history];
-            $cursor = $cursor->modify('+' . $plan['interval_months'] . ' months');
         }
         return $plan + ['plan_id' => $id, 'document_id' => (int)$row['document_id'], 'months' => $months];
     }

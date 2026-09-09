@@ -70,6 +70,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260909_000047_finance_inventory_count_review.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260909_000048_finance_inventory_count_correction.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260909_000049_finance_customer_return.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260909_000050_finance_recurring_plan_change.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -83,6 +84,56 @@ final class FinanceBusinessWorkflowTest extends TestCase
     public static function deferredClosureCases(): array { return [[false], [true]]; }
 
     public static function customerRefundSaleCases(): array { return [[false], [true]]; }
+
+    public function test_recurring_plan_changes_only_future_schedule_and_stop_keeps_processed_month_history(): void
+    {
+        $this->activate(); $month = date('Y-m'); $next = date('Y-m', strtotime('first day of next month')); $end = date('Y-m', strtotime('first day of +6 months'));
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '未来周期服务方']);
+        $category = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_category', 'payload' => [
+            'category_id' => 0, 'expected_category_version' => 0, 'parent' => 'utilities', 'name' => '周期用水', 'is_enabled' => 1]]); self::assertNotFalse($category, FinanceBusinessLogic::getError());
+        $plan = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_recurring_plan', 'payload' => ['subject_id' => $vendor,
+            'category_id' => $category['confirmed_result']['category']['id'], 'expected_category_version' => 1, 'source_reference' => 'PLAN-CHANGE-70', 'service_start' => $month,
+            'service_end' => $end, 'interval_months' => 1, 'reason' => '原按月核对费用', 'plan_verified' => 1]]); self::assertNotFalse($plan, FinanceBusinessLogic::getError());
+        $id = $plan['confirmed_result']['plan_id'];
+        $none = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_recurring_none', 'payload' => ['subject_id' => $vendor, 'recurring_plan_id' => $id,
+            'expected_plan_version' => 1, 'benefit_month' => $month, 'none_verified' => 1, 'reason' => '本月已核实不发生']]); self::assertNotFalse($none, FinanceBusinessLogic::getError());
+        $input = ['subject_id' => $vendor, 'recurring_plan_id' => $id, 'expected_plan_version' => 1, 'change_mode' => 'revise', 'effective_month' => $next,
+            'service_end' => $end, 'interval_months' => 2, 'plan_verified' => 1, 'reason' => '下月起每两月核对一次'];
+        foreach ([['effective_month' => $month], ['effective_month' => date('Y-m', strtotime('first day of last month'))], ['plan_verified' => 0],
+            ['change_mode' => 'unknown'], ['interval_months' => 0], ['interval_months' => 121], ['service_end' => $month], ['subject_id' => $vendor + 999999]] as $invalid) {
+            self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_recurring_plan_change', 'payload' => array_replace($input, $invalid)]));
+        }
+        self::assertSame(0, Db::name('finance_recurring_plan_change')->where('tenant_id', self::TENANT_ID)->count());
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($this->command(0) + ['action' => 'record', 'type' => 'expense_recurring_plan_change', 'payload' => $input]);
+        self::assertSame(2, $preview['expense']['version']); self::assertSame([], $preview['impacts']); self::assertSame([], $preview['balances']);
+        self::assertSame(1, FinanceBusinessLogic::options(['type' => 'expense_recurring_plan', 'recurring_plan_id' => $id])['selected_plan']['version'], '预览回滚未来规则');
+        $this->prepareCustomerReportRequestContext(self::OTHER_TENANT_ID);
+        self::assertFalse(FinanceBusinessLogic::options(['type' => 'expense_recurring_plan_change', 'recurring_plan_id' => $id]));
+        $this->prepareCustomerReportRequestContext();
+        $employee = WorkforceLogic::saveEmployee(['name' => '周期计划准备人员', 'mobile' => '13800009970', 'bind_user_id' => 996970, 'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['finance.expense.prepare']]); self::assertNotFalse($employee, WorkforceLogic::getError());
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996970; request()->adminId = 0;
+        $draft = FinanceBusinessLogic::action('prepare', $this->command(0) + ['type' => 'expense_recurring_plan_change', 'payload' => $input]); self::assertNotFalse($draft, FinanceBusinessLogic::getError());
+        self::assertFalse(FinanceBusinessLogic::action('confirm', $this->command($draft['version']) + ['id' => $draft['id']]));
+        $this->prepareCustomerReportRequestContext();
+        $check = \app\api\jxc\logic\FinancePeriodChecklist::collect(new FinanceLedger(self::TENANT_ID), ['month' => $month]);
+        self::assertCount(0, array_filter($check['items'], static fn(array $item): bool => ($item['details']['document_id'] ?? 0) === $draft['id']), '未来计划待确认不阻止当前月结账');
+        $dated = FinanceBusinessLogic::action('prepare', $this->command(0) + ['type' => 'expense_recurring_plan_change', 'payload' => $input + ['actual_date' => date('Y-m-d')]]); self::assertNotFalse($dated, FinanceBusinessLogic::getError());
+        $check = \app\api\jxc\logic\FinancePeriodChecklist::collect(new FinanceLedger(self::TENANT_ID), ['month' => $month]);
+        self::assertCount(0, array_filter($check['items'], static fn(array $item): bool => ($item['details']['document_id'] ?? 0) === $dated['id']), '生效月份优先于客户端带入的操作日期');
+        $changed = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_recurring_plan_change', 'payload' => $input]); self::assertNotFalse($changed, FinanceBusinessLogic::getError());
+        $current = FinanceBusinessLogic::options(['type' => 'expense_recurring_plan', 'recurring_plan_id' => $id])['selected_plan'];
+        self::assertSame(2, $current['version']); self::assertSame($none['id'], $current['months'][0]['document_id']); self::assertSame('none', $current['months'][0]['status']);
+        self::assertSame([$month, $next, date('Y-m', strtotime($next . '-01 +2 months')), date('Y-m', strtotime($next . '-01 +4 months'))], array_column($current['months'], 'month'));
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_recurring_plan_change', 'payload' => $input]), '过期计划版本不能重复改变未来月份');
+        $input = array_replace($input, ['expected_plan_version' => 2, 'change_mode' => 'stop']);
+        $stopped = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_recurring_plan_change', 'payload' => $input]); self::assertNotFalse($stopped, FinanceBusinessLogic::getError());
+        $current = FinanceBusinessLogic::options(['type' => 'expense_recurring_plan', 'recurring_plan_id' => $id])['selected_plan'];
+        self::assertSame(3, $current['version']); self::assertSame([$month], array_column($current['months'], 'month')); self::assertCount(2, $current['plan_changes']);
+        self::assertSame($plan['confirmed_result'], FinanceBusinessLogic::detail(['id' => $plan['id']])['confirmed_result']);
+        self::assertSame(0, Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->whereIn('document_id', [$changed['id'], $stopped['id']])->count());
+        self::assertFalse(FinanceBusinessLogic::action('reverse', $this->command($stopped['version']) + ['id' => $stopped['id'], 'correction_reason' => '不得通用撤销未来规则']));
+        self::assertFalse(FinanceBusinessLogic::action('confirm', $this->command($draft['version']) + ['id' => $draft['id']]), '旧共享草稿不可覆盖最新计划');
+    }
 
     /** @dataProvider customerRefundSaleCases */
     public function test_customer_actual_return_correction_replaces_physical_fact_atomically_without_credit_or_cash(bool $moveWarehouse): void
@@ -5710,6 +5761,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
     private function clean(): void
     {
+        Db::name('finance_recurring_plan_change')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_transit_reconciliation')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_report_export_attempt')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_report_export_access')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();

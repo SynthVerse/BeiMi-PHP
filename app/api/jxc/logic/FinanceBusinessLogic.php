@@ -208,7 +208,7 @@ final class FinanceBusinessLogic extends BaseLogic
                 'salary_expense' => FinanceSalaries::options($params),
                 'employee_expense_adjustment' => FinanceEmployeeExpenses::options($subjectId, $params),
                 'employee_expense' => !empty($params['original_expense_document_id']) ? FinanceEmployeeExpenses::outstanding(FinanceValue::id($params['original_expense_document_id'])) : FinanceExpenseCategories::options(),
-                'expense_recurring_plan', 'expense_recurring_none', 'expense_recurring_correct' => FinanceRecurringExpenses::options($subjectId, $params),
+                'expense_recurring_plan', 'expense_recurring_plan_change', 'expense_recurring_none', 'expense_recurring_correct' => FinanceRecurringExpenses::options($subjectId, $params),
                 'deferred_amortization' => FinanceDeferredExpenses::options($ledger, $subjectId, $params),
                 'deferred_expense' => FinanceExpenseCategories::options(),
                 'expense_adjustment', 'expense_estimate_final' => FinanceExpenseAdjustments::options($subjectId, $params),

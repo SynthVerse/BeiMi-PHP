@@ -2,6 +2,27 @@
 
 按根因去重。每条记录必须指向实际防线；仅有“不要这样做”的提醒不算已防护。
 
+## PIT-0070：未来规则待确认沿用操作日期，误阻止历史月结账
+
+日期：2026-09-09
+
+### 报告来源
+
+- 生成原因：工作流要求
+- 主工作流：Matt Pocock
+- 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`用户级自定义 / impeccable`、`Matt Pocock / code-review`、`Matt Pocock / diagnosing-bugs`、`用户级自定义 / prevent-repeat-pitfalls`（自动调用）。
+- 说明：第70批周期计划审查确认月份归属缺口；修复并验证后继续周期计划交付。
+
+- 状态：已防护；首次／最近发生：2026-09-09；复发次数：0。
+- 触发场景：提交下月起生效的计划变更，检查本月结账清单。
+- 根因：通用待确认清单只识别费用月、操作日期与服务起始月，没有按新类型读取 `effective_month`；无日期时阻止所有旧月，有操作日期时错误归到操作月份。
+- 错误做法：所有单据统一按客户端任意日期猜测业务月份。
+- 正确做法：未来规则变更只使用生效月份；缺失有效月份的待确认输入继续保留未决状态。
+- 自动防线：`FinanceBusinessWorkflowTest::test_recurring_plan_changes_only_future_schedule_and_stop_keeps_processed_month_history` 同时检查有无 `actual_date` 的未来待确认计划不阻止本月。
+- 已验证事实：`finance-70-month-red.log` 为1 test、45 assertions、1 failure，实际错误列出1项阻塞；修复后 `finance-70-final-php.log` 28 tests、1047 assertions通过，exit 0，覆盖周期、待摊与月结。Spec定点复审关闭本项。
+- 尚未验证：业务数据库迁移与原生验收。
+- 后续建议：新增有未来生效规则的单据时，同步检查未确认单据的期间归属。
+
 ## PIT-0069：历史关联查询复用新建候选展开，受无关容量限制阻断
 
 日期：2026-09-09
@@ -108,6 +129,8 @@
 - 已验证事实：真实页面方法250行输出114404字节；前端容量测试稳定失败。PHP `.scratch/finance-62-capacity-red.log` 1 test、27 assertions复现保存超限。最终 `.scratch/finance-62-final-php.log` 12 tests、471 assertions通过，包含250SKU全部范围保存提交和750SKU建立前无占用拒绝；前端财务脚本171 tests通过。Standards复审已关闭本项。
 - 尚未验证：原生长列表、键盘与触控、业务库迁移和部署。容量检查保证基本输入可提交，不保证任意多行都能填满1000字原因；较长说明仍受单据总容量限制，输入不静默截断。
 - 后续建议：新建会占用业务资源的大范围操作，应同时覆盖建立、录入、提交与退出的容量边界。
+
+第70批同根因复发：前端未来规则把完整计划及月份历史随命令提交。原盘点输入投影没有覆盖新类型。现新增九字段 `businessPayload`，预览和保存共用；容量 RED 为 `finance-70-payload-red.log`，GREEN 同组通过，最终前端205 tests通过。后端本批未放宽65536字节上限；保护位于前端仓库，详见其 PIT-0044。首次／最近发生仍为2026-09-09，本项累计复发次数现为1。修复后返回周期计划开发。
 
 ## PIT-0064：未知成本判断只覆盖正向数量
 

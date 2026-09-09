@@ -37,6 +37,7 @@ final class FinancePayments
         if ($type === 'employee_expense') { return FinanceEmployeeExpenses::confirm($this->ledger, $document, $data); }
         if ($type === 'employee_expense_adjustment') { return FinanceEmployeeExpenses::adjust($this->ledger, $document, $data); }
         if ($type === 'expense_recurring_plan') { return FinanceRecurringExpenses::confirmPlan($document, $data); }
+        if ($type === 'expense_recurring_plan_change') { return FinanceRecurringPlanChanges::confirm($document, $data); }
         if ($type === 'expense_recurring_none') { return FinanceRecurringExpenses::confirmNone($document, $data); }
         if ($type === 'expense_recurring_correct') { return FinanceRecurringExpenses::correct($document, $data); }
         if ($type === 'expense_estimate_final') { return FinanceExpenseEstimates::confirm($this->ledger, $document, $data); }

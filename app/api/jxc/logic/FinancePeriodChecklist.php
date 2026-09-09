@@ -41,7 +41,8 @@ final class FinancePeriodChecklist
         }
         foreach (Db::name('finance_document')->where('tenant_id', $tenant)->whereIn('status', ['draft', 'pending'])->order('id')->select()->toArray() as $document) {
             $payload = FinanceValue::decode($document['payload']); $businessMonth = null;
-            foreach (['month', 'benefit_month', 'actual_date', 'service_start'] as $key) {
+            $monthKeys = $document['type'] === 'expense_recurring_plan_change' ? ['effective_month'] : ['month', 'benefit_month', 'actual_date', 'service_start'];
+            foreach ($monthKeys as $key) {
                 if (is_string($payload[$key] ?? null) && preg_match('/^[0-9]{4}-(0[1-9]|1[0-2])/', $payload[$key])) { $businessMonth = substr($payload[$key], 0, 7); break; }
             }
             if ($businessMonth !== null && $businessMonth > $month) { continue; }
