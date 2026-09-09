@@ -84,6 +84,60 @@ final class FinanceBusinessWorkflowTest extends TestCase
 
     public static function customerPhysicalReturnCases(): array { return ['same_warehouse' => [false, '2'], 'other_warehouse' => [true, '2'], 'unknown_original_cost' => [true, null], 'saved_draft' => [false, '2', 'save'], 'prepared' => [false, '2', 'prepare']]; }
 
+    public function test_mixed_pre_and_post_activation_customer_deliveries_keep_separate_return_quantities_and_costs(): void
+    {
+        $this->activate(); $warehouse = $this->createCustomerReportWarehouse('跨启用日交付仓'); $goods = $this->createCustomerReportGoods('混合交付商品', 'RETURN-MIXED', '斤'); $sku = $this->customerReportSkuId($goods);
+        $unit = $this->createCustomerReportUnit('斤'); Db::name('goods')->where('id', $goods)->update(['unit_id' => $unit]); Db::name('goods_sku')->where('id', $sku)->update(['base_unit_id' => $unit, 'base_unit_name' => '斤']);
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '混合交付供方']);
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival', 'payload' => ['subject_id' => $vendor, 'warehouse_id' => $warehouse,
+            'actual_date' => date('Y-m-d'), 'source_reference' => 'MIXED-STOCK', 'reason' => '启用后入库', 'lines' => [['sku_id' => $sku, 'actual_quantity' => '10', 'agreed_price' => '2']]]]), FinanceBusinessLogic::getError());
+        $sale = $this->deliveredSale(null, ['warehouse' => $warehouse, 'goods' => $goods, 'quantity' => '3', 'unit_id' => $unit]);
+        $oldDate = strtotime('last day of last month 12:00:00'); Db::name('sales_order')->where('id', $sale['order_id'])->update(['datetimesingle' => $oldDate]);
+        Db::name('order_goods')->where('id', $sale['line_id'])->update(['number' => '8', 'base_quantity' => '8']);
+        Db::name('stock_flow')->insert(['tenant_id' => self::TENANT_ID, 'order_id' => $sale['order_id'], 'order_type' => 'sales', 'warehouse_id' => $warehouse, 'goods_id' => $goods, 'sku_id' => $sku,
+            'flow_type' => 2, 'quantity' => '5', 'before_stock' => '5', 'after_stock' => '0', 'create_time' => $oldDate]);
+        $query = ['type' => 'customer_return_actual', 'subject_id' => $this->customerId, 'original_sales_order_id' => $sale['order_id'], 'sku_id' => $sku];
+        $options = FinanceBusinessLogic::options($query); self::assertNotFalse($options, FinanceBusinessLogic::getError()); self::assertCount(2, $options['sales']);
+        $choices = array_column($options['sales'], null, 'delivery_period'); self::assertSame('5.0000', $choices['pre_cutoff']['returnable_quantity']); self::assertSame('3.0000', $choices['current']['returnable_quantity']);
+        self::assertStringContainsString('请选择', $options['selected_sale']['selection_error']);
+        self::assertFalse(FinanceBusinessLogic::options($query + ['delivery_period' => 'unverified']));
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'customer_return_actual', 'payload' => array_replace($options['selected_sale'], ['warehouse_id' => $warehouse,
+            'actual_date' => date('Y-m-d'), 'quantity' => '2', 'received_verified' => 1, 'source_reference' => 'MIXED-NO-PERIOD', 'reason' => '未选择交付期间不得入库'])]));
+        self::assertSame(0, Db::name('finance_customer_return')->where('tenant_id', self::TENANT_ID)->count());
+        foreach (['pre_cutoff', 'current'] as $period) {
+            $source = FinanceBusinessLogic::options($query + ['delivery_period' => $period]); self::assertNotFalse($source, FinanceBusinessLogic::getError());
+            $payload = array_replace($source['selected_sale'], ['warehouse_id' => $warehouse,
+                'actual_date' => date('Y-m-d'), 'quantity' => '2', 'received_verified' => 1, 'source_reference' => 'MIXED-RETURN-' . $period, 'reason' => '按原交付期间核实本次两单位退回']);
+            $draft = FinanceBusinessLogic::action($period === 'pre_cutoff' ? 'save' : 'prepare', $this->command(0) + ['type' => 'customer_return_actual', 'payload' => $payload]);
+            self::assertNotFalse($draft, FinanceBusinessLogic::getError()); self::assertSame($period, $draft['payload']['selected_sale']['delivery_period']);
+            $returned = FinanceBusinessLogic::action($period === 'pre_cutoff' ? 'record' : 'confirm', $this->command($draft['version']) + ['id' => $draft['id'], 'type' => 'customer_return_actual', 'payload' => $payload]);
+            self::assertNotFalse($returned, FinanceBusinessLogic::getError()); self::assertSame($period, $returned['confirmed_result']['delivery_period']);
+            self::assertSame($period === 'pre_cutoff' ? null : '4.000000', $returned['confirmed_result']['return_cost']);
+            self::assertSame($period === 'pre_cutoff' ? '6.0000' : '4.0000', $returned['confirmed_result']['total_returnable_quantity']);
+        }
+        $remaining = FinanceBusinessLogic::options($query); self::assertNotFalse($remaining, FinanceBusinessLogic::getError()); $choices = array_column($remaining['sales'], null, 'delivery_period');
+        self::assertSame('3.0000', $choices['pre_cutoff']['returnable_quantity']); self::assertSame('1.0000', $choices['current']['returnable_quantity']);
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'customer_return_actual', 'payload' => array_replace($choices['current'], ['warehouse_id' => $warehouse,
+            'actual_date' => date('Y-m-d'), 'quantity' => '2', 'received_verified' => 1, 'source_reference' => 'MIXED-OVER-RETURN', 'reason' => '不得借用旧交付剩余量多退本期商品'])]));
+        $order = Db::name('sales_order')->where('id', $sale['order_id'])->find();
+        try { Db::transaction(fn() => \app\api\jxc\logic\FinanceCustomerReturns::assertSalesCorrections($order, [['sku_id' => $sku, 'actual_delivery_delta' => '-2']])); self::fail('不得把本期交付降到该期间已退回量以下'); }
+        catch (\DomainException $error) { self::assertStringContainsString('退', $error->getMessage()); }
+        self::assertSame('11.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $sku));
+        // 历史记录缺少日期与成本期间时不得猜分配；补齐启用前事实日期后仅占用启用前份额。
+        $legacy = (int)Db::name('sales_return_order')->insertGetId(['tenant_id' => self::TENANT_ID, 'customer_id' => $this->customerId, 'warehouse_id' => $warehouse,
+            'original_sales_order_id' => $sale['order_id'], 'order_sn' => 'MIXED-LEGACY-RETURN']);
+        Db::name('order_goods')->insert(['tenant_id' => self::TENANT_ID, 'order_id' => $legacy, 'order_type' => 'sales-return', 'goods_id' => $goods, 'sku_id' => $sku, 'number' => '1']);
+        $legacyFlow = (int)Db::name('stock_flow')->insertGetId(['tenant_id' => self::TENANT_ID, 'warehouse_id' => $warehouse, 'goods_id' => $goods, 'sku_id' => $sku,
+            'order_id' => $legacy, 'order_type' => 'sales-return', 'flow_type' => 1, 'quantity' => '1']);
+        $ambiguous = FinanceBusinessLogic::options($query); self::assertNotFalse($ambiguous, FinanceBusinessLogic::getError());
+        foreach ($ambiguous['sales'] as $choice) { self::assertStringContainsString('缺少依据', $choice['selection_error']); }
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'customer_return_actual', 'payload' => array_replace($ambiguous['sales'][0], ['warehouse_id' => $warehouse,
+            'actual_date' => date('Y-m-d'), 'quantity' => '1', 'received_verified' => 1, 'source_reference' => 'MIXED-AMBIGUOUS', 'reason' => '旧退货归属未核实不得继续退'])]));
+        Db::name('stock_flow')->where('id', $legacyFlow)->update(['create_time' => $oldDate]);
+        $known = FinanceBusinessLogic::options($query); self::assertNotFalse($known, FinanceBusinessLogic::getError()); $choices = array_column($known['sales'], null, 'delivery_period');
+        self::assertSame('', $choices['pre_cutoff']['selection_error']); self::assertSame('2.0000', $choices['pre_cutoff']['returnable_quantity']); self::assertSame('1.0000', $choices['current']['returnable_quantity']);
+    }
+
     public function test_customer_return_can_prepare_a_draft_before_activation_without_selecting_formal_delivery(): void
     {
         $options = FinanceBusinessLogic::options(['type' => 'customer_return_actual']); self::assertNotFalse($options, FinanceBusinessLogic::getError());
