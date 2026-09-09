@@ -82,6 +82,72 @@ final class FinanceBusinessWorkflowTest extends TestCase
 
     public static function deferredClosureCases(): array { return [[false], [true]]; }
 
+    public static function customerRefundSaleCases(): array { return [[false], [true]]; }
+
+    /** @dataProvider customerRefundSaleCases */
+    public function test_customer_refund_links_verified_physical_return_to_original_sale_credit_without_repeating_income_or_stock(bool $batch): void
+    {
+        $this->activate(); $warehouse = $this->createCustomerReportWarehouse('退货退款关联仓'); $goods = $this->createCustomerReportGoods('退货退款商品', 'RETURN-REFUND', '斤'); $sku = $this->customerReportSkuId($goods);
+        $unit = $this->createCustomerReportUnit('斤'); Db::name('goods')->where('id', $goods)->update(['unit_id' => $unit]); Db::name('goods_sku')->where('id', $sku)->update(['base_unit_id' => $unit, 'base_unit_name' => '斤']);
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '退货退款供方']);
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival', 'payload' => ['subject_id' => $vendor, 'warehouse_id' => $warehouse,
+            'actual_date' => date('Y-m-d'), 'source_reference' => 'RETURN-REFUND-STOCK', 'reason' => '原库存', 'lines' => [['sku_id' => $sku, 'actual_quantity' => '10', 'agreed_price' => '2']]]]), FinanceBusinessLogic::getError());
+        $sale = $this->deliveredSale(null, ['warehouse' => $warehouse, 'goods' => $goods, 'quantity' => '5', 'unit_id' => $unit]);
+        $settlement = ['order_id' => $sale['order_id'], 'lines' => [['order_goods_id' => $sale['line_id'], 'customer_settlement_weight' => '5', 'pricing_unit_id' => $unit, 'price' => '200']]];
+        if ($batch) {
+            $delivery = (int)Db::name('fulfillment_delivery_item')->where('tenant_id', self::TENANT_ID)->where('delivery_event_id', $sale['event_id'])->value('id');
+            $batchPayload = ['subject_id' => $this->customerId, 'reason' => '核实交付销售', 'rounding_amount' => '0', 'precision_mode' => 'cents',
+                'lines' => [['delivery_item_id' => $delivery, 'covered_weight' => '5', 'settlement_weight' => '5', 'price' => '200']]];
+            $batchDocument = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'sales_batch', 'payload' => $batchPayload]); self::assertNotFalse($batchDocument, FinanceBusinessLogic::getError());
+            $saleRef = $batchDocument['confirmed_result']['created_sources'][0];
+        } else {
+            self::assertNotFalse(SalesSettlementLogic::submit($this->command(0) + $settlement), SalesSettlementLogic::getError());
+            $saleRef = (string)Db::name('finance_sales_version')->where('tenant_id', self::TENANT_ID)->where('order_id', $sale['order_id'])->value('source_ref');
+        }
+        $receipt = array_replace($this->receipt('1000', '1000'), ['allocations' => [['source' => $saleRef, 'amount' => '1000']]]);
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $receipt]), FinanceBusinessLogic::getError());
+        $source = FinanceBusinessLogic::options(['type' => 'customer_return_actual', 'subject_id' => $this->customerId, 'original_sales_order_id' => $sale['order_id'], 'sku_id' => $sku]);
+        $returned = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'customer_return_actual', 'payload' => array_replace($source['selected_sale'], ['warehouse_id' => $warehouse,
+            'actual_date' => date('Y-m-d'), 'quantity' => '1', 'received_verified' => 1, 'source_reference' => 'RETURN-REFUND-RECEIVED', 'reason' => '实际退回一单位'])]); self::assertNotFalse($returned, FinanceBusinessLogic::getError());
+        $settlement['lines'][0]['price'] = '160'; $settlement += ['credit_reviewed' => 1, 'credit_allocations' => [], 'edit_reason' => '核实退货调减二百元'];
+        if ($batch) {
+            $batchPayload['lines'][0]['price'] = '160'; $batchPayload += ['credit_reviewed' => 1, 'credit_allocations' => []];
+            self::assertNotFalse(FinanceBusinessLogic::action('correct', $this->command($batchDocument['version']) + ['id' => $batchDocument['id'], 'payload' => $batchPayload, 'correction_reason' => '核实退货贷项']), FinanceBusinessLogic::getError());
+        } else { self::assertNotFalse(SalesSettlementLogic::submit($this->command(1) + $settlement), SalesSettlementLogic::getError()); }
+        $options = FinanceBusinessLogic::options(['type' => 'customer_return_actual', 'subject_id' => $this->customerId, 'return_document_id' => $returned['id']]); self::assertNotFalse($options, FinanceBusinessLogic::getError());
+        self::assertCount(1, $options['return_credits']); $credit = $options['return_credits'][0]; self::assertSame('200.00', $credit['balance']);
+        $payload = ['subject_id' => $this->customerId, 'account_id' => $this->accountId, 'actual_date' => date('Y-m-d'), 'amount' => '200', 'allocations' => [['source' => $credit['reference'], 'amount' => '200']],
+            'reason' => '已实际退还本次退货款', 'return_document_id' => $returned['id'], 'return_link_verified' => 0];
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'customer_refund', 'payload' => $payload]));
+        $payload['return_link_verified'] = 1;
+        self::assertFalse(FinanceBusinessLogic::options(['type' => 'customer_refund', 'subject_id' => $this->createCustomer('不相关客户'), 'return_document_id' => $returned['id']]));
+        $unrelated = (new FinanceLedger(self::TENANT_ID))->createSource((int)$credit['document_id'], 'customer_refund', $this->customerId, '200', date('Y-m-d'), null, ['sales_order_id' => $sale['order_id'] + 100000]);
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'customer_refund', 'payload' => array_replace($payload, ['allocations' => [['source' => $unrelated, 'amount' => '200']]])]));
+        $draft = FinanceBusinessLogic::action('prepare', $this->command(0) + ['type' => 'customer_refund', 'payload' => $payload + ['return_context' => ['document_id' => 999, 'subject_name' => '伪造名称']]]);
+        self::assertNotFalse($draft, FinanceBusinessLogic::getError()); self::assertSame($returned['id'], $draft['payload']['return_context']['document_id']);
+        $command = $this->command($draft['version']) + ['id' => $draft['id'], 'type' => 'customer_refund'];
+        $refund = FinanceBusinessLogic::action('confirm', $command); self::assertNotFalse($refund, FinanceBusinessLogic::getError()); self::assertSame($refund, FinanceBusinessLogic::action('confirm', $command));
+        self::assertSame($returned['id'], $refund['confirmed_result']['return_context']['document_id']);
+        self::assertSame('0.00', (new FinanceLedger(self::TENANT_ID))->source($saleRef)['balance']);
+        self::assertSame('0.00', (new FinanceLedger(self::TENANT_ID))->source($credit['reference'])['balance']);
+        self::assertSame('800.00', bcadd((string)Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('metric', 'revenue')->sum('amount'), '0', 2));
+        self::assertSame('6.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $sku));
+        $history = FinanceBusinessLogic::options(['type' => 'customer_return_actual', 'subject_id' => $this->customerId, 'return_document_id' => $returned['id']]);
+        self::assertSame($refund['id'], $history['return_refunds'][0]['document_id']); self::assertSame('0.00', $history['return_credits'][0]['balance']);
+        $payload['amount'] = '150'; $payload['allocations'][0]['amount'] = '150';
+        $corrected = FinanceBusinessLogic::action('correct', $this->command($refund['version']) + ['id' => $refund['id'], 'payload' => $payload, 'correction_reason' => '原退款凭据实付一百五十元']); self::assertNotFalse($corrected, FinanceBusinessLogic::getError());
+        self::assertSame('50.00', (new FinanceLedger(self::TENANT_ID))->source($credit['reference'])['balance']);
+        $history = FinanceBusinessLogic::options(['type' => 'customer_return_actual', 'subject_id' => $this->customerId, 'return_document_id' => $returned['id']]);
+        self::assertSame($corrected['id'], $history['return_refunds'][0]['document_id']); self::assertSame($corrected['id'], $history['return_refunds'][1]['replacement_document_id']);
+        if (!$batch) {
+            // 查既有验收关联记录不需要展开新验收的全部销售候选。
+            $otherLines = []; for ($index = 0; $index < 1001; $index++) { $otherLines[] = ['tenant_id' => self::TENANT_ID, 'order_id' => $sale['order_id'], 'order_type' => 'sales', 'sku_id' => 800000000 + $index]; }
+            Db::name('order_goods')->insertAll($otherLines);
+            $history = FinanceBusinessLogic::options(['type' => 'customer_return_actual', 'subject_id' => $this->customerId, 'return_document_id' => $returned['id']]);
+            self::assertNotFalse($history, FinanceBusinessLogic::getError()); self::assertSame($corrected['id'], $history['return_refunds'][0]['document_id']);
+        }
+    }
+
     public static function customerPhysicalReturnCases(): array { return ['same_warehouse' => [false, '2'], 'other_warehouse' => [true, '2'], 'unknown_original_cost' => [true, null], 'saved_draft' => [false, '2', 'save'], 'prepared' => [false, '2', 'prepare']]; }
 
     public function test_mixed_pre_and_post_activation_customer_deliveries_keep_separate_return_quantities_and_costs(): void

@@ -2,6 +2,29 @@
 
 按根因去重。每条记录必须指向实际防线；仅有“不要这样做”的提醒不算已防护。
 
+## PIT-0069：历史关联查询复用新建候选展开，受无关容量限制阻断
+
+日期：2026-09-09
+
+### 报告来源
+
+- 生成原因：工作流要求
+- 主工作流：Matt Pocock
+- 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`用户级自定义 / impeccable`、`Matt Pocock / code-review`、`用户级自定义 / prevent-repeat-pitfalls`、`Matt Pocock / diagnosing-bugs`（自动调用）。
+- 说明：第67批 Standards 审查定位已确认验收回看失败，建立红绿防线后继续退货退款关联开发。
+
+- 状态：已防护；首次／最近发生：2026-09-09；复发次数：0。
+- 适用范围：`FinanceBusinessLogic::options` 的已确认退货关联记录查询。
+- 相关问题：PIT-0065（写入容量，根因不同）。
+- 触发场景：客户销售单商品超过1000项，读取某个已确认验收的贷项与退款记录。
+- 根因：按单据定位的历史查询先执行全客户的新建验收候选展开，候选的容量拒绝在真正历史读取前抛出。
+- 错误做法：给历史查询附加一个ID参数，却继续无条件执行新建候选查询。
+- 正确做法：历史入口按可信原凭据单独读取关联事实；新建候选仍保留原容量门槛。
+- 自动防线：`FinanceBusinessWorkflowTest::test_customer_refund_links_verified_physical_return_to_original_sale_credit_without_repeating_income_or_stock` 增加1001销售明细后回看已有退货，不展开候选。
+- 已验证事实：`.scratch/finance-67-history-capacity-red.log` 为2 tests、103 assertions、1 failure；修复后 green 日志2 tests、104 assertions通过，包含旧销售与分次交付销售、退款和更正链。
+- 尚未验证：业务库、生产规模压测与原生客户端。
+- 后续建议：新增历史回看入口应验证新业务候选已失效或超容量时仍可读取原事实。
+
 ## PIT-0068：历史单据未写新数量字段，导致已发生实物被漏计
 
 日期：2026-09-09

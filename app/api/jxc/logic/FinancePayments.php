@@ -83,6 +83,7 @@ final class FinancePayments
         $reason = FinanceValue::text($data['reason'] ?? '', 1000);
         $lines = $data['allocations'] ?? [];
         if (!is_array($lines)) { throw new \DomainException('请核对所选来源组成'); }
+        $returnContext = $type === 'customer_refund' ? FinanceCustomerReturnRefunds::validate($this->ledger, $data) : [];
         if ($type === 'supplier_payment') {
             foreach ($lines as $line) {
                 if (!is_array($line)) { throw new \DomainException('付款组成格式无效'); }
@@ -112,7 +113,7 @@ final class FinancePayments
         }
         if ($type === 'recovery_receipt') { $this->ledger->add((int)$document['id'], 'recovery_income', $subjectId, $amount, $date, $month, 'bad_debt_recovery'); }
         return ['type' => $type, 'subject_id' => $subjectId, 'subject_name' => $subject['name'], 'reason' => $reason,
-            'allocated_amount' => $total, 'advance_amount' => $advance, 'created_sources' => $created, 'money' => $money];
+            'allocated_amount' => $total, 'advance_amount' => $advance, 'created_sources' => $created, 'money' => $money] + ($returnContext ? ['return_context' => $returnContext] : []);
     }
 
     private function advance(array $document, array $data): array

@@ -121,7 +121,7 @@ final class FinanceBusinessLogic extends BaseLogic
                 if (in_array($action, ['save', 'prepare', 'record', 'correct', 'reverse_duplicate', 'reverse'], true)) {
                     if ($document && $document['status'] !== 'draft') { throw new \DomainException('请先退回草稿再修改'); }
                     $payload = in_array($action, ['reverse_duplicate', 'reverse'], true) ? FinanceValue::decode($original['payload']) : ($params['payload'] ?? null);
-                    if (is_array($payload)) { $payload = FinanceCustomerReturns::input($type, FinanceInventoryCounts::input($type, $payload)); }
+                    if (is_array($payload)) { $payload = FinanceCustomerReturnRefunds::input($type, FinanceCustomerReturns::input($type, FinanceInventoryCounts::input($type, $payload))); }
                     if (!is_array($payload) || strlen(FinanceValue::json($payload)) > 65536) { throw new \DomainException('草稿内容格式无效或超过容量限制'); }
                     $document = array_merge($document ?? ['tenant_id' => $tenantId, 'type' => $type, 'created_by' => FinanceValue::json(FinanceAccess::actor()),
                         'create_time' => time(), 'confirmed_at' => 0, 'confirmed_by' => '{}', 'confirmed_result' => '{}'],
@@ -216,7 +216,7 @@ final class FinanceBusinessLogic extends BaseLogic
                 'legacy_return_cost' => FinanceLegacyReturnCosts::options($params),
                 'inventory_count_start' => FinancePurchaseArrivals::options(0, $params),
                 'inventory_count_review' => FinanceInventoryCountReviews::options($params),
-                'customer_return_actual' => FinanceCustomerReturns::options($subjectId, $params),
+                'customer_return_actual' => !empty($params['return_document_id']) ? [] : FinanceCustomerReturns::options($subjectId, $params),
                 'inventory_count_correction' => FinanceInventoryCountCorrections::options($params),
                 'inventory_count_correction_cancel' => FinanceInventoryCountCorrections::cancellationOptions($params),
                 'inventory_count', 'inventory_count_cancel' => FinanceInventoryCounts::options($params),
@@ -260,6 +260,14 @@ final class FinanceBusinessLogic extends BaseLogic
                 if (!in_array($selected['category'], $categories, true) || $selected['subject_id'] !== $subjectId || ($type !== 'deferred_amortization' && bccomp($selected['balance'], '0', 2) <= 0)) { throw new \DomainException('指定来源已结清或不属于本对象和业务类型'); }
                 $sources['selected_source'] = $selected;
             }
+            if (in_array($type, ['customer_return_actual', 'customer_refund'], true) && !empty($params['return_document_id'])) {
+                $sources += FinanceCustomerReturnRefunds::options(FinanceValue::id($params['return_document_id']), $subjectId, $params);
+                if ($type === 'customer_refund') {
+                    $sources['sources'] = array_values(array_filter($sources['return_credits'], static fn(array $credit): bool => bccomp($credit['balance'], '0', 2) > 0));
+                    $sources['has_more'] = $sources['return_credit_has_more'];
+                    if (isset($sources['selected_source'])) { FinanceCustomerReturnRefunds::assertCredit($sources['selected_source'], $sources['return_context']); }
+                }
+            }
             if ($type === 'supplier_payment') {
                 foreach ($sources['sources'] as &$source) {
                     $source['disputed_amount'] = FinanceStatements::disputedAmount($source['reference']);
@@ -289,6 +297,7 @@ final class FinanceBusinessLogic extends BaseLogic
         $document = FinanceInventoryCounts::present($document);
         $document = FinanceInventoryCountReviews::present($document);
         $document = FinanceCustomerReturns::present($document);
+        $document = FinanceCustomerReturnRefunds::present($document);
         if ($document['type'] === 'sales_batch' && $document['status'] === 'confirmed' && FinanceAccess::has('settlement.view')) { $document['output'] = FinanceSalesOutput::document(['id' => $document['id']]); }
         return $document;
     }
