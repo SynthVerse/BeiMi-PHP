@@ -216,6 +216,8 @@ final class FinanceBusinessLogic extends BaseLogic
                 'legacy_return_cost' => FinanceLegacyReturnCosts::options($params),
                 'inventory_count_start' => FinancePurchaseArrivals::options(0, $params),
                 'inventory_count_review' => FinanceInventoryCountReviews::options($params),
+                'inventory_count_correction' => FinanceInventoryCountCorrections::options($params),
+                'inventory_count_correction_cancel' => FinanceInventoryCountCorrections::cancellationOptions($params),
                 'inventory_count', 'inventory_count_cancel' => FinanceInventoryCounts::options($params),
                 'inventory_loss' => FinancePurchaseArrivals::options(0, $params),
                 'inventory_loss_resolution' => FinanceInventoryLosses::options($params),

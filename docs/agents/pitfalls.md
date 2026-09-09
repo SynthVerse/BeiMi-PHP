@@ -2,6 +2,43 @@
 
 按根因去重。每条记录必须指向实际防线；仅有“不要这样做”的提醒不算已防护。
 
+## PIT-0067：以原始交付流水量代替更正后的可关联实重
+
+日期：2026-09-09
+
+### 报告来源
+
+- 生成原因：工作流要求
+- 主工作流：Matt Pocock
+- 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`用户级自定义 / impeccable`、`Matt Pocock / code-review`、`Matt Pocock / diagnosing-bugs`、`用户级自定义 / prevent-repeat-pitfalls`（自动调用）。
+- 说明：第64批 Spec 审查发现销售实重已更正但盘点关联仍引用原流水数量；固定当前盘点关联交付位置，建立真实业务回归后继续完整财务验证。
+
+- 状态：已防护；首次／最近发生：2026-09-09；复发次数：0。
+- 根因：原库存流水为不可变事实；直接用其数量，或仅用订单SKU总实重减已关联量，均不能表达某次交付被后续实重更正冲回的份额。
+- 触发场景：原出库10改为4后仍可关联10；更隐蔽的情况是原截止前已出库6，后来补录4又把总实重10改8，后补可关联量应为2而不是4。
+- 防线：`FinanceInventoryCountCorrections::salesQuantities()` 顺序投影每次真实出库，减少实重从最近有效交付扣减，后来新交付独立保留；原单当前总实重再作上限。确认关联和后续销售实重更正均逐流水检查有效数量与已关联份额。受影响份额先追加撤回记录，原业务流水保持不变。
+- 已验证事实：单交付红测 `.scratch/finance-64-sale-correction-red.log` 为3 tests、132 assertions、1 failure；多交付红测 `.scratch/finance-64-multi-sale-red.log` 为1 test、32 assertions、1 failure。最终专项 `.scratch/finance-64-final-targeted.log` 为27 tests、566 assertions通过，覆盖真实交付、实重更正、分次关联、撤回、跨月及成本重放；Spec 对销售有效量投影定点复审 clear。
+- 尚未验证：业务库迁移、部署、原生页面和生产并发，专项不代表全仓通过。
+- 后续建议：任何消耗历史业务份额的功能，都应同时验证“原事实量”“当前有效量”“此前已使用量”，并包含同一订单多次交付。
+
+## PIT-0066：新库存流水类型超过既有数据库字段长度
+
+日期：2026-09-09
+
+### 报告来源
+
+- 生成原因：工作流要求
+- 主工作流：Matt Pocock
+- 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`Matt Pocock / code-review`、`Matt Pocock / diagnosing-bugs`、`用户级自定义 / prevent-repeat-pitfalls`（自动调用）。
+- 说明：第64批盘点反向实际写库存时发现持久化类型长度不兼容；保留当前业务锚点，修复并执行真实数据库路径后恢复关联页面工作。
+
+- 状态：已防护；首次／最近发生：2026-09-09；复发次数：0。
+- 根因：将较长的业务单据类型直接复用作 `stock_flow.order_type`，忽略既有 `varchar(30)`；候选值31字符，实际插入被数据库拒绝。
+- 防线：库存层采用独立的 `finance_count_reverse` 类型（21字符），业务单据仍保留完整名称；真实 `FinanceBusinessWorkflowTest` 通过 StockService 写入库存流水，覆盖反向与撤回，不以纯成本测试代替数据库契约。
+- 已验证事实：实际隔离库插入曾报字段长度错误；改用短库存类型后，`.scratch/finance-64-final-targeted.log` 27 tests、566 assertions通过。未扩大业务表字段长度。
+- 尚未验证：业务库迁移与部署；没有据此称业务库已更新。
+- 后续建议：新增库存类型时检查既有持久化字段约束，并执行至少一条完整真实写入路径。
+
 ## PIT-0065：展示快照随写入命令回传耗尽单据容量
 
 日期：2026-09-09
@@ -1312,7 +1349,7 @@
 
 ## PIT-0004：外层业务事务中再次开启嵌套事务
 
-日期：2026-09-09（第60批期间当前读补充）
+日期：2026-09-09（第64批来源展示补充）
 
 ### 报告来源
 
@@ -1324,7 +1361,7 @@
 - 状态：已防护
 - 首次发生：2026-07-29
 - 最近发生：2026-09-09
-- 复发次数：12
+- 复发次数：13
 - 适用范围：`CustomerReportLogic`、`FulfillmentChangeLogic`、`FulfillmentTaskLogic`、`DeliveryInventoryLogic`、`DeliveryVariantLogic`、`LineVehicleLogic`、`NegativeInventoryLogic`、`SalesSettlementLogic`、`FinanceService`、`FinanceCostLedger`、`FinancePurchaseArrivals` 等已开启业务事务后调用库存、财务原语或写入幂等事实的路径
 - 相关问题：PIT-0022
 
@@ -1346,6 +1383,7 @@ ThinkPHP 在嵌套事务中依赖保存点。仓库余额服务的独立事务�
 
 ### 防线
 
+- 2026-09-09 盘点关联展示扩展：`FinanceInventoryCountCorrections::present()` 在保存、提交的既有事务内调用候选读取，候选最初无条件再次开启事务。规范审查确认调用链，未声称现场复现保存点错误。统一改为 `readConsistently()`：已有事务直接读取，无事务时才开启；`CustomerReportRouteContractTest::test_inventory_count_source_presentation_reuses_the_callers_transaction` 限制候选通过统一入口，真实草稿保存与预览回滚由盘点关联专项覆盖。旧入口枚举防线未覆盖新增展示读取方法，防护完成后返回第64批完整回归。
 - 2026-09-08 库内损耗扩展：`StockService::outboundFinanceInventoryLossWithinTransaction` 曾调用会自行开事务的 `WarehouseSkuBalanceService::outbound`。新增禁止负量的 `outboundWithinTransaction` 并改用它；`CustomerReportRouteContractTest::test_finance_stock_loss_never_starts_an_inner_stock_transaction` 在旧调用上明确失败，保护同事务调用和原语不再开事务、不放开负量。行为用例继续覆盖可用量不足整体回滚、原事件幂等和核实不二扣。来源为 Matt Pocock / implement、tdd、code-review、diagnosing-bugs、prevent-repeat-pitfalls；此为原入口枚举防线未覆盖新损耗路径的复发，不另建 PIT，防护后返回财务一期开发。
 - 2026-09-09 收款更正扩展：新增原现金入账月冻结判断时曾使用普通 `count()`，漏掉外层 RR 快照之后另一连接提交的关账；`test_receipt_correction_reads_original_period_closed_after_outer_snapshot` 用真实双连接复现替代进入旧开放月，原冲销却进入本月。改为原期间 `lock(true)->find()`，同时识别普通和暂估月结；最终财务专项 28 tests、1409 assertions 通过。既有成本入口当前读测试没有覆盖新的付款更正入口。业务库部署与生产并发压测尚未验证；后续期间判断继续复用当前读边界。
 - 2026-09-08 财务成本扩展：成本原语在外层事务内先取得稳定的门店准备行锁，再对成本来源、份额和待补数量使用当前读，避免沿外层已创建的 RR 快照覆盖其他事务已提交的成本。`FinanceBusinessWorkflowTest::test_cost_confirmation_reloads_committed_facts_after_an_outer_transaction_created_an_older_snapshot` 与 `tests/fixtures/finance_cost_worker.php` 用两个真实 PHP 连接固定先建快照、另一个事务出库 2、原事务再出库 3 的交错；修复前剩余成本错误为 70，修复后为 50，且两次销售成本分别为 20 和 30。此次只更新同根因记录；来源为 Matt Pocock / implement、tdd、code-review、diagnosing-bugs、prevent-repeat-pitfalls，完成后返回财务一期成本与采购接线。

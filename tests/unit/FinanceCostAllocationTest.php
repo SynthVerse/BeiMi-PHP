@@ -9,6 +9,70 @@ use PHPUnit\Framework\TestCase;
 
 final class FinanceCostAllocationTest extends TestCase
 {
+    public function test_count_gain_reversal_keeps_original_origin_and_only_remaining_gain_funds_inventory(): void
+    {
+        $state = FinanceCostAllocation::receive(FinanceCostAllocation::empty(), 'original', 10, 20, '100', '200.00')['state'];
+        $event = ['warehouse_id' => 10, 'sku_id' => 20, 'direction' => 'in', 'quantity' => '10', 'amount' => '20.00',
+            'origin' => 'inventory-count-gain:1:10:20', 'target_reference' => 'inventory-count:1:20', 'bucket' => 'loss', 'reversed_quantity' => '4'];
+        $partial = FinanceCostAllocation::inventoryCount($state, $event)['state'];
+        self::assertSame('106.000000000000', FinanceCostAllocation::balance($partial, 10, 20)['quantity']);
+        self::assertSame('212.000000', FinanceCostAllocation::balance($partial, 10, 20)['value']);
+        self::assertSame('10.000000000000', $partial['origins'][$event['origin']]['quantity']);
+        self::assertSame('20.00', $partial['origins'][$event['origin']]['amount']);
+        $adjusted = FinanceCostAllocation::adjust($partial, $event['origin'], '30.00');
+        self::assertSame('218.000000', FinanceCostAllocation::balance($adjusted['state'], 10, 20)['value']);
+        $full = FinanceCostAllocation::inventoryCount($state, array_replace($event, ['reversed_quantity' => '10', 'amount' => null]))['state'];
+        self::assertSame(FinanceCostAllocation::balance($state, 10, 20), FinanceCostAllocation::balance($full, 10, 20));
+        self::assertNull($full['origins'][$event['origin']]['amount']);
+    }
+
+    public function test_count_loss_reversal_releases_original_cutoff_share_instead_of_current_average(): void
+    {
+        $state = FinanceCostAllocation::receive(FinanceCostAllocation::empty(), 'original', 10, 20, '100', '200.00')['state'];
+        $event = ['warehouse_id' => 10, 'sku_id' => 20, 'direction' => 'out', 'quantity' => '10', 'target_reference' => 'inventory-count:1:20', 'bucket' => 'pending', 'reversed_quantity' => '4'];
+        $partial = FinanceCostAllocation::inventoryCount($state, $event)['state'];
+        $later = FinanceCostAllocation::receive($partial, 'later', 10, 20, '100', '400.00')['state'];
+        self::assertSame('194.000000000000', FinanceCostAllocation::balance($later, 10, 20)['quantity']);
+        self::assertSame('588.000000', FinanceCostAllocation::balance($later, 10, 20)['value']);
+        $full = FinanceCostAllocation::inventoryCount($state, array_replace($event, ['reversed_quantity' => '10']))['state'];
+        self::assertSame($state, $full);
+        $this->expectException(\DomainException::class);
+        FinanceCostAllocation::inventoryCount($state, array_replace($event, ['reversed_quantity' => '11']));
+    }
+
+    public function test_count_replay_applies_cumulative_reversals_to_original_count_and_its_reason_reclassification(): void
+    {
+        $events = [
+            ['type' => 'count', 'reference' => 'stock:10', '_journal_id' => 2, 'count_cutoff_event_id' => 1, 'quantity' => '10', 'target_reference' => 'inventory-count:1:20'],
+            ['type' => 'reclassify', 'reference' => 'review:1', '_journal_id' => 3, 'business_date' => '2026-09-01', 'quantity' => '10', 'target_reference' => 'inventory-count:1:20'],
+            ['type' => 'count_reverse', 'reference' => 'reverse:1', '_journal_id' => 4, 'business_date' => '2026-09-01', 'quantity' => '4', 'count_reference' => 'stock:10'],
+            ['type' => 'count_reverse', 'reference' => 'reverse:2', '_journal_id' => 5, 'business_date' => '2026-09-01', 'quantity' => '6', 'count_reference' => 'stock:10'],
+        ];
+        $ordered = \app\api\jxc\logic\FinanceCostReplayOrder::ordered($events);
+        self::assertSame('10.000000000000', $ordered[0]['reversed_quantity']);
+        self::assertSame('0.0000', $ordered[1]['quantity']);
+        self::assertSame('10', $events[0]['quantity'], '原事件不覆盖');
+        $events[3]['quantity'] = '7'; $this->expectException(\DomainException::class);
+        \app\api\jxc\logic\FinanceCostReplayOrder::ordered($events);
+    }
+
+    public function test_cancelled_count_link_does_not_expand_previous_reason_verification(): void
+    {
+        $events = [
+            ['type' => 'count', 'reference' => 'stock:10', '_journal_id' => 2, 'count_cutoff_event_id' => 1, 'quantity' => '10', 'target_reference' => 'inventory-count:1:20'],
+            ['type' => 'count_reverse', 'reference' => 'reverse:1', '_journal_id' => 3, 'business_date' => '2026-09-01', 'quantity' => '4', 'count_reference' => 'stock:10'],
+            ['type' => 'reclassify', 'reference' => 'review:1', '_journal_id' => 4, 'business_date' => '2026-09-01', 'quantity' => '6', 'target_reference' => 'inventory-count:1:20'],
+            ['type' => 'count_reverse', 'reference' => 'cancel:1', '_journal_id' => 5, 'business_date' => '2026-09-01', 'quantity' => '-4', 'count_reference' => 'stock:10'],
+        ];
+        $ordered = array_column(\app\api\jxc\logic\FinanceCostReplayOrder::ordered($events), null, 'reference');
+        self::assertSame('0.000000000000', $ordered['stock:10']['reversed_quantity']); self::assertSame('6.0000', $ordered['review:1']['quantity']);
+        $events[] = ['type' => 'reclassify', 'reference' => 'review:2', '_journal_id' => 6, 'business_date' => '2026-09-01', 'quantity' => '4', 'target_reference' => 'inventory-count:1:20'];
+        $events[] = ['type' => 'count_reverse', 'reference' => 'reverse:2', '_journal_id' => 7, 'business_date' => '2026-09-01', 'quantity' => '7', 'count_reference' => 'stock:10'];
+        $ordered = array_column(\app\api\jxc\logic\FinanceCostReplayOrder::ordered($events), null, 'reference');
+        self::assertSame('3.0000', $ordered['review:1']['quantity']); self::assertSame('0.0000', $ordered['review:2']['quantity']);
+        self::assertTrue($ordered['review:2']['skip_count_reclassification']);
+    }
+
     public function test_loss_already_excluded_from_received_quantity_creates_cost_destination_without_removing_stock(): void
     {
         $state = FinanceCostAllocation::receive(FinanceCostAllocation::empty(), 'goods', 10, 20, '499', '998.00')['state'];

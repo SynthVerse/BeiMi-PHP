@@ -83,6 +83,7 @@ final class FinancePeriodChecklist
             ->where('o.tenant_id', $tenant)->whereNull('o.current_amount')->where('e.business_date', '<=', $cutoff)->where('e.posting_month', '<=', substr($cutoff, 0, 7))
             ->distinct(true)->field('o.origin_key,o.sku_id,o.snapshot')->select()->toArray();
         foreach ($unknown as $origin) {
+            if (FinanceInventoryCountCorrections::cancelledGainOrigin($origin['origin_key'])) { continue; }
             $basis = FinanceValue::decode($origin['snapshot']); unset($origin['snapshot']);
             $source = $basis['source'] ?? [];
             $route = ($source['cost_basis_pending'] ?? null) === 'pre_cutoff_sales_return'

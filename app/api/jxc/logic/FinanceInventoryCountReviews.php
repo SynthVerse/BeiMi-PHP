@@ -11,6 +11,7 @@ final class FinanceInventoryCountReviews
 {
     public static function present(array $document): array
     {
+        if (in_array($document['type'], ['inventory_count_correction', 'inventory_count_correction_cancel'], true)) { return FinanceInventoryCountCorrections::present($document); }
         if ($document['type'] !== 'inventory_count_review' || $document['status'] === 'confirmed') { return $document; }
         $data = $document['payload']; $document['payload']['selected_difference'] = null;
         $original = Db::name('finance_document')->where('tenant_id', FinanceAccess::tenant())->where('id', (int)($data['count_result_document_id'] ?? 0))->where('type', 'inventory_count')->where('status', 'confirmed')->find();
@@ -58,17 +59,30 @@ final class FinanceInventoryCountReviews
         $reasonVerified = (bool)($latest['reason_verified'] ?? $line['reason_verified']);
         $costVerified = (bool)($latest['cost_verified'] ?? !$line['cost_pending']);
         $gain = bccomp($line['difference_quantity'], '0', 4) > 0;
+        $reasonQuantity = $latest['reason_quantity'] ?? ($reasonVerified ? ltrim($line['difference_quantity'], '-') : '0');
+        $pendingReason = '0.0000';
         $reference = 'inventory-count:' . $document . ':' . $sku;
         if ($gain) {
             $value = Db::name('finance_cost_origin')->where('tenant_id', $tenant)->where('origin_key', 'inventory-count-gain:' . $document . ':' . $warehouse . ':' . $sku)->lock(true)->value('current_amount');
             $cost = $value === null ? null : bcadd($value, '0', 6);
-        } else { $cost = (new FinanceCostLedger($tenant))->destination($warehouse, $sku, $reasonVerified ? 'loss' : 'pending', $reference)['cost']; }
+        } else {
+            $ledger = new FinanceCostLedger($tenant); $loss = $ledger->destination($warehouse, $sku, 'loss', $reference); $pending = $ledger->destination($warehouse, $sku, 'pending', $reference);
+            $cost = $loss['cost'] === null || $pending['cost'] === null ? null : bcadd($loss['cost'], $pending['cost'], 6);
+            $pendingReason = bcadd($pending['quantity'], '0', 4);
+            $reasonVerified = $reasonVerified && bccomp($pendingReason, '0', 4) === 0;
+        }
+        $correction = FinanceInventoryCountCorrections::state($document, $sku);
+        $remaining = bcsub(ltrim($line['difference_quantity'], '-'), $correction['reversed_quantity'], 4);
+        if ($gain && bccomp($reasonQuantity, $remaining, 4) < 0) { $reasonVerified = false; }
+        if ($gain && $cost !== null && bccomp($correction['reversed_quantity'], '0', 4) > 0) { $cost = bcdiv(bcmul($cost, $remaining, 12), ltrim($line['difference_quantity'], '-'), 6); }
+        if (bccomp($remaining, '0', 4) === 0) { $cost = '0.000000'; }
         return array_replace($line, ['count_document_id' => (int)$result['count_document_id'], 'count_result_document_id' => $document, 'warehouse_id' => $warehouse,
             'warehouse_name' => $result['warehouse_name'], 'cutoff_at' => $result['cutoff_at'], 'actual_date' => $result['actual_date'],
             'expected_review_id' => (int)($review['id'] ?? 0), 'expected_cost_event_id' => (int)(Db::name('finance_cost_event')->where('tenant_id', $tenant)->where('sku_id', $sku)->order('id desc')->lock(true)->value('id') ?? 0),
             'current_cost' => $cost, 'cost_pending' => $cost === null, 'reason_verified' => $reasonVerified, 'cost_verified' => $costVerified,
             'reason_kind' => $latest['reason_kind'] ?? null,
-            'resolved' => $reasonVerified && $costVerified && $cost !== null]);
+            'reason_quantity' => $reasonQuantity, 'pending_reason_quantity' => $pendingReason,
+            'resolved' => bccomp($remaining, '0', 4) === 0 || ($reasonVerified && $costVerified && $cost !== null), 'remaining_correction_quantity' => $remaining], $correction);
     }
 
     public static function confirm(FinanceLedger $ledger, array $document, array $data): array
@@ -105,12 +119,14 @@ final class FinanceInventoryCountReviews
         if (!$gain && !$current['reason_verified'] && $reasonVerified) {
             $reference = 'inventory-count:' . $id . ':' . $sku;
             $cost->recordWithinTransaction(['reference' => 'inventory-count-review:' . $document['id'], 'type' => 'reclassify', 'document_id' => (int)$document['id'],
-                'warehouse_id' => $warehouse, 'sku_id' => $sku, 'business_date' => $current['actual_date'], 'quantity' => ltrim($current['difference_quantity'], '-'),
+                'warehouse_id' => $warehouse, 'sku_id' => $sku, 'business_date' => $current['actual_date'], 'quantity' => $current['pending_reason_quantity'],
+                'count_reversed_quantity' => $current['reversed_quantity'],
                 'bucket' => 'pending', 'target_reference' => $reference, 'to_bucket' => 'loss', 'to_reference' => $reference,
                 'snapshot' => ['count_result_document_id' => $id, 'reason' => $reason]]);
         }
         $snapshot = array_replace($current, ['type' => 'inventory_count_review', 'reason_verified' => $reasonVerified, 'cost_verified' => $costVerified,
             'reason_kind' => $reasonKind,
+            'reason_quantity' => $reasonVerified ? $current['remaining_correction_quantity'] : $current['reason_quantity'],
             'reason' => $reason, 'cost_basis' => $basis, 'confirmed_by' => FinanceAccess::actor(), 'confirmed_at' => time()]);
         $review = (int)Db::name('finance_inventory_count_review')->insertGetId(['tenant_id' => $tenant, 'document_id' => $document['id'], 'count_result_document_id' => $id,
             'sku_id' => $sku, 'snapshot' => FinanceValue::json($snapshot), 'create_time' => time()]);

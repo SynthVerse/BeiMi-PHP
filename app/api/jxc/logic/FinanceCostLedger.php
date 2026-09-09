@@ -31,7 +31,7 @@ final class FinanceCostLedger
         $ledger->postingMonth($date);
         $stored = $this->load($sku); $before = $this->withOpening($stored, $sku);
         $this->persist($stored, $before, []);
-        $replayed = $event['type'] === 'count' || (!in_array($event['type'], ['adjust', 'reestimate'], true)
+        $replayed = in_array($event['type'], ['count', 'count_reverse'], true) || (!in_array($event['type'], ['adjust', 'reestimate'], true)
             && $this->query('finance_cost_event')->where('sku_id', $sku)->whereIn('event_type', ['receive', 'issue', 'restore', 'transfer', 'reclassify', 'excluded_loss'])
                 ->where('business_date', '>', $date)->lock(true)->find());
         $result = $replayed ? $this->replay($sku, $event) : $this->applyEvent($before, $event);
@@ -71,10 +71,10 @@ final class FinanceCostLedger
     private function applyEvent(array $before, array $event): array
     {
         $sku = FinanceValue::id($event['sku_id']); $warehouse = FinanceValue::id($event['warehouse_id']);
+        if ($event['type'] === 'reclassify' && ($event['skip_count_reclassification'] ?? false)) { return ['state' => $before]; }
         return match ($event['type'] ?? '') {
-            'count' => $event['direction'] === 'out'
-                ? FinanceCostAllocation::issue($before, $warehouse, $sku, $event['quantity'], $event['bucket'], $event['target_reference'])
-                : FinanceCostAllocation::receive($before, $event['origin'], $warehouse, $sku, $event['quantity'], $event['amount']),
+            'count' => FinanceCostAllocation::inventoryCount($before, $event),
+            'count_reverse' => ['state' => $before],
             'excluded_loss' => FinanceCostAllocation::recognizeExcludedLoss($before, FinanceValue::text($event['origin'] ?? null, 160), $warehouse, $sku, $event['quantity'] ?? '', $event['amount'] ?? null, $event['target_reference'] ?? ''),
             'reclassify' => FinanceCostAllocation::reclassify($before, $warehouse, $sku, $event['quantity'] ?? '', $event['bucket'] ?? '', $event['target_reference'] ?? '', $event['to_bucket'] ?? '', $event['to_reference'] ?? ''),
             'receive' => FinanceCostAllocation::receive($before, FinanceValue::text($event['origin'] ?? null, 160), $warehouse, $sku, $event['quantity'] ?? '', $event['amount'] ?? null),

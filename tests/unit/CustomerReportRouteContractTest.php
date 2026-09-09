@@ -6,6 +6,19 @@ use PHPUnit\Framework\TestCase;
 
 final class CustomerReportRouteContractTest extends TestCase
 {
+    public function test_inventory_count_source_presentation_reuses_the_callers_transaction(): void
+    {
+        $source = (string)file_get_contents(dirname(__DIR__, 2) . '/app/api/jxc/logic/FinanceInventoryCountCorrections.php');
+        foreach (['options', 'cancellationOptions'] as $name) {
+            $start = strpos($source, 'public static function ' . $name . '('); self::assertNotFalse($start);
+            $end = strpos($source, "\n    private static function ", $start);
+            $method = substr($source, $start, $end === false ? null : $end - $start);
+            self::assertStringContainsString('return self::readConsistently(', $method);
+        }
+        self::assertStringContainsString('$pdo && $pdo->inTransaction() ? $read() : Db::transaction($read)', $source);
+        self::assertSame(1, substr_count($source, 'Db::transaction('), '来源展示不能绕过同事务读取入口');
+    }
+
     public function test_finance_transfer_uses_one_business_transaction_and_one_pair_timestamp(): void
     {
         $root = dirname(__DIR__, 2); $source = (string)file_get_contents($root . '/app/api/jxc/logic/StockService.php');

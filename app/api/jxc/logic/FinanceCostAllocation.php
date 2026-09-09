@@ -9,6 +9,29 @@ final class FinanceCostAllocation
 {
     public static function empty(): array { return ['origins' => [], 'positions' => [], 'shortages' => []]; }
 
+    /** 关联反向只减少原截止差额的有效份额；盘盈原来源及其补价链仍完整保留。 */
+    public static function inventoryCount(array $state, array $event): array
+    {
+        $quantity = self::quantity($event['quantity']); $reversed = bcadd($event['reversed_quantity'] ?? '0', '0', 12);
+        if (bccomp($reversed, '0', 12) < 0 || bccomp($reversed, $quantity, 12) > 0) { throw new \DomainException('反向盘点数量超过原差额'); }
+        $remaining = bcsub($quantity, $reversed, 12); $warehouse = (int)$event['warehouse_id']; $sku = (int)$event['sku_id'];
+        self::dimension($warehouse, $sku);
+        if ($event['direction'] === 'out') {
+            return bccomp($remaining, '0', 12) === 0 ? ['state' => $state] : self::issue($state, $warehouse, $sku, bcadd($remaining, '0', 4), $event['bucket'], $event['target_reference']);
+        }
+        if ($event['direction'] !== 'in') { throw new \DomainException('盘点方向无效'); }
+        if (bccomp($reversed, '0', 12) === 0) { return self::receive($state, $event['origin'], $warehouse, $sku, bcadd($quantity, '0', 4), $event['amount']); }
+        $origin = FinanceValue::text($event['origin'], 160);
+        if (isset($state['origins'][$origin])) { throw new \DomainException('原盘盈来源不能重复创建'); }
+        $amount = $event['amount'] === null ? null : FinanceValue::money($event['amount'], true);
+        $state['origins'][$origin] = ['quantity' => $quantity, 'amount' => $amount, 'sku_id' => $sku];
+        $cancelledValue = self::takeValue(bcadd($amount ?? '0', '0', 6), $reversed, $quantity);
+        // 正的取消份额与原盘盈的负损失对方抵消；未知金额也保留其净数量，不制造零成本依据。
+        self::put($state, $origin, $warehouse, $sku, 'loss', $event['target_reference'], $reversed, $cancelledValue);
+        $offsets = self::receiveShare($state, $origin, $warehouse, $sku, $remaining, bcsub($amount ?? '0', $cancelledValue, 6));
+        return ['state' => $state, 'offsets' => $offsets, 'pending' => $amount === null && bccomp($remaining, '0', 12) > 0];
+    }
+
     /** 验收入库量已经排除的异常损失，独立持有成本份额，不再流经现存库存。 */
     public static function recognizeExcludedLoss(array $state, string $origin, int $warehouse, int $sku, string $quantity, ?string $amount, string $reference): array
     {

@@ -26,7 +26,12 @@ final class FinanceStockCosts
             $event['business_date'] = FinanceValue::date($context['business_date'] ?? null);
             $event['document_id'] = FinanceValue::id($context['document_id'] ?? null);
         }
-        if ($flow['order_type'] === 'finance_inventory_count') {
+        if ($flow['order_type'] === 'finance_count_reverse') {
+            $event['business_date'] = FinanceValue::date($context['business_date']); $event['document_id'] = FinanceValue::id($context['document_id']);
+            $event += ['type' => 'count_reverse', 'count_reference' => 'stock:' . FinanceValue::id($context['count_line']['stock_flow_id'])];
+            if ($context['cancel_count_reverse'] ?? false) { $event['quantity'] = bcsub('0', $event['quantity'], 4); }
+            $event['snapshot']['count_result_document_id'] = $context['count_line']['count_result_document_id'];
+        } elseif ($flow['order_type'] === 'finance_inventory_count') {
             $line = $context['count_line']; $document = FinanceValue::id($context['document_id']);
             $event['business_date'] = FinanceValue::date($context['business_date']); $event['document_id'] = $document;
             $target = 'inventory-count:' . $document . ':' . $event['sku_id'];

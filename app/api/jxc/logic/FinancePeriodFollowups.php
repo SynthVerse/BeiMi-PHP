@@ -87,9 +87,9 @@ final class FinancePeriodFollowups
                 foreach ($details['lines'] as $original) {
                     $line = $lines[$original['sku_id']] ?? null;
                     if (!$line || !$line['resolved']) { $resolved = false; }
-                    if ($line && ($line['expected_review_id'] > ($original['expected_review_id'] ?? 0) || $line['resolved'])) { $partial = true; }
+                    if ($line && ($line['expected_review_id'] > ($original['expected_review_id'] ?? 0) || $line['expected_correction_id'] > ($original['expected_correction_id'] ?? 0) || $line['resolved'])) { $partial = true; }
                 }
-                $evidence = self::records('finance_inventory_count_review', 'count_result_document_id', $id);
+                $evidence = array_merge(self::records('finance_inventory_count_review', 'count_result_document_id', $id), self::records('finance_inventory_count_correction', 'count_result_document_id', $id));
             }
         } elseif ($item['category'] === 'inventory_loss') {
             $incident = (int)$details['incident_document_id'];
@@ -119,6 +119,11 @@ final class FinancePeriodFollowups
                 $evidence[] = $basis + ['document_id' => (int)$event['document_id'], 'confirmed_at' => (int)$event['create_time'], 'confirmed_by' => FinanceValue::decode($event['actor'])];
             }
             $resolved = $amount !== null && (bool)$evidence;
+            if (preg_match('/^inventory-count-gain:(\d+):(\d+):(\d+)$/D', $item['reference'], $countOrigin)) {
+                $corrections = array_values(array_filter(self::records('finance_inventory_count_correction', 'count_result_document_id', (int)$countOrigin[1]), static fn(array $row): bool => (int)$row['sku_id'] === (int)$countOrigin[3]));
+                $evidence = array_merge($evidence, $corrections); $partial = (bool)$corrections;
+                $resolved = $resolved || FinanceInventoryCountCorrections::cancelledGainOrigin($item['reference']);
+            }
         } elseif ($item['category'] === 'statement_dispute') {
             [$kind, $id] = explode(':', $item['reference']); $table = $kind === 'vendor' ? 'finance_supplier_statement' : 'finance_statement';
             $resolution = Db::name($table . '_resolution')->where('tenant_id', $tenant)->where('dispute_id', (int)$id)->order('id', 'desc')->find();

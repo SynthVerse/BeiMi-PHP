@@ -102,6 +102,22 @@ class StockService
         return $flow;
     }
 
+    /** 补录真实业务后，独立保留对原盘点重复份额的反向流水。 */
+    public static function financeInventoryCountReverseWithinTransaction(int $warehouse, array $line, string $delta, int $document, string $date, bool $cancel = false): int
+    {
+        FinanceIntegration::lock(); $sku = (int)$line['sku_id']; $out = bccomp($delta, '0', 4) < 0;
+        $movement = WarehouseSkuBalanceService::inventoryCountWithinTransaction($warehouse, $sku, $delta);
+        if ($movement === false) { throw new \DomainException('关联反向库存调整失败'); }
+        $sn = 'FIN-COUNT-REV-' . $document;
+        $flow = self::writeFlow(['warehouse_id' => $warehouse, 'goods_id' => $line['goods_id'], 'sku_id' => $sku, 'batch_id' => 0,
+            'order_id' => $document, 'order_type' => 'finance_count_reverse', 'order_sn' => $sn, 'flow_type' => $out ? StockFlow::FLOW_OUT : StockFlow::FLOW_IN,
+            'quantity' => ltrim($delta, '-'), 'remark' => '补录业务关联反向原盘点'], $movement,
+            ['business_date' => $date, 'document_id' => $document, 'count_line' => $line, 'cancel_count_reverse' => $cancel]);
+        if (!$out) { NegativeInventoryLogic::autoOffsetWithinTransaction($warehouse, $sku, $movement, $document, 'finance_count_reverse', $sn); }
+        else { NegativeInventoryLogic::inventoryCountWithinTransaction($warehouse, (int)$line['goods_id'], $sku, $movement, $document, $date); }
+        return $flow;
+    }
+
     /** 库内实物减少只出库一次；原因未查明时成本仍在待核实去向。 */
     public static function outboundFinanceInventoryLossWithinTransaction(int $warehouse, int $goods, int $sku, string $quantity, int $document, string $date): int
     {
