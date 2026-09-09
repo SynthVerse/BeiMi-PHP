@@ -70,6 +70,19 @@ class StockService
         return false;
     }
 
+    /** 客户实物返回与原销售成本在同一业务事务处理，不生成贷项或退款。 */
+    public static function inboundFinanceCustomerReturnWithinTransaction(int $warehouse, array $source, string $quantity, int $document, string $date): int
+    {
+        FinanceIntegration::lock(); $movement = WarehouseSkuBalanceService::inboundWithinTransaction($warehouse, $source['sku_id'], $quantity);
+        if ($movement === false) { throw new \DomainException('客户退货验收入库失败，请核对仓库与商品'); }
+        $sn = 'FIN-CRETURN-' . $document;
+        $flow = self::writeFlow(['warehouse_id' => $warehouse, 'goods_id' => $source['goods_id'], 'sku_id' => $source['sku_id'], 'batch_id' => 0,
+            'order_id' => $document, 'order_type' => 'finance_customer_return', 'order_sn' => $sn, 'flow_type' => StockFlow::FLOW_IN, 'quantity' => $quantity, 'remark' => '客户实际退回验收'], $movement,
+            ['business_date' => $date, 'document_id' => $document, 'original_warehouse_id' => $source['original_warehouse_id'], 'original_sales_order_id' => $source['original_sales_order_id'], 'customer_return_source' => $source]);
+        NegativeInventoryLogic::autoOffsetWithinTransaction($warehouse, $source['sku_id'], $movement, $document, 'finance_customer_return', $sn);
+        return $flow;
+    }
+
     /** 财务到货入口；调用方持有财务单据事务，不在这里另开事务。 */
     public static function inboundFinancePurchaseWithinTransaction(int $warehouseId, int $goodsId, int $skuId, string $quantity,
         int $documentId, int $arrivalLineId, string $date, ?string $amount, array $basis): int

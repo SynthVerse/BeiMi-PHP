@@ -2,6 +2,25 @@
 
 按根因去重。每条记录必须指向实际防线；仅有“不要这样做”的提醒不算已防护。
 
+## PIT-0068：历史单据未写新数量字段，导致已发生实物被漏计
+
+日期：2026-09-09
+
+### 报告来源
+
+- 生成原因：工作流要求
+- 主工作流：Matt Pocock
+- 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`用户级自定义 / impeccable`、`Matt Pocock / code-review`、`Matt Pocock / diagnosing-bugs`、`用户级自定义 / prevent-repeat-pitfalls`（自动调用）。
+- 说明：第65批客户退货在验证旧来源额度时发现字段迁移边界；修复后继续实物验收页面及完整财务验证。
+
+- 状态：已防护；首次／最近发生：2026-09-09；复发次数：0；相关问题：PIT-0067。
+- 触发场景：旧销售退货入口保存 `number=2` 并实际入库2，但没有填写后来新增的 `base_quantity`，新退货将其当作未退。
+- 根因：直接汇总新字段的默认零值，误当成历史业务真实零数量。
+- 防线：`FinanceCustomerReturns::legacyReturned()` 按原退货单关联的实际库存流水汇总正反方向，并与旧入口保存的 `number` 核对；不一致时明确要求核实，不能把缺失证据当作零。新旧退回共同约束有效交付量，实重更正也不能降到已退量以下。
+- 已验证事实：`.scratch/finance-65-legacy-return-red.log` 为3 tests、152 assertions、3 failures，期望可退4而实际6；修复后 `.scratch/finance-65-return-final-targeted.log` 为7 tests、289 assertions通过，含同仓、跨仓、未知成本、历史补录及盘点关联。
+- 尚未验证：业务库迁移、生产历史数据完整性和原生验收，不代表全仓测试通过。
+- 后续建议：消费历史事实前，确认该时期的真实写入字段和实物单位，不能只依据现版表结构。
+
 ## PIT-0067：以原始交付流水量代替更正后的可关联实重
 
 日期：2026-09-09
@@ -618,6 +637,7 @@
 - 架构防线：`FinanceCostLedger::recordWithinTransaction` 检测乱序并在同一账套锁与事务内重放；统一 `applyEvent`，不另建退货专用估价算法。
 - 启用衔接防线：`FinanceStockFactTime::resolve` 供截点数量与成本承接共用，交付及运输损耗读取原交付事件日期。`FinanceBusinessWorkflowTest::test_activation_carries_cutoff_stock_then_replays_intervening_sales_cost_without_moving_stock_again` 的运输损耗样本修改前预期 `2026-08-11`、实际 `2026-09-08`；修复后启用边界 8 tests、245 assertions 通过。必要日期或来源无法核实则阻断，不按录入日补造事实。
 - 返回和损失防线：`FinancePurchaseReturnResolutions` 从重放完成后的原退货去向差额或独立损失去向取得成本，不保存事件中间估价。`test_purchase_return_dispute_restores_original_cost_to_actual_warehouse_and_reclassifies_loss_without_stock_change` 覆盖已知暂估及未知成本补价、跨仓恢复和确认快照；初次红灯为预期 12、实际 8，扩展后与定向负量用例共 3 tests、132 assertions 通过。第23批财务、销售结算与仓库专项 192 tests、4418 assertions、1 skipped；两轴复审已关闭本次 P2，跳过项不计通过。
+- 2026-09-09 客户实物退回扩展：同一原销售可包含多次交付，整单去向前后差会混入后续交付重估，不能视为本次退回成本；直接读取本次 `restore` 的中间结果又会漏掉本段最后执行的补价。`FinanceCustomerReturns::returnedCost()` 使用本次真实退回的来源份额，按重放后的原来源总价值核算；全部重算影响仍另列 `cost_impacts`。两条红测分别为预期4、实际5.666668和补价后预期6、实际4，保存在 `.scratch/finance-65-return-cost-red.log` 与 `.scratch/finance-65-return-reprice-red.log`。最终专项 `.scratch/finance-65-return-final-targeted.log` 为7 tests、289 assertions通过。来源：Matt Pocock / implement、tdd、code-review、diagnosing-bugs；用户级自定义 / impeccable、prevent-repeat-pitfalls。该段更新相同重放边界问题，完成后返回第65批页面与整体验证；尚未验证业务库和生产并发。
 - 已验证：最小用例修改前预期 20、实际 30；修改后与负库存用例合计 2 tests、87 assertions 通过。
 - 已验证补充：跨月测试保护上月库存 180、本月销售及剩余库存各 290，专项 2 tests、88 assertions；串行财务、销售、仓库及负库存回归 195 tests、4329 assertions、1 skipped。两轴复审已关闭跨月库存补差问题；一次并发干扰测试库的运行已作废，不计入通过结果。
 - 尚未验证：业务库迁移和真机验收。

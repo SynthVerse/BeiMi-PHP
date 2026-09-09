@@ -57,6 +57,7 @@ final class FinanceDocumentPolicy
         'purchase_arrival' => ['title' => '采购实际到货与暂估', 'prepare' => 'finance.purchase.prepare', 'confirm' => 'finance.purchase.receive', 'owner' => false, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],
         'purchase_settlement' => ['title' => '供应商分次采购结算', 'prepare' => 'finance.purchase.prepare', 'confirm' => 'finance.purchase.confirm', 'owner' => false, 'subject' => 'vendor', 'sources' => ['payable'], 'direction' => 'none'],
         'purchase_rules' => ['title' => '采购复核与付款规则', 'prepare' => '', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => [], 'direction' => 'none'],
+        'customer_return_actual' => ['title' => '客户实物退回验收', 'prepare' => 'finance.refund.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'customer', 'sources' => [], 'direction' => 'none'],
         'sales_batch' => ['title' => '交付合并与分次销售结算', 'prepare' => 'settlement.bill', 'confirm' => 'settlement.bill', 'owner' => false, 'subject' => 'customer', 'sources' => ['receivable'], 'direction' => 'none'],
         'receipt_return' => ['title' => '客户原收款退回', 'prepare' => 'finance.refund.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'customer', 'sources' => ['receivable', 'advance'], 'direction' => 'out'],
         'receivable_due' => ['title' => '调整应收付款日', 'prepare' => 'finance.receivable.prepare', 'confirm' => '', 'owner' => true, 'subject' => 'customer', 'sources' => ['receivable'], 'direction' => 'none'],

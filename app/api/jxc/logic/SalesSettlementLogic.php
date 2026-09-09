@@ -811,6 +811,7 @@ final class SalesSettlementLogic extends BaseLogic
             return false;
         }
         FinanceInventoryCountCorrections::assertSalesCorrections($order, $corrections);
+        FinanceCustomerReturns::assertSalesCorrections($order, $corrections);
         usort($corrections, static fn(array $left, array $right): int => [
             (int)$left['sku_id'], (int)$left['goods_id'], (int)$left['order_goods_id'],
         ] <=> [

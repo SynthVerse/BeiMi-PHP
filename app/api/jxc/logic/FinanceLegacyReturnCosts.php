@@ -28,9 +28,16 @@ final class FinanceLegacyReturnCosts
         $tenant = FinanceAccess::tenant(); $reference = 'stock:' . $flow;
         $row = Db::name('finance_cost_event')->where('tenant_id', $tenant)->where('reference', $reference)->lock($lock)->find();
         $event = $row ? FinanceValue::decode($row['snapshot']) : [];
-        if (($event['type'] ?? '') !== 'receive' || ($event['snapshot']['bootstrap'] ?? false) !== true
+        $customerReturn = false;
+        if (($event['snapshot']['order_type'] ?? '') === 'finance_customer_return') {
+            $document = Db::name('finance_document')->where('tenant_id', $tenant)->where('id', $row['document_id'])->where('type', 'customer_return_actual')->where('status', 'confirmed')->lock($lock)->find();
+            $record = Db::name('finance_customer_return')->where('tenant_id', $tenant)->where('document_id', $row['document_id'])->where('sku_id', $row['sku_id'])->where('warehouse_id', $event['warehouse_id'])->lock($lock)->find();
+            $fact = $record ? FinanceValue::decode($record['snapshot']) : [];
+            $customerReturn = $document && $record && (int)($fact['stock_flow_id'] ?? 0) === $flow && ($fact['cost_basis'] ?? '') === 'pre_cutoff';
+        }
+        if (($event['type'] ?? '') !== 'receive' || (!(($event['snapshot']['bootstrap'] ?? false) === true) && !$customerReturn)
             || ($event['snapshot']['cost_basis_pending'] ?? '') !== 'pre_cutoff_sales_return' || ($event['origin'] ?? '') !== $reference) {
-            throw new \DomainException('请选择本门店启用承接的旧售退回成本来源');
+            throw new \DomainException('请选择本门店已确认的旧售退回成本来源');
         }
         $origin = Db::name('finance_cost_origin')->where('tenant_id', $tenant)->where('origin_key', $reference)->lock($lock)->find();
         if (!$origin) { throw new \DomainException('旧售退回成本来源不完整，请重新核实'); }

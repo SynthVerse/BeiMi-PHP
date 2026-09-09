@@ -58,7 +58,7 @@ final class FinanceCustomerBalances
             $source['overdue_days'] = $category === 'receivable' && $source['due_date'] && $source['due_date'] < date('Y-m-d') ? (int)(new \DateTimeImmutable($source['due_date']))->diff(new \DateTimeImmutable(date('Y-m-d')))->days : 0;
         }
         $actions = [];
-        foreach (['receipt', 'receipt_return', 'advance_allocate', 'customer_refund', 'advance_refund', 'bad_debt', 'recovery_receipt', 'recovery_termination', 'receivable_due'] as $type) {
+        foreach (['receipt', 'receipt_return', 'customer_return_actual', 'advance_allocate', 'customer_refund', 'advance_refund', 'bad_debt', 'recovery_receipt', 'recovery_termination', 'receivable_due'] as $type) {
             try { $policy = FinanceDocumentPolicy::authorize($type); $actions[] = ['type' => $type, 'title' => $policy['title']]; } catch (\DomainException) { continue; }
         }
         return ['tenant_id' => $tenant, 'customer' => $customer, 'balances' => $balances, 'category' => $category, 'overdue' => FinanceCustomers::overdue($id), 'actions' => $actions, 'can_statement' => FinanceAccess::has('finance.receivable.view'), 'as_of' => date('Y-m-d H:i:s')] + $page;

@@ -49,6 +49,7 @@ final class FinancePayments
         if ($type === 'inventory_loss_resolution') { return FinanceInventoryLosses::resolve($this->ledger, $document, $data); }
         if ($type === 'purchase_arrival_loss') { return FinancePurchaseArrivalLosses::confirm($this->ledger, $document, $data); }
         if ($type === 'purchase_difference') { return FinancePurchaseReviews::confirm($this->ledger, $document, $data); }
+        if ($type === 'customer_return_actual') { return FinanceCustomerReturns::confirm($this->ledger, $document, $data); }
         if ($type === 'purchase_return_actual') { return FinancePurchaseReturns::confirm($this->ledger, $document, $data); }
         if ($type === 'purchase_return_resolution') { return FinancePurchaseReturnResolutions::confirm($this->ledger, $document, $data); }
         if ($type === 'purchase_return_acceptance') { return FinancePurchaseReturnAcceptances::confirm($this->ledger, $document, $data); }

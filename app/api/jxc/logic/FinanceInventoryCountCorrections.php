@@ -105,7 +105,7 @@ final class FinanceInventoryCountCorrections
         foreach ($query->order('id desc')->select()->toArray() as $flow) {
             $kind = match ($flow['order_type']) {
                 'sales', 'sales_delivery' => 'omitted_sale', 'finance_purchase_arrival', 'supply' => 'omitted_purchase',
-                'finance_purchase_return', 'finance_purchase_return_back', 'sales-return' => 'omitted_return', default => 'omitted_transfer',
+                'finance_purchase_return', 'finance_purchase_return_back', 'finance_customer_return', 'sales-return' => 'omitted_return', default => 'omitted_transfer',
             };
             if (!empty($params['reason_kind']) && $params['reason_kind'] !== $kind) { continue; }
             try { $real = self::realFlow((int)$flow['id'], $line, $kind); }
@@ -217,7 +217,7 @@ final class FinanceInventoryCountCorrections
         $gain = bccomp($line['difference_quantity'], '0', 4) > 0;
         if ((int)$flow['flow_type'] !== ($gain ? 1 : 2)) { throw new \DomainException('补录业务方向须与原盘点差额相同'); }
         $types = ['omitted_sale' => ['sales', 'sales_delivery'], 'omitted_purchase' => ['finance_purchase_arrival', 'supply'],
-            'omitted_return' => ['sales-return', 'finance_purchase_return', 'finance_purchase_return_back']];
+            'omitted_return' => ['sales-return', 'finance_purchase_return', 'finance_purchase_return_back', 'finance_customer_return']];
         $reference = 'stock:' . $id;
         if ($kind === 'omitted_transfer') {
             $pair = Db::name('finance_stock_transfer_pair')->where('tenant_id', $tenant)->where($gain ? 'inbound_flow_id' : 'outbound_flow_id', $id)->lock(true)->find();
@@ -246,6 +246,12 @@ final class FinanceInventoryCountCorrections
             $returnId = preg_match('/^purchase-return:(\d+)$/D', $costFact['target_reference'] ?? '', $match) ? (int)$match[1] : 0;
             $returned = Db::name('finance_purchase_return_line')->where('tenant_id', $tenant)->where('id', $returnId)->where('document_id', $flow['order_id'])->where('warehouse_id', $line['warehouse_id'])->where('sku_id', $line['sku_id'])->lock(true)->find();
             if (!$document || !$returned || (int)$event['document_id'] !== (int)$document['id'] || bccomp($returned['quantity'], $flow['quantity'], 4) !== 0) { throw new \DomainException('实际退离须关联已确认的原退货明细'); }
+        } elseif ($flow['order_type'] === 'finance_customer_return') {
+            $document = Db::name('finance_document')->where('tenant_id', $tenant)->where('id', $flow['order_id'])->where('type', 'customer_return_actual')->where('status', 'confirmed')->lock(true)->find();
+            $returned = Db::name('finance_customer_return')->where('tenant_id', $tenant)->where('document_id', $flow['order_id'])->where('warehouse_id', $line['warehouse_id'])->where('sku_id', $line['sku_id'])->lock(true)->find();
+            $fact = $returned ? FinanceValue::decode($returned['snapshot']) : [];
+            if (!$document || !$returned || (int)$event['document_id'] !== (int)$document['id'] || (int)($fact['stock_flow_id'] ?? 0) !== $id
+                || bccomp($returned['quantity'], $flow['quantity'], 4) !== 0) { throw new \DomainException('客户退回须关联已确认的原实物验收记录'); }
         } elseif ($flow['order_type'] === 'finance_purchase_return_back') {
             $document = Db::name('finance_document')->where('tenant_id', $tenant)->where('id', $flow['order_id'])->where('type', 'purchase_return_resolution')->where('status', 'confirmed')->lock(true)->find();
             $resolution = Db::name('finance_purchase_return_resolution')->where('tenant_id', $tenant)->where('document_id', $flow['order_id'])->where('kind', 'returned')->lock(true)->find();

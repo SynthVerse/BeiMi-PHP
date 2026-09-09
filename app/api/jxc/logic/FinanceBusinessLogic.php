@@ -121,7 +121,7 @@ final class FinanceBusinessLogic extends BaseLogic
                 if (in_array($action, ['save', 'prepare', 'record', 'correct', 'reverse_duplicate', 'reverse'], true)) {
                     if ($document && $document['status'] !== 'draft') { throw new \DomainException('请先退回草稿再修改'); }
                     $payload = in_array($action, ['reverse_duplicate', 'reverse'], true) ? FinanceValue::decode($original['payload']) : ($params['payload'] ?? null);
-                    if (is_array($payload)) { $payload = FinanceInventoryCounts::input($type, $payload); }
+                    if (is_array($payload)) { $payload = FinanceCustomerReturns::input($type, FinanceInventoryCounts::input($type, $payload)); }
                     if (!is_array($payload) || strlen(FinanceValue::json($payload)) > 65536) { throw new \DomainException('草稿内容格式无效或超过容量限制'); }
                     $document = array_merge($document ?? ['tenant_id' => $tenantId, 'type' => $type, 'created_by' => FinanceValue::json(FinanceAccess::actor()),
                         'create_time' => time(), 'confirmed_at' => 0, 'confirmed_by' => '{}', 'confirmed_result' => '{}'],
@@ -216,6 +216,7 @@ final class FinanceBusinessLogic extends BaseLogic
                 'legacy_return_cost' => FinanceLegacyReturnCosts::options($params),
                 'inventory_count_start' => FinancePurchaseArrivals::options(0, $params),
                 'inventory_count_review' => FinanceInventoryCountReviews::options($params),
+                'customer_return_actual' => FinanceCustomerReturns::options($subjectId, $params),
                 'inventory_count_correction' => FinanceInventoryCountCorrections::options($params),
                 'inventory_count_correction_cancel' => FinanceInventoryCountCorrections::cancellationOptions($params),
                 'inventory_count', 'inventory_count_cancel' => FinanceInventoryCounts::options($params),
@@ -287,6 +288,7 @@ final class FinanceBusinessLogic extends BaseLogic
         $document['id'] = (int)$document['id']; $document['version'] = (int)$document['version'];
         $document = FinanceInventoryCounts::present($document);
         $document = FinanceInventoryCountReviews::present($document);
+        $document = FinanceCustomerReturns::present($document);
         if ($document['type'] === 'sales_batch' && $document['status'] === 'confirmed' && FinanceAccess::has('settlement.view')) { $document['output'] = FinanceSalesOutput::document(['id' => $document['id']]); }
         return $document;
     }

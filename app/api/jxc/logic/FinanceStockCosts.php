@@ -26,7 +26,17 @@ final class FinanceStockCosts
             $event['business_date'] = FinanceValue::date($context['business_date'] ?? null);
             $event['document_id'] = FinanceValue::id($context['document_id'] ?? null);
         }
-        if ($flow['order_type'] === 'finance_count_reverse') {
+        if ($flow['order_type'] === 'finance_customer_return') {
+            $event['business_date'] = FinanceValue::date($context['business_date']); $event['document_id'] = FinanceValue::id($context['document_id']);
+            $event['to_warehouse_id'] = $event['warehouse_id']; $event['warehouse_id'] = FinanceValue::id($context['original_warehouse_id']);
+            $event += ['type' => 'restore', 'bucket' => 'sale', 'target_reference' => 'sales_order:' . FinanceValue::id($context['original_sales_order_id'])];
+            if (($context['customer_return_source']['cost_basis'] ?? '') === 'pre_cutoff') {
+                unset($event['bucket'], $event['target_reference'], $event['to_warehouse_id']);
+                $event['warehouse_id'] = (int)$flow['warehouse_id']; $event['type'] = 'receive'; $event['origin'] = $reference; $event['amount'] = null;
+                $event['snapshot']['cost_basis_pending'] = 'pre_cutoff_sales_return'; $event['snapshot']['original_flow'] = $flow;
+                $event['snapshot']['return_source'] = ['order_sn' => $flow['order_sn'], 'original_sales_order_id' => $context['original_sales_order_id'], 'original_order_sn' => $context['customer_return_source']['order_sn']];
+            }
+        } elseif ($flow['order_type'] === 'finance_count_reverse') {
             $event['business_date'] = FinanceValue::date($context['business_date']); $event['document_id'] = FinanceValue::id($context['document_id']);
             $event += ['type' => 'count_reverse', 'count_reference' => 'stock:' . FinanceValue::id($context['count_line']['stock_flow_id'])];
             if ($context['cancel_count_reverse'] ?? false) { $event['quantity'] = bcsub('0', $event['quantity'], 4); }
