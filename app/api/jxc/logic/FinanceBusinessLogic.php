@@ -195,6 +195,7 @@ final class FinanceBusinessLogic extends BaseLogic
             $subjectId = FinanceValue::id($params['subject_id'] ?? 0, true);
             $categories = $type === 'advance_allocate' && ($params['role'] ?? '') === 'fund' ? ['advance'] : $policy['sources'];
             if ($type === 'supplier_credit_allocate' && ($params['role'] ?? '') === 'fund') { $categories = ['supplier_refund']; }
+            if ($type === 'customer_credit_allocate' && ($params['role'] ?? '') === 'fund') { $categories = ['customer_refund']; }
             $page = max(1, FinanceValue::id($params['page'] ?? 1));
             $sources = match ($type) {
                 'account_reconcile', 'cash_shortage' => FinanceReconciliations::options($ledger, $params),

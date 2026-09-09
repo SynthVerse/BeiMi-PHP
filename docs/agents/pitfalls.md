@@ -1031,8 +1031,8 @@
 - 状态：已防护
 - 首次发生：2026-09-07
 - 最近发生：2026-09-09
-- 复发次数：5
-- 适用范围：预收抵扣、已用预收跨月更正、后续资金认领、历史销售贷项、未知日期供应商贷项冲销与期间对账快照
+- 复发次数：6
+- 适用范围：预收抵扣、已用预收跨月更正、后续资金认领、历史销售贷项、未知日期客户和供应商贷项冲销与期间对账快照
 - 相关问题：PIT-0032（时点含义不同）
 
 ### 触发场景
@@ -1076,6 +1076,9 @@
 | 2026-09-08 | 供应商对账 | 后月抵扣之后生成启用月份快照，旧期应退款提前减少 | 原防线检查了正反分录月份，未覆盖快照读取仍回落到启用日的期间筛选。 |
 | 2026-09-08 | 普通费用调整 | 上月费用已结账，本月调减产生的应退款仍用原发生日进入旧期对账 | 原测试仅让受益月在上月，原发生日仍为今天，未覆盖新增义务来源的截止时点。 |
 | 2026-09-09 | 财务一期第60批 | 已退回部分预收后向前／向后改到账月份，或原已结月改为另一个未结月 | 原防线验证当前余额及同月日期对账，没有验证保留来源身份后的月报归属；替代入账只看新业务日期，未承接原现金已封账的确认月边界。 |
+| 2026-09-09 | 财务一期第68批 | 未知日期期初客户贷项抵扣本月应收后，生成上月对账时贷项余额提前由50降为20 | 原快照月份防线仅作用于供应商；新增客户抵扣虽保存正确月份，读取仍回落到启用日。 |
+
+2026-09-09 第68批补充：`FinanceStatementSnapshot::capture` 对 `customer_credit_allocate` 的未知生效日分录按保存的归属月份限制截止范围，关联反向沿用同一规则；其他客户真实资金业务仍保留其原日期口径。`test_unknown_date_customer_credit_keeps_effective_date_unknown_and_limits_staff_foreign_and_excess_allocations` 覆盖旧期50、本期20、明细仅显示已知月份及撤销后两期50。原红 `E:/object/BeiMi/.scratch/finance-68-credit-targeted.log` 为5 tests、241 assertions、1 failure；修复后 `finance-68-credit-targeted-green.log` 为5 tests、257 assertions通过，包含贷项退款共享余额及供应商回归。一次重跑因隔离服务停止产生5 errors、0 assertions，恢复3307服务后得到上述绿色终态，该环境失败不计为业务验证。实际使用 `Matt Pocock / implement`、`Matt Pocock / tdd`、`用户级自定义 / impeccable`、`Matt Pocock / code-review`、`Matt Pocock / diagnosing-bugs`、`用户级自定义 / prevent-repeat-pitfalls`，两轴静态复核clear。尚未验证本批生产部署和真机；后续新增无真实日期的核销类型须同时核对正反分录与期间读取。防护后返回客户贷项抵扣提交与剩余财务功能。
 
 2026-09-09 自动防线：`test_consumed_advance_date_correction_keeps_cash_and_customer_months_consistent` 覆盖向前／向后移动、已结来源、改回已结月、连续日期更正和更正后再封账；金额不变时不生成零分录。原红 `.scratch/finance-60-date-red.log` 4 tests、126 assertions、3 failures；修复后相关回归 `.scratch/finance-60-regression.log` 14 tests、523 assertions 通过。当前总余额正确并不能证明各月正确，测试同时比较客户预收、现金、相邻月承接及原冻结快照。尚未验证：本批生产部署及真机；后续建议：其他保留来源身份的日期更正也须核对关联分录期间，不能从最新业务日期重推历史入账。
 

@@ -84,6 +84,75 @@ final class FinanceBusinessWorkflowTest extends TestCase
 
     public static function customerRefundSaleCases(): array { return [[false], [true]]; }
 
+    public function test_unknown_date_customer_credit_keeps_effective_date_unknown_and_limits_staff_foreign_and_excess_allocations(): void
+    {
+        $activation = date('Y-m-01', strtotime('first day of last month')); $this->activate('cash', $activation);
+        $creditId = (int)Db::name('finance_opening_source')->insertGetId(['tenant_id' => self::TENANT_ID, 'opening_item_id' => 990068,
+            'category' => 'customer_refund', 'subject_id' => $this->customerId, 'amount' => '50.00', 'activation_date' => $activation,
+            'source_snapshot' => json_encode(['historical_date' => null, 'subject_name' => '收款主客户', 'source_reference' => '已核实期初客户贷项']), 'create_time' => time()]);
+        $credit = 'o:' . $creditId; $ledger = new FinanceLedger(self::TENANT_ID);
+        $target = $ledger->createSource(2068, 'receivable', $this->customerId, '100', date('Y-m-d'), null, []);
+        $other = $ledger->createSource(2069, 'receivable', $this->createCustomer('其他贷项客户'), '100', date('Y-m-d'), null, []);
+        $payload = ['subject_id' => $this->customerId, 'credit_source' => $credit, 'reason' => '人工指定期初贷项抵扣本期应收', 'allocations' => [['source' => $target, 'amount' => '30']]];
+        foreach ([['allocations' => []], ['credit_source' => $target], ['allocations' => [['source' => $other, 'amount' => '30']]],
+            ['allocations' => [['source' => $target, 'amount' => '60']]], ['allocations' => [['source' => $target, 'amount' => '10'], ['source' => $target, 'amount' => '10']]]] as $invalid) {
+            self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'customer_credit_allocate', 'payload' => array_replace($payload, $invalid)]));
+        }
+        self::assertSame('100.00', $ledger->source($target)['balance']); self::assertSame('50.00', $ledger->source($credit)['balance']);
+        $employee = WorkforceLogic::saveEmployee(['name' => '客户贷项准备人员', 'mobile' => '13800009968', 'bind_user_id' => 996968, 'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['finance.refund.prepare']]); self::assertNotFalse($employee, WorkforceLogic::getError());
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996968; request()->adminId = 0;
+        $draft = FinanceBusinessLogic::action('prepare', $this->command(0) + ['type' => 'customer_credit_allocate', 'payload' => $payload]); self::assertNotFalse($draft, FinanceBusinessLogic::getError());
+        self::assertFalse(FinanceBusinessLogic::action('confirm', $this->command($draft['version']) + ['id' => $draft['id']])); $this->prepareCustomerReportRequestContext();
+        $allocated = FinanceBusinessLogic::action('confirm', $this->command($draft['version']) + ['id' => $draft['id']]); self::assertNotFalse($allocated, FinanceBusinessLogic::getError());
+        $entries = Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('document_id', $allocated['id'])->select()->toArray(); self::assertCount(2, $entries);
+        foreach ($entries as $entry) { self::assertSame(date('Y-m'), $entry['posting_month']); self::assertNull($entry['effective_date']); }
+        $oldStatement = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['subject_kind' => 'customer', 'customer_id' => $this->customerId, 'date_from' => $activation, 'date_to' => date('Y-m-t', strtotime($activation))]);
+        self::assertNotFalse($oldStatement); self::assertSame('50.00', $oldStatement['snapshot']['balances']['customer_refund']['closing']);
+        $currentStatement = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['subject_kind' => 'customer', 'customer_id' => $this->customerId]);
+        self::assertNotFalse($currentStatement); self::assertSame('20.00', $currentStatement['snapshot']['balances']['customer_refund']['closing']);
+        $movements = array_values(array_filter($currentStatement['snapshot']['movements'], static fn(array $row): bool => ($row['document_id'] ?? null) === (int)$allocated['id']));
+        self::assertCount(2, $movements);
+        foreach ($movements as $movement) { self::assertSame('month', $movement['date_precision']); self::assertSame(date('Y-m'), $movement['date']); self::assertNull($movement['effective_date']); }
+        $reversed = FinanceBusinessLogic::action('reverse', $this->command($allocated['version']) + ['id' => $allocated['id'], 'correction_reason' => '撤销错误指定的抵扣组成']);
+        self::assertNotFalse($reversed, FinanceBusinessLogic::getError());
+        $oldAfter = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['subject_kind' => 'customer', 'customer_id' => $this->customerId, 'date_from' => $activation, 'date_to' => date('Y-m-t', strtotime($activation))]);
+        $currentAfter = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['subject_kind' => 'customer', 'customer_id' => $this->customerId]);
+        self::assertNotFalse($oldAfter); self::assertNotFalse($currentAfter);
+        self::assertSame('50.00', $oldAfter['snapshot']['balances']['customer_refund']['closing']);
+        self::assertSame('50.00', $currentAfter['snapshot']['balances']['customer_refund']['closing']);
+        self::assertSame('100.00', $ledger->source($target)['balance']);
+        $this->prepareCustomerReportRequestContext(self::OTHER_TENANT_ID); self::assertFalse(FinanceBusinessLogic::options(['type' => 'customer_credit_allocate', 'subject_id' => $this->customerId, 'role' => 'fund', 'source' => $credit]));
+    }
+
+    public function test_customer_remaining_credit_can_offset_selected_receivables_and_shares_its_balance_with_refunds(): void
+    {
+        $this->activate(); $sale = $this->deliveredSale();
+        $settlement = ['order_id' => $sale['order_id'], 'lines' => [['order_goods_id' => $sale['line_id'], 'customer_settlement_weight' => '2', 'pricing_unit_id' => $sale['unit_id'], 'price' => '500']]];
+        self::assertNotFalse(SalesSettlementLogic::submit($this->command(0) + $settlement), SalesSettlementLogic::getError());
+        $saleRef = (string)Db::name('finance_sales_version')->where('tenant_id', self::TENANT_ID)->where('order_id', $sale['order_id'])->value('source_ref');
+        $settlement['lines'][0]['price'] = '400'; $settlement += ['credit_reviewed' => 1, 'credit_allocations' => [], 'edit_reason' => '确认销售调减，贷项保留待明确处理'];
+        self::assertNotFalse(SalesSettlementLogic::submit($this->command(1) + $settlement), SalesSettlementLogic::getError());
+        $ledger = new FinanceLedger(self::TENANT_ID); $credit = $ledger->sources('customer_refund', $this->customerId)[0];
+        $options = FinanceBusinessLogic::options(['type' => 'customer_credit_allocate', 'subject_id' => $this->customerId, 'role' => 'fund', 'source' => $credit['reference']]);
+        self::assertNotFalse($options, FinanceBusinessLogic::getError()); self::assertSame($credit['reference'], $options['selected_source']['reference']);
+        $cash = $ledger->account($this->accountId)['balance'];
+        $payload = ['subject_id' => $this->customerId, 'credit_source' => $credit['reference'], 'allocations' => [['source' => $this->receivable, 'amount' => '100'], ['source' => $saleRef, 'amount' => '50']], 'reason' => '客户确认指定抵扣两笔应收'];
+        $command = $this->command(0) + ['type' => 'customer_credit_allocate', 'payload' => $payload];
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($command + ['action' => 'record']); self::assertSame('200.00', $ledger->source($credit['reference'])['balance'], '抵扣预览回滚');
+        $allocated = FinanceBusinessLogic::action('record', $command); self::assertNotFalse($allocated, FinanceBusinessLogic::getError()); self::assertSame($allocated, FinanceBusinessLogic::action('record', $command));
+        self::assertSame('150.00', $allocated['confirmed_result']['allocated_amount']); self::assertSame('50.00', $ledger->source($credit['reference'])['balance']);
+        self::assertSame('900.00', $ledger->source($this->receivable)['balance']); self::assertSame('950.00', $ledger->source($saleRef)['balance']); self::assertSame($cash, $ledger->account($this->accountId)['balance']);
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'customer_credit_allocate', 'payload' => array_replace($payload, ['allocations' => [['source' => $saleRef, 'amount' => '51']]])]));
+        $refund = ['subject_id' => $this->customerId, 'account_id' => $this->accountId, 'actual_date' => date('Y-m-d'), 'amount' => '50', 'allocations' => [['source' => $credit['reference'], 'amount' => '50']], 'reason' => '实际退还剩余五十元'];
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'customer_refund', 'payload' => $refund]), FinanceBusinessLogic::getError());
+        self::assertSame('0.00', $ledger->source($credit['reference'])['balance']);
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'customer_credit_allocate', 'payload' => array_replace($payload, ['allocations' => [['source' => $saleRef, 'amount' => '1']]])]));
+        $reverse = FinanceBusinessLogic::action('reverse', $this->command($allocated['version']) + ['id' => $allocated['id'], 'correction_reason' => '核实原抵扣组成录错，恢复后重新处理']); self::assertNotFalse($reverse, FinanceBusinessLogic::getError());
+        self::assertSame('150.00', $ledger->source($credit['reference'])['balance']); self::assertSame('1000.00', $ledger->source($this->receivable)['balance']); self::assertSame('1000.00', $ledger->source($saleRef)['balance']);
+        self::assertSame(bcsub($cash, '50', 2), $ledger->account($this->accountId)['balance']);
+        self::assertSame('800.00', bcadd((string)Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('metric', 'revenue')->sum('amount'), '0', 2));
+    }
+
     /** @dataProvider customerRefundSaleCases */
     public function test_customer_refund_links_verified_physical_return_to_original_sale_credit_without_repeating_income_or_stock(bool $batch): void
     {

@@ -38,14 +38,16 @@ final class FinanceStatementSnapshot
             }
         }
         if ($sources) {
-            $entries = Db::name('finance_entry')->where('tenant_id', $tenant)->where('metric', 'balance')->whereIn('source_ref', array_keys($sources))->order('id')->limit(20001)->select()->toArray();
+            $entries = Db::name('finance_entry')->alias('e')->leftJoin('finance_document d', 'd.id=e.document_id AND d.tenant_id=e.tenant_id')
+                ->where('e.tenant_id', $tenant)->where('e.metric', 'balance')->whereIn('e.source_ref', array_keys($sources))
+                ->field('e.*,d.type AS document_type')->order('e.id')->limit(20001)->select()->toArray();
             if (count($entries) > 20000) { throw new \DomainException('客户分录超过单次对账容量，请联系管理员分段归档后处理'); }
             foreach ($entries as $entry) {
                 if ($entry['purpose'] === 'advance_revision' && $sources[$entry['source_ref']]['advance_revision']) { continue; }
                 $date = $entry['effective_date'] ?? $entry['business_date'] ?? $activation;
-                // 日期不详的期初贷项可能抵扣后月应付，原启用日不能使核销提前进入旧期快照。
+                // 日期不详的贷项抵扣后月往来时，以已保存的入账月限制旧期快照，不能把启用日当作核销日。
                 $datePrecision = 'day';
-                if ($supplier && $entry['effective_date'] === null && $date < $entry['posting_month'] . '-01') {
+                if (($supplier || $entry['document_type'] === 'customer_credit_allocate') && $entry['effective_date'] === null && $date < $entry['posting_month'] . '-01') {
                     $date = $entry['posting_month'] . '-01'; $datePrecision = 'month';
                 }
                 if ($date > $to) { continue; }

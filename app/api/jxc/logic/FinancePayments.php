@@ -55,6 +55,7 @@ final class FinancePayments
         if ($type === 'purchase_return_acceptance') { return FinancePurchaseReturnAcceptances::confirm($this->ledger, $document, $data); }
         if ($type === 'purchase_extra_adjustment') { return FinancePurchaseExtraAdjustments::confirm($this->ledger, $document, $data); }
         if ($type === 'supplier_credit_allocate') { return FinanceSupplierCredits::confirm($this->ledger, $document, $data); }
+        if ($type === 'customer_credit_allocate') { return FinanceCustomerCredits::confirm($this->ledger, $document, $data); }
         if ($type === 'purchase_adjustment') { return FinancePurchaseAdjustments::confirm($this->ledger, $document, $data); }
         if ($type === 'purchase_extra_cost') { return FinancePurchaseExtraCosts::confirm($this->ledger, $document, $data); }
         if ($type === 'purchase_arrival') { return FinancePurchaseArrivals::confirm($this->ledger, $document, $data); }
