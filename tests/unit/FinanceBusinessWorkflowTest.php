@@ -73,6 +73,8 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260909_000050_finance_recurring_plan_change.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260909_000051_finance_deferred_amortization_revision.sql')));
         $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260909_000052_finance_deferred_plan_revision.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260913_000053_finance_transfer_settlement_rebase.sql')));
+        $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260913_000054_finance_transfer_settlement_rebase_event_scope.sql')));
         $this->clean();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
     }
@@ -1165,7 +1167,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertTrue($review['confirmed_result']['ordinary_close_allowed']);
         // 模拟升级前已保存的核对，新增展示字段不能使无业务变化的历史结论失效。
         $legacy = $review['confirmed_result']; $legacyTransfer = $legacy['transfer'];
-        unset($legacyTransfer['fingerprint'], $legacyTransfer['closed_period_followup'], $legacyTransfer['frozen_remaining_amount'], $legacyTransfer['post_close_adjustments'], $legacyTransfer['transfer_correction_amount'], $legacyTransfer['replacement_transfer_source'], $legacyTransfer['replacement_document_id']);
+        unset($legacyTransfer['fingerprint'], $legacyTransfer['closed_period_followup'], $legacyTransfer['frozen_remaining_amount'], $legacyTransfer['post_close_adjustments'], $legacyTransfer['transfer_correction_amount'], $legacyTransfer['rebased_arrived_amount'], $legacyTransfer['rebased_returned_amount'], $legacyTransfer['rebased_withheld_fee'], $legacyTransfer['replacement_transfer_source'], $legacyTransfer['replacement_document_id']);
         $legacyTransfer['fingerprint'] = hash('sha256', \app\api\jxc\logic\FinanceValue::json($legacyTransfer)); $legacy['transfer'] = $legacyTransfer;
         Db::name('finance_transit_reconciliation')->where('tenant_id', self::TENANT_ID)->where('document_id', $review['id'])->update(['snapshot' => \app\api\jxc\logic\FinanceValue::json($legacy)]);
         self::assertSame('normal', FinanceBusinessLogic::options(['type' => 'transit_reconcile', 'month' => $month, 'transfer_source' => $source])['selected_transfer']['state']);
@@ -1562,7 +1564,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $this->prepareCustomerReportRequestContext(self::OTHER_TENANT_ID); self::assertFalse(FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $changed['id'], 'payload' => $data, 'correction_reason' => '跨店拒绝']));
     }
 
-    public function test_transfer_out_correction_refuses_when_downstream_settlement_consumed_transit(): void
+    public function test_transfer_out_correction_rebases_downstream_arrival_without_reposting_cash(): void
     {
         $this->activate(); $target = FinanceSetupLogic::saveAccount($this->command(0) + ['name' => '转出更正后续到账目标', 'account_type' => 'cash']); self::assertNotFalse($target);
         $data = ['account_id' => $this->accountId, 'target_account_id' => (int)$target['id'], 'actual_date' => date('Y-m-d'), 'amount' => '1000', 'source_reference' => 'TRANSFER-OUT-CORRECT-SETTLED-74',
@@ -1570,8 +1572,142 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $original = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_out', 'payload' => $data]); self::assertNotFalse($original, FinanceBusinessLogic::getError()); $source = $original['confirmed_result']['transfer_source'];
         $arrival = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_arrival', 'payload' => ['source' => $source, 'account_id' => $target['id'], 'actual_date' => date('Y-m-d'), 'amount' => '100',
             'transfer_verified' => 1, 'reason' => '后续已实际到账', 'transaction_no' => 'ARRIVED-SETTLED-74', 'transaction_scope' => '真实到账凭据']]); self::assertNotFalse($arrival, FinanceBusinessLogic::getError());
-        $data['amount'] = '900'; self::assertFalse(FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $original['id'], 'payload' => $data, 'correction_reason' => '原转出金额误录']));
-        self::assertStringContainsString('已有后续处理', FinanceBusinessLogic::getError()); self::assertSame('900.00', (new FinanceLedger(self::TENANT_ID))->source($source)['balance']);
+        $returned = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_return', 'payload' => ['source' => $source, 'account_id' => $this->accountId, 'actual_date' => date('Y-m-d'), 'amount' => '150',
+            'transfer_verified' => 1, 'reason' => '后续已实际返还', 'transaction_no' => 'RETURNED-SETTLED-74', 'transaction_scope' => '真实返还凭据']]); self::assertNotFalse($returned, FinanceBusinessLogic::getError());
+        $alternative = FinanceSetupLogic::saveAccount($this->command(0) + ['name' => '不应改写已到账目标', 'account_type' => 'cash']); self::assertNotFalse($alternative);
+        $wrong = $data; $wrong['amount'] = '900'; $wrong['target_account_id'] = (int)$alternative['id']; self::assertFalse(FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $original['id'], 'payload' => $wrong, 'correction_reason' => '错误改写到账目标'])); self::assertStringContainsString('保留原目标账户', FinanceBusinessLogic::getError());
+        $data['amount'] = '900'; $changed = FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $original['id'], 'payload' => $data, 'correction_reason' => '原转出金额误录']); self::assertNotFalse($changed, FinanceBusinessLogic::getError());
+        $replacement = $changed['confirmed_result']['transfer_source']; $ledger = new FinanceLedger(self::TENANT_ID);
+        self::assertSame($original['confirmed_result']['money']['transaction_id'], $changed['confirmed_result']['money']['transaction_id']); self::assertSame(3, Db::name('finance_money_transaction')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame('0.00', $ledger->source($source)['balance']); self::assertSame('650.00', $ledger->source($replacement)['balance']);
+        $old = FinanceBusinessLogic::options(['type' => 'account_transfer_arrival', 'transfer_source' => $source])['selected_transfer'];
+        $new = FinanceBusinessLogic::options(['type' => 'account_transfer_arrival', 'transfer_source' => $replacement])['selected_transfer'];
+        self::assertSame('100.00', $old['arrived_amount']); self::assertSame('150.00', $old['returned_amount']); self::assertSame('-100.00', $old['rebased_arrived_amount']); self::assertSame('-150.00', $old['rebased_returned_amount']); self::assertSame('0.00', $old['remaining_amount']); self::assertSame($replacement, $old['replacement_transfer_source']);
+        self::assertSame('0.00', $new['arrived_amount']); self::assertSame('0.00', $new['returned_amount']); self::assertSame('100.00', $new['rebased_arrived_amount']); self::assertSame('150.00', $new['rebased_returned_amount']); self::assertSame('650.00', $new['remaining_amount']);
+        $report = FinanceBusinessLogic::monthlyReport(['month' => date('Y-m'), 'report' => 'cash']); self::assertNotFalse($report, FinanceBusinessLogic::getError());
+        self::assertSame('0.00', $report['data']['summary']['external_in']); self::assertSame('0.00', $report['data']['summary']['external_out']); self::assertSame('4350.00', $report['data']['summary']['closing_accounts']); self::assertSame('650.00', $report['data']['summary']['closing_transit']);
+    }
+
+    public function test_closed_month_transfer_out_correction_rebases_settlements_without_rewriting_history(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $date = date('Y-m-t', strtotime($month . '-01')); $this->activate('cash', $month . '-01');
+        $target = FinanceSetupLogic::saveAccount($this->command(0) + ['name' => '已结月互转更正目标', 'account_type' => 'cash']); self::assertNotFalse($target);
+        $data = ['account_id' => $this->accountId, 'target_account_id' => (int)$target['id'], 'actual_date' => $date, 'amount' => '1000', 'source_reference' => 'TRANSFER-OUT-CLOSED-REBASE-74',
+            'transfer_verified' => 1, 'reason' => '上月实际转出', 'transaction_no' => 'OUT-CLOSED-REBASE-74', 'transaction_scope' => '原真实转出凭据'];
+        $original = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_out', 'payload' => $data]); self::assertNotFalse($original, FinanceBusinessLogic::getError()); $source = $original['confirmed_result']['transfer_source'];
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_arrival', 'payload' => ['source' => $source, 'account_id' => $target['id'], 'actual_date' => $date, 'amount' => '100',
+            'transfer_verified' => 1, 'reason' => '上月实际到账', 'transaction_no' => 'ARRIVED-CLOSED-REBASE-74', 'transaction_scope' => '原真实到账凭据']]), FinanceBusinessLogic::getError());
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_return', 'payload' => ['source' => $source, 'account_id' => $this->accountId, 'actual_date' => $date, 'amount' => '150',
+            'transfer_verified' => 1, 'reason' => '上月实际返还', 'transaction_no' => 'RETURNED-CLOSED-REBASE-74', 'transaction_scope' => '原真实返还凭据']]), FinanceBusinessLogic::getError());
+        $preview = FinanceBusinessLogic::periodAction('preview', ['month' => $month]); self::assertNotFalse($preview, FinanceBusinessLogic::getError());
+        self::assertNotFalse(FinanceBusinessLogic::periodAction('close', $this->command(0) + ['month' => $month, 'mode' => 'estimated', 'acknowledge_unresolved' => 1, 'expected_fingerprint' => $preview['fingerprint'], 'reason' => '冻结上月互转结清组成']), FinanceBusinessLogic::getError());
+        $frozen = FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => 'cash']); self::assertNotFalse($frozen, FinanceBusinessLogic::getError()); self::assertSame('4250.00', $frozen['data']['summary']['closing_accounts']); self::assertSame('750.00', $frozen['data']['summary']['closing_transit']);
+        $data['amount'] = '900'; $changed = FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $original['id'], 'payload' => $data, 'correction_reason' => '上月转出本金误录']); self::assertNotFalse($changed, FinanceBusinessLogic::getError()); $replacement = $changed['confirmed_result']['transfer_source'];
+        $old = FinanceBusinessLogic::options(['type' => 'transit_reconcile', 'month' => $month, 'transfer_source' => $source])['selected_transfer'];
+        $new = FinanceBusinessLogic::options(['type' => 'account_transfer_arrival', 'transfer_source' => $replacement])['selected_transfer'];
+        self::assertSame('replaced', $old['state']); self::assertTrue($old['composition_known']); self::assertSame('0.00', $old['remaining_amount']); self::assertSame('-100.00', $old['rebased_arrived_amount']); self::assertSame('-150.00', $old['rebased_returned_amount']);
+        self::assertSame('650.00', $new['remaining_amount']); self::assertSame('100.00', $new['rebased_arrived_amount']); self::assertSame('150.00', $new['rebased_returned_amount']);
+        self::assertSame(date('Y-m'), Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('document_id', $changed['id'])->where('purpose', 'transfer_settlement_rebase')->value('posting_month'));
+        $history = FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => 'cash']); self::assertSame('4250.00', $history['data']['summary']['closing_accounts']); self::assertSame('750.00', $history['data']['summary']['closing_transit']);
+    }
+
+    public function test_transfer_out_correction_rebases_each_settlement_event_across_multiple_replacements(): void
+    {
+        $this->activate(); $target = FinanceSetupLogic::saveAccount($this->command(0) + ['name' => '连续更正结清目标', 'account_type' => 'cash']); self::assertNotFalse($target);
+        $data = ['account_id' => $this->accountId, 'target_account_id' => (int)$target['id'], 'actual_date' => date('Y-m-d'), 'amount' => '1000', 'source_reference' => 'TRANSFER-OUT-CHAIN-REBASE-75',
+            'transfer_verified' => 1, 'reason' => '连续更正原始转出', 'transaction_no' => 'OUT-CHAIN-REBASE-75', 'transaction_scope' => '真实转出凭据'];
+        $original = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_out', 'payload' => $data]); self::assertNotFalse($original, FinanceBusinessLogic::getError()); $source = $original['confirmed_result']['transfer_source'];
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_arrival', 'payload' => ['source' => $source, 'account_id' => $target['id'], 'actual_date' => date('Y-m-d'), 'amount' => '100', 'transfer_verified' => 1, 'reason' => '连续更正到账', 'transaction_no' => 'ARRIVED-CHAIN-75', 'transaction_scope' => '真实到账凭据']]), FinanceBusinessLogic::getError());
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_return', 'payload' => ['source' => $source, 'account_id' => $this->accountId, 'actual_date' => date('Y-m-d'), 'amount' => '150', 'transfer_verified' => 1, 'reason' => '连续更正返还', 'transaction_no' => 'RETURNED-CHAIN-75', 'transaction_scope' => '真实返还凭据']]), FinanceBusinessLogic::getError());
+        $data['amount'] = '900'; $first = FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $original['id'], 'payload' => $data, 'correction_reason' => '第一次更正本金']); self::assertNotFalse($first, FinanceBusinessLogic::getError()); $middle = $first['confirmed_result']['transfer_source'];
+        $data['amount'] = '800'; $second = FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $first['id'], 'payload' => $data, 'correction_reason' => '第二次更正本金']); self::assertNotFalse($second, FinanceBusinessLogic::getError()); $replacement = $second['confirmed_result']['transfer_source']; $ledger = new FinanceLedger(self::TENANT_ID);
+        self::assertSame('0.00', $ledger->source($source)['balance']); self::assertSame('0.00', $ledger->source($middle)['balance']); self::assertSame('550.00', $ledger->source($replacement)['balance']);
+        self::assertSame(4, Db::name('finance_transfer_settlement_rebase')->where('tenant_id', self::TENANT_ID)->count());
+        $current = FinanceBusinessLogic::options(['type' => 'account_transfer_arrival', 'transfer_source' => $replacement])['selected_transfer']; self::assertSame('100.00', $current['rebased_arrived_amount']); self::assertSame('150.00', $current['rebased_returned_amount']); self::assertSame('550.00', $current['remaining_amount']);
+    }
+
+    public function test_fully_settled_transfer_out_correction_keeps_replaced_source_readable(): void
+    {
+        $this->activate(); $target = FinanceSetupLogic::saveAccount($this->command(0) + ['name' => '全额结清更正目标', 'account_type' => 'cash']); self::assertNotFalse($target);
+        $data = ['account_id' => $this->accountId, 'target_account_id' => (int)$target['id'], 'actual_date' => date('Y-m-d'), 'amount' => '1000', 'source_reference' => 'TRANSFER-OUT-FULL-SETTLED-75',
+            'transfer_verified' => 1, 'reason' => '全额结清原始转出', 'transaction_no' => 'OUT-FULL-SETTLED-75', 'transaction_scope' => '真实转出凭据'];
+        $original = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_out', 'payload' => $data]); self::assertNotFalse($original, FinanceBusinessLogic::getError()); $source = $original['confirmed_result']['transfer_source'];
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_arrival', 'payload' => ['source' => $source, 'account_id' => $target['id'], 'actual_date' => date('Y-m-d'), 'amount' => '1000', 'transfer_verified' => 1, 'reason' => '全额实际到账', 'transaction_no' => 'ARRIVED-FULL-75', 'transaction_scope' => '真实到账凭据']]), FinanceBusinessLogic::getError());
+        $changed = FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $original['id'], 'payload' => $data, 'correction_reason' => '全额结清后关联更正']); self::assertNotFalse($changed, FinanceBusinessLogic::getError()); $replacement = $changed['confirmed_result']['transfer_source'];
+        self::assertSame('0.00', (new FinanceLedger(self::TENANT_ID))->source($source)['balance']); self::assertSame('0.00', (new FinanceLedger(self::TENANT_ID))->source($replacement)['balance']);
+        $old = FinanceBusinessLogic::options(['type' => 'account_transfer_arrival', 'transfer_source' => $source])['selected_transfer']; self::assertSame('0.00', $old['remaining_amount']); self::assertSame($replacement, $old['replacement_transfer_source']);
+    }
+
+    public function test_rebased_arrival_correction_moves_to_latest_transfer_source(): void
+    {
+        $this->activate(); $target = FinanceSetupLogic::saveAccount($this->command(0) + ['name' => '承接到账更正目标', 'account_type' => 'cash']); self::assertNotFalse($target);
+        $data = ['account_id' => $this->accountId, 'target_account_id' => (int)$target['id'], 'actual_date' => date('Y-m-d'), 'amount' => '1000', 'source_reference' => 'TRANSFER-OUT-BLOCK-SETTLEMENT-75',
+            'transfer_verified' => 1, 'reason' => '承接到账原始转出', 'transaction_no' => 'OUT-BLOCK-SETTLEMENT-75', 'transaction_scope' => '真实转出凭据'];
+        $original = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_out', 'payload' => $data]); self::assertNotFalse($original, FinanceBusinessLogic::getError()); $source = $original['confirmed_result']['transfer_source'];
+        $arrivalData = ['source' => $source, 'account_id' => $target['id'], 'actual_date' => date('Y-m-d'), 'amount' => '100', 'transfer_verified' => 1, 'reason' => '承接前到账', 'transaction_no' => 'ARRIVED-BLOCK-75', 'transaction_scope' => '真实到账凭据'];
+        $arrival = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_arrival', 'payload' => $arrivalData]); self::assertNotFalse($arrival, FinanceBusinessLogic::getError());
+        $data['amount'] = '900'; $outCorrection = FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $original['id'], 'payload' => $data, 'correction_reason' => '承接到账后的转出更正']); self::assertNotFalse($outCorrection, FinanceBusinessLogic::getError()); $replacement = $outCorrection['confirmed_result']['transfer_source'];
+        $arrivalData['amount'] = '80'; $changed = FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $arrival['id'], 'payload' => $arrivalData, 'correction_reason' => '到账金额二次核实']); self::assertNotFalse($changed, FinanceBusinessLogic::getError());
+        self::assertSame($arrival['confirmed_result']['money']['transaction_id'], $changed['confirmed_result']['money']['transaction_id']); self::assertSame($replacement, $changed['confirmed_result']['transfer_source']);
+        self::assertSame($replacement, FinanceBusinessLogic::detail(['id' => $changed['id']])['payload']['source']);
+        self::assertSame('0.00', (new FinanceLedger(self::TENANT_ID))->source($source)['balance']); self::assertSame('820.00', (new FinanceLedger(self::TENANT_ID))->source($replacement)['balance']);
+        $old = FinanceBusinessLogic::options(['type' => 'account_transfer_arrival', 'transfer_source' => $source])['selected_transfer']; $current = FinanceBusinessLogic::options(['type' => 'account_transfer_arrival', 'transfer_source' => $replacement])['selected_transfer'];
+        self::assertSame('0.00', $old['remaining_amount']); self::assertSame('80.00', $current['arrived_amount']); self::assertSame('0.00', $current['rebased_arrived_amount']); self::assertSame('820.00', $current['remaining_amount']);
+        $arrivalData['source'] = $replacement; $arrivalData['amount'] = '70'; $again = FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $changed['id'], 'payload' => $arrivalData, 'correction_reason' => '到账金额第三次核实']); self::assertNotFalse($again, FinanceBusinessLogic::getError()); self::assertSame($replacement, $again['confirmed_result']['transfer_source']); self::assertSame('830.00', (new FinanceLedger(self::TENANT_ID))->source($replacement)['balance']);
+    }
+
+    public function test_closed_transfer_month_stays_composed_when_later_settlement_is_rebased(): void
+    {
+        $month = date('Y-m', strtotime('first day of last month')); $outDate = date('Y-m-t', strtotime($month . '-01')); $this->activate('cash', $month . '-01');
+        $target = FinanceSetupLogic::saveAccount($this->command(0) + ['name' => '跨月重投影目标', 'account_type' => 'cash']); self::assertNotFalse($target);
+        $data = ['account_id' => $this->accountId, 'target_account_id' => (int)$target['id'], 'actual_date' => $outDate, 'amount' => '1000', 'source_reference' => 'TRANSFER-OUT-LATER-SETTLEMENT-75',
+            'transfer_verified' => 1, 'reason' => '已结月原始转出', 'transaction_no' => 'OUT-LATER-SETTLEMENT-75', 'transaction_scope' => '真实转出凭据'];
+        $original = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_out', 'payload' => $data]); self::assertNotFalse($original, FinanceBusinessLogic::getError()); $source = $original['confirmed_result']['transfer_source'];
+        $preview = FinanceBusinessLogic::periodAction('preview', ['month' => $month]); self::assertNotFalse($preview, FinanceBusinessLogic::getError());
+        self::assertNotFalse(FinanceBusinessLogic::periodAction('close', $this->command(0) + ['month' => $month, 'mode' => 'estimated', 'acknowledge_unresolved' => 1, 'expected_fingerprint' => $preview['fingerprint'], 'reason' => '冻结尚未到账的互转']), FinanceBusinessLogic::getError());
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_arrival', 'payload' => ['source' => $source, 'account_id' => $target['id'], 'actual_date' => date('Y-m-d'), 'amount' => '100', 'transfer_verified' => 1, 'reason' => '本月实际到账', 'transaction_no' => 'ARRIVED-LATER-SETTLEMENT-75', 'transaction_scope' => '真实到账凭据']]), FinanceBusinessLogic::getError());
+        $data['amount'] = '900'; $changed = FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $original['id'], 'payload' => $data, 'correction_reason' => '已结月本金更正']); self::assertNotFalse($changed, FinanceBusinessLogic::getError()); $replacement = $changed['confirmed_result']['transfer_source'];
+        $old = FinanceBusinessLogic::options(['type' => 'transit_reconcile', 'month' => $month, 'transfer_source' => $source])['selected_transfer']; self::assertSame('replaced', $old['state']); self::assertTrue($old['composition_known']); self::assertSame('0.00', $old['remaining_amount']); self::assertSame('-1000.00', $old['post_close_adjustments']);
+        $new = FinanceBusinessLogic::options(['type' => 'account_transfer_arrival', 'transfer_source' => $replacement])['selected_transfer']; self::assertSame('800.00', $new['remaining_amount']); self::assertSame('100.00', $new['rebased_arrived_amount']);
+    }
+
+    public function test_transfer_out_rebase_uses_effective_settlement_total_not_historical_peak(): void
+    {
+        $this->activate(); $target = FinanceSetupLogic::saveAccount($this->command(0) + ['name' => '有效结清重投影目标', 'account_type' => 'cash']); self::assertNotFalse($target);
+        $data = ['account_id' => $this->accountId, 'target_account_id' => (int)$target['id'], 'actual_date' => date('Y-m-d'), 'amount' => '1000', 'source_reference' => 'TRANSFER-OUT-EFFECTIVE-REBASE-75', 'transfer_verified' => 1, 'reason' => '有效结清原始转出', 'transaction_no' => 'OUT-EFFECTIVE-REBASE-75', 'transaction_scope' => '真实转出凭据'];
+        $original = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_out', 'payload' => $data]); self::assertNotFalse($original, FinanceBusinessLogic::getError()); $source = $original['confirmed_result']['transfer_source'];
+        $arrivalData = ['source' => $source, 'account_id' => $target['id'], 'actual_date' => date('Y-m-d'), 'amount' => '600', 'transfer_verified' => 1, 'reason' => '先登记较大到账', 'transaction_no' => 'ARRIVED-EFFECTIVE-REBASE-75', 'transaction_scope' => '真实到账凭据'];
+        $arrival = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_arrival', 'payload' => $arrivalData]); self::assertNotFalse($arrival, FinanceBusinessLogic::getError());
+        $arrivalData['amount'] = '100'; self::assertNotFalse(FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $arrival['id'], 'payload' => $arrivalData, 'correction_reason' => '实际到账较小']), FinanceBusinessLogic::getError());
+        $data['amount'] = '200'; $changed = FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $original['id'], 'payload' => $data, 'correction_reason' => '转出本金按有效到账更正']); self::assertNotFalse($changed, FinanceBusinessLogic::getError()); $replacement = $changed['confirmed_result']['transfer_source'];
+        self::assertSame('100.00', (new FinanceLedger(self::TENANT_ID))->source($replacement)['balance']); $current = FinanceBusinessLogic::options(['type' => 'account_transfer_arrival', 'transfer_source' => $replacement])['selected_transfer']; self::assertSame('100.00', $current['rebased_arrived_amount']); self::assertSame('100.00', $current['remaining_amount']);
+    }
+
+    public function test_rebased_arrival_correction_reverses_every_transfer_replacement_link(): void
+    {
+        $this->activate(); $target = FinanceSetupLogic::saveAccount($this->command(0) + ['name' => '多段承接到账目标', 'account_type' => 'cash']); self::assertNotFalse($target);
+        $data = ['account_id' => $this->accountId, 'target_account_id' => (int)$target['id'], 'actual_date' => date('Y-m-d'), 'amount' => '1000', 'source_reference' => 'TRANSFER-OUT-MULTI-REDIRECT-75', 'transfer_verified' => 1, 'reason' => '多段承接原始转出', 'transaction_no' => 'OUT-MULTI-REDIRECT-75', 'transaction_scope' => '真实转出凭据'];
+        $original = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_out', 'payload' => $data]); self::assertNotFalse($original, FinanceBusinessLogic::getError()); $source = $original['confirmed_result']['transfer_source'];
+        $arrivalData = ['source' => $source, 'account_id' => $target['id'], 'actual_date' => date('Y-m-d'), 'amount' => '100', 'transfer_verified' => 1, 'reason' => '多段承接原到账', 'transaction_no' => 'ARRIVED-MULTI-REDIRECT-75', 'transaction_scope' => '真实到账凭据'];
+        $arrival = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_arrival', 'payload' => $arrivalData]); self::assertNotFalse($arrival, FinanceBusinessLogic::getError());
+        $data['amount'] = '900'; $first = FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $original['id'], 'payload' => $data, 'correction_reason' => '第一次转出承接']); self::assertNotFalse($first, FinanceBusinessLogic::getError());
+        $data['amount'] = '800'; $second = FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $first['id'], 'payload' => $data, 'correction_reason' => '第二次转出承接']); self::assertNotFalse($second, FinanceBusinessLogic::getError()); $replacement = $second['confirmed_result']['transfer_source'];
+        $arrivalData['amount'] = '80'; $changed = FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $arrival['id'], 'payload' => $arrivalData, 'correction_reason' => '跨两段承接更正到账']); self::assertNotFalse($changed, FinanceBusinessLogic::getError());
+        self::assertSame($replacement, $changed['confirmed_result']['transfer_source']); self::assertSame('0.00', (new FinanceLedger(self::TENANT_ID))->source($source)['balance']); self::assertSame('720.00', (new FinanceLedger(self::TENANT_ID))->source($replacement)['balance']); self::assertSame(4, Db::name('finance_transfer_settlement_rebase')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
+    public function test_rebase_entry_never_posts_before_replacement_transfer_source(): void
+    {
+        $outMonth = date('Y-m', strtotime('first day of -2 months')); $settlementMonth = date('Y-m', strtotime('first day of last month')); $outDate = date('Y-m-t', strtotime($outMonth . '-01')); $settlementDate = date('Y-m-t', strtotime($settlementMonth . '-01')); $this->activate('cash', $outMonth . '-01');
+        $target = FinanceSetupLogic::saveAccount($this->command(0) + ['name' => '替代来源期间目标', 'account_type' => 'cash']); self::assertNotFalse($target);
+        $data = ['account_id' => $this->accountId, 'target_account_id' => (int)$target['id'], 'actual_date' => $outDate, 'amount' => '1000', 'source_reference' => 'TRANSFER-OUT-REBASE-PERIOD-75', 'transfer_verified' => 1, 'reason' => '早月原始转出', 'transaction_no' => 'OUT-REBASE-PERIOD-75', 'transaction_scope' => '真实转出凭据'];
+        $original = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_out', 'payload' => $data]); self::assertNotFalse($original, FinanceBusinessLogic::getError()); $source = $original['confirmed_result']['transfer_source'];
+        $preview = FinanceBusinessLogic::periodAction('preview', ['month' => $outMonth]); self::assertNotFalse($preview, FinanceBusinessLogic::getError()); self::assertNotFalse(FinanceBusinessLogic::periodAction('close', $this->command(0) + ['month' => $outMonth, 'mode' => 'estimated', 'acknowledge_unresolved' => 1, 'expected_fingerprint' => $preview['fingerprint'], 'reason' => '关闭早月互转']), FinanceBusinessLogic::getError());
+        $arrivalData = ['source' => $source, 'account_id' => $target['id'], 'actual_date' => $settlementDate, 'amount' => '100', 'transfer_verified' => 1, 'reason' => '未关闭后续月份到账', 'transaction_no' => 'ARRIVED-REBASE-PERIOD-75', 'transaction_scope' => '真实到账凭据'];
+        $arrival = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'account_transfer_arrival', 'payload' => $arrivalData]); self::assertNotFalse($arrival, FinanceBusinessLogic::getError());
+        $data['amount'] = '900'; $changed = FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $original['id'], 'payload' => $data, 'correction_reason' => '当前月更正早月本金']); self::assertNotFalse($changed, FinanceBusinessLogic::getError()); $replacement = $changed['confirmed_result']['transfer_source'];
+        self::assertSame(date('Y-m'), Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('source_ref', $replacement)->where('purpose', 'transfer_settlement_rebase')->value('posting_month')); self::assertSame('800.00', (new FinanceLedger(self::TENANT_ID))->source($replacement)['balance']);
+        $arrivalData['amount'] = '80'; $arrivalCorrection = FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $arrival['id'], 'payload' => $arrivalData, 'correction_reason' => '替代来源到账更正']); self::assertNotFalse($arrivalCorrection, FinanceBusinessLogic::getError()); self::assertSame($replacement, $arrivalCorrection['confirmed_result']['transfer_source']); self::assertSame(date('Y-m'), Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('document_id', $arrivalCorrection['id'])->where('purpose', 'transfer_settlement')->value('posting_month'));
     }
 
     public function test_account_transfers_track_principal_partial_arrival_return_and_fees_without_external_turnover(): void
@@ -5987,7 +6123,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         Db::name('finance_cash_shortage_application')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_account_reconciliation')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         foreach (['finance_recurring_month_revision', 'finance_recurring_expense_month', 'finance_recurring_expense_plan'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
-        foreach (['finance_transfer_settlement', 'finance_account_transfer', 'finance_opening_equipment_revision', 'finance_equipment_refund_revision', 'finance_equipment_refund_due', 'finance_equipment_revision', 'finance_equipment_purchase', 'finance_salary_revision', 'finance_salary_result', 'finance_employee_expense_revision', 'finance_employee_expense', 'finance_expense_estimate_resolution', 'finance_deferred_amortization', 'finance_expense_identity', 'finance_expense_revision', 'finance_expense_bill', 'finance_expense_category'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
+        foreach (['finance_transfer_settlement_rebase', 'finance_transfer_settlement', 'finance_account_transfer', 'finance_opening_equipment_revision', 'finance_equipment_refund_revision', 'finance_equipment_refund_due', 'finance_equipment_revision', 'finance_equipment_purchase', 'finance_salary_revision', 'finance_salary_result', 'finance_employee_expense_revision', 'finance_employee_expense', 'finance_expense_estimate_resolution', 'finance_deferred_amortization', 'finance_expense_identity', 'finance_expense_revision', 'finance_expense_bill', 'finance_expense_category'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         foreach (['finance_inventory_loss_resolution', 'finance_inventory_loss'] as $table) { Db::name($table)->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete(); }
         Db::name('finance_purchase_arrival_loss')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_inventory_count_line')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();

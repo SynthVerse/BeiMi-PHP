@@ -11,7 +11,7 @@ final class FinanceCorrections
 {
     public function __construct(private readonly int $tenantId, private readonly FinanceLedger $ledger) {}
 
-    public function replace(array $original, array $replacement, string $reason, int $duplicateOf = 0, bool $reverseOnly = false): array
+    public function replace(array $original, array &$replacement, string $reason, int $duplicateOf = 0, bool $reverseOnly = false): array
     {
         $policy = FinanceDocumentPolicy::authorize($original['type'], true);
         if (str_starts_with($original['type'], 'inventory_count')) { throw new \DomainException('盘点快照与确认事实必须保留，请关联取消或反向调整，不能覆盖历史'); }
@@ -48,24 +48,32 @@ final class FinanceCorrections
         $reason = FinanceValue::text($reason, 1000);
         $originalResult = FinanceValue::decode($original['confirmed_result']);
         if (!empty($originalResult['duplicate_of']) || !empty($originalResult['reversal_of'])) { throw new \DomainException('反向凭据不是原业务，不能再次冲销或替代'); }
+        $settlementRebase = in_array($original['type'], ['account_transfer_arrival', 'account_transfer_return'], true)
+            ? FinanceAccountTransfers::settlementRebasePath((int)$original['id'], FinanceValue::text($originalResult['transfer_source'] ?? null, 40)) : null;
         if ($original['type'] === 'customer_return_actual') { return FinanceCustomerReturnCorrections::replace($this->ledger, $original, $replacement, $reason, $duplicateOf, $reverseOnly); }
         if ($duplicateOf) { $this->validateDuplicate($original, $originalResult, $duplicateOf); }
         $preservedAdvance = $original['type'] === 'receipt' && !$duplicateOf ? FinanceAdvanceRevisions::preserve($this->ledger, $original, FinanceValue::decode($replacement['payload'])) : null;
         if ($preservedAdvance) { $preservedAdvance['revision_reason'] = $reason; }
         (new FinanceReceiptReturns($this->tenantId, $this->ledger))->protectReceiptCorrection($original, $replacement, $duplicateOf);
         // 派生预收等已被其他业务消耗时，不能让更正形成负来源余额。
-        $created = [];
+        $transferOut = $original['type'] === 'account_transfer_out'; $transferOutHasSettlements = false; $created = [];
         foreach ($originalResult['created_sources'] ?? [] as $reference) {
             if ($reference === ($preservedAdvance['reference'] ?? '')) { continue; }
             $source = $this->ledger->source($reference);
-            $created[] = ['id' => substr($reference, 2), 'amount' => $source['confirmed_amount'], 'subject_id' => $source['subject_id'], 'business_date' => $source['business_date']];
+            $transferOutHasSettlements = $transferOutHasSettlements || bccomp($source['balance'], $source['confirmed_amount'], 2) !== 0;
+            $created[] = ['id' => substr($reference, 2), 'reference' => $reference, 'amount' => $source['confirmed_amount'],
+                'subject_id' => $source['subject_id'], 'business_date' => $source['business_date']];
         }
         foreach ($created as $row) {
             $source = $this->ledger->source('n:' . $row['id']);
-            if (bccomp($source['balance'], $source['confirmed_amount'], 2) !== 0) { throw new \DomainException('原记录产生的余额已有后续处理，请先核对并更正关联业务'); }
+            if (!$transferOut && bccomp($source['balance'], $source['confirmed_amount'], 2) !== 0) { throw new \DomainException('原记录产生的余额已有后续处理，请先核对并更正关联业务'); }
+        }
+        if ($transferOut && $transferOutHasSettlements) {
+            $originalTarget = FinanceValue::id($originalResult['target_account_id'] ?? null); $replacementPayload = FinanceValue::decode($replacement['payload']);
+            if (FinanceValue::id($replacementPayload['target_account_id'] ?? null) !== $originalTarget) { throw new \DomainException('已有到账或返还时，更正转出须保留原目标账户以关联真实结清事实'); }
         }
         $entries = Db::name('finance_entry')->where('tenant_id', $this->tenantId)->where('document_id', $original['id'])
-            ->whereNotIn('purpose', ['correction_reversal', 'correction_source', 'advance_revision'])->order('id', 'desc')->select()->toArray();
+            ->whereNotIn('purpose', ['correction_reversal', 'correction_source', 'advance_revision', 'transfer_settlement_rebase', 'transfer_rebase_release', 'transfer_rebase_redirect'])->order('id', 'desc')->select()->toArray();
         $activation = (string)Db::name('finance_preparation')->where('tenant_id', $this->tenantId)->value('activation_date');
         foreach ($entries as $entry) {
             // 冲销沿用原分录的实际入账期；未知业务日期不能把后月核销退回启用月。
@@ -73,6 +81,10 @@ final class FinanceCorrections
             $this->ledger->add((int)$replacement['id'], $entry['metric'], (int)$entry['subject_id'], bcsub('0', $entry['amount'], 2),
                 $entry['business_date'], $month, 'correction_reversal', $entry['source_ref'], $entry['effective_date'],
                 ['original_entry_id' => (int)$entry['id'], 'original_document_id' => (int)$original['id'], 'reason' => $reason]);
+        }
+        if ($settlementRebase) { FinanceAccountTransfers::redirectSettlementCorrection($this->ledger, (int)$replacement['id'], FinanceValue::text($originalResult['transfer_source'] ?? null, 40), $settlementRebase, $reason); }
+        if ($transferOut && $transferOutHasSettlements) {
+            foreach ($created as $row) { FinanceAccountTransfers::releaseSettlements($this->ledger, (int)$replacement['id'], $row['reference'], $reason); }
         }
         foreach ($created as $row) {
             $date = $row['business_date'] ?: $activation;
@@ -85,9 +97,17 @@ final class FinanceCorrections
             $transaction = Db::name('finance_money_transaction')->where('tenant_id', $this->tenantId)->where('id', $originalResult['money']['transaction_id'])->find();
             if (!$transaction) { throw new \DomainException('原真实资金交易不存在，不能建立更正'); }
         }
+        if ($settlementRebase) {
+            $replacementPayload = FinanceValue::decode($replacement['payload']); $replacementPayload['source'] = $settlementRebase['terminal_source']; $replacement['payload'] = FinanceValue::json($replacementPayload);
+        }
         $result = $duplicateOf || $reverseOnly ? ['type' => $original['type'], 'subject_id' => $originalResult['subject_id'], 'subject_name' => $originalResult['subject_name'],
             'allocated_amount' => '0.00', 'created_sources' => [], 'duplicate_of' => $duplicateOf, 'reversal_of' => $reverseOnly ? (int)$original['id'] : null, 'reason' => $reason]
             : (new FinancePayments($this->tenantId, $this->ledger))->confirm($replacement, $transaction, (int)$original['id'], $preservedAdvance);
+        if ($transferOut && !$duplicateOf && !$reverseOnly && $transferOutHasSettlements) {
+            $originalSource = FinanceValue::text($originalResult['transfer_source'] ?? null, 40); $replacementSource = FinanceValue::text($result['transfer_source'] ?? null, 40);
+            $rebase = FinanceAccountTransfers::rebaseSettlements($this->ledger, (int)$replacement['id'], $originalSource, $replacementSource);
+            $result = array_replace($result, $rebase, ['remaining_amount' => $this->ledger->source($replacementSource)['balance']]);
+        }
         if ($original['type'] === 'equipment_payment') { FinanceEquipmentRefunds::protectPaymentCorrection($this->ledger, FinanceValue::decode($original['payload']), FinanceValue::decode($replacement['payload'])); }
         Db::name('finance_correction')->insert(['tenant_id' => $this->tenantId, 'original_document_id' => $original['id'],
             'replacement_document_id' => $replacement['id'], 'reason' => $reason, 'actor' => FinanceValue::json(FinanceAccess::actor()), 'create_time' => time()]);

@@ -43,12 +43,17 @@ final class FinanceTransitReviews
             'returned_amount' => isset($facts['returned_amount']) ? FinanceValue::money($facts['returned_amount'], true) : null,
             'withheld_fee' => isset($facts['withheld_fee']) ? FinanceValue::money($facts['withheld_fee'], true) : null,
             'extra_fee' => $opening ? (isset($facts['additional_fee']) ? FinanceValue::money($facts['additional_fee'], true) : null) : ($facts['extra_fee'] ?? null), 'original_document_id' => $source['document_id'], 'opening_item_id' => $opening ? (int)($snapshot['id'] ?? 0) : null,
-            'transfer_correction_amount' => '0.00', 'replacement_transfer_source' => null, 'replacement_document_id' => null];
+            'transfer_correction_amount' => '0.00', 'rebased_arrived_amount' => '0.00', 'rebased_returned_amount' => '0.00', 'rebased_withheld_fee' => '0.00',
+            'replacement_transfer_source' => null, 'replacement_document_id' => null];
         foreach (FinanceAccountTransfers::settlements($reference) as $entry) {
             $settled = FinanceValue::decode($entry['snapshot']);
             if ($settled['actual_date'] > $cutoff || (!$frozen && $settled['posting_month'] > $month)) { continue; }
             if ($entry['kind'] === 'transfer_out_correction') {
                 $row['transfer_correction_amount'] = bcadd($row['transfer_correction_amount'], $entry['amount'], 2); $row['replacement_transfer_source'] = $settled['replacement_transfer_source']; $row['replacement_document_id'] = (int)$settled['replacement_document_id']; continue;
+            }
+            if ($entry['kind'] === 'transfer_settlement_rebase') {
+                $key = ($settled['settlement_kind'] ?? '') === 'arrival' ? 'rebased_arrived_amount' : 'rebased_returned_amount';
+                $row[$key] = bcadd($row[$key], $entry['amount'], 2); $row['rebased_withheld_fee'] = bcadd($row['rebased_withheld_fee'], $entry['withheld_fee'], 2); continue;
             }
             $key = $entry['kind'] === 'arrival' ? 'arrived_amount' : 'returned_amount';
             if ($row[$key] !== null) { $row[$key] = bcadd($row[$key], $entry['amount'], 2); }
@@ -59,9 +64,11 @@ final class FinanceTransitReviews
         $row['composition_known'] = $targetId > 0 && $targetId !== $source['subject_id'] && $row['actual_date'] !== null && $row['actual_date'] <= $cutoff && $row['principal'] !== null && $row['arrived_amount'] !== null && $row['returned_amount'] !== null && $row['withheld_fee'] !== null;
         if ($row['composition_known']) {
             $composed = bcsub(bcsub(bcadd($row['principal'], $row['transfer_correction_amount'], 2), $row['arrived_amount'], 2), $row['returned_amount'], 2); $composed = bcsub($composed, $row['withheld_fee'], 2);
+            $composed = bcsub(bcsub(bcsub($composed, $row['rebased_arrived_amount'], 2), $row['rebased_returned_amount'], 2), $row['rebased_withheld_fee'], 2);
             $row['composition_known'] = bccomp($composed, $row['remaining_amount'], 2) === 0 && bccomp($composed, '0', 2) >= 0;
         }
         $fingerprint = $row;
+        if ($fingerprint['rebased_arrived_amount'] === '0.00' && $fingerprint['rebased_returned_amount'] === '0.00' && $fingerprint['rebased_withheld_fee'] === '0.00') { unset($fingerprint['rebased_arrived_amount'], $fingerprint['rebased_returned_amount'], $fingerprint['rebased_withheld_fee']); }
         if ($fingerprint['replacement_transfer_source'] === null) { unset($fingerprint['transfer_correction_amount'], $fingerprint['replacement_transfer_source'], $fingerprint['replacement_document_id']); }
         $row['fingerprint'] = hash('sha256', FinanceValue::json($fingerprint));
         // 展示元数据不属于业务组成，新增字段不能使升级前的正式核对凭空失效。

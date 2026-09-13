@@ -2,6 +2,53 @@
 
 按根因去重。每条记录必须指向实际防线；仅有“不要这样做”的提醒不算已防护。
 
+## PIT-0073：迁移使用隔离库不支持的索引条件语法
+
+日期：2026-09-13
+
+### 报告来源
+
+- 生成原因：工作流要求
+- 主工作流：Matt Pocock
+- 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`Matt Pocock / diagnosing-bugs`、`Matt Pocock / code-review`、`用户级自定义 / prevent-repeat-pitfalls`（自动调用）。
+- 说明：互转结清重投影唯一键需要扩展承接来源维度。隔离 MySQL 在执行迁移时拒绝 `DROP INDEX IF EXISTS`，修复兼容语法并返回互转更正交付。
+
+- 状态：已防护
+- 首次发生：2026-09-13
+- 最近发生：2026-09-13
+- 复发次数：0
+- 适用范围：`database/migrations` 与隔离 MySQL 迁移回归
+- 相关问题：无
+
+### 触发场景
+
+为既有唯一索引改为含来源的复合唯一键，并在隔离 MySQL 上从测试初始化路径执行迁移。
+
+### 根因
+
+迁移采用当前隔离 MySQL 不支持的 `ALTER TABLE ... DROP INDEX IF EXISTS` 方言；在真正执行迁移前没有验证该版本的 DDL 语法。
+
+### 错误做法
+
+把较新 MySQL 的条件索引语法写进必须由项目隔离数据库执行的迁移，只依赖静态检查。
+
+### 正确做法
+
+使用该隔离 MySQL 支持的原子 `DROP INDEX` 加 `ADD UNIQUE KEY`，并通过真实初始化路径反复执行迁移和业务写入。
+
+### 防线
+
+- 自动化防线：`FinanceBusinessWorkflowTest::setUpBeforeClass` 连续执行迁移 `20260913_000053` 与 `20260913_000054`；互转更正定向用例在隔离库中实际创建复合唯一索引并写入多段承接事件。
+- 架构防线：迁移 054 在单条 `ALTER TABLE` 中删除并重建同名唯一键，避免迁移重跑留下缺失索引窗口。
+- 已验证事实：修复前定向测试在 0 条断言时报 MySQL `1064`；改为兼容语法后 `test_rebased_arrival_correction_moves_to_latest_transfer_source` 通过，且后续多段承接写入用例继续覆盖该索引。
+- 尚未验证：生产库迁移与部署。
+
+### 发生记录
+
+| 日期 | 任务 | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-09-13 | 财务一期互转结清重投影 | 为重投影事件唯一键加入承接来源时隔离 MySQL 拒绝条件删索引语法 | 此前迁移只建表，没有覆盖既有索引替换的实际 DDL。 |
+
 ## PIT-0072：把关联资金更正重计为当期真实收支
 
 日期：2026-09-13
@@ -165,7 +212,7 @@
 - 完整回归：`finance-69-finance-full.log` 为336 tests、10935 assertions、1 skipped，退出码0；跳过项不计通过。业务库、部署及原生客户端未验收。
 - 后续建议：新建“冲回原事实”能力时，除正向阻止已有下游，还需校验相反操作顺序、当前候选及旧月遗留，不把原单永久保留等同于原单仍可消耗。
 
-## PIT-0066：新库存流水类型超过既有数据库字段长度
+## PIT-0066：新增持久化标识超过既有数据库字段长度
 
 日期：2026-09-09
 
@@ -176,12 +223,12 @@
 - 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`Matt Pocock / code-review`、`Matt Pocock / diagnosing-bugs`、`用户级自定义 / prevent-repeat-pitfalls`（自动调用）。
 - 说明：第64批盘点反向实际写库存时发现持久化类型长度不兼容；保留当前业务锚点，修复并执行真实数据库路径后恢复关联页面工作。
 
-- 状态：已防护；首次／最近发生：2026-09-09；复发次数：0。
-- 根因：将较长的业务单据类型直接复用作 `stock_flow.order_type`，忽略既有 `varchar(30)`；候选值31字符，实际插入被数据库拒绝。
-- 防线：库存层采用独立的 `finance_count_reverse` 类型（21字符），业务单据仍保留完整名称；真实 `FinanceBusinessWorkflowTest` 通过 StockService 写入库存流水，覆盖反向与撤回，不以纯成本测试代替数据库契约。
-- 已验证事实：实际隔离库插入曾报字段长度错误；改用短库存类型后，`.scratch/finance-64-final-targeted.log` 27 tests、566 assertions通过。未扩大业务表字段长度。
+- 状态：已防护；首次发生：2026-09-09；最近发生：2026-09-13；复发次数：1。
+- 根因：将超出既有列上限的业务标识直接写入持久化字段，未在真实数据库路径验证字段长度。首次是 `stock_flow.order_type` 的 `varchar(30)`；本次是 `finance_entry.purpose`，`transfer_settlement_rebase_release` 超过该字段上限并被 MySQL 拒绝。
+- 防线：库存层采用独立的 `finance_count_reverse` 类型（21字符）；互转重投影余额释放使用短用途 `transfer_rebase_release`。`FinanceBusinessWorkflowTest::test_transfer_out_correction_rebases_each_settlement_event_across_multiple_replacements` 走真实隔离库写入，覆盖该分录用途、两笔结清事实和连续更正，不以纯内存断言代替数据库契约。
+- 已验证事实：本次隔离库红态为 1 test、28 assertions，`SQLSTATE[22001]` 报 `finance_entry.purpose` 数据截断；改用短用途并补齐测试清理后，绿色终态为 1 test、37 assertions通过。未扩大业务表字段长度。
 - 尚未验证：业务库迁移与部署；没有据此称业务库已更新。
-- 后续建议：新增库存类型时检查既有持久化字段约束，并执行至少一条完整真实写入路径。
+- 后续建议：新增持久化类型、用途或枚举值时检查既有字段约束，并执行至少一条完整真实写入路径。
 
 ## PIT-0065：展示快照随写入命令回传耗尽单据容量
 
@@ -1134,9 +1181,9 @@
 
 - 状态：已防护
 - 首次发生：2026-09-07
-- 最近发生：2026-09-09
-- 复发次数：6
-- 适用范围：预收抵扣、已用预收跨月更正、后续资金认领、历史销售贷项、未知日期客户和供应商贷项冲销与期间对账快照
+- 最近发生：2026-09-13
+- 复发次数：7
+- 适用范围：预收抵扣、已用预收跨月更正、后续资金认领、历史销售贷项、未知日期客户和供应商贷项冲销、账户互转结清事实重投影与期间对账快照
 - 相关问题：PIT-0032（时点含义不同）
 
 ### 触发场景
@@ -1181,6 +1228,7 @@
 | 2026-09-08 | 普通费用调整 | 上月费用已结账，本月调减产生的应退款仍用原发生日进入旧期对账 | 原测试仅让受益月在上月，原发生日仍为今天，未覆盖新增义务来源的截止时点。 |
 | 2026-09-09 | 财务一期第60批 | 已退回部分预收后向前／向后改到账月份，或原已结月改为另一个未结月 | 原防线验证当前余额及同月日期对账，没有验证保留来源身份后的月报归属；替代入账只看新业务日期，未承接原现金已封账的确认月边界。 |
 | 2026-09-09 | 财务一期第68批 | 未知日期期初客户贷项抵扣本月应收后，生成上月对账时贷项余额提前由50降为20 | 原快照月份防线仅作用于供应商；新增客户抵扣虽保存正确月份，读取仍回落到启用日。 |
+| 2026-09-13 | 财务一期账户互转更正 | 已结月存在到账和返还后更正转出，本金替代来源进入当前月而重投影余额仍写入旧月 | 原防线覆盖历史资金更正和快照，但没有覆盖“重投影来源与其余额分录必须经过同一关账路由”。 |
 
 2026-09-09 第68批补充：`FinanceStatementSnapshot::capture` 对 `customer_credit_allocate` 的未知生效日分录按保存的归属月份限制截止范围，关联反向沿用同一规则；其他客户真实资金业务仍保留其原日期口径。`test_unknown_date_customer_credit_keeps_effective_date_unknown_and_limits_staff_foreign_and_excess_allocations` 覆盖旧期50、本期20、明细仅显示已知月份及撤销后两期50。原红 `E:/object/BeiMi/.scratch/finance-68-credit-targeted.log` 为5 tests、241 assertions、1 failure；修复后 `finance-68-credit-targeted-green.log` 为5 tests、257 assertions通过，包含贷项退款共享余额及供应商回归。一次重跑因隔离服务停止产生5 errors、0 assertions，恢复3307服务后得到上述绿色终态，该环境失败不计为业务验证。实际使用 `Matt Pocock / implement`、`Matt Pocock / tdd`、`用户级自定义 / impeccable`、`Matt Pocock / code-review`、`Matt Pocock / diagnosing-bugs`、`用户级自定义 / prevent-repeat-pitfalls`，两轴静态复核clear。尚未验证本批生产部署和真机；后续新增无真实日期的核销类型须同时核对正反分录与期间读取。防护后返回客户贷项抵扣提交与剩余财务功能。
 
@@ -1189,6 +1237,8 @@
 审查补充：暂估结账必须与普通结账同样冻结；`.scratch/finance-60-review-red.log` 同时复现暂估旧月错入和并发关账旧快照错入。期间更正明细缺失由 `.scratch/finance-60-movement-red.log` 两例复现，现按资金分录保存的入账月提供可追溯的组成；季年汇总、Excel 和页面均接入。最终 `.scratch/finance-60-final-php.log` 28 tests、1409 assertions 通过，前端专项 14 tests 与 source integrity 通过，两轴复审关闭全部发现项。
 
 2026-09-08 费用时点防线：原发生日保留在费用快照与分录业务日期；本次义务生效日独立保存为 `obligation_date`，用于新增应付/应退款及对应余额调整的生效日。费用仍按真实受益月及关账规则入账，不能把本次退款倒灌旧期。上述费用公开用例增加原发生日在已结上月的供应商对账：修复前上月应退款为70.00（应为0.00），修复后上月应退款0.00、费用应付300.00保持。本次实际使用 `Matt Pocock / implement`、`Matt Pocock / tdd`、`Matt Pocock / code-review`、`Matt Pocock / diagnosing-bugs`、`Matt Pocock / prevent-repeat-pitfalls`。完成防护后继续费用调整页面；完整月报尚未完成。
+
+2026-09-13 账户互转重投影复发：已结月的转出先发生到账与返还、再关联更正转出本金时，`FinanceAccountTransfers::rebaseSettlements()` 曾把原结清快照的 `posting_month` 直接写入新余额分录。新来源本身已按 `FinanceLedger::postingMonth()` 进入当前开放月，余额分录却倒灌到已结月，导致同一更正的来源与余额期间分裂。现保留原到账／返还的日期和月份于重投影快照与明细中，但余额分录统一通过 `FinanceLedger::postingMonth($actualDate)` 进入当前合法入账月。自动防线 `FinanceBusinessWorkflowTest::test_closed_month_transfer_out_correction_rebases_settlements_without_rewriting_history` 覆盖到账、返还、已结月、关联更正和历史资金报表冻结，断言旧来源替代、替代来源承接 650 元、重投影余额分录入当前月且历史账户与在途快照仍为 4250/750。修复前用例的旧断言会在新来源被归入当前月时错误读取已结月；补充当前入账月断言后，修复版本以 1 test、45 assertions 通过。实际使用 `Matt Pocock / implement`、`Matt Pocock / tdd`、`Matt Pocock / diagnosing-bugs`、`用户级自定义 / prevent-repeat-pitfalls`；后续新增“历史结清事实重投影”能力必须同时验证事实日期、分录入账月、当前余额和冻结快照。
 
 ## PIT-0036：敏感凭证复用公共上传或缓存存储
 

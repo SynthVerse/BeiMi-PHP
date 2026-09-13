@@ -82,17 +82,115 @@ final class FinanceAccountTransfers
         $events = [];
         foreach ($rows as $row) {
             if ((int)$row['document_id'] === $correctingDocument) { continue; }
-            $events[] = $row;
+            $events[] = $row + ['settlement_event_id' => (int)$row['id'] * 10];
             $correction = Db::name('finance_correction')->where('tenant_id', $tenant)->where('original_document_id', $row['document_id'])->find();
             if (!$correction) { continue; }
             $reversal = Db::name('finance_entry')->where('tenant_id', $tenant)->where('document_id', $correction['replacement_document_id'])
                 ->where('metric', 'balance')->where('purpose', 'correction_reversal')->where('source_ref', $reference)->find();
             if (!$reversal) { throw new \DomainException('互转更正缺少原在途反向依据'); }
             $snapshot = FinanceValue::decode($row['snapshot']);
-            $events[] = array_replace($row, ['document_id' => $correction['replacement_document_id'], 'amount' => bcsub('0', $row['amount'], 2), 'withheld_fee' => bcsub('0', $row['withheld_fee'], 2),
+            $events[] = array_replace($row, ['document_id' => $correction['replacement_document_id'], 'settlement_event_id' => (int)$row['id'] * 10 + 1, 'amount' => bcsub('0', $row['amount'], 2), 'withheld_fee' => bcsub('0', $row['withheld_fee'], 2),
                 'snapshot' => FinanceValue::json(array_replace($snapshot, ['actual_date' => $reversal['business_date'], 'posting_month' => $reversal['posting_month'], 'reverses_document_id' => (int)$row['document_id']]))]);
         }
         if ($correction = self::outCorrection($reference)) { $events[] = $correction; }
+        foreach (self::rebaseEvents($reference) as $event) { $events[] = $event; }
+        return $events;
+    }
+
+    /** 更正不重记实际到账或返还；只将已有结清事实投影到替代在途。 */
+    public static function rebaseSettlements(FinanceLedger $ledger, int $correctionDocument, string $originalSource, string $replacementSource): array
+    {
+        $tenant = FinanceAccess::tenant(); $replacement = $ledger->source($replacementSource);
+        $totals = ['rebased_arrived_amount' => '0.00', 'rebased_returned_amount' => '0.00', 'rebased_withheld_fee' => '0.00'];
+        $rebases = [];
+        foreach (self::settlements($originalSource, $correctionDocument) as $event) {
+            $settled = FinanceValue::decode($event['snapshot']); $kind = $event['kind'] === 'transfer_settlement_rebase' ? ($settled['settlement_kind'] ?? '') : $event['kind'];
+            if (!in_array($kind, ['arrival', 'return'], true)) { continue; }
+            $amount = $event['amount']; $fee = $event['withheld_fee']; $consumed = bcadd($amount, $fee, 2);
+            if (bccomp($consumed, '0', 2) === 0) { continue; }
+            $eventId = (int)($event['settlement_event_id'] ?? $event['document_id']); $actualDate = FinanceValue::date($settled['actual_date'] ?? null); $settlementMonth = FinanceValue::text($settled['posting_month'] ?? null, 7);
+            $replacementMonth = FinanceValue::text($replacement['snapshot']['posting_month'] ?? null, 7); $postingMonth = $ledger->postingMonth(max($actualDate, $replacementMonth ? $replacementMonth . '-01' : $actualDate));
+            $rebases[] = ['event_id' => $eventId, 'document_id' => (int)$event['document_id'], 'kind' => $kind, 'amount' => $amount, 'fee' => $fee, 'consumed' => $consumed,
+                'actual_date' => $actualDate, 'settlement_month' => $settlementMonth, 'posting_month' => $postingMonth, 'snapshot' => $settled];
+        }
+        foreach ($rebases as $rebase) {
+            Db::name('finance_transfer_settlement_rebase')->insert(['tenant_id' => $tenant, 'correction_document_id' => $correctionDocument,
+                'original_source_ref' => $originalSource, 'replacement_source_ref' => $replacementSource, 'settlement_document_id' => $rebase['event_id'],
+                'kind' => $rebase['kind'], 'amount' => $rebase['amount'], 'withheld_fee' => $rebase['fee'], 'snapshot' => FinanceValue::json($rebase['snapshot'] + ['settlement_kind' => $rebase['kind'], 'settlement_event_id' => $rebase['event_id']]), 'create_time' => time()]);
+            $key = $rebase['kind'] === 'arrival' ? 'rebased_arrived_amount' : 'rebased_returned_amount';
+            $totals[$key] = bcadd($totals[$key], $rebase['amount'], 2); $totals['rebased_withheld_fee'] = bcadd($totals['rebased_withheld_fee'], $rebase['fee'], 2);
+        }
+        // 先承接反向事实，避免历史峰值在同一有效结清链中错误限制替代本金。
+        usort($rebases, static fn(array $left, array $right): int => bccomp($left['consumed'], '0', 2) === bccomp($right['consumed'], '0', 2) ? 0 : (bccomp($left['consumed'], '0', 2) < 0 ? -1 : 1));
+        foreach ($rebases as $rebase) {
+            $ledger->add($correctionDocument, 'balance', (int)$replacement['subject_id'], bcsub('0', $rebase['consumed'], 2), $rebase['actual_date'], $rebase['posting_month'],
+                'transfer_settlement_rebase', $replacementSource, $rebase['actual_date'], ['transfer_settlement_rebase' => true, 'original_source_ref' => $originalSource,
+                    'settlement_document_id' => $rebase['document_id'], 'settlement_event_id' => $rebase['event_id'], 'settlement_kind' => $rebase['kind'], 'settlement_posting_month' => $rebase['settlement_month']]);
+        }
+        return $totals;
+    }
+
+    /** 释放原来源已承接的结清余额，再由完整本金替代；日期仍归属各结清事实。 */
+    public static function releaseSettlements(FinanceLedger $ledger, int $correctionDocument, string $source, string $reason): void
+    {
+        $subject = $ledger->source($source)['subject_id'];
+        foreach (self::settlements($source, $correctionDocument) as $event) {
+            $settled = FinanceValue::decode($event['snapshot']); $kind = $event['kind'] === 'transfer_settlement_rebase' ? ($settled['settlement_kind'] ?? '') : $event['kind'];
+            if (!in_array($kind, ['arrival', 'return'], true)) { continue; }
+            $amount = bcadd($event['amount'], $event['withheld_fee'], 2);
+            if (bccomp($amount, '0', 2) === 0) { continue; }
+            $date = FinanceValue::date($settled['actual_date'] ?? null); $ledger->add($correctionDocument, 'balance', $subject, $amount, $date, $ledger->postingMonth($date),
+                'transfer_rebase_release', $source, $date, ['original_source_ref' => $source, 'settlement_document_id' => (int)$event['document_id'],
+                    'settlement_event_id' => (int)($event['settlement_event_id'] ?? $event['document_id']), 'reason' => $reason]);
+        }
+    }
+
+    /** 返回某笔实际结清沿互转更正链承接到的来源和每一段承接关系。 */
+    public static function settlementRebasePath(int $documentId, string $source): ?array
+    {
+        $settlement = Db::name('finance_transfer_settlement')->where('tenant_id', FinanceAccess::tenant())->where('source_ref', $source)->where('document_id', $documentId)->find();
+        if (!$settlement) { return null; }
+        $eventId = (int)$settlement['id'] * 10; $current = $source; $links = [];
+        while ($link = Db::name('finance_transfer_settlement_rebase')->where('tenant_id', FinanceAccess::tenant())->where('original_source_ref', $current)
+            ->where('settlement_document_id', $eventId)->order('id')->find()) {
+            $links[] = $link; $current = $link['replacement_source_ref'];
+        }
+        return $links ? ['settlement' => $settlement, 'terminal_source' => $current, 'links' => $links, 'event_id' => $eventId] : null;
+    }
+
+    /** 实际结清更正写向最新承接来源，同时在每段承接链补入反向事实。 */
+    public static function redirectSettlementCorrection(FinanceLedger $ledger, int $correctionDocument, string $originalSource, array $path, string $reason): void
+    {
+        $settlement = $path['settlement']; $snapshot = FinanceValue::decode($settlement['snapshot']); $amount = bcadd($settlement['amount'], $settlement['withheld_fee'], 2);
+        $date = FinanceValue::date($snapshot['actual_date'] ?? null); $month = $ledger->postingMonth($date); $eventId = (int)$path['event_id'];
+        $ledger->add($correctionDocument, 'balance', $ledger->source($originalSource)['subject_id'], bcsub('0', $amount, 2), $date, $month,
+            'transfer_rebase_redirect', $originalSource, $date, ['settlement_document_id' => (int)$settlement['document_id'], 'settlement_event_id' => $eventId, 'reason' => $reason]);
+        $terminal = $path['terminal_source']; $terminalSnapshot = $ledger->source($terminal)['snapshot']; $terminalMonth = FinanceValue::text($terminalSnapshot['posting_month'] ?? null, 7);
+        $ledger->add($correctionDocument, 'balance', $ledger->source($terminal)['subject_id'], $amount, $date,
+            $ledger->postingMonth(max($date, $terminalMonth ? $terminalMonth . '-01' : $date)), 'transfer_rebase_redirect', $terminal, $date,
+            ['settlement_document_id' => (int)$settlement['document_id'], 'settlement_event_id' => $eventId, 'reason' => $reason]);
+        foreach ($path['links'] as $link) {
+            Db::name('finance_transfer_settlement_rebase')->insert(['tenant_id' => FinanceAccess::tenant(), 'correction_document_id' => $correctionDocument,
+                'original_source_ref' => $link['original_source_ref'], 'replacement_source_ref' => $link['replacement_source_ref'], 'settlement_document_id' => $eventId + 1,
+                'kind' => $settlement['kind'], 'amount' => bcsub('0', $settlement['amount'], 2), 'withheld_fee' => bcsub('0', $settlement['withheld_fee'], 2),
+                'snapshot' => FinanceValue::json($snapshot + ['settlement_kind' => $settlement['kind'], 'settlement_event_id' => $eventId + 1]), 'create_time' => time()]);
+        }
+    }
+
+    /** 关联重投影在旧来源抵销、在替代来源承接，展示时保留其非资金性质。 */
+    private static function rebaseEvents(string $reference): array
+    {
+        $rows = Db::name('finance_transfer_settlement_rebase')->where('tenant_id', FinanceAccess::tenant())
+            ->whereRaw('(original_source_ref = ? OR replacement_source_ref = ?)', [$reference, $reference])->order('id')->select()->toArray();
+        $events = [];
+        foreach ($rows as $row) {
+            $removesFromOriginal = $row['original_source_ref'] === $reference; $snapshot = FinanceValue::decode($row['snapshot']);
+            $events[] = ['document_id' => (int)$row['correction_document_id'], 'settlement_event_id' => (int)($snapshot['settlement_event_id'] ?? $row['settlement_document_id']), 'kind' => 'transfer_settlement_rebase',
+                'amount' => $removesFromOriginal ? bcsub('0', $row['amount'], 2) : $row['amount'],
+                'withheld_fee' => $removesFromOriginal ? bcsub('0', $row['withheld_fee'], 2) : $row['withheld_fee'],
+                'snapshot' => FinanceValue::json($snapshot + ['settlement_kind' => $row['kind'], 'original_source_ref' => $row['original_source_ref'],
+                    'replacement_source_ref' => $row['replacement_source_ref'], 'rebase_direction' => $removesFromOriginal ? 'remove' : 'apply'])];
+        }
         return $events;
     }
 
@@ -111,7 +209,7 @@ final class FinanceAccountTransfers
             ->where('purpose', 'correction_reversal')->where('source_ref', $reference)->find();
         $source = Db::name('finance_entry')->where('tenant_id', $tenant)->where('document_id', $correction['replacement_document_id'])->where('metric', 'balance')
             ->where('purpose', 'correction_source')->where('source_ref', $reference)->find();
-        if (!$reversal || !$source || bccomp($reversal['amount'], $source['amount'], 2) !== 0 || bccomp($reversal['amount'], '0', 2) >= 0) { throw new \DomainException('互转更正缺少旧在途冲销依据'); }
+        if (!$reversal || !$source || bccomp($reversal['amount'], '0', 2) >= 0 || bccomp($source['amount'], '0', 2) > 0) { throw new \DomainException('互转更正缺少旧在途冲销依据'); }
         return ['document_id' => (int)$correction['replacement_document_id'], 'kind' => 'transfer_out_correction', 'amount' => $reversal['amount'], 'withheld_fee' => '0.00',
             'snapshot' => FinanceValue::json(['actual_date' => $reversal['business_date'], 'posting_month' => $reversal['posting_month'], 'reverses_document_id' => $original,
                 'replacement_document_id' => (int)$correction['replacement_document_id'], 'replacement_transfer_source' => $replacementSource])];
@@ -131,18 +229,26 @@ final class FinanceAccountTransfers
                 'extra_fee' => null, 'opening_basis' => $snapshot['evidence'] ?? '', 'opening_item_id' => (int)($snapshot['id'] ?? 0)];
         }
         $entries = self::settlements($reference, $correctingDocument); $correctionAmount = '0.00'; $replacementSource = null; $replacementDocument = null;
+        $rebasedArrived = '0.00'; $rebasedReturned = '0.00'; $rebasedFee = '0.00';
         foreach ($entries as $entry) {
             if ($entry['kind'] === 'transfer_out_correction') {
                 $correctionAmount = bcadd($correctionAmount, $entry['amount'], 2); $correction = FinanceValue::decode($entry['snapshot']);
                 $replacementSource = $correction['replacement_transfer_source']; $replacementDocument = (int)$correction['replacement_document_id']; continue;
             }
+            if ($entry['kind'] === 'transfer_settlement_rebase') {
+                $rebased = FinanceValue::decode($entry['snapshot']); $key = ($rebased['settlement_kind'] ?? '') === 'arrival' ? 'arrival' : 'return';
+                if ($key === 'arrival') { $rebasedArrived = bcadd($rebasedArrived, $entry['amount'], 2); } else { $rebasedReturned = bcadd($rebasedReturned, $entry['amount'], 2); }
+                $rebasedFee = bcadd($rebasedFee, $entry['withheld_fee'], 2); continue;
+            }
             $key = $entry['kind'] === 'arrival' ? 'arrived_amount' : 'returned_amount';
             $snapshot[$key] = bcadd($snapshot[$key], $entry['amount'], 2); $snapshot['withheld_fee'] = bcadd($snapshot['withheld_fee'], $entry['withheld_fee'], 2);
         }
         $remaining = bcsub(bcsub(bcadd($snapshot['principal'], $correctionAmount, 2), $snapshot['arrived_amount'], 2), $snapshot['returned_amount'], 2); $remaining = bcsub($remaining, $snapshot['withheld_fee'], 2);
+        $remaining = bcsub(bcsub(bcsub($remaining, $rebasedArrived, 2), $rebasedReturned, 2), $rebasedFee, 2);
         if (bccomp($remaining, $source['balance'], 2) !== 0) { throw new \DomainException('互转在途与到账、返还及手续费组成不一致，请核实原来源'); }
         return array_replace($snapshot, ['transfer_source' => $reference, 'remaining_amount' => $remaining, 'original_document_id' => $source['document_id'],
-            'transfer_correction_amount' => $correctionAmount, 'replacement_transfer_source' => $replacementSource, 'replacement_document_id' => $replacementDocument]);
+            'transfer_correction_amount' => $correctionAmount, 'rebased_arrived_amount' => $rebasedArrived, 'rebased_returned_amount' => $rebasedReturned,
+            'rebased_withheld_fee' => $rebasedFee, 'replacement_transfer_source' => $replacementSource, 'replacement_document_id' => $replacementDocument]);
     }
 
     public static function settle(FinanceLedger $ledger, array $document, array $data, ?array $originalTransaction = null, int $correctingDocument = 0): array
@@ -150,7 +256,7 @@ final class FinanceAccountTransfers
         FinanceAccess::require('', true); $basis = self::basis($data); $source = FinanceValue::text($data['source'] ?? null, 40); $current = self::current($ledger, $source, $correctingDocument);
         $arrival = $document['type'] === 'account_transfer_arrival'; $account = $arrival ? $current['target_account_id'] : $current['source_account_id'];
         if (FinanceValue::id($data['account_id'] ?? null) !== $account) { throw new \DomainException('到账须进入原目标账户，实际返还须进入原来源账户'); }
-        $date = FinanceValue::date($data['actual_date'] ?? null); $month = $ledger->postingMonth($date);
+        $date = FinanceValue::date($data['actual_date'] ?? null); $sourceMonth = isset($current['posting_month']) ? FinanceValue::text($current['posting_month'], 7) : ''; $month = $ledger->postingMonth(max($date, $sourceMonth ? $sourceMonth . '-01' : $date));
         if (!$current['actual_date'] || $date < $current['actual_date']) { throw new \DomainException('到账或返还日期不能早于已核实转出日期'); }
         $amount = FinanceValue::money($data['amount'] ?? null, $arrival); $fee = self::fee($data, $document['type']);
         if (!$arrival && bccomp($fee['amount'], '0', 2) !== 0) { throw new \DomainException('返还本金不能夹带未知手续费，原已付未退手续费继续保留'); }
