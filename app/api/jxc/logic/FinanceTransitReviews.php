@@ -42,10 +42,14 @@ final class FinanceTransitReviews
             'arrived_amount' => isset($facts['arrived_amount']) ? FinanceValue::money($facts['arrived_amount'], true) : null,
             'returned_amount' => isset($facts['returned_amount']) ? FinanceValue::money($facts['returned_amount'], true) : null,
             'withheld_fee' => isset($facts['withheld_fee']) ? FinanceValue::money($facts['withheld_fee'], true) : null,
-            'extra_fee' => $opening ? (isset($facts['additional_fee']) ? FinanceValue::money($facts['additional_fee'], true) : null) : ($facts['extra_fee'] ?? null), 'original_document_id' => $source['document_id'], 'opening_item_id' => $opening ? (int)($snapshot['id'] ?? 0) : null];
+            'extra_fee' => $opening ? (isset($facts['additional_fee']) ? FinanceValue::money($facts['additional_fee'], true) : null) : ($facts['extra_fee'] ?? null), 'original_document_id' => $source['document_id'], 'opening_item_id' => $opening ? (int)($snapshot['id'] ?? 0) : null,
+            'transfer_correction_amount' => '0.00', 'replacement_transfer_source' => null, 'replacement_document_id' => null];
         foreach (FinanceAccountTransfers::settlements($reference) as $entry) {
             $settled = FinanceValue::decode($entry['snapshot']);
             if ($settled['actual_date'] > $cutoff || (!$frozen && $settled['posting_month'] > $month)) { continue; }
+            if ($entry['kind'] === 'transfer_out_correction') {
+                $row['transfer_correction_amount'] = bcadd($row['transfer_correction_amount'], $entry['amount'], 2); $row['replacement_transfer_source'] = $settled['replacement_transfer_source']; $row['replacement_document_id'] = (int)$settled['replacement_document_id']; continue;
+            }
             $key = $entry['kind'] === 'arrival' ? 'arrived_amount' : 'returned_amount';
             if ($row[$key] !== null) { $row[$key] = bcadd($row[$key], $entry['amount'], 2); }
             if ($row['withheld_fee'] !== null) { $row['withheld_fee'] = bcadd($row['withheld_fee'], $entry['withheld_fee'], 2); }
@@ -54,10 +58,12 @@ final class FinanceTransitReviews
         $row['remaining_amount'] = bcadd($frozen ? $frozen['closing'] : $source['confirmed_amount'], $changes ?: '0', 2);
         $row['composition_known'] = $targetId > 0 && $targetId !== $source['subject_id'] && $row['actual_date'] !== null && $row['actual_date'] <= $cutoff && $row['principal'] !== null && $row['arrived_amount'] !== null && $row['returned_amount'] !== null && $row['withheld_fee'] !== null;
         if ($row['composition_known']) {
-            $composed = bcsub(bcsub(bcsub($row['principal'], $row['arrived_amount'], 2), $row['returned_amount'], 2), $row['withheld_fee'], 2);
+            $composed = bcsub(bcsub(bcadd($row['principal'], $row['transfer_correction_amount'], 2), $row['arrived_amount'], 2), $row['returned_amount'], 2); $composed = bcsub($composed, $row['withheld_fee'], 2);
             $row['composition_known'] = bccomp($composed, $row['remaining_amount'], 2) === 0 && bccomp($composed, '0', 2) >= 0;
         }
-        $row['fingerprint'] = hash('sha256', FinanceValue::json($row));
+        $fingerprint = $row;
+        if ($fingerprint['replacement_transfer_source'] === null) { unset($fingerprint['transfer_correction_amount'], $fingerprint['replacement_transfer_source'], $fingerprint['replacement_document_id']); }
+        $row['fingerprint'] = hash('sha256', FinanceValue::json($fingerprint));
         // 展示元数据不属于业务组成，新增字段不能使升级前的正式核对凭空失效。
         $row['closed_period_followup'] = $frozen !== null; $row['frozen_remaining_amount'] = $frozen['closing'] ?? null;
         $row['post_close_adjustments'] = $frozen ? bcadd($changes ?: '0', '0', 2) : '0.00';
@@ -67,11 +73,11 @@ final class FinanceTransitReviews
     private static function present(FinanceLedger $ledger, string $reference, string $month, bool $closed): array
     {
         $current = self::atMonth($ledger, $reference, $month); $latest = self::latest($reference, $month);
-        $allowed = !$closed || $current['closed_period_followup'];
+        $replaced = $current['replacement_transfer_source'] !== null; $allowed = !$replaced && (!$closed || $current['closed_period_followup']);
         if ($closed && !$current['closed_period_followup'] && $latest) { $current = $latest['transfer']; }
         $settled = $current['composition_known'] && $current['extra_fee'] !== null && bccomp($current['remaining_amount'], '0', 2) === 0;
-        $state = !$latest ? ($settled ? 'settled' : 'unreviewed') : ($latest['transfer']['fingerprint'] !== $current['fingerprint'] ? 'needs_review' : $latest['review_state']);
-        return $current + ['state' => $state, 'latest' => $latest, 'can_reconcile' => $allowed, 'ordinary_close_allowed' => in_array($state, ['normal', 'settled'], true)];
+        $state = $replaced ? 'replaced' : (!$latest ? ($settled ? 'settled' : 'unreviewed') : ($latest['transfer']['fingerprint'] !== $current['fingerprint'] ? 'needs_review' : $latest['review_state']));
+        return $current + ['state' => $state, 'latest' => $latest, 'can_reconcile' => $allowed, 'ordinary_close_allowed' => in_array($state, ['normal', 'settled', 'replaced'], true)];
     }
 
     public static function followup(FinanceLedger $ledger, string $reference, string $month): array { return self::present($ledger, $reference, $month, true); }
@@ -102,6 +108,7 @@ final class FinanceTransitReviews
     {
         $month = self::month($data['month'] ?? null); $tenant = FinanceAccess::tenant();
         $source = FinanceValue::text($data['transfer_source'] ?? null, 40); $current = self::atMonth($ledger, $source, $month); $latest = self::latest($source, $month);
+        if ($current['replacement_transfer_source'] !== null) { throw new \DomainException('该在途已由关联更正替代，无需再核对'); }
         if (!$current['closed_period_followup'] && Db::name('finance_period')->where('tenant_id', $tenant)->where('month', $month)->find()) { throw new \DomainException('已结月份缺少该在途权威快照，不能补造历史核对'); }
         if (($data['actual_cutoff'] ?? '') !== $current['actual_cutoff'] || ($data['expected_fingerprint'] ?? '') !== $current['fingerprint']) { throw new \DomainException('原月末在途组成已变化，请刷新后重新核对'); }
         $expected = $data['expected_reconciliation_id'] ?? null;

@@ -9,16 +9,17 @@ use think\facade\Db;
 /** 同门店互转本金只在账户和在途间移动；明确核实的手续费单独计费。 */
 final class FinanceAccountTransfers
 {
-    public static function out(FinanceLedger $ledger, array $document, array $data): array
+    public static function out(FinanceLedger $ledger, array $document, array $data, ?array $originalTransaction = null, int $correctingDocument = 0): array
     {
         FinanceAccess::require('', true); $basis = self::basis($data); $tenant = FinanceAccess::tenant();
         $account = $ledger->account(FinanceValue::id($data['account_id'] ?? null)); $target = $ledger->account(FinanceValue::id($data['target_account_id'] ?? null));
         if ((int)$account['id'] === (int)$target['id']) { throw new \DomainException('互转来源和目标须为本门店不同账户'); }
         $date = FinanceValue::date($data['actual_date'] ?? null); $month = $ledger->postingMonth($date); $amount = FinanceValue::money($data['amount'] ?? null);
         $reference = FinanceValue::text($data['source_reference'] ?? null, 160);
-        if (Db::name('finance_account_transfer')->where('tenant_id', $tenant)->where('source_account_id', $account['id'])->where('source_reference', $reference)->lock(true)->find()) { throw new \DomainException('此账户的互转来源已登记，请读取原转出记录'); }
+        $existing = Db::name('finance_account_transfer')->where('tenant_id', $tenant)->where('source_account_id', $account['id'])->where('source_reference', $reference)->lock(true)->find();
+        if ($existing && !self::correctionChainIncludes((int)$existing['document_id'], $correctingDocument)) { throw new \DomainException('此账户的互转来源已登记，请读取原转出记录'); }
         $fee = self::fee($data, $document['type']); $total = bcadd($amount, $fee['amount'], 2);
-        $money = (new FinanceMoney($tenant, $ledger))->record((int)$document['id'], $document['type'], $data, 'out', $date, $total, $month);
+        $money = (new FinanceMoney($tenant, $ledger))->record((int)$document['id'], $document['type'], $data, 'out', $date, $total, $month, $originalTransaction);
         $snapshot = ['type' => 'account_transfer_out', 'subject_id' => (int)$account['id'], 'subject_name' => $account['name'],
             'source_account_id' => (int)$account['id'], 'source_account_name' => $account['name'], 'target_account_id' => (int)$target['id'], 'target_account_name' => $target['name'],
             'source_reference' => $reference, 'principal' => $amount, 'actual_date' => $date, 'posting_month' => $month, 'extra_fee' => $fee['amount'], 'fee' => $fee,
@@ -26,9 +27,23 @@ final class FinanceAccountTransfers
         $source = $ledger->createSource((int)$document['id'], 'transit', (int)$account['id'], $amount, $date, null, $snapshot);
         $ledger->add((int)$document['id'], 'transit', (int)$account['id'], $amount, $date, $month, 'transfer_out', $source, $date, ['internal_transfer' => true]);
         self::recognizeFee($ledger, $document, $fee, $source, $date, $month);
-        Db::name('finance_account_transfer')->insert(['tenant_id' => $tenant, 'document_id' => $document['id'], 'source_account_id' => $account['id'], 'target_account_id' => $target['id'],
-            'source_reference' => $reference, 'source_ref' => $source, 'snapshot' => FinanceValue::json($snapshot), 'create_time' => time()]);
+        if (!$existing) {
+            Db::name('finance_account_transfer')->insert(['tenant_id' => $tenant, 'document_id' => $document['id'], 'source_account_id' => $account['id'], 'target_account_id' => $target['id'],
+                'source_reference' => $reference, 'source_ref' => $source, 'snapshot' => FinanceValue::json($snapshot), 'create_time' => time()]);
+        }
         return $snapshot + ['transfer_source' => $source, 'created_sources' => [$source], 'money' => $money];
+    }
+
+    /** 同一真实转出可沿更正链重放；原始登记继续防止无关记录占用来源凭据。 */
+    private static function correctionChainIncludes(int $documentId, int $correctingDocument): bool
+    {
+        $candidate = $correctingDocument; $visited = [];
+        while ($candidate > 0 && !isset($visited[$candidate])) {
+            if ($candidate === $documentId) { return true; }
+            $visited[$candidate] = true;
+            $candidate = (int)Db::name('finance_correction')->where('tenant_id', FinanceAccess::tenant())->where('replacement_document_id', $candidate)->value('original_document_id');
+        }
+        return false;
     }
 
     private static function basis(array $data): array
@@ -77,7 +92,29 @@ final class FinanceAccountTransfers
             $events[] = array_replace($row, ['document_id' => $correction['replacement_document_id'], 'amount' => bcsub('0', $row['amount'], 2), 'withheld_fee' => bcsub('0', $row['withheld_fee'], 2),
                 'snapshot' => FinanceValue::json(array_replace($snapshot, ['actual_date' => $reversal['business_date'], 'posting_month' => $reversal['posting_month'], 'reverses_document_id' => (int)$row['document_id']]))]);
         }
+        if ($correction = self::outCorrection($reference)) { $events[] = $correction; }
         return $events;
+    }
+
+    /** 转出更正冲销旧在途，不把替代事实伪装成到账或返还。 */
+    private static function outCorrection(string $reference): ?array
+    {
+        if (!preg_match('/^n:([1-9][0-9]*)$/D', $reference, $matches)) { return null; }
+        $tenant = FinanceAccess::tenant(); $original = (int)Db::name('finance_source')->where('tenant_id', $tenant)->where('id', (int)$matches[1])->value('document_id');
+        if (!$original) { return null; }
+        $correction = Db::name('finance_correction')->where('tenant_id', $tenant)->where('original_document_id', $original)->find();
+        if (!$correction) { return null; }
+        $replacement = Db::name('finance_document')->where('tenant_id', $tenant)->where('id', $correction['replacement_document_id'])->find();
+        if (!$replacement || $replacement['type'] !== 'account_transfer_out') { throw new \DomainException('互转更正缺少替代转出记录'); }
+        $result = FinanceValue::decode($replacement['confirmed_result']); $replacementSource = FinanceValue::text($result['transfer_source'] ?? '', 40);
+        $reversal = Db::name('finance_entry')->where('tenant_id', $tenant)->where('document_id', $correction['replacement_document_id'])->where('metric', 'transit')
+            ->where('purpose', 'correction_reversal')->where('source_ref', $reference)->find();
+        $source = Db::name('finance_entry')->where('tenant_id', $tenant)->where('document_id', $correction['replacement_document_id'])->where('metric', 'balance')
+            ->where('purpose', 'correction_source')->where('source_ref', $reference)->find();
+        if (!$reversal || !$source || bccomp($reversal['amount'], $source['amount'], 2) !== 0 || bccomp($reversal['amount'], '0', 2) >= 0) { throw new \DomainException('互转更正缺少旧在途冲销依据'); }
+        return ['document_id' => (int)$correction['replacement_document_id'], 'kind' => 'transfer_out_correction', 'amount' => $reversal['amount'], 'withheld_fee' => '0.00',
+            'snapshot' => FinanceValue::json(['actual_date' => $reversal['business_date'], 'posting_month' => $reversal['posting_month'], 'reverses_document_id' => $original,
+                'replacement_document_id' => (int)$correction['replacement_document_id'], 'replacement_transfer_source' => $replacementSource])];
     }
 
     private static function current(FinanceLedger $ledger, string $reference, int $correctingDocument = 0): array
@@ -93,14 +130,19 @@ final class FinanceAccountTransfers
                 'principal' => $details['principal'], 'arrived_amount' => $details['arrived_amount'], 'returned_amount' => $details['returned_amount'], 'withheld_fee' => $details['withheld_fee'],
                 'extra_fee' => null, 'opening_basis' => $snapshot['evidence'] ?? '', 'opening_item_id' => (int)($snapshot['id'] ?? 0)];
         }
-        $entries = self::settlements($reference, $correctingDocument);
+        $entries = self::settlements($reference, $correctingDocument); $correctionAmount = '0.00'; $replacementSource = null; $replacementDocument = null;
         foreach ($entries as $entry) {
+            if ($entry['kind'] === 'transfer_out_correction') {
+                $correctionAmount = bcadd($correctionAmount, $entry['amount'], 2); $correction = FinanceValue::decode($entry['snapshot']);
+                $replacementSource = $correction['replacement_transfer_source']; $replacementDocument = (int)$correction['replacement_document_id']; continue;
+            }
             $key = $entry['kind'] === 'arrival' ? 'arrived_amount' : 'returned_amount';
             $snapshot[$key] = bcadd($snapshot[$key], $entry['amount'], 2); $snapshot['withheld_fee'] = bcadd($snapshot['withheld_fee'], $entry['withheld_fee'], 2);
         }
-        $remaining = bcsub(bcsub(bcsub($snapshot['principal'], $snapshot['arrived_amount'], 2), $snapshot['returned_amount'], 2), $snapshot['withheld_fee'], 2);
+        $remaining = bcsub(bcsub(bcadd($snapshot['principal'], $correctionAmount, 2), $snapshot['arrived_amount'], 2), $snapshot['returned_amount'], 2); $remaining = bcsub($remaining, $snapshot['withheld_fee'], 2);
         if (bccomp($remaining, $source['balance'], 2) !== 0) { throw new \DomainException('互转在途与到账、返还及手续费组成不一致，请核实原来源'); }
-        return array_replace($snapshot, ['transfer_source' => $reference, 'remaining_amount' => $remaining, 'original_document_id' => $source['document_id']]);
+        return array_replace($snapshot, ['transfer_source' => $reference, 'remaining_amount' => $remaining, 'original_document_id' => $source['document_id'],
+            'transfer_correction_amount' => $correctionAmount, 'replacement_transfer_source' => $replacementSource, 'replacement_document_id' => $replacementDocument]);
     }
 
     public static function settle(FinanceLedger $ledger, array $document, array $data, ?array $originalTransaction = null, int $correctingDocument = 0): array

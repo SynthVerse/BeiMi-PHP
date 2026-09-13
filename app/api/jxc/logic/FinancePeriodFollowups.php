@@ -36,7 +36,10 @@ final class FinancePeriodFollowups
         } elseif ($item['category'] === 'transit_reconciliation') {
             $check = FinanceTransitReviews::followup(new FinanceLedger($tenant), $details['transfer_source'], $month);
             if ($check['latest']) { $evidence[] = $check['latest']; }
-            $resolved = $check['state'] === 'normal' && ($check['latest']['closed_period_followup'] ?? false);
+            if ($check['state'] === 'replaced' && $check['closed_period_followup'] && $check['replacement_document_id']) {
+                $replacement = Db::name('finance_document')->where('tenant_id', $tenant)->where('id', $check['replacement_document_id'])->where('type', 'account_transfer_out')->where('status', 'confirmed')->find();
+                if ($replacement) { $evidence[] = FinanceValue::decode($replacement['confirmed_result']) + ['document_id' => (int)$replacement['id']]; $resolved = true; }
+            } else { $resolved = $check['state'] === 'normal' && ($check['latest']['closed_period_followup'] ?? false); }
         } elseif ($item['category'] === 'expense_estimate') {
             [$bill, $category] = explode(':', $item['reference']);
             $row = Db::name('finance_expense_estimate_resolution')->where('tenant_id', $tenant)->where('bill_id', (int)$bill)->where('category_id', (int)$category)->find();
