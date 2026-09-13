@@ -17,7 +17,8 @@ final class FinanceCorrections
         if (str_starts_with($original['type'], 'inventory_count')) { throw new \DomainException('盘点快照与确认事实必须保留，请关联取消或反向调整，不能覆盖历史'); }
         if ($original['type'] === 'transit_reconcile') { throw new \DomainException('在途核对须追加新的核实结论，不能覆盖或撤销原历史'); }
         if ($original['type'] === 'account_reconcile') { throw new \DomainException('月末核对须按最新历史追加核对记录，不能覆盖或撤销原核对'); }
-        if (in_array($original['type'], ['account_transfer_out', 'account_transfer_arrival', 'account_transfer_return'], true)) { throw new \DomainException('互转更正须关联两端账户、在途及后续到账，不能直接覆盖或撤销一端资金'); }
+        if ($original['type'] === 'account_transfer_out') { throw new \DomainException('互转转出更正须关联两端账户、在途及后续到账，不能直接覆盖或撤销一端资金'); }
+        if (in_array($original['type'], ['account_transfer_arrival', 'account_transfer_return'], true) && ($reverseOnly || $duplicateOf)) { throw new \DomainException('实际到账或返还请关联更正核实内容，不能作为无资金业务撤销'); }
         if (in_array($original['type'], ['equipment_refund_due', 'equipment_refund_adjustment'], true)) { throw new \DomainException('设备退款约定须从原退款关联调整，不能覆盖实际到账历史'); }
         if (in_array($original['type'], ['equipment_purchase', 'equipment_adjustment'], true)) { throw new \DomainException('设备额度请从原购置记录关联调价或取消未付，不能覆盖已有付款历史'); }
         if (in_array($original['type'], ['salary_expense', 'salary_adjustment'], true)) { throw new \DomainException('工资结果须关联原工资和已发放组成调整，不能覆盖历史'); }

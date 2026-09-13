@@ -43,7 +43,7 @@ final class FinanceTransitReviews
             'returned_amount' => isset($facts['returned_amount']) ? FinanceValue::money($facts['returned_amount'], true) : null,
             'withheld_fee' => isset($facts['withheld_fee']) ? FinanceValue::money($facts['withheld_fee'], true) : null,
             'extra_fee' => $opening ? (isset($facts['additional_fee']) ? FinanceValue::money($facts['additional_fee'], true) : null) : ($facts['extra_fee'] ?? null), 'original_document_id' => $source['document_id'], 'opening_item_id' => $opening ? (int)($snapshot['id'] ?? 0) : null];
-        foreach (Db::name('finance_transfer_settlement')->where('tenant_id', FinanceAccess::tenant())->where('source_ref', $reference)->order('id')->select()->toArray() as $entry) {
+        foreach (FinanceAccountTransfers::settlements($reference) as $entry) {
             $settled = FinanceValue::decode($entry['snapshot']);
             if ($settled['actual_date'] > $cutoff || (!$frozen && $settled['posting_month'] > $month)) { continue; }
             $key = $entry['kind'] === 'arrival' ? 'arrived_amount' : 'returned_amount';

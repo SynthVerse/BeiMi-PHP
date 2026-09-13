@@ -35,6 +35,21 @@ final class FinanceEvidence
         return ['id' => (int)$row['id'], 'name' => $snapshot['name'] ?? '核验截图', 'mime' => $snapshot['mime'] ?? '', 'size' => $snapshot['size'] ?? 0];
     }
 
+    /** 调用方已经按单据类型完成读取授权；仅返回同门店、同类型的已有材料元数据。 */
+    public static function metadataForDocument(string $type, mixed $ids): array
+    {
+        if (!is_array($ids)) { return []; }
+        $wanted = [];
+        foreach ($ids as $id) {
+            if ((is_int($id) || is_string($id)) && preg_match('/^[1-9][0-9]{0,9}$/D', (string)$id)) { $wanted[(int)$id] = true; }
+        }
+        if (!$wanted) { return []; }
+        $rows = Db::name('finance_evidence')->where('tenant_id', FinanceAccess::tenant())->where('document_type', $type)->whereIn('id', array_keys($wanted))->select()->toArray();
+        $metadata = [];
+        foreach ($rows as $row) { $metadata[(int)$row['id']] = self::metadata($row); }
+        return array_values(array_filter(array_map(static fn(int $id): ?array => $metadata[$id] ?? null, array_keys($wanted))));
+    }
+
     public static function content(int $id): array
     {
         if (FinanceAccess::tenant() <= 0 || FinanceAccess::operator() <= 0) { throw new \DomainException('请先登录并选择门店'); }

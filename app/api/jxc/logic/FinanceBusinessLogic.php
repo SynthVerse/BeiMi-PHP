@@ -181,7 +181,21 @@ final class FinanceBusinessLogic extends BaseLogic
                     $document['current_source'] = $source;
                 }
             }
-            return self::present($document) + ['replacement_document_id' => (int)(Db::name('finance_correction')->where('tenant_id', FinanceAccess::tenant())->where('original_document_id', $document['id'])->value('replacement_document_id') ?: 0)];
+            $presented = self::present($document);
+            if (in_array($presented['type'], ['account_transfer_out', 'account_transfer_arrival', 'account_transfer_return'], true)) {
+                $payload = &$presented['payload'];
+                $payload['evidence_files'] = FinanceEvidence::metadataForDocument($presented['type'], $payload['evidence_ids'] ?? []);
+                $vendorId = $payload['fee_vendor_id'] ?? 0;
+                if ((is_int($vendorId) || is_string($vendorId)) && preg_match('/^[1-9][0-9]{0,9}$/D', (string)$vendorId)) {
+                    $payload['fee_vendor_name'] = (string)(Db::name('vendor')->where('tenant_id', FinanceAccess::tenant())->where('id', (int)$vendorId)->value('supplier_name') ?: '');
+                }
+                $categoryId = $payload['fee_category_id'] ?? 0;
+                if ((is_int($categoryId) || is_string($categoryId)) && preg_match('/^[1-9][0-9]{0,9}$/D', (string)$categoryId)) {
+                    $payload['fee_category_name'] = (string)(Db::name('finance_expense_category')->where('tenant_id', FinanceAccess::tenant())->where('id', (int)$categoryId)->value('name') ?: '');
+                }
+                unset($payload);
+            }
+            return $presented + ['replacement_document_id' => (int)(Db::name('finance_correction')->where('tenant_id', FinanceAccess::tenant())->where('original_document_id', $document['id'])->value('replacement_document_id') ?: 0)];
         } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
     }
 

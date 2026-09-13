@@ -109,14 +109,30 @@ final class FinanceReports
         $external = []; $internal = []; $adjustments = []; $transferDocuments = [];
         foreach ($period as $entry) {
             $fact = FinanceValue::decode($documents[$entry['document_id']] ?? '{}'); $type = $entry['details']['type'] ?? $fact['type'] ?? '';
+            $reverses = 0;
+            if ($entry['purpose'] === 'correction_reversal' && !empty($entry['details']['original_document_id'])) {
+                $originalId = (int)$entry['details']['original_document_id'];
+                $originalFact = FinanceValue::decode((string)Db::name('finance_document')->where('tenant_id', $tenant)->where('id', $originalId)->value('confirmed_result'));
+                if (in_array($originalFact['type'] ?? '', ['account_transfer_out', 'account_transfer_arrival', 'account_transfer_return'], true)) { $fact = $originalFact; $type = $fact['type']; $reverses = $originalId; }
+            }
             $entry['document_type'] = $type;
+            // 关联冲销和替代记录只重述原真实资金事实，不能在更正入账月再成为一笔对外收支或内部互转。
+            $transferCorrection = $reverses > 0 || (!empty($fact['corrects_document_id']) && in_array($type, ['account_transfer_out', 'account_transfer_arrival', 'account_transfer_return'], true));
+            if ($transferCorrection) {
+                if (in_array($entry['metric'], ['cash', 'transit'], true)) { $summary['cash_adjustment'] = bcadd($summary['cash_adjustment'], $entry['amount'], 2); }
+                $entry['adjustment_kind'] = 'transfer_correction'; $adjustments[] = $entry;
+                continue;
+            }
             if (in_array($type, ['account_transfer_out', 'account_transfer_arrival', 'account_transfer_return'], true)) {
-                if (isset($transferDocuments[$entry['document_id']])) { continue; }
-                $transferDocuments[$entry['document_id']] = true;
+                $transferKey = $entry['document_id'] . ':' . $reverses;
+                if (isset($transferDocuments[$transferKey])) { continue; }
+                $transferDocuments[$transferKey] = true;
                 $fee = $type === 'account_transfer_out' ? $fact['extra_fee'] : ($fact['withheld_fee'] ?? '0.00');
+                $principal = $fact['internal_principal'];
+                if ($reverses) { $fee = bcsub('0', $fee, 2); $principal = bcsub('0', $principal, 2); }
                 $summary['external_out'] = bcadd($summary['external_out'], $fee, 2);
-                $internal[] = ['document_id' => (int)$entry['document_id'], 'type' => $type, 'actual_date' => $entry['business_date'], 'posting_month' => $entry['posting_month'], 'principal' => $fact['internal_principal'], 'fee' => $fee, 'entry_id' => (int)$entry['id'], 'transfer_source' => $fact['transfer_source']];
-                if (bccomp($fee, '0', 2) > 0) { $external[] = ['document_id' => (int)$entry['document_id'], 'actual_date' => $entry['business_date'], 'amount' => '-' . $fee, 'type' => 'transfer_fee', 'from_transit' => $type === 'account_transfer_arrival']; }
+                $internal[] = ['document_id' => (int)$entry['document_id'], 'type' => $type, 'actual_date' => $entry['business_date'], 'posting_month' => $entry['posting_month'], 'principal' => $principal, 'fee' => $fee, 'entry_id' => (int)$entry['id'], 'transfer_source' => $fact['transfer_source'], 'reverses_document_id' => $reverses];
+                if (bccomp($fee, '0', 2) !== 0) { $external[] = ['document_id' => (int)$entry['document_id'], 'actual_date' => $entry['business_date'], 'amount' => bcsub('0', $fee, 2), 'type' => 'transfer_fee', 'from_transit' => $type === 'account_transfer_arrival', 'reverses_document_id' => $reverses]; }
             } else {
                 if ($entry['metric'] !== 'cash') { continue; }
                 if ($entry['purpose'] !== 'actual_money') { $summary['cash_adjustment'] = bcadd($summary['cash_adjustment'], $entry['amount'], 2); $adjustments[] = $entry; continue; }
