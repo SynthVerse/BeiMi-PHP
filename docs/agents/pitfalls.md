@@ -2629,8 +2629,8 @@ pending，权威明细和金额却已经发生了副作用。代码缺少“草�
 
 - 状态：防护中
 - 首次发生：2026-08-27
-- 最近发生：2026-08-27
-- 复发次数：0
+- 最近发生：2026-09-14
+- 复发次数：1
 - 适用范围：Codex 受限终端中对 `BeiMi-PHP`、`BeiMi-uniapp` 的 Codegraph 增量同步与新符号验证
 - 相关问题：无
 
@@ -2669,9 +2669,11 @@ Vue2 使用新文件、组件或顶层常量验证，不以 Options API 对象�
 
 - 可重复探针：只读查询 `.codegraph/codegraph.db` 的 `files`／`nodes` 表，要求 PHP 新类进入节点；前端目标文件的索引 `modified_at` 与磁盘时间一致、`errors` 为空，并能检索新增顶层常量或组件。
 - 运行防线：沙箱内解析不到用户级 CLI 时，先验证宿主机 `%APPDATA%\npm` 命令垫片，再在授权下进入每个已初始化子项目运行 `codegraph sync .`；全局 MCP 未固定该子项目 `--path` 时，不把无 pending 的查询结果等同于文件监听已覆盖该索引。禁止把权限隔离误报成安装丢失或擅自重建索引。
+- 2026-09-14：新增 `scripts/sync-codegraph.ps1`，显式解析项目路径、拒绝未初始化仓库，并在 PATH 查询失败后检查宿主用户 npm 垫片；实际执行增量同步和状态校验。前端使用 `-ProjectPath ../BeiMi-uniapp`。脚本不可见时须在宿主用户权限下运行，不得把沙箱视图当作安装检测结论。
 - 自动化限制：仓库测试不能自行取得 Codex 沙箱外权限，当前无法把宿主机 CLI 可见性变成无人值守测试，因此本 PIT 保持“防护中”。
 - 决策与知识：本记录及用户级 `C:\Users\ASUS\.codex\AGENTS.md` 的 Codegraph 增量同步规则。
 - 验证结果：两个索引库 `quick_check=ok`；同步后 PHP 可检索 `PurchaseBatchLogic`，前端可检索 `purchaseBatchAPI` 及三个采购批次组件，目标 Vue 文件索引时间晚于修改时间且无解析错误。
+- 2026-09-14 复发：财务修复任务只查询无 pending 状态后把同步留为限制；宿主机确认 Codegraph 0.9.7，PHP 增量同步补入 19 个变化文件后可检索 `FinanceManagedScopeGuard`。原防线停留在操作约定，未提供能直接执行的宿主 CLI 解析与子项目同步入口。
 
 ### 发生记录
 
@@ -2717,3 +2719,26 @@ Vue2 使用新文件、组件或顶层常量验证，不以 Options API 对象�
 |---|---|---|---|
 | 2026-08-29 | 冻结 V1 真实数据验收 / 员工工序能力配置 | 新增只具备“杀鱼”能力的纸质员工被保存接口拒绝 | 既有履约测试直接调用逻辑层，绕过控制器校验；没有覆盖小程序实际提交的 `id: 0` 保存契约。 |
 | 2026-08-29 | 新增员工保存校验回归 | 首版候选补丁写为 `remove('id', 'require|gt:0')`，聚焦 PHPUnit 仍拒绝 `id: 0` | 当时未使用可用的 `D:\xampp\php\php.exe` 执行聚焦测试，未暴露 ThinkPHP `remove()` 只按标准化规则类型匹配的细节。 |
+
+## PIT-0031：业务回归未执行到断言，留下无效测试夹具
+
+- 状态：已防护
+- 首次发生：2026-09-14
+- 最近发生：2026-09-14
+- 复发次数：0
+- 适用范围：财务工作台、跨店报表与导出、采购待办的 PHPUnit 验收
+- 相关问题：PIT-0002、PIT-0029
+
+### 触发场景与根因
+
+隔离 MySQL 3307 停止时，新财务用例在连接阶段以 0 assertions 退出，夹具一直没有实际执行。恢复实例后依次发现：清理和查询 `tenant_relation` 前未创建测试表；分店期初余额引用了不存在的账户；声称重试旧导出的断言每次生成新的幂等键。前端通过和 PHP 语法通过均无法发现这些问题。
+
+### 防线
+
+- `scripts/test-finance.ps1` 固定恢复既有、仅监听本机 3307 的 `data-test` 实例，给予崩溃恢复 180 秒；拒绝不符合隔离配置的数据目录，自动解析实际 PHP，并保留 PHPUnit 失败退出码。`tests/bootstrap.php` 继续强制 `.env.testing`、`beimi_test_*` 库名和隔离标记。
+- `FinanceBusinessWorkflowTest::setUp` 从正式门店关系迁移抽取建表语句；跨店用例建立分店真实账户并复用同一导出命令验证撤权重取，另验证缩小范围的新命令可成功。
+- `test_purchase_todo_finds_exact_arrival_beyond_first_page_and_rechecks_scope_and_remaining_quantity` 经公开业务逻辑创建 21 笔到货，验证精确来源、异店与异供应商隔离、分次结算余量以及结清后不可选。
+
+### 验证证据
+
+2026-09-14：连接失败为 1 test / 0 assertions / 1 error；恢复后完整 Finance 测试通过 328 tests / 11470 assertions，无跳过。采购回归加载旧 `FinancePurchaseBatches` 时稳定失败（预期第21条来源、实际为空），当前实现通过 1 test / 59 assertions。全程仅使用本机隔离测试库；不以这些结果宣称生产部署或实体手机验收已完成。

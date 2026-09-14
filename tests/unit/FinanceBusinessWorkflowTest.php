@@ -26,6 +26,10 @@ final class FinanceBusinessWorkflowTest extends TestCase
     protected function setUp(): void
     {
         $this->prepareCustomerReportRequestContext(); $this->ensureCustomerReportTables();
+        $this->runStatements($this->authoritativeCreateTable(
+            (string)file_get_contents(dirname(__DIR__, 2) . '/database/migrations/20260521_000002_add_tenant_relation_and_invite_types.sql'),
+            'tenant_relation'
+        ));
         foreach (['20260907_000001_finance_preparation.sql', '20260907_000002_finance_opening.sql', '20260907_000003_finance_opening_details.sql', '20260907_000004_finance_business.sql', '20260907_000005_finance_sales.sql', '20260907_000006_finance_receivables.sql', '20260907_000007_finance_advance_revisions.sql'] as $file) {
             $this->runStatements($this->prepareMigration(file_get_contents(dirname(__DIR__, 2) . '/database/migrations/' . $file)));
         }
@@ -694,7 +698,8 @@ final class FinanceBusinessWorkflowTest extends TestCase
             'permissions' => null, 'remark' => '财务跨店测试', 'is_deleted' => 0, 'create_time' => $now, 'update_time' => $now, 'delete_time' => null]);
         Db::name('finance_preparation')->insert(['tenant_id' => self::OTHER_TENANT_ID, 'activation_date' => date('Y-m-01'), 'inventory_cost_reviewed' => 1, 'legacy_settlement_reviewed' => 1, 'excluded_business_reviewed' => 1, 'notes' => '', 'version' => 1, 'operator_id' => self::ADMIN_ID, 'update_time' => $now]);
         Db::name('finance_opening_book')->insert(['tenant_id' => self::OTHER_TENANT_ID, 'status' => 'active', 'version' => 1, 'reviews' => '{}', 'submitted_hash' => str_repeat('a', 64), 'confirmed_snapshot' => '{}', 'created_by' => '{}', 'last_modified_by' => '{}', 'create_time' => $now, 'update_time' => $now, 'confirmed_at' => $now]);
-        Db::name('finance_opening_source')->insert(['tenant_id' => self::OTHER_TENANT_ID, 'opening_item_id' => 1, 'category' => 'account', 'subject_id' => 1, 'amount' => '200.00', 'activation_date' => date('Y-m-01'), 'source_snapshot' => '{}', 'create_time' => $now]);
+        $childAccount = Db::name('finance_account')->insertGetId(['tenant_id' => self::OTHER_TENANT_ID, 'name' => '分店现金', 'account_type' => 'cash', 'create_time' => $now, 'update_time' => $now]);
+        Db::name('finance_opening_source')->insert(['tenant_id' => self::OTHER_TENANT_ID, 'opening_item_id' => 1, 'category' => 'account', 'subject_id' => $childAccount, 'amount' => '200.00', 'activation_date' => date('Y-m-01'), 'source_snapshot' => '{}', 'create_time' => $now]);
 
         $query = ['report' => 'cash', 'period_type' => 'month', 'period' => date('Y-m'), 'tenant_ids' => [999999]];
         $managed = FinanceBusinessLogic::managedReport($query); self::assertNotFalse($managed, FinanceBusinessLogic::getError());
@@ -704,7 +709,8 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertArrayHasKey('accounts', $managed['stores'][0]['data']); self::assertArrayHasKey('entries', $managed['stores'][0]['data']);
         self::assertNotEmpty($managed['stores'][0]['months']); self::assertSame('管理总店', $managed['stores'][0]['store_name']);
 
-        $export = FinanceBusinessLogic::reportExport('prepare', $this->command(0) + $query + ['scope' => 'managed']); self::assertNotFalse($export, FinanceBusinessLogic::getError()); self::assertSame('managed', $export['scope']);
+        $exportCommand = $this->command(0) + $query + ['scope' => 'managed'];
+        $export = FinanceBusinessLogic::reportExport('prepare', $exportCommand); self::assertNotFalse($export, FinanceBusinessLogic::getError()); self::assertSame('managed', $export['scope']);
         $content = FinanceBusinessLogic::reportExport('content', ['id' => $export['id']]); self::assertNotFalse($content, FinanceBusinessLogic::getError()); self::assertSame('managed', $content['scope']);
         $file = tempnam(sys_get_temp_dir(), 'finance-managed-xlsx-');
         try { file_put_contents($file, base64_decode($content['base64'])); $book = \PhpOffice\PhpSpreadsheet\IOFactory::load($file); self::assertNotNull($book->getSheetByName('各店状态'));
@@ -713,10 +719,14 @@ final class FinanceBusinessWorkflowTest extends TestCase
         finally { unlink($file); }
 
         Db::name('tenant_relation')->where('parent_tenant_id', self::TENANT_ID)->where('child_tenant_id', self::OTHER_TENANT_ID)->update(['status' => 0, 'update_time' => time()]);
-        self::assertFalse(FinanceBusinessLogic::reportExport('prepare', $this->command(0) + $query + ['scope' => 'managed']), '管理范围移除门店后不能幂等取回含该店的旧导出');
+        self::assertFalse(FinanceBusinessLogic::reportExport('prepare', $exportCommand), '管理范围移除门店后不能幂等取回含该店的旧导出');
         self::assertStringContainsString('管理范围已变化', FinanceBusinessLogic::getError());
         self::assertFalse(FinanceBusinessLogic::reportExport('content', ['id' => $export['id']]), '管理范围移除门店后不能继续下载旧快照');
         self::assertStringContainsString('管理范围已变化', FinanceBusinessLogic::getError());
+
+        $replacement = FinanceBusinessLogic::reportExport('prepare', $this->command(0) + $query + ['scope' => 'managed']);
+        self::assertNotFalse($replacement, FinanceBusinessLogic::getError());
+        self::assertNotSame($export['id'], $replacement['id'], '缩小范围后允许另建不含被移出门店的新快照');
 
         $employee = WorkforceLogic::saveEmployee(['name' => '跨店拒权员工', 'mobile' => '13800009941', 'bind_user_id' => 996941, 'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['finance.report.cash.view', 'finance.report.cash.export']]); self::assertNotFalse($employee, WorkforceLogic::getError());
         request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996941; request()->adminId = 0;
@@ -4259,6 +4269,46 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertSame(date('Y-m-d', strtotime('+7 days')), $result['confirmed_result']['lines'][0]['due_date']);
         Db::name('employee_permission')->where('tenant_id', self::TENANT_ID)->where('employee_id', $employee['id'])->delete();
         self::assertFalse(FinanceBusinessLogic::action('record', $command));
+    }
+
+    public function test_purchase_todo_finds_exact_arrival_beyond_first_page_and_rechecks_scope_and_remaining_quantity(): void
+    {
+        $this->activate();
+        $warehouse = $this->createCustomerReportWarehouse('分页到货仓');
+        $goods = $this->createCustomerReportGoods('分页到货商品', 'FIN-TODO-PAGE');
+        $sku = $this->customerReportSkuId($goods);
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '分页供应商']);
+        $otherVendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '其他供应商']);
+        $target = 0;
+        for ($index = 1; $index <= 21; $index++) {
+            $arrival = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_arrival', 'payload' => [
+                'subject_id' => $vendor, 'warehouse_id' => $warehouse, 'actual_date' => date('Y-m-d'),
+                'source_reference' => 'TODO-PAGE-' . $index, 'reason' => '独立到货待核定结算',
+                'lines' => [['sku_id' => $sku, 'actual_quantity' => '10', 'reported_quantity' => '10', 'agreed_price' => '2.00']],
+            ]]);
+            self::assertNotFalse($arrival, FinanceBusinessLogic::getError());
+            $target = (int)$arrival['confirmed_result']['lines'][0]['arrival_line_id'];
+        }
+        $query = ['type' => 'purchase_settlement', 'subject_id' => $vendor];
+        $firstPage = FinanceBusinessLogic::options($query);
+        self::assertNotFalse($firstPage, FinanceBusinessLogic::getError());
+        self::assertCount(20, $firstPage['arrivals']); self::assertTrue($firstPage['arrival_has_more']);
+        self::assertNotContains($target, array_column($firstPage['arrivals'], 'arrival_line_id'));
+        $exact = FinanceBusinessLogic::options($query + ['arrival_line_id' => $target, 'page' => 99]);
+        self::assertNotFalse($exact, FinanceBusinessLogic::getError());
+        self::assertSame([$target], array_column($exact['arrivals'], 'arrival_line_id'));
+        self::assertSame('10.0000', $exact['arrivals'][0]['pending_quantity']); self::assertFalse($exact['arrival_has_more']);
+        self::assertSame([], FinanceBusinessLogic::options(['type' => 'purchase_settlement', 'subject_id' => $otherVendor, 'arrival_line_id' => $target])['arrivals']);
+        $this->prepareCustomerReportRequestContext(self::OTHER_TENANT_ID);
+        self::assertSame([], FinanceBusinessLogic::options($query + ['arrival_line_id' => $target])['arrivals']);
+        $this->prepareCustomerReportRequestContext();
+        $settle = static fn(string $quantity): array => ['subject_id' => $vendor, 'reason' => '按实际数量结清',
+            'supplier_confirmation' => '已核实供方结算依据', 'supplier_confirmed' => 1,
+            'lines' => [['arrival_line_id' => $target, 'covered_quantity' => $quantity, 'settlement_quantity' => $quantity, 'price' => '2.00', 'terms_version' => 0]]];
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_settlement', 'payload' => $settle('4')]), FinanceBusinessLogic::getError());
+        self::assertSame('6.0000', FinanceBusinessLogic::options($query + ['arrival_line_id' => $target])['arrivals'][0]['pending_quantity']);
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'purchase_settlement', 'payload' => $settle('6')]), FinanceBusinessLogic::getError());
+        self::assertSame([], FinanceBusinessLogic::options($query + ['arrival_line_id' => $target])['arrivals']);
     }
 
     public function test_purchase_arrival_records_actual_stock_and_estimate_once_without_formal_payable(): void
