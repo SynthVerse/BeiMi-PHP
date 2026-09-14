@@ -140,10 +140,13 @@ final class FinanceReportExports
         foreach ($report['stores'] as $store) {
             if (!$store['available']) { continue; }
             $label = mb_substr((string)$store['store_name'], 0, 18, 'UTF-8') . '-' . $store['tenant_id'];
-            $storeRows = [];
+            $storeRows = [['门店名称', (string)$store['store_name']], ['门店编号', (string)$store['tenant_id']], ['财务启用日期', self::value($store['activation_date'])],
+                ['实际范围', $store['start_month'] . ' 至 ' . $store['end_month']], ['截止日期', self::value($store['cutoff'])],
+                ['结账状态', self::closing($store['closing_status'])], ['结果状态', $store['stage'] ? '阶段结果' : '冻结结果']];
             foreach ($store['data']['summary'] ?? [] as $field => $amount) { $storeRows[] = [self::label($field), self::value($amount)]; }
             foreach ($store['data']['categories'] ?? [] as $category) { $storeRows[] = [self::label((string)$category['category']) . '期末', self::value($category['closing'] ?? null)]; }
-            self::sheet($book, mb_substr($label, 0, 31, 'UTF-8'), ['项目', '内容'], $storeRows ?: [['结果', '该期间无汇总金额']]);
+            $details = []; self::flatten($store['data'], '组成明细', $details); array_push($storeRows, ...$details);
+            self::sheet($book, mb_substr($label, 0, 31, 'UTF-8'), ['项目或字段路径', '内容'], $storeRows);
         }
         $facts = []; self::flatten($report, '', $facts); self::sheet($book, '完整导出依据', ['字段路径', '原值'], $facts);
         $stream = fopen('php://temp', 'w+b');

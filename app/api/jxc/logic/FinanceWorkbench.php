@@ -60,7 +60,9 @@ final class FinanceWorkbench
         usort($todos, static fn(array $left, array $right): int => [$left['business_date'] ?: '9999-12-31', $left['kind'], $left['id']] <=> [$right['business_date'] ?: '9999-12-31', $right['kind'], $right['id']]);
         foreach ($todos as &$todo) { $todo['render_key'] = $todo['kind'] . ':' . $todo['id']; } unset($todo);
         $full = array_key_exists('page', $params); $page = max(1, FinanceValue::id($params['page'] ?? 1)); $pageSize = $full ? 20 : 3; $offset = $full ? ($page - 1) * $pageSize : 0;
-        return ['overview' => $overview, 'todos' => array_slice($todos, $offset, $pageSize), 'todo_count' => count($todos),
+        return ['overview' => $overview, 'todo_access' => ['receivable_overdue' => $active && FinanceAccess::has('finance.receivable.view'),
+            'purchase_pending' => $active && $access['payable'], 'sales_pending' => $active && $access['sales_settlement']],
+            'todos' => array_slice($todos, $offset, $pageSize), 'todo_count' => count($todos),
             'has_more' => $offset + $pageSize < count($todos), 'page' => $page];
     }
 

@@ -670,6 +670,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertSame('1000.00', $owner['overview']['receivable']['overdue_amount']); self::assertSame(1, $owner['overview']['sales_settlement']['pending_delivery_count']);
         self::assertLessThanOrEqual(3, count($owner['todos'])); self::assertGreaterThanOrEqual(2, $owner['todo_count']);
         self::assertContains('receivable_overdue', array_column($owner['todos'], 'kind')); self::assertContains('sales_pending', array_column($owner['todos'], 'kind'));
+        self::assertSame(['receivable_overdue' => true, 'purchase_pending' => true, 'sales_pending' => true], $owner['todo_access']);
 
         $employee = WorkforceLogic::saveEmployee(['name' => '财务首页收款员', 'mobile' => '13800009940', 'bind_user_id' => 996940, 'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['finance.receipt.prepare']]);
         self::assertNotFalse($employee, WorkforceLogic::getError());
@@ -677,6 +678,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $limited = FinanceSetupLogic::workbench(); self::assertNotFalse($limited, FinanceSetupLogic::getError());
         self::assertTrue($limited['overview']['receivable']['can_view']); self::assertFalse($limited['overview']['payable']['can_view']); self::assertFalse($limited['overview']['sales_settlement']['can_view']);
         self::assertSame([], $limited['todos'], '没有逾期查看权限时不能借首页泄露逾期客户和来源');
+        self::assertFalse($limited['todo_access']['receivable_overdue']); self::assertFalse($limited['todo_access']['purchase_pending']); self::assertFalse($limited['todo_access']['sales_pending']);
         self::assertArrayNotHasKey('unpaid_amount', $limited['overview']['payable']);
     }
 
@@ -699,12 +701,15 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertSame('managed', $managed['scope']); self::assertTrue($managed['read_only']); self::assertSame(2, $managed['store_count']);
         self::assertSame([self::TENANT_ID, self::OTHER_TENANT_ID], array_column($managed['stores'], 'tenant_id'));
         self::assertSame('5200.00', $managed['data']['summary']['closing_accounts']);
-        self::assertArrayNotHasKey('accounts', $managed['stores'][0]['data']); self::assertArrayNotHasKey('entries', $managed['stores'][0]['data']);
+        self::assertArrayHasKey('accounts', $managed['stores'][0]['data']); self::assertArrayHasKey('entries', $managed['stores'][0]['data']);
+        self::assertNotEmpty($managed['stores'][0]['months']); self::assertSame('管理总店', $managed['stores'][0]['store_name']);
 
         $export = FinanceBusinessLogic::reportExport('prepare', $this->command(0) + $query + ['scope' => 'managed']); self::assertNotFalse($export, FinanceBusinessLogic::getError()); self::assertSame('managed', $export['scope']);
         $content = FinanceBusinessLogic::reportExport('content', ['id' => $export['id']]); self::assertNotFalse($content, FinanceBusinessLogic::getError()); self::assertSame('managed', $content['scope']);
         $file = tempnam(sys_get_temp_dir(), 'finance-managed-xlsx-');
-        try { file_put_contents($file, base64_decode($content['base64'])); $book = \PhpOffice\PhpSpreadsheet\IOFactory::load($file); self::assertNotNull($book->getSheetByName('各店状态')); $book->disconnectWorksheets(); }
+        try { file_put_contents($file, base64_decode($content['base64'])); $book = \PhpOffice\PhpSpreadsheet\IOFactory::load($file); self::assertNotNull($book->getSheetByName('各店状态'));
+            $storeSheet = $book->getSheetByName('管理总店-' . self::TENANT_ID); self::assertNotNull($storeSheet);
+            self::assertStringContainsString('组成明细', json_encode($storeSheet->toArray(), JSON_UNESCAPED_UNICODE)); $book->disconnectWorksheets(); }
         finally { unlink($file); }
 
         $employee = WorkforceLogic::saveEmployee(['name' => '跨店拒权员工', 'mobile' => '13800009941', 'bind_user_id' => 996941, 'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['finance.report.cash.view', 'finance.report.cash.export']]); self::assertNotFalse($employee, WorkforceLogic::getError());

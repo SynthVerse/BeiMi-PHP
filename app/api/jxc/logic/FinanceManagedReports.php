@@ -6,7 +6,7 @@ namespace app\api\jxc\logic;
 
 use think\facade\Db;
 
-/** 管理范围跨店报表只汇总各自账套结果；来源、账户和记账动作始终留在单一门店。 */
+/** 管理范围跨店报表只读汇总各自账套；组成明细随快照返回，但不提供跨店记账入口。 */
 final class FinanceManagedReports
 {
     public static function read(array $params): array
@@ -21,7 +21,7 @@ final class FinanceManagedReports
                 if (!$active) { return $store + ['activation_date' => $activation ?: null, 'available' => false, 'reason' => '该门店财务账套尚未启用']; }
                 try {
                     $report = FinanceReportPeriods::read(new FinanceLedger($tenant), $params + ['report' => $kind], true);
-                    return $store + ['activation_date' => $activation ?: null, 'available' => true, 'reason' => null] + self::storeReport($report, $kind);
+                    return $store + ['activation_date' => $activation ?: null, 'available' => true, 'reason' => null] + self::storeReport($report);
                 } catch (\DomainException $error) {
                     return $store + ['activation_date' => $activation ?: null, 'available' => false, 'reason' => $error->getMessage()];
                 }
@@ -40,15 +40,12 @@ final class FinanceManagedReports
             'available_store_count' => count($available), 'stores' => $stores, 'data' => self::aggregate($kind, $available)];
     }
 
-    private static function storeReport(array $report, string $kind): array
+    private static function storeReport(array $report): array
     {
-        $data = in_array($kind, ['customer', 'vendor'], true)
-            ? ['categories' => array_map(static fn(array $row): array => array_intersect_key($row, array_flip(['category', 'opening', 'new_sources', 'entries_change', 'closing'])), $report['data']['categories'] ?? [])]
-            : ['summary' => $report['data']['summary'] ?? []];
         return ['requested_start_month' => $report['requested_start_month'], 'requested_end_month' => $report['requested_end_month'],
             'start_month' => $report['start_month'], 'end_month' => $report['end_month'], 'cutoff' => $report['cutoff'], 'stage' => $report['stage'],
-            'closing_status' => $report['closing_status'], 'verification' => $report['verification'], 'data' => $data,
-            'months' => array_map(static fn(array $month): array => array_intersect_key($month, array_flip(['month', 'cutoff', 'stage', 'closing_status', 'verification'])), $report['months']),
+            'closing_status' => $report['closing_status'], 'verification' => $report['verification'], 'salary_details_visible' => $report['salary_details_visible'],
+            'data' => $report['data'], 'months' => $report['months'],
             'current_followups' => array_map(static fn(array $item): array => array_intersect_key($item, array_flip(['month', 'original_mode', 'summary', 'all_resolved'])), $report['current_followups'])];
     }
 
