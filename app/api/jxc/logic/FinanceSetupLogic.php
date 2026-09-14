@@ -13,7 +13,7 @@ final class FinanceSetupLogic extends BaseLogic
 {
     public const ACCOUNT_TYPES = ['cash' => '现金', 'wechat' => '微信', 'alipay' => '支付宝', 'bank' => '银行'];
 
-    public static function workbench(): array|false
+    public static function workbench(array $params = []): array|false
     {
         self::clearError();
         if (self::tenantId() <= 0) {
@@ -21,6 +21,10 @@ final class FinanceSetupLogic extends BaseLogic
             return false;
         }
         $owner = self::isOwner();
+        try { $projection = FinanceWorkbench::read($params); }
+        catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
+        $managedReports = false;
+        if ($owner) { try { $managedReports = count(FinanceManagedStoreScope::stores()) > 1; } catch (\DomainException) { $managedReports = false; } }
         return [
             'tenant_id' => self::tenantId(),
             'operator_id' => self::operatorId(),
@@ -33,8 +37,9 @@ final class FinanceSetupLogic extends BaseLogic
                 'prepare_opening_salary' => self::salaryAccess()['prepare'],
                 'prepare_opening' => $owner || (self::isUserIdentity() && WorkforceLogic::hasPermission('finance.opening.prepare')),
                 'view_settlement' => $owner || (self::isUserIdentity() && WorkforceLogic::hasPermission('settlement.view')),
+                'managed_reports' => $managedReports,
             ],
-        ];
+        ] + $projection;
     }
 
     public static function preparation(): array|false

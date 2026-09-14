@@ -34,6 +34,15 @@ final class FinanceBusinessLogic extends BaseLogic
         } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
     }
 
+    public static function managedReport(array $params): array|false
+    {
+        self::clearError();
+        try {
+            FinanceAccess::require('', true);
+            return Db::transaction(static fn(): array => FinanceManagedReports::read($params));
+        } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
+    }
+
     public static function reportTrace(array $params): array|false
     {
         self::clearError();

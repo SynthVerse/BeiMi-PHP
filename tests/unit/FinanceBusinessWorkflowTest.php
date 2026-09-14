@@ -659,6 +659,59 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $customer = FinanceBusinessLogic::monthlyReport(['month' => date('Y-m'), 'report' => 'customer']); self::assertSame('20.00', array_column($customer['data']['categories'], 'closing', 'category')['advance']);
     }
 
+    public function test_workbench_returns_only_authorized_current_store_summaries_and_three_todos(): void
+    {
+        $this->activate(); $this->deliveredSale();
+        $opening = Db::name('finance_opening_source')->where('tenant_id', self::TENANT_ID)->where('category', 'receivable')->find();
+        $snapshot = json_decode($opening['source_snapshot'], true); $snapshot['due_date'] = date('Y-m-d', strtotime('-2 days'));
+        Db::name('finance_opening_source')->where('id', $opening['id'])->update(['source_snapshot' => json_encode($snapshot, JSON_UNESCAPED_UNICODE)]);
+        $owner = FinanceSetupLogic::workbench(); self::assertNotFalse($owner, FinanceSetupLogic::getError());
+        self::assertTrue($owner['overview']['receivable']['can_view']); self::assertSame('1000.00', $owner['overview']['receivable']['unpaid_amount']);
+        self::assertSame('1000.00', $owner['overview']['receivable']['overdue_amount']); self::assertSame(1, $owner['overview']['sales_settlement']['pending_delivery_count']);
+        self::assertLessThanOrEqual(3, count($owner['todos'])); self::assertGreaterThanOrEqual(2, $owner['todo_count']);
+        self::assertContains('receivable_overdue', array_column($owner['todos'], 'kind')); self::assertContains('sales_pending', array_column($owner['todos'], 'kind'));
+
+        $employee = WorkforceLogic::saveEmployee(['name' => '财务首页收款员', 'mobile' => '13800009940', 'bind_user_id' => 996940, 'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['finance.receipt.prepare']]);
+        self::assertNotFalse($employee, WorkforceLogic::getError());
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996940; request()->adminId = 0;
+        $limited = FinanceSetupLogic::workbench(); self::assertNotFalse($limited, FinanceSetupLogic::getError());
+        self::assertTrue($limited['overview']['receivable']['can_view']); self::assertFalse($limited['overview']['payable']['can_view']); self::assertFalse($limited['overview']['sales_settlement']['can_view']);
+        self::assertSame([], $limited['todos'], '没有逾期查看权限时不能借首页泄露逾期客户和来源');
+        self::assertArrayNotHasKey('unpaid_amount', $limited['overview']['payable']);
+    }
+
+    public function test_managed_reports_keep_each_store_separate_reject_arbitrary_scope_and_export_read_only_snapshot(): void
+    {
+        $this->activate(); $now = time();
+        foreach ([[self::TENANT_ID, 'ROOT-' . self::TENANT_ID, '管理总店'], [self::OTHER_TENANT_ID, 'CHILD-' . self::OTHER_TENANT_ID, '管理分店']] as [$id, $sn, $name]) {
+            Db::name('tenant')->duplicate(['name' => $name, 'disable' => 0, 'delete_time' => null])->insert(['id' => $id, 'sn' => $sn, 'name' => $name, 'disable' => 0, 'create_time' => $now, 'update_time' => $now, 'delete_time' => null]);
+        }
+        Db::name('tenant_relation')->whereIn('parent_tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->whereIn('child_tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
+        Db::name('tenant_relation')->insert(['parent_tenant_id' => self::TENANT_ID, 'child_tenant_id' => self::OTHER_TENANT_ID, 'relation_type' => 'default', 'status' => 1, 'level' => 1,
+            'path' => '/' . self::TENANT_ID . '/' . self::OTHER_TENANT_ID . '/', 'invite_id' => 0, 'creator_user_id' => 0, 'accepted_user_id' => 0, 'accepted_at' => $now,
+            'permissions' => null, 'remark' => '财务跨店测试', 'is_deleted' => 0, 'create_time' => $now, 'update_time' => $now, 'delete_time' => null]);
+        Db::name('finance_preparation')->insert(['tenant_id' => self::OTHER_TENANT_ID, 'activation_date' => date('Y-m-01'), 'inventory_cost_reviewed' => 1, 'legacy_settlement_reviewed' => 1, 'excluded_business_reviewed' => 1, 'notes' => '', 'version' => 1, 'operator_id' => self::ADMIN_ID, 'update_time' => $now]);
+        Db::name('finance_opening_book')->insert(['tenant_id' => self::OTHER_TENANT_ID, 'status' => 'active', 'version' => 1, 'reviews' => '{}', 'submitted_hash' => str_repeat('a', 64), 'confirmed_snapshot' => '{}', 'created_by' => '{}', 'last_modified_by' => '{}', 'create_time' => $now, 'update_time' => $now, 'confirmed_at' => $now]);
+        Db::name('finance_opening_source')->insert(['tenant_id' => self::OTHER_TENANT_ID, 'opening_item_id' => 1, 'category' => 'account', 'subject_id' => 1, 'amount' => '200.00', 'activation_date' => date('Y-m-01'), 'source_snapshot' => '{}', 'create_time' => $now]);
+
+        $query = ['report' => 'cash', 'period_type' => 'month', 'period' => date('Y-m'), 'tenant_ids' => [999999]];
+        $managed = FinanceBusinessLogic::managedReport($query); self::assertNotFalse($managed, FinanceBusinessLogic::getError());
+        self::assertSame('managed', $managed['scope']); self::assertTrue($managed['read_only']); self::assertSame(2, $managed['store_count']);
+        self::assertSame([self::TENANT_ID, self::OTHER_TENANT_ID], array_column($managed['stores'], 'tenant_id'));
+        self::assertSame('5200.00', $managed['data']['summary']['closing_accounts']);
+        self::assertArrayNotHasKey('accounts', $managed['stores'][0]['data']); self::assertArrayNotHasKey('entries', $managed['stores'][0]['data']);
+
+        $export = FinanceBusinessLogic::reportExport('prepare', $this->command(0) + $query + ['scope' => 'managed']); self::assertNotFalse($export, FinanceBusinessLogic::getError()); self::assertSame('managed', $export['scope']);
+        $content = FinanceBusinessLogic::reportExport('content', ['id' => $export['id']]); self::assertNotFalse($content, FinanceBusinessLogic::getError()); self::assertSame('managed', $content['scope']);
+        $file = tempnam(sys_get_temp_dir(), 'finance-managed-xlsx-');
+        try { file_put_contents($file, base64_decode($content['base64'])); $book = \PhpOffice\PhpSpreadsheet\IOFactory::load($file); self::assertNotNull($book->getSheetByName('各店状态')); $book->disconnectWorksheets(); }
+        finally { unlink($file); }
+
+        $employee = WorkforceLogic::saveEmployee(['name' => '跨店拒权员工', 'mobile' => '13800009941', 'bind_user_id' => 996941, 'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['finance.report.cash.view', 'finance.report.cash.export']]); self::assertNotFalse($employee, WorkforceLogic::getError());
+        request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996941; request()->adminId = 0;
+        self::assertFalse(FinanceBusinessLogic::managedReport($query)); self::assertFalse(FinanceBusinessLogic::reportExport('content', ['id' => $export['id']]));
+    }
+
     public function test_monthly_report_permissions_are_independent_and_salary_details_require_an_additional_grant(): void
     {
         $month = date('Y-m', strtotime('first day of last month')); $this->activate('cash', $month . '-01');
@@ -6113,6 +6166,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
     }
     private function clean(): void
     {
+        Db::name('tenant_relation')->whereIn('parent_tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->whereIn('child_tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_deferred_plan_revision')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_deferred_amortization_revision')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('finance_recurring_plan_change')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();

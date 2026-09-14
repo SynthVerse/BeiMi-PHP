@@ -11,21 +11,27 @@ final class FinanceReports
 {
     public const TYPES = ['profit' => '经营利润', 'cash' => '资金收支', 'customer' => '客户往来', 'vendor' => '供应商往来', 'expense' => '费用分析', 'inventory' => '库存与损耗'];
 
-    public static function authorize(array $params): string
+    public static function kind(array $params): string
     {
         $kind = FinanceValue::text($params['report'] ?? 'profit', 24);
         if (!isset(self::TYPES[$kind])) { throw new \DomainException('报表类别无效'); }
+        return $kind;
+    }
+
+    public static function authorize(array $params): string
+    {
+        $kind = self::kind($params);
         FinanceAccess::require('finance.report.' . $kind . '.view');
         return $kind;
     }
 
-    public static function monthly(FinanceLedger $ledger, array $params): array
+    public static function monthly(FinanceLedger $ledger, array $params, bool $managedRead = false): array
     {
         $month = FinanceValue::text($params['month'] ?? date('Y-m'), 7);
         if (!preg_match('/^[0-9]{4}-(0[1-9]|1[0-2])$/D', $month)) { throw new \DomainException('请选择有效报表月份'); }
         $activation = (string)Db::name('finance_preparation')->where('tenant_id', FinanceAccess::tenant())->value('activation_date');
         if ($month < substr($activation, 0, 7) || $month > date('Y-m')) { throw new \DomainException('报表月份须在启用月与当前月之间'); }
-        $kind = self::authorize($params);
+        $kind = $managedRead ? self::kind($params) : self::authorize($params);
         $cutoff = min(date('Y-m-d'), date('Y-m-t', strtotime($month . '-01')));
         $period = Db::name('finance_period')->where('tenant_id', FinanceAccess::tenant())->where('month', $month)->find();
         if ($period) {

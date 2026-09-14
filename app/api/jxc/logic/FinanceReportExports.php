@@ -37,14 +37,17 @@ final class FinanceReportExports
             if (FinanceValue::id($params['expected_tenant_id'] ?? null) !== $tenant) { throw new \DomainException('门店已变化，请重新读取报表'); }
             $key = FinanceValue::text($params['idempotency_key'] ?? null, 96);
             if (!preg_match('/^[a-zA-Z0-9_-]{16,96}$/D', $key)) { throw new \DomainException('导出提交标识无效'); }
-            $query = ['report' => $kind, 'period_type' => $params['period_type'] ?? 'month', 'period' => $params['period'] ?? $params['month'] ?? date('Y-m')];
+            $scope = FinanceValue::text($params['scope'] ?? 'store', 12);
+            if (!in_array($scope, ['store', 'managed'], true)) { throw new \DomainException('导出范围无效'); }
+            if ($scope === 'managed') { FinanceAccess::require('', true); }
+            $query = ['report' => $kind, 'period_type' => $params['period_type'] ?? 'month', 'period' => $params['period'] ?? $params['month'] ?? date('Y-m'), 'scope' => $scope];
             $actor = FinanceAccess::actor(); $fingerprint = self::hash([$tenant, $actor['type'], $actor['id'], $query]);
             $existing = Db::name('finance_report_export')->where('tenant_id', $tenant)->where('idempotency_key', $key)->find();
             if ($existing) {
                 if ($existing['fingerprint'] !== $fingerprint) { throw new \DomainException('同一导出标识不能更换报表范围或操作人'); }
                 self::authorize($existing); return self::describe($existing);
             }
-            $snapshot = FinanceReportPeriods::read($ledger, $query);
+            $snapshot = $scope === 'managed' ? FinanceManagedReports::read($query) : FinanceReportPeriods::read($ledger, $query) + ['scope' => 'store'];
             $row = ['tenant_id' => $tenant, 'idempotency_key' => $key, 'fingerprint' => $fingerprint, 'report' => $kind, 'actor' => FinanceValue::json($actor),
                 'snapshot' => FinanceValue::json($snapshot), 'snapshot_hash' => self::hash($snapshot), 'create_time' => time()];
             $row['id'] = Db::name('finance_report_export')->insertGetId($row);
@@ -67,6 +70,7 @@ final class FinanceReportExports
         $actor = FinanceValue::decode($row['actor']); $current = FinanceAccess::actor();
         if ($actor['type'] !== $current['type'] || (int)$actor['id'] !== (int)$current['id']) { throw new \DomainException('请以本次导出操作人的身份读取文件'); }
         $snapshot = FinanceValue::decode($row['snapshot']);
+        if (($snapshot['scope'] ?? 'store') === 'managed') { FinanceAccess::require('', true); }
         if ($snapshot['salary_details_visible'] && !FinanceAccess::has('finance.salary.view')) { throw new \DomainException('工资明细权限已变化，请重新生成不含个人明细的报表'); }
         return $snapshot;
     }
@@ -74,8 +78,9 @@ final class FinanceReportExports
     private static function describe(array $row): array
     {
         $snapshot = FinanceValue::decode($row['snapshot']);
-        return ['tenant_id' => (int)$row['tenant_id'], 'id' => (int)$row['id'], 'report' => $row['report'], 'period_type' => $snapshot['period_type'], 'period' => $snapshot['period'],
-            'filename' => FinanceReports::TYPES[$row['report']] . '-' . $snapshot['period'] . '-' . $row['id'] . '.xlsx', 'snapshot_hash' => $row['snapshot_hash'], 'cutoff' => $snapshot['cutoff'], 'created_at' => (int)$row['create_time']];
+        $scope = $snapshot['scope'] ?? 'store';
+        return ['tenant_id' => (int)$row['tenant_id'], 'id' => (int)$row['id'], 'report' => $row['report'], 'scope' => $scope, 'period_type' => $snapshot['period_type'], 'period' => $snapshot['period'],
+            'filename' => FinanceReports::TYPES[$row['report']] . ($scope === 'managed' ? '-管理范围' : '') . '-' . $snapshot['period'] . '-' . $row['id'] . '.xlsx', 'snapshot_hash' => $row['snapshot_hash'], 'cutoff' => $snapshot['cutoff'], 'created_at' => (int)$row['create_time']];
     }
 
     private static function hash(mixed $value): string
@@ -93,6 +98,7 @@ final class FinanceReportExports
     {
         $book = new Spreadsheet(); $book->removeSheetByIndex(0);
         $book->getProperties()->setCreator('BeiMi')->setTitle(FinanceReports::TYPES[$report['report']])->setCreated((int)$export['create_time'])->setModified((int)$export['create_time']);
+        if (($report['scope'] ?? 'store') === 'managed') { return self::managedWorkbook($book, $report, $export); }
         $rows = [['报表', FinanceReports::TYPES[$report['report']]], ['门店编号', (string)$report['tenant_id']], ['统计期间', $report['period']], ['实际范围', $report['start_month'] . ' 至 ' . $report['end_month']],
             ['截止日期', $report['cutoff']], ['生成时间', $report['generated_at']], ['结果状态', $report['stage'] ? '阶段结果' : '已结月份原快照'],
             ['结账状态', self::closing($report['closing_status'])], ['原核验状态', $report['verification']['status'] === 'checked' ? '已核验' : '尚未完全核验'], ['导出记录编号', (string)$export['id']], ['依据校验值', $export['snapshot_hash']]];
@@ -108,6 +114,37 @@ final class FinanceReportExports
         foreach ($report['data']['obligations'] ?? [] as $key => $parts) { self::table($book, '费用余额-' . self::label($key), $parts); }
         self::table($book, '导出时遗留进度', $report['current_followups']);
         // 保存逐月及嵌套组成的完整字段，辅助复查；所有原文均按文本写入，不能执行公式。
+        $facts = []; self::flatten($report, '', $facts); self::sheet($book, '完整导出依据', ['字段路径', '原值'], $facts);
+        $stream = fopen('php://temp', 'w+b');
+        try { (new Xlsx($book))->save($stream); rewind($stream); return stream_get_contents($stream); }
+        finally { fclose($stream); $book->disconnectWorksheets(); }
+    }
+
+    private static function managedWorkbook(Spreadsheet $book, array $report, array $export): string
+    {
+        $rows = [['报表', FinanceReports::TYPES[$report['report']]], ['范围', '管理范围（跨店只读）'], ['管理门店编号', (string)$report['root_tenant_id']],
+            ['统计期间', $report['period']], ['统一可比截止日期', self::value($report['cutoff'])], ['门店数', (string)$report['store_count']],
+            ['可读取门店数', (string)$report['available_store_count']], ['结果状态', $report['stage'] ? '含阶段结果' : '均为已结月份原快照'],
+            ['结账状态', self::closing($report['closing_status'])], ['导出记录编号', (string)$export['id']], ['依据校验值', $export['snapshot_hash']]];
+        foreach ($report['data']['summary'] ?? [] as $field => $amount) { $rows[] = [self::label($field), self::value($amount)]; }
+        self::sheet($book, '报表汇总', ['项目', '内容'], $rows);
+        $stores = [];
+        foreach ($report['stores'] as $store) {
+            $summary = $store['data']['summary'] ?? [];
+            $stores[] = ['tenant_id' => $store['tenant_id'], 'store_name' => $store['store_name'], 'available' => $store['available'], 'reason' => $store['reason'],
+                'activation_date' => $store['activation_date'], 'start_month' => $store['start_month'] ?? null, 'end_month' => $store['end_month'] ?? null,
+                'cutoff' => $store['cutoff'] ?? null, 'closing_status' => isset($store['closing_status']) ? self::closing($store['closing_status']) : null,
+                'stage' => $store['stage'] ?? null, 'verification_status' => $store['verification']['status'] ?? null] + $summary;
+        }
+        self::table($book, '各店状态', $stores);
+        foreach ($report['stores'] as $store) {
+            if (!$store['available']) { continue; }
+            $label = mb_substr((string)$store['store_name'], 0, 18, 'UTF-8') . '-' . $store['tenant_id'];
+            $storeRows = [];
+            foreach ($store['data']['summary'] ?? [] as $field => $amount) { $storeRows[] = [self::label($field), self::value($amount)]; }
+            foreach ($store['data']['categories'] ?? [] as $category) { $storeRows[] = [self::label((string)$category['category']) . '期末', self::value($category['closing'] ?? null)]; }
+            self::sheet($book, mb_substr($label, 0, 31, 'UTF-8'), ['项目', '内容'], $storeRows ?: [['结果', '该期间无汇总金额']]);
+        }
         $facts = []; self::flatten($report, '', $facts); self::sheet($book, '完整导出依据', ['字段路径', '原值'], $facts);
         $stream = fopen('php://temp', 'w+b');
         try { (new Xlsx($book))->save($stream); rewind($stream); return stream_get_contents($stream); }

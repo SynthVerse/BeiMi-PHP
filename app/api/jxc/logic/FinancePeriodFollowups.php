@@ -9,9 +9,9 @@ use think\facade\Db;
 /** 原月结事项不改写；当前进度只由对应业务的正式核实记录投影。 */
 final class FinancePeriodFollowups
 {
-    public static function read(string $month): array
+    public static function read(string $month, bool $managedRead = false): array
     {
-        FinanceAccess::require('', true); $tenant = FinanceAccess::tenant();
+        if (!$managedRead) { FinanceAccess::require('', true); } $tenant = FinanceAccess::tenant();
         $period = Db::name('finance_period')->where('tenant_id', $tenant)->where('month', $month)->find();
         if (!$period) { throw new \DomainException('请先选择本门店已结账月份'); }
         $snapshot = FinanceValue::decode($period['snapshot']);

@@ -9,6 +9,20 @@ use think\facade\Db;
 /** 交付事件是覆盖量的唯一来源；旧全单结算按事件先后分配，新结算显式保存覆盖。 */
 final class FinanceDeliveries
 {
+    /** 工作台跨客户读取仍沿用交付覆盖算法，并补回主客户作为精确跳转依据。 */
+    public static function pendingAll(): array
+    {
+        $result = [];
+        $customers = Db::name('sales_order')->where('tenant_id', FinanceAccess::tenant())->where('source_type', 'customer_report')->where('customer_id', '>', 0)->distinct(true)->column('customer_id');
+        foreach ($customers as $customer) {
+            foreach (self::rows((int)$customer, '1900-01-01', date('Y-m-d')) as $row) {
+                $result[] = ['customer_id' => (int)$customer] + $row;
+                if (count($result) > 5000) { throw new \DomainException('待结算交付超过工作台容量，请进入销售结算按客户处理'); }
+            }
+        }
+        return $result;
+    }
+
     public static function rows(int $customer, string $from, string $to, bool $includeCovered = false): array
     {
         $tenant = FinanceAccess::tenant();

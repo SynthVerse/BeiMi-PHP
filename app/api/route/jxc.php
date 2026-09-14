@@ -48,6 +48,7 @@ Route::group('', function () {
     Route::get('finance/business/catalog', 'jxc.FinanceBusiness/catalog');
     Route::get('finance/business/closingChecklist', 'jxc.FinanceBusiness/closingChecklist');
     Route::get('finance/business/monthlyReport', 'jxc.FinanceBusiness/monthlyReport');
+    Route::get('finance/business/managedReport', 'jxc.FinanceBusiness/managedReport');
     Route::post('finance/business/prepareReportExport', 'jxc.FinanceBusiness/prepareReportExport');
     Route::get('finance/business/reportTrace', 'jxc.FinanceBusiness/reportTrace');
     Route::get('finance/business/reportExportContent', 'jxc.FinanceBusiness/reportExportContent');

@@ -9,10 +9,10 @@ use think\facade\Db;
 /** 季年报逐月读取权威切片；发生额累计，余额只取窗口首尾。 */
 final class FinanceReportPeriods
 {
-    public static function read(FinanceLedger $ledger, array $params): array
+    public static function read(FinanceLedger $ledger, array $params, bool $managedRead = false): array
     {
-        $kind = FinanceReports::authorize($params); $type = FinanceValue::text($params['period_type'] ?? 'month', 12);
-        if (!array_key_exists('period_type', $params)) { return FinanceReports::monthly($ledger, $params); }
+        $kind = $managedRead ? FinanceReports::kind($params) : FinanceReports::authorize($params); $type = FinanceValue::text($params['period_type'] ?? 'month', 12);
+        if (!array_key_exists('period_type', $params)) { return FinanceReports::monthly($ledger, $params, $managedRead); }
         $period = FinanceValue::text($params['period'] ?? $params['month'] ?? date('Y-m'), 12);
         if ($type === 'month' && preg_match('/^[0-9]{4}-(0[1-9]|1[0-2])$/D', $period)) { $first = $last = $period; }
         elseif ($type === 'year' && preg_match('/^[0-9]{4}$/D', $period)) { $first = $period . '-01'; $last = $period . '-12'; }
@@ -24,14 +24,14 @@ final class FinanceReportPeriods
         if (!$activation || $last < $activation || $first > date('Y-m')) { throw new \DomainException('报表范围须与启用后至当前月份重叠'); }
         $start = max($first, $activation); $end = min($last, date('Y-m')); $months = [];
         for ($month = $start; $month <= $end; $month = date('Y-m', strtotime($month . '-01 +1 month'))) {
-            $months[] = FinanceReports::monthly($ledger, ['report' => $kind, 'month' => $month]);
+            $months[] = FinanceReports::monthly($ledger, ['report' => $kind, 'month' => $month], $managedRead);
         }
         $verification = ['has_unresolved' => false, 'has_estimates' => false]; $stage = $last > $end; $states = []; $followups = [];
         foreach ($months as $slice) {
             foreach (array_keys($verification) as $key) { $verification[$key] = $verification[$key] || $slice['verification'][$key]; }
             $stage = $stage || $slice['stage']; $states[$slice['closing_status']] = true;
-            if (!$slice['stage'] && FinanceAccess::owner()) {
-                $progress = FinancePeriodFollowups::read($slice['month']);
+            if (!$slice['stage'] && ($managedRead || FinanceAccess::owner())) {
+                $progress = FinancePeriodFollowups::read($slice['month'], $managedRead);
                 $followups[] = ['month' => $slice['month'], 'original_mode' => $progress['original_mode'], 'summary' => $progress['summary'], 'all_resolved' => $progress['all_resolved']];
             }
         }
