@@ -70,7 +70,10 @@ final class FinanceReportExports
         $actor = FinanceValue::decode($row['actor']); $current = FinanceAccess::actor();
         if ($actor['type'] !== $current['type'] || (int)$actor['id'] !== (int)$current['id']) { throw new \DomainException('请以本次导出操作人的身份读取文件'); }
         $snapshot = FinanceValue::decode($row['snapshot']);
-        if (($snapshot['scope'] ?? 'store') === 'managed') { FinanceAccess::require('', true); }
+        if (($snapshot['scope'] ?? 'store') === 'managed') {
+            FinanceAccess::require('', true);
+            FinanceManagedScopeGuard::assertCurrent(FinanceManagedStoreScope::stores(), $snapshot, FinanceAccess::tenant());
+        }
         if ($snapshot['salary_details_visible'] && !FinanceAccess::has('finance.salary.view')) { throw new \DomainException('工资明细权限已变化，请重新生成不含个人明细的报表'); }
         return $snapshot;
     }

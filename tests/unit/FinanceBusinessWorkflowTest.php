@@ -712,6 +712,12 @@ final class FinanceBusinessWorkflowTest extends TestCase
             self::assertStringContainsString('组成明细', json_encode($storeSheet->toArray(), JSON_UNESCAPED_UNICODE)); $book->disconnectWorksheets(); }
         finally { unlink($file); }
 
+        Db::name('tenant_relation')->where('parent_tenant_id', self::TENANT_ID)->where('child_tenant_id', self::OTHER_TENANT_ID)->update(['status' => 0, 'update_time' => time()]);
+        self::assertFalse(FinanceBusinessLogic::reportExport('prepare', $this->command(0) + $query + ['scope' => 'managed']), '管理范围移除门店后不能幂等取回含该店的旧导出');
+        self::assertStringContainsString('管理范围已变化', FinanceBusinessLogic::getError());
+        self::assertFalse(FinanceBusinessLogic::reportExport('content', ['id' => $export['id']]), '管理范围移除门店后不能继续下载旧快照');
+        self::assertStringContainsString('管理范围已变化', FinanceBusinessLogic::getError());
+
         $employee = WorkforceLogic::saveEmployee(['name' => '跨店拒权员工', 'mobile' => '13800009941', 'bind_user_id' => 996941, 'is_enabled' => 1, 'process_ids' => [], 'permission_keys' => ['finance.report.cash.view', 'finance.report.cash.export']]); self::assertNotFalse($employee, WorkforceLogic::getError());
         request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID]; request()->jxcFromUserToken = true; request()->userId = 996941; request()->adminId = 0;
         self::assertFalse(FinanceBusinessLogic::managedReport($query)); self::assertFalse(FinanceBusinessLogic::reportExport('content', ['id' => $export['id']]));

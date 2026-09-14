@@ -12,17 +12,19 @@ final class FinancePurchaseBatches
     public static function options(int $vendor, array $params): array
     {
         $tenant = FinanceAccess::tenant(); $page = max(1, FinanceValue::id($params['page'] ?? 1));
+        $arrivalId = array_key_exists('arrival_line_id', $params) ? FinanceValue::id($params['arrival_line_id']) : 0;
         $from = FinanceValue::date($params['date_from'] ?? '1900-01-01'); $to = FinanceValue::date($params['date_to'] ?? date('Y-m-d'));
         if ($from > $to || $to > date('Y-m-d')) { throw new \DomainException('到货日期范围无效'); }
         $coverage = FinancePurchaseCoverage::sql();
         $query = Db::name('finance_purchase_arrival_line')->alias('a')->leftJoin([$coverage => 'c'], 'c.arrival_line_id=a.id')
             ->where('a.tenant_id', $tenant)->where('a.vendor_id', $vendor)->whereBetween('a.business_date', [$from, $to])
             ->whereRaw('a.actual_quantity>COALESCE(c.quantity,0)');
+        if ($arrivalId > 0) { $query->where('a.id', $arrivalId); }
         $keyword = FinanceValue::text($params['keyword'] ?? '', 60, false);
         if ($keyword !== '') { $query->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(a.snapshot,'$.goods_name')) LIKE ?", ['%' . $keyword . '%']); }
         $rows = $query->field('a.*,COALESCE(c.quantity,0) AS covered_quantity,a.actual_quantity-COALESCE(c.quantity,0) AS pending_quantity')
-            ->order('a.business_date,a.id')->limit(($page - 1) * 20, 21)->select()->toArray();
-        $more = count($rows) > 20; $rows = array_slice($rows, 0, 20); $arrivals = [];
+            ->order('a.business_date,a.id')->limit($arrivalId > 0 ? 0 : ($page - 1) * 20, $arrivalId > 0 ? 1 : 21)->select()->toArray();
+        $more = $arrivalId === 0 && count($rows) > 20; $rows = array_slice($rows, 0, 20); $arrivals = [];
         foreach ($rows as $row) {
             $snapshot = FinanceValue::decode($row['snapshot']);
             $rule = FinancePurchaseRuleBook::threshold($vendor, (int)$row['sku_id'], (int)($snapshot['category_id'] ?? 0));
