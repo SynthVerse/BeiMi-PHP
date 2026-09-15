@@ -28,14 +28,14 @@ final class FinanceOpeningWorkflowTest extends TestCase
         }
         Db::execute('CREATE TABLE IF NOT EXISTS la_vendor (id int unsigned AUTO_INCREMENT PRIMARY KEY, tenant_id int unsigned NOT NULL, supplier_name varchar(100) NOT NULL) ENGINE=InnoDB');
         $this->clean();
-        Config::set(['activation_tenant_ids' => []], 'finance');
+        Config::set(['activation_mode' => 'allowlist', 'activation_tenant_ids' => []], 'finance');
     }
 
     protected function tearDown(): void
     {
         $this->prepareCustomerReportRequestContext();
         $this->clean();
-        Config::set(['activation_tenant_ids' => []], 'finance');
+        Config::set(['activation_mode' => 'all', 'activation_tenant_ids' => []], 'finance');
     }
 
     public function test_complete_opening_confirms_once_and_never_creates_current_period_transactions(): void
@@ -73,6 +73,17 @@ final class FinanceOpeningWorkflowTest extends TestCase
         self::assertFalse(FinanceSetupLogic::savePreparation($this->command(1) + ['activation_date' => '2026-10-01']));
         Db::name('customer')->where('id', $customer)->update(['customer_name' => '后续改名']);
         self::assertSame($active, FinanceSetupLogic::opening(), '确认快照不随档案改名覆盖');
+    }
+
+    public function test_all_activation_mode_confirms_an_opening_without_a_tenant_allowlist_entry(): void
+    {
+        $pending = $this->ready();
+        Config::set(['activation_mode' => 'all', 'activation_tenant_ids' => []], 'finance');
+
+        $active = FinanceSetupLogic::openingAction('confirm', $this->command((int)$pending['version']));
+
+        self::assertNotFalse($active, FinanceSetupLogic::getError());
+        self::assertSame('active', $active['status']);
     }
 
     public function test_unknown_amount_review_conflicts_and_new_account_block_activation(): void

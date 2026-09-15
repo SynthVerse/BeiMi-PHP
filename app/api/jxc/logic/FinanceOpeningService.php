@@ -49,12 +49,21 @@ final class FinanceOpeningService
             'preparation_version' => (int)($preparation['version'] ?? 0),
             'categories' => $categories, 'items' => $items,
             'blockers' => $this->blockers($preparation, $categories, $items),
-            'activation_available' => in_array($this->tenantId, (array)config('finance.activation_tenant_ids', []), true),
+            'activation_available' => self::isActivationAvailableForTenant($this->tenantId),
             'created_by' => json_decode($book['created_by'], true),
             'last_modified_by' => json_decode($book['last_modified_by'], true),
             'create_time' => (int)$book['create_time'], 'update_time' => (int)$book['update_time'],
             'confirmed_at' => 0,
         ];
+    }
+
+    public static function isActivationAvailableForTenant(int $tenantId): bool
+    {
+        if (config('finance.activation_mode', 'allowlist') === 'all') {
+            return true;
+        }
+
+        return in_array($tenantId, (array)config('finance.activation_tenant_ids', []), true);
     }
 
     public function subjects(array $params): array
