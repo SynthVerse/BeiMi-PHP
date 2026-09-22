@@ -220,6 +220,10 @@ class CustomerReportLineService extends BaseLogic
             if ($acceptable === false) {
                 return false;
             }
+            if ($range['confirmed'] === 1 && !self::hasPossiblePieceCount($acceptable['min'], $acceptable['max'], $range['min'], $range['max'])) {
+                self::setError('可接受总重量范围与单条重量要求无法同时满足');
+                return false;
+            }
             return [
                 'base_qty' => $baseQuantity,
                 'acceptable_min' => $acceptable['min'],
@@ -297,6 +301,16 @@ class CustomerReportLineService extends BaseLogic
             return false;
         }
         return ['min' => $min, 'max' => $max];
+    }
+
+    private static function hasPossiblePieceCount(string $totalMin, string $totalMax, string $pieceMin, string $pieceMax): bool
+    {
+        $minimumCount = (int)bcdiv($totalMin, $pieceMax, 0);
+        if (bccomp(bcmul((string)$minimumCount, $pieceMax, self::SCALE), $totalMin, self::SCALE) < 0) {
+            $minimumCount++;
+        }
+        $maximumCount = (int)bcdiv($totalMax, $pieceMin, 0);
+        return $minimumCount > 0 && $minimumCount <= $maximumCount;
     }
 
     /** @param array<string, mixed> $item
