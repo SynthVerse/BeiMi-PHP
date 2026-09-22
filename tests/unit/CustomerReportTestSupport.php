@@ -293,6 +293,7 @@ SQL;
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260819_000002_delivery_variants.sql')));
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260819_000003_sales_settlement_versions.sql')));
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260819_000004_customer_sales_print_receipts.sql')));
+        $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260922_000001_customer_report_weight_requirements.sql')));
         self::$customerReportSchemaReady = true;
     }
 

@@ -73,6 +73,20 @@ final class FulfillmentTaskLogic extends BaseLogic
                     'planned_qty' => self::decimal((string)$item['shortage_base_qty']),
                 ]);
             }
+            $specificationShortageTaskId = 0;
+            if ((string)($item['specification_verification_status'] ?? '') === 'failed' && isset($byCode['purchase'])) {
+                $key = 'item:' . $itemId . ':specification_shortage';
+                $desired[] = $key;
+                $specificationShortageTaskId = self::upsertTask($report, $item, $groupId, $byCode['purchase'], $key, [
+                    'status' => 'unassigned',
+                    'is_settlement_task' => 0,
+                    'requirement' => '规格缺货：单条 ' . self::decimal((string)$item['piece_weight_min'])
+                        . '～' . self::decimal((string)$item['piece_weight_max']) . '斤；'
+                        . trim((string)($item['specification_verification_note'] ?? '')),
+                    'planned_qty' => self::decimal((string)$item['expected_base_qty']),
+                ]);
+            }
+            $blockingPurchaseTaskId = $shortageTaskId > 0 ? $shortageTaskId : $specificationShortageTaskId;
 
             $matched = [];
             if ($requirement !== '') {
@@ -128,8 +142,8 @@ final class FulfillmentTaskLogic extends BaseLogic
                     $key = 'item:' . $itemId . ':process:' . $process['code'];
                     $desired[] = $key;
                     self::upsertTask($report, $item, $groupId, $process, $key, [
-                        'depends_on_task_id' => $shortageTaskId,
-                        'status' => $shortageTaskId > 0 ? 'blocked' : 'unassigned',
+                        'depends_on_task_id' => $blockingPurchaseTaskId,
+                        'status' => $blockingPurchaseTaskId > 0 ? 'blocked' : 'unassigned',
                         'is_settlement_task' => $key === $selectedSourceKey ? 1 : 0,
                         'requirement' => $requirement,
                     ]);
@@ -540,6 +554,72 @@ final class FulfillmentTaskLogic extends BaseLogic
     }
 
     /** @return array<string,mixed>|false */
+    public static function specificationShortage(array $params): array|false
+    {
+        self::clearError();
+        if (!WorkforceLogic::requirePermission('task.recover')) {
+            return false;
+        }
+        $id = (int)($params['id'] ?? 0);
+        $note = mb_substr(trim((string)($params['specification_note'] ?? '')), 0, 500);
+        if ($note === '') {
+            self::setError('登记规格不符时必须填写现场核实说明');
+            return false;
+        }
+        try {
+            return Db::transaction(static function () use ($id, $note) {
+                $task = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', $id)->lock(true)->find();
+                if (!$task || !in_array((string)$task['status'], ['printed', 'in_progress'], true)) {
+                    self::setError('只有作业中的最终称重工票可以登记规格不符');
+                    return false;
+                }
+                $item = Db::name('customer_report_item')->where('tenant_id', self::tenantId())
+                    ->where('id', (int)$task['report_item_id'])->lock(true)->find();
+                if (!$item || (int)($item['piece_weight_confirmed'] ?? 0) !== 1 || !self::isSettlementTask($task)) {
+                    self::setError('当前任务没有需要核实的单条重量要求');
+                    return false;
+                }
+                $now = time();
+                Db::name('customer_report_item')->where('tenant_id', self::tenantId())->where('id', (int)$item['id'])->update([
+                    'specification_verification_status' => 'failed',
+                    'specification_verification_note' => $note,
+                    'specification_verified_by' => self::operatorId(),
+                    'specification_verified_time' => $now,
+                    'update_time' => $now,
+                ]);
+                Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())->where('task_id', $id)
+                    ->where('print_type', 'task')->where('paper_status', 'issued')->update([
+                        'paper_status' => 'recovered',
+                        'accounted_by' => self::operatorId(),
+                        'accounted_time' => $now,
+                        'account_reason' => 'specification_shortage',
+                        'account_note' => $note,
+                        'update_time' => $now,
+                    ]);
+                Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', $id)->update([
+                    'status' => 'exception',
+                    'exception_code' => 'specification_shortage',
+                    'recovery_note' => $note,
+                    'update_time' => $now,
+                ]);
+                AuditService::logWithinTransaction(
+                    'fulfillment_task', 'specification_shortage', $id, (string)$task['ticket_no'],
+                    $task,
+                    ['status' => 'exception', 'specification_verification_status' => 'failed', 'note' => $note],
+                    $note
+                );
+                self::syncForReport((int)$task['report_id']);
+                return self::taskById($id);
+            });
+        } catch (\Throwable) {
+            if (!self::hasError()) {
+                self::setError('规格不符登记失败，任务状态未改变');
+            }
+            return false;
+        }
+    }
+
+    /** @return array<string,mixed>|false */
     public static function bill(array $params): array|false
     {
         self::clearError();
@@ -678,6 +758,10 @@ final class FulfillmentTaskLogic extends BaseLogic
                     return false;
                 }
                 $note = mb_substr(trim((string)($params['recovery_note'] ?? '')), 0, 500);
+                $specificationVerification = self::validateSpecificationVerification($lockedItem, $requiresSettlement, $weight, $params);
+                if ($specificationVerification === false) {
+                    return false;
+                }
                 $copy = null;
                 if ($printLogId > 0) {
                     $copy = Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
@@ -705,7 +789,8 @@ final class FulfillmentTaskLogic extends BaseLogic
                     if ($savedModeMatches
                         && bccomp((string)$task['process_weight'], $weight, 2) === 0
                         && bccomp((string)$task['actual_price'], $price, 2) === 0
-                        && (string)$task['recovery_note'] === $requestedNote) {
+                        && (string)$task['recovery_note'] === $requestedNote
+                        && self::specificationVerificationMatches($lockedItem, $specificationVerification)) {
                         return self::taskById($id);
                     }
                     self::setError('该纸质工票副本已经处理，不能覆盖原结果');
@@ -730,7 +815,8 @@ final class FulfillmentTaskLogic extends BaseLogic
                     if ($modeMatches
                         && bccomp((string)$task['process_weight'], $weight, 2) === 0
                         && bccomp((string)$task['actual_price'], $price, 2) === 0
-                        && (string)$task['recovery_note'] === $requestedNote) {
+                        && (string)$task['recovery_note'] === $requestedNote
+                        && self::specificationVerificationMatches($lockedItem, $specificationVerification)) {
                         return self::taskById($id);
                     }
                     self::setError('工票已回收，不能覆盖回收模式、重量、价格或说明');
@@ -765,6 +851,20 @@ final class FulfillmentTaskLogic extends BaseLogic
                     self::setError(CustomerReportLogic::getError());
                     return false;
                 }
+                if (str_ends_with((string)$task['source_key'], ':specification_shortage')
+                    && !in_array((string)$task['status'], ['recovered', 'completed'], true)) {
+                    Db::name('customer_report_item')->where('tenant_id', self::tenantId())
+                        ->where('id', (int)$task['report_item_id'])->update([
+                            'specification_verification_status' => 'pending',
+                            'verified_piece_count' => 0,
+                            'verified_piece_weight_min' => '0.00',
+                            'verified_piece_weight_max' => '0.00',
+                            'specification_verification_note' => '',
+                            'specification_verified_by' => 0,
+                            'specification_verified_time' => 0,
+                            'update_time' => time(),
+                        ]);
+                }
                 $now = time();
                 if ($copy) {
                     Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())->where('id', (int)$copy['id'])->update([
@@ -785,10 +885,18 @@ final class FulfillmentTaskLogic extends BaseLogic
                     'recovered_by' => self::operatorId(), 'recovered_time' => $now, 'update_time' => $now,
                 ]);
                 if ($requiresSettlement) {
-                    Db::name('customer_report_item')->where('tenant_id', self::tenantId())->where('id', (int)$finalItem['id'])->update([
+                    $itemUpdate = [
                         'final_actual_weight' => $weight, 'final_weight_task_id' => $id,
                         'fulfillment_status' => 'final_weight_recorded', 'update_time' => $now,
-                    ]);
+                    ];
+                    if (is_array($specificationVerification)) {
+                        $itemUpdate = array_merge($itemUpdate, $specificationVerification, [
+                            'specification_verification_status' => 'confirmed',
+                            'specification_verified_by' => self::operatorId(),
+                            'specification_verified_time' => $now,
+                        ]);
+                    }
+                    Db::name('customer_report_item')->where('tenant_id', self::tenantId())->where('id', (int)$finalItem['id'])->update($itemUpdate);
                 }
                 AuditService::logWithinTransaction(
                     'fulfillment_task', $exception ? 'exception_recover' : 'recover', $id, (string)$task['ticket_no'],
@@ -813,6 +921,64 @@ final class FulfillmentTaskLogic extends BaseLogic
             }
             return false;
         }
+    }
+
+    /** @param array<string,mixed>|null $item @param array<string,mixed> $params @return array<string,mixed>|null|false */
+    private static function validateSpecificationVerification(?array $item, bool $requiresSettlement, string $actualWeight, array $params): array|null|false
+    {
+        if (!$requiresSettlement || !$item || (int)($item['piece_weight_confirmed'] ?? 0) !== 1) {
+            return null;
+        }
+        if ((string)($params['specification_result'] ?? '') !== 'confirmed') {
+            self::setError('该明细有单条重量要求，请先逐条核实规格；不符合时请选择“规格不符，转补货”');
+            return false;
+        }
+        $count = (int)($params['verified_piece_count'] ?? 0);
+        $min = self::money((string)($params['verified_piece_weight_min'] ?? ''));
+        $max = self::money((string)($params['verified_piece_weight_max'] ?? ''));
+        if ($count <= 0 || $min === false || $max === false || bccomp($min, '0.00', 2) <= 0 || bccomp($max, $min, 2) < 0) {
+            self::setError('请输入实际条数和现场核实的最小、最大单条重量');
+            return false;
+        }
+        $requiredMin = self::decimal((string)($item['piece_weight_min'] ?? '0'));
+        $requiredMax = self::decimal((string)($item['piece_weight_max'] ?? '0'));
+        if (bccomp($min, $requiredMin, 2) < 0 || bccomp($max, $requiredMax, 2) > 0) {
+            self::setError('现场核实的单条重量不在客户要求范围内');
+            return false;
+        }
+        $acceptableMin = self::decimal((string)($item['acceptable_base_qty_min'] ?? $item['expected_base_qty'] ?? '0'));
+        $acceptableMax = self::decimal((string)($item['acceptable_base_qty_max'] ?? $item['expected_base_qty'] ?? '0'));
+        if (bccomp($actualWeight, $acceptableMin, 2) < 0 || bccomp($actualWeight, $acceptableMax, 2) > 0) {
+            self::setError('最终实重不在客户可接受总重量范围内');
+            return false;
+        }
+        $possibleMin = bcmul((string)$count, $min, 2);
+        $possibleMax = bcmul((string)$count, $max, 2);
+        if (bccomp($actualWeight, $possibleMin, 2) < 0 || bccomp($actualWeight, $possibleMax, 2) > 0) {
+            self::setError('最终实重与实际条数、单条重量核实结果不一致');
+            return false;
+        }
+        return [
+            'verified_piece_count' => $count,
+            'verified_piece_weight_min' => $min,
+            'verified_piece_weight_max' => $max,
+            'specification_verification_note' => mb_substr(trim((string)($params['specification_note'] ?? '')), 0, 500),
+        ];
+    }
+
+    /** @param array<string,mixed>|null $item @param array<string,mixed>|null|false $verification */
+    private static function specificationVerificationMatches(?array $item, array|null|false $verification): bool
+    {
+        if ($verification === null) {
+            return true;
+        }
+        if ($verification === false || !$item || (string)($item['specification_verification_status'] ?? '') !== 'confirmed') {
+            return false;
+        }
+        return (int)($item['verified_piece_count'] ?? 0) === (int)$verification['verified_piece_count']
+            && bccomp((string)($item['verified_piece_weight_min'] ?? '0'), (string)$verification['verified_piece_weight_min'], 2) === 0
+            && bccomp((string)($item['verified_piece_weight_max'] ?? '0'), (string)$verification['verified_piece_weight_max'], 2) === 0
+            && (string)($item['specification_verification_note'] ?? '') === (string)$verification['specification_verification_note'];
     }
 
     /** @return array<string,mixed>|false */
@@ -1248,6 +1414,11 @@ final class FulfillmentTaskLogic extends BaseLogic
         $processIds = array_values(array_unique(array_filter(array_map(static fn(array $task): int => (int)$task['process_id'], $tasks))));
         $processes = $processIds === [] ? [] : Db::name('work_process')->where('tenant_id', self::tenantId())->whereIn('id', $processIds)->column('name', 'id');
         $itemIds = array_values(array_unique(array_filter(array_map(static fn(array $task): int => (int)$task['report_item_id'], $tasks))));
+        $items = $itemIds === [] ? [] : Db::name('customer_report_item')->where('tenant_id', self::tenantId())
+            ->whereIn('id', $itemIds)->column(
+                'piece_weight_confirmed,piece_weight_min,piece_weight_max,acceptable_base_qty_min,acceptable_base_qty_max,specification_verification_status,specification_verification_note',
+                'id'
+            );
         $settlementTaskIds = self::settlementTaskIdsForItems($itemIds);
         foreach ($tasks as &$task) {
             if (trim((string)($task['process_name_snapshot'] ?? '')) === '' && (int)$task['process_id'] > 0) {
@@ -1263,6 +1434,14 @@ final class FulfillmentTaskLogic extends BaseLogic
             $task['is_supplement'] = (int)Db::name('fulfillment_task_group')->where('tenant_id', self::tenantId())->where('id', (int)$task['group_id'])->value('is_supplement');
             $task['candidates_count'] = (int)$task['process_id'] > 0 ? count(WorkforceLogic::candidatesForProcess((int)$task['process_id'])) : 0;
             $task['requires_settlement'] = (int)($settlementTaskIds[(int)$task['report_item_id']] ?? 0) === (int)$task['id'];
+            $requirementItem = $items[(int)$task['report_item_id']] ?? [];
+            $task['piece_weight_confirmed'] = (int)($requirementItem['piece_weight_confirmed'] ?? 0);
+            $task['piece_weight_min'] = self::decimal((string)($requirementItem['piece_weight_min'] ?? '0'));
+            $task['piece_weight_max'] = self::decimal((string)($requirementItem['piece_weight_max'] ?? '0'));
+            $task['acceptable_base_qty_min'] = self::decimal((string)($requirementItem['acceptable_base_qty_min'] ?? '0'));
+            $task['acceptable_base_qty_max'] = self::decimal((string)($requirementItem['acceptable_base_qty_max'] ?? '0'));
+            $task['specification_verification_status'] = (string)($requirementItem['specification_verification_status'] ?? 'not_required');
+            $task['specification_verification_note'] = (string)($requirementItem['specification_verification_note'] ?? '');
             $successfulCopies = (int)Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
                 ->where('task_id', (int)$task['id'])->where('print_type', 'task')
                 ->whereNotIn('paper_status', ['not_issued', 'print_failed'])->count();
@@ -1331,7 +1510,7 @@ final class FulfillmentTaskLogic extends BaseLogic
             ->field('sn,main_customer_id,main_customer_name,is_supplement')->find() ?: [];
         $item = (int)($task['report_item_id'] ?? 0) > 0
             ? (Db::name('customer_report_item')->where('tenant_id', self::tenantId())->where('id', (int)$task['report_item_id'])
-                ->field('goods_name,sku_name,delivery_customer_id,delivery_customer_name,base_unit_name')->find() ?: [])
+                ->field('goods_name,sku_name,delivery_customer_id,delivery_customer_name,base_unit_name,piece_weight_confirmed,piece_weight_min,piece_weight_max,acceptable_base_qty_min,acceptable_base_qty_max')->find() ?: [])
             : [];
         $processName = (string)($task['process_name_snapshot'] ?? '');
         $mainName = (string)($report['main_customer_name'] ?? '');
@@ -1352,7 +1531,15 @@ final class FulfillmentTaskLogic extends BaseLogic
             'goods_name' => (string)(($item['sku_name'] ?? '') ?: ($item['goods_name'] ?? $task['goods_name'] ?? '')),
             'planned_qty' => self::decimal((string)($task['planned_qty'] ?? '0')),
             'unit_name' => (string)(($item['base_unit_name'] ?? '') ?: ($task['unit_name'] ?? '')),
-            'requirement' => (string)($task['requirement'] ?? ''),
+            'requirement' => trim(implode('；', array_filter([
+                (string)($task['requirement'] ?? ''),
+                (int)($item['piece_weight_confirmed'] ?? 0) === 1
+                    ? '单条 ' . self::decimal((string)$item['piece_weight_min']) . '～' . self::decimal((string)$item['piece_weight_max']) . '斤'
+                    : '',
+                (int)($item['piece_weight_confirmed'] ?? 0) === 1
+                    ? '可接受总重 ' . self::decimal((string)$item['acceptable_base_qty_min']) . '～' . self::decimal((string)$item['acceptable_base_qty_max']) . '斤'
+                    : '',
+            ]))),
         ];
     }
 

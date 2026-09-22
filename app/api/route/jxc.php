@@ -233,6 +233,7 @@ Route::group('', function () {
     Route::post('jxc/tasks/print_data', 'jxc.FulfillmentTask/printData');
     Route::post('jxc/tasks/print_result', 'jxc.FulfillmentTask/printResult');
     Route::post('jxc/tasks/recover', 'jxc.FulfillmentTask/recover');
+    Route::post('jxc/tasks/specification_shortage', 'jxc.FulfillmentTask/specificationShortage');
     Route::post('jxc/tasks/recover_exception', 'jxc.FulfillmentTask/recoverException');
     Route::post('jxc/tasks/paper_control', 'jxc.FulfillmentTask/paperControl');
     Route::post('jxc/tasks/control_print_data', 'jxc.FulfillmentTask/controlPrintData');

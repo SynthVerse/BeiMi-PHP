@@ -114,9 +114,18 @@ class CustomerReportLineService extends BaseLogic
             'base_unit_name' => $attributes['base_unit_name'],
             'order_qty' => $orderQuantity,
             'expected_base_qty' => $expected['base_qty'],
+            'acceptable_base_qty_min' => $expected['acceptable_min'],
+            'acceptable_base_qty_max' => $expected['acceptable_max'],
             'piece_weight_min' => $expected['min'],
             'piece_weight_max' => $expected['max'],
             'piece_weight_confirmed' => $expected['confirmed'],
+            'specification_verification_status' => $expected['confirmed'] === 1 ? 'pending' : 'not_required',
+            'verified_piece_count' => 0,
+            'verified_piece_weight_min' => '0.00',
+            'verified_piece_weight_max' => '0.00',
+            'specification_verification_note' => '',
+            'specification_verified_by' => 0,
+            'specification_verified_time' => 0,
             'quality_snapshot' => $attributes['quality_snapshot'],
             'specification_snapshot' => $attributes['specification_snapshot'],
             'processing_requirement' => trim((string)($item['processing_requirement'] ?? $item['processing'] ?? '')),
@@ -195,27 +204,71 @@ class CustomerReportLineService extends BaseLogic
     }
 
     /** @param array<string, mixed> $item
-     * @return array{base_qty:string,min:string,max:string,confirmed:int}|false
+     * @return array{base_qty:string,acceptable_min:string,acceptable_max:string,min:string,max:string,confirmed:int}|false
      */
     private static function expectedQuantity(string $orderQuantity, string $unitName, array $item): array|false
     {
         $unit = self::canonicalUnit($unitName);
         $factors = ['斤' => '1.00', '公斤' => '2.00', '两' => '0.10'];
         if (isset($factors[$unit])) {
+            $baseQuantity = bcmul($orderQuantity, $factors[$unit], self::SCALE);
+            $range = self::pieceWeightRange($item, false);
+            if ($range === false) {
+                return false;
+            }
+            $acceptable = self::acceptableTotalRange($item, $baseQuantity);
+            if ($acceptable === false) {
+                return false;
+            }
             return [
-                'base_qty' => bcmul($orderQuantity, $factors[$unit], self::SCALE),
-                'min' => self::decimal((string)($item['piece_weight_min'] ?? 0)),
-                'max' => self::decimal((string)($item['piece_weight_max'] ?? 0)),
-                'confirmed' => self::truthy($item['piece_weight_confirmed'] ?? false) ? 1 : 0,
+                'base_qty' => $baseQuantity,
+                'acceptable_min' => $acceptable['min'],
+                'acceptable_max' => $acceptable['max'],
+                'min' => $range['min'],
+                'max' => $range['max'],
+                'confirmed' => $range['confirmed'],
             ];
         }
         if (!in_array($unit, ['条', '个', '只', '盒', '件'], true) || !preg_match('/^\d+\.00$/', $orderQuantity)) {
             self::setError('计数单位数量必须是正整数');
             return false;
         }
-        if (!self::truthy($item['piece_weight_confirmed'] ?? false)) {
-            self::setError('计数单位必须在本次报货确认单件重量或区间');
+        $range = self::pieceWeightRange($item, true);
+        if ($range === false) {
             return false;
+        }
+        $physicalMin = bcmul($orderQuantity, $range['min'], self::SCALE);
+        $physicalMax = bcmul($orderQuantity, $range['max'], self::SCALE);
+        $requested = self::positive($item['expected_base_qty'] ?? null, 2);
+        $baseQuantity = $requested === false ? $physicalMax : $requested;
+        if (bccomp($baseQuantity, $physicalMin, self::SCALE) < 0 || bccomp($baseQuantity, $physicalMax, self::SCALE) > 0) {
+            self::setError('预计总重量必须落在数量与单件重量范围可组成的区间内');
+            return false;
+        }
+        $acceptable = self::acceptableTotalRange($item, $baseQuantity, $physicalMin, $physicalMax);
+        if ($acceptable === false) {
+            return false;
+        }
+        return [
+            'base_qty' => $baseQuantity,
+            'acceptable_min' => $acceptable['min'],
+            'acceptable_max' => $acceptable['max'],
+            'min' => $range['min'],
+            'max' => $range['max'],
+            'confirmed' => 1,
+        ];
+    }
+
+    /** @param array<string,mixed> $item @return array{min:string,max:string,confirmed:int}|false */
+    private static function pieceWeightRange(array $item, bool $required): array|false
+    {
+        $confirmed = self::truthy($item['piece_weight_confirmed'] ?? false);
+        if (!$confirmed) {
+            if ($required) {
+                self::setError('计数单位必须在本次报货确认单件重量或区间');
+                return false;
+            }
+            return ['min' => '0.00', 'max' => '0.00', 'confirmed' => 0];
         }
         $min = self::positive($item['piece_weight_min'] ?? $item['piece_weight'] ?? null, 2);
         $max = self::positive($item['piece_weight_max'] ?? $item['piece_weight'] ?? null, 2);
@@ -223,7 +276,27 @@ class CustomerReportLineService extends BaseLogic
             self::setError('单件重量区间无效');
             return false;
         }
-        return ['base_qty' => bcmul($orderQuantity, $max, self::SCALE), 'min' => $min, 'max' => $max, 'confirmed' => 1];
+        return ['min' => $min, 'max' => $max, 'confirmed' => 1];
+    }
+
+    /** @param array<string,mixed> $item @return array{min:string,max:string}|false */
+    private static function acceptableTotalRange(array $item, string $target, ?string $physicalMin = null, ?string $physicalMax = null): array|false
+    {
+        $minInput = trim((string)($item['acceptable_base_qty_min'] ?? ''));
+        $maxInput = trim((string)($item['acceptable_base_qty_max'] ?? ''));
+        $min = $minInput === '' ? $target : self::positive($minInput, 2);
+        $max = $maxInput === '' ? $target : self::positive($maxInput, 2);
+        if ($min === false || $max === false || bccomp($max, $min, self::SCALE) < 0
+            || bccomp($target, $min, self::SCALE) < 0 || bccomp($target, $max, self::SCALE) > 0) {
+            self::setError('可接受总重量范围必须包含本次预计总重量');
+            return false;
+        }
+        if (($physicalMin !== null && bccomp($max, $physicalMin, self::SCALE) < 0)
+            || ($physicalMax !== null && bccomp($min, $physicalMax, self::SCALE) > 0)) {
+            self::setError('可接受总重量范围与数量及单件重量要求无法同时满足');
+            return false;
+        }
+        return ['min' => $min, 'max' => $max];
     }
 
     /** @param array<string, mixed> $item
