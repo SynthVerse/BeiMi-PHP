@@ -75,7 +75,16 @@ final class FulfillmentTaskLogic extends BaseLogic
             }
             $specificationShortageTaskId = 0;
             if ((string)($item['specification_verification_status'] ?? '') === 'failed' && isset($byCode['purchase'])) {
-                $key = 'item:' . $itemId . ':specification_shortage';
+                $specificationShortagePrefix = 'item:' . $itemId . ':specification_shortage';
+                $activeSpecificationShortage = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())
+                    ->where('report_id', (int)$report['id'])->whereLike('source_key', $specificationShortagePrefix . '%')
+                    ->whereNotIn('status', array_merge(self::FINISHED, ['cancelled']))->order('id desc')->find();
+                $key = (string)($activeSpecificationShortage['source_key'] ?? '');
+                if ($key === '') {
+                    $round = (int)Db::name('fulfillment_task')->where('tenant_id', self::tenantId())
+                        ->where('report_id', (int)$report['id'])->whereLike('source_key', $specificationShortagePrefix . '%')->count() + 1;
+                    $key = $specificationShortagePrefix . ':' . $round;
+                }
                 $desired[] = $key;
                 $specificationShortageTaskId = self::upsertTask($report, $item, $groupId, $byCode['purchase'], $key, [
                     'status' => 'unassigned',
@@ -561,13 +570,14 @@ final class FulfillmentTaskLogic extends BaseLogic
             return false;
         }
         $id = (int)($params['id'] ?? 0);
+        $printLogId = (int)($params['print_log_id'] ?? 0);
         $note = mb_substr(trim((string)($params['specification_note'] ?? '')), 0, 500);
         if ($note === '') {
             self::setError('登记规格不符时必须填写现场核实说明');
             return false;
         }
         try {
-            return Db::transaction(static function () use ($id, $note) {
+            return Db::transaction(static function () use ($id, $printLogId, $note) {
                 $task = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', $id)->lock(true)->find();
                 if (!$task || !in_array((string)$task['status'], ['printed', 'in_progress'], true)) {
                     self::setError('只有作业中的最终称重工票可以登记规格不符');
@@ -579,6 +589,23 @@ final class FulfillmentTaskLogic extends BaseLogic
                     self::setError('当前任务没有需要核实的单条重量要求');
                     return false;
                 }
+                $copyQuery = Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
+                    ->where('task_id', $id)->where('print_type', 'task')->where('paper_status', 'issued');
+                if ($printLogId > 0) {
+                    $copyQuery->where('print_log_id', $printLogId);
+                } else {
+                    $copyQuery->where('content_version', (int)$task['content_version']);
+                }
+                $issuedCopies = $copyQuery->lock(true)->order('id')->select()->toArray();
+                if ($printLogId <= 0 && count($issuedCopies) > 1) {
+                    self::setError('存在多张未回收工票，必须指定本次核实的打印副本，其余副本继续作废控制');
+                    return false;
+                }
+                $copy = $issuedCopies[0] ?? null;
+                if (!$copy) {
+                    self::setError('没有可登记规格不符的未回收纸质工票副本');
+                    return false;
+                }
                 $now = time();
                 Db::name('customer_report_item')->where('tenant_id', self::tenantId())->where('id', (int)$item['id'])->update([
                     'specification_verification_status' => 'failed',
@@ -587,8 +614,7 @@ final class FulfillmentTaskLogic extends BaseLogic
                     'specification_verified_time' => $now,
                     'update_time' => $now,
                 ]);
-                Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())->where('task_id', $id)
-                    ->where('print_type', 'task')->where('paper_status', 'issued')->update([
+                Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())->where('id', (int)$copy['id'])->update([
                         'paper_status' => 'recovered',
                         'accounted_by' => self::operatorId(),
                         'accounted_time' => $now,
@@ -851,7 +877,7 @@ final class FulfillmentTaskLogic extends BaseLogic
                     self::setError(CustomerReportLogic::getError());
                     return false;
                 }
-                if (str_ends_with((string)$task['source_key'], ':specification_shortage')
+                if (str_contains((string)$task['source_key'], ':specification_shortage')
                     && !in_array((string)$task['status'], ['recovered', 'completed'], true)) {
                     Db::name('customer_report_item')->where('tenant_id', self::tenantId())
                         ->where('id', (int)$task['report_item_id'])->update([

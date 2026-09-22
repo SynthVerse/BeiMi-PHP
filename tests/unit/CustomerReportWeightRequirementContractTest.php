@@ -29,5 +29,8 @@ final class CustomerReportWeightRequirementContractTest extends TestCase
             'public static function specificationShortage',
             (string)file_get_contents($root . '/app/api/jxc/logic/FulfillmentTaskLogic.php')
         );
+        $logic = (string)file_get_contents($root . '/app/api/jxc/logic/FulfillmentTaskLogic.php');
+        self::assertStringContainsString("\$specificationShortagePrefix . ':' . \$round", $logic);
+        self::assertStringContainsString("where('id', (int)\$copy['id'])->update", $logic);
     }
 }

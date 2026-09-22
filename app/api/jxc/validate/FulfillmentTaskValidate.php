@@ -48,7 +48,7 @@ final class FulfillmentTaskValidate extends BaseValidate
     public function scenePrintData() { return $this->only(['id']); }
     public function scenePrintResult() { return $this->only(['id', 'print_log_id', 'success', 'error_message'])->append('print_log_id', 'require'); }
     public function sceneRecover() { return $this->only(['id', 'print_log_id', 'actual_weight', 'actual_price', 'recovery_note', 'specification_result', 'verified_piece_count', 'verified_piece_weight_min', 'verified_piece_weight_max', 'specification_note']); }
-    public function sceneSpecificationShortage() { return $this->only(['id', 'specification_note'])->append('specification_note', 'require'); }
+    public function sceneSpecificationShortage() { return $this->only(['id', 'print_log_id', 'specification_note'])->append('specification_note', 'require'); }
     public function sceneRecoverException() { return $this->only(['id', 'print_log_id', 'actual_weight', 'actual_price', 'exception_reason', 'exception_note'])->append('print_log_id', 'require'); }
     public function scenePaperControl() { return $this->only(['control_id', 'resolution', 'note'])->append('control_id', 'require'); }
     public function sceneControlPrintData() { return $this->only(['control_id'])->append('control_id', 'require'); }
