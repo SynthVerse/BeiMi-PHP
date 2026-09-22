@@ -622,6 +622,7 @@ final class FulfillmentTaskLogic extends BaseLogic
                         'account_note' => $note,
                         'update_time' => $now,
                     ]);
+                self::requireVoidControlsForOtherCopies($task, $item, (int)$copy['id'], $note, $now);
                 Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', $id)->update([
                     'status' => 'exception',
                     'exception_code' => 'specification_shortage',
@@ -642,6 +643,44 @@ final class FulfillmentTaskLogic extends BaseLogic
                 self::setError('规格不符登记失败，任务状态未改变');
             }
             return false;
+        }
+    }
+
+    /** @param array<string,mixed> $task @param array<string,mixed> $item */
+    private static function requireVoidControlsForOtherCopies(array $task, array $item, int $recoveredCopyId, string $reason, int $now): void
+    {
+        $copies = Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
+            ->where('task_id', (int)$task['id'])->where('print_type', 'task')->where('paper_status', 'issued')
+            ->where('id', '<>', $recoveredCopyId)->order('id')->lock(true)->select()->toArray();
+        foreach ($copies as $copy) {
+            $actionKey = 'specification_shortage:' . (int)$task['id'] . ':paper:' . (int)$copy['id'];
+            $existing = Db::name('fulfillment_ticket_control')->where('tenant_id', self::tenantId())
+                ->where('action_key', $actionKey)->find();
+            if ($existing) {
+                continue;
+            }
+            Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())->where('id', (int)$copy['id'])
+                ->update(['paper_status' => 'void_required', 'update_time' => $now]);
+            Db::name('fulfillment_ticket_control')->insert([
+                'tenant_id' => self::tenantId(),
+                'report_id' => (int)$task['report_id'],
+                'report_item_id' => (int)$item['id'],
+                'item_change_id' => 0,
+                'task_id' => (int)$task['id'],
+                'print_log_id' => (int)$copy['print_log_id'],
+                'action_type' => 'void',
+                'action_key' => $actionKey,
+                'reason' => '规格不符，旧纸票必须回收或打印作废通知：' . $reason,
+                'before_snapshot' => json_encode(self::ticketSnapshot($task), JSON_UNESCAPED_UNICODE),
+                'after_snapshot' => json_encode(['specification_verification_status' => 'failed'], JSON_UNESCAPED_UNICODE),
+                'status' => 'pending_recovery',
+                'resolution' => '',
+                'resolution_note' => '',
+                'resolved_by' => 0,
+                'resolved_time' => 0,
+                'create_time' => $now,
+                'update_time' => $now,
+            ]);
         }
     }
 
@@ -1474,6 +1513,14 @@ final class FulfillmentTaskLogic extends BaseLogic
             $task['reprint_count'] = max(0, $successfulCopies - 1);
             $task['outstanding_paper_count'] = (int)Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
                 ->where('task_id', (int)$task['id'])->whereIn('paper_status', ['issued', 'void_required'])->count();
+            $task['issued_paper_copies'] = Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
+                ->where('task_id', (int)$task['id'])->where('print_type', 'task')->where('paper_status', 'issued')
+                ->order('id')->field('id,print_log_id,copy_no,printed_time')->select()->toArray();
+            foreach ($task['issued_paper_copies'] as &$paperCopy) {
+                $paperCopy['label'] = '第 ' . max(1, (int)$paperCopy['copy_no']) . ' 张 · '
+                    . ((int)$paperCopy['printed_time'] > 0 ? date('m-d H:i', (int)$paperCopy['printed_time']) : '打印时间待确认');
+            }
+            unset($paperCopy);
             $accounted = Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
                 ->where('task_id', (int)$task['id'])->where('accounted_time', '>', 0)->order('accounted_time desc,id desc')->find();
             $task['recovery_mode'] = $accounted && in_array((string)$accounted['account_reason'], ['lost', 'damaged', 'illegible'], true)

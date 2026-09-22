@@ -32,5 +32,7 @@ final class CustomerReportWeightRequirementContractTest extends TestCase
         $logic = (string)file_get_contents($root . '/app/api/jxc/logic/FulfillmentTaskLogic.php');
         self::assertStringContainsString("\$specificationShortagePrefix . ':' . \$round", $logic);
         self::assertStringContainsString("where('id', (int)\$copy['id'])->update", $logic);
+        self::assertStringContainsString("'paper_status' => 'void_required'", $logic);
+        self::assertStringContainsString("Db::name('fulfillment_ticket_control')->insert", $logic);
     }
 }
