@@ -25,6 +25,10 @@ final class WorkforceLogic extends BaseLogic
             ['key' => 'task.reprint', 'name' => '补打与重试工票'],
             ['key' => 'task.control', 'name' => '处理工票作废、异常补录与履约变更'],
         ],
+        '采购计划' => [
+            ['key' => 'purchase.plan.view', 'name' => '查看采购计划'],
+            ['key' => 'purchase.plan.manage', 'name' => '创建、分配与终止采购计划'],
+        ],
         '结算' => [
             ['key' => 'settlement.view', 'name' => '查看结算'],
             ['key' => 'settlement.weight', 'name' => '录入最终实重'],
@@ -135,7 +139,7 @@ final class WorkforceLogic extends BaseLogic
     public static function processes(array $params): array|false
     {
         self::clearError();
-        if (!self::requireAnyPermission(['process.manage', 'employee.manage', 'task.view'])) {
+        if (!self::requireAnyPermission(['process.manage', 'employee.manage', 'task.view', 'report.create'])) {
             return false;
         }
         $query = Db::name('work_process')->where('tenant_id', self::tenantId())->whereNull('delete_time');

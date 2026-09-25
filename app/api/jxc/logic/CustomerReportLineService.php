@@ -94,6 +94,15 @@ class CustomerReportLineService extends BaseLogic
         if ($attributes === false) {
             return false;
         }
+        $processingGroupsInput = (array)($item['processing_groups'] ?? []);
+        if (array_key_exists('processing_groups', $item) && $processingGroupsInput === []) {
+            self::setError('每条报货明细必须至少添加一个加工分组');
+            return false;
+        }
+        $processingGroups = self::normalizeProcessingGroups($processingGroupsInput, $orderQuantity);
+        if ($processingGroups === false) {
+            return false;
+        }
         return [
             'client_line_id' => (int)($item['id'] ?? 0),
             'warehouse_id' => $warehouseId,
@@ -129,6 +138,7 @@ class CustomerReportLineService extends BaseLogic
             'quality_snapshot' => $attributes['quality_snapshot'],
             'specification_snapshot' => $attributes['specification_snapshot'],
             'processing_requirement' => trim((string)($item['processing_requirement'] ?? $item['processing'] ?? '')),
+            'processing_groups' => $processingGroups,
             'price_status' => $price['status'],
             'price' => $price['price'],
             'pricing_unit_id' => $price['unit_id'],
@@ -261,6 +271,60 @@ class CustomerReportLineService extends BaseLogic
             'max' => $range['max'],
             'confirmed' => 1,
         ];
+    }
+
+    /** @return array<int,array<string,mixed>>|false */
+    private static function normalizeProcessingGroups(array $groups, string $orderQuantity): array|false
+    {
+        if ($groups === []) {
+            return [];
+        }
+        $normalized = [];
+        $keys = [];
+        $total = '0.00';
+        foreach (array_values($groups) as $index => $group) {
+            if (!is_array($group)) {
+                self::setError('加工分组格式无效');
+                return false;
+            }
+            $key = trim((string)($group['group_key'] ?? $group['client_group_id'] ?? 'group-' . ($index + 1)));
+            if ($key === '' || strlen($key) > 64 || isset($keys[$key])) {
+                self::setError('加工分组标识无效或重复');
+                return false;
+            }
+            $keys[$key] = true;
+            $quantity = self::positive($group['planned_qty'] ?? null, 2);
+            if ($quantity === false) {
+                self::setError('加工分组计划数量必须为最多两位小数的正数');
+                return false;
+            }
+            $processIds = array_values(array_unique(array_filter(array_map('intval', (array)($group['process_ids'] ?? [])), static fn(int $id): bool => $id > 0)));
+            if ($processIds === []) {
+                self::setError('每个加工分组必须选择至少一个执行工序');
+                return false;
+            }
+            $processes = Db::name('work_process')->where('tenant_id', self::tenantId())->whereIn('id', $processIds)
+                ->where('trigger_type', 'report_selection')->where('is_enabled', 1)->whereNull('delete_time')
+                ->field('id,name,sort')->select()->toArray();
+            if (count($processes) !== count($processIds)) {
+                self::setError('加工分组包含不可用的报货选择工序');
+                return false;
+            }
+            usort($processes, static fn(array $left, array $right): int => [(int)$left['sort'], (int)$left['id']] <=> [(int)$right['sort'], (int)$right['id']]);
+            $normalized[] = [
+                'group_key' => $key,
+                'name' => mb_substr(trim((string)($group['name'] ?? '')) ?: '加工分组' . ($index + 1), 0, 100),
+                'planned_qty' => $quantity,
+                'processes' => array_values($processes),
+                'sort' => $index,
+            ];
+            $total = bcadd($total, $quantity, self::SCALE);
+        }
+        if (bccomp($total, $orderQuantity, self::SCALE) !== 0) {
+            self::setError('加工分组计划数量之和必须等于报货数量');
+            return false;
+        }
+        return $normalized;
     }
 
     /** @param array<string,mixed> $item @return array{min:string,max:string,confirmed:int}|false */

@@ -13,6 +13,7 @@ class PurchaseBatchValidate extends BaseValidate
         'remarks' => 'max:500',
         'items' => 'require|array',
         'idempotency_key' => 'require|string|regex:/^[A-Za-z0-9._:-]{1,64}$/D',
+        'purchase_plan_id' => 'integer|gt:0',
     ];
 
     protected $field = [
@@ -26,7 +27,7 @@ class PurchaseBatchValidate extends BaseValidate
 
     public function scenePublish()
     {
-        return $this->only(['warehouse_id', 'datetimesingle', 'remarks', 'items', 'idempotency_key']);
+        return $this->only(['warehouse_id', 'datetimesingle', 'remarks', 'items', 'idempotency_key', 'purchase_plan_id']);
     }
 
     public function sceneDetail()

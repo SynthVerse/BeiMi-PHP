@@ -264,7 +264,6 @@ final class DeliveryInventoryLogic extends BaseLogic
                     }
                     foreach ($items as $item) {
                         if (bccomp((string)$item['final_actual_weight'], '0.0000', self::SCALE) <= 0
-                            || (int)$item['final_weight_task_id'] <= 0
                             || (string)$item['fulfillment_status'] !== 'final_weight_recorded') {
                             self::setError('每条交付明细必须先完成最终称重');
                             return false;

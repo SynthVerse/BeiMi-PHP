@@ -30,6 +30,7 @@ class CustomerReportValidate extends BaseValidate
         'reason' => 'require|max:255',
         'dimensions' => 'array',
         'combinations' => 'array',
+        'groups' => 'require|array|min:1',
     ];
 
     public function sceneRecognize() { return $this->only(['text']); }
@@ -42,6 +43,7 @@ class CustomerReportValidate extends BaseValidate
     public function sceneRetry() { return $this->only(['id','version']); }
     public function sceneConvert() { return $this->only(['id','version']); }
     public function sceneCancel() { return $this->only(['id','version','reason']); }
+    public function sceneSaveProcessingWeights() { return $this->only(['id','version','groups']); }
     public function sceneBatchStart() { return $this->only(['delivery_date','idempotency_key']); }
     public function sceneBatchTransition() { return $this->only(['id','version']); }
     public function sceneBatchDetail() { return $this->only(['id']); }

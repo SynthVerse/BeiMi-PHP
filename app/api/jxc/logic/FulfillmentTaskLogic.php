@@ -107,54 +107,71 @@ final class FulfillmentTaskLogic extends BaseLogic
             }
             $blockingPurchaseTaskId = $shortageTaskId > 0 ? $shortageTaskId : $specificationShortageTaskId;
 
-            $matched = [];
-            if ($requirement !== '' && $matched === []) {
-                $manual = Db::name('fulfillment_task')->alias('t')
-                    ->join('work_process p', 'p.id=t.process_id AND p.tenant_id=t.tenant_id')
-                    ->where('t.tenant_id', $tenantId)->where('t.report_item_id', $itemId)
-                    ->whereLike('t.source_key', 'item:' . $itemId . ':process:%')
-                    ->where('p.is_enabled', 1)->whereNull('p.delete_time')
-                    ->field('p.*')->find();
-                if ($manual) {
-                    $matched[(int)$manual['id']] = $manual;
+            $processingGroups = Db::name('customer_report_processing_group')->where('tenant_id', $tenantId)
+                ->where('report_item_id', $itemId)->order(['sort' => 'asc', 'id' => 'asc'])->select()->toArray();
+            if ($processingGroups !== []) {
+                foreach ($processingGroups as $processingGroup) {
+                    $steps = Db::name('customer_report_processing_group_process')->where('tenant_id', $tenantId)
+                        ->where('processing_group_id', (int)$processingGroup['id'])
+                        ->order(['step_no' => 'asc', 'id' => 'asc'])->select()->toArray();
+                    $previousTaskId = $blockingPurchaseTaskId;
+                    foreach ($steps as $step) {
+                        $process = [
+                            'id' => (int)$step['process_id'],
+                            'name' => (string)$step['process_name_snapshot'],
+                            'sort' => (int)$step['process_sort_snapshot'],
+                        ];
+                        $key = 'item:' . $itemId . ':group:' . (int)$processingGroup['id'] . ':process:' . (int)$step['process_id'];
+                        $desired[] = $key;
+                        $taskId = self::upsertTask($report, $item, $groupId, $process, $key, [
+                            'processing_group_id' => (int)$processingGroup['id'],
+                            'depends_on_task_id' => $previousTaskId,
+                            'status' => 'printable',
+                            'planned_qty' => self::decimal((string)$processingGroup['planned_qty']),
+                            'unit_name' => (string)$item['unit_name'],
+                            'requirement' => (string)$processingGroup['name'],
+                            'is_settlement_task' => 0,
+                        ]);
+                        $previousTaskId = $taskId;
+                    }
                 }
-            }
-            if ($requirement === '' || $matched === []) {
-                $code = $requirement === '' ? 'missing_remark' : 'unrecognized_remark';
-                $key = 'item:' . $itemId . ':exception:' . $code;
-                $desired[] = $key;
-                self::upsertTask($report, $item, $groupId, null, $key, [
-                    'task_type' => 'exception',
-                    'exception_code' => $code,
-                    'status' => 'exception',
-                    'is_settlement_task' => 0,
-                    'requirement' => $requirement,
-                ]);
             } else {
-                $matched = array_values($matched);
-                usort($matched, static fn(array $left, array $right): int => [(int)$left['sort'], (int)$left['id']] <=> [(int)$right['sort'], (int)$right['id']]);
-                $candidateSourceKeys = array_map(static fn(array $process): string => 'item:' . $itemId . ':process:' . $process['code'], $matched);
-                $existingOwner = Db::name('fulfillment_task')->where('tenant_id', $tenantId)->where('report_item_id', $itemId)
-                    ->where('is_settlement_task', 1)->where('status', '<>', 'cancelled')->order('id asc')->find();
-                $selectedSourceKey = '';
-                if ($existingOwner && (in_array((string)$existingOwner['source_key'], $candidateSourceKeys, true)
-                    || in_array((string)$existingOwner['status'], self::FINISHED, true))) {
-                    $selectedSourceKey = (string)$existingOwner['source_key'];
-                } elseif ($candidateSourceKeys !== []) {
-                    $selectedSourceKey = (string)end($candidateSourceKeys);
+                $matched = [];
+                if ($requirement !== '' && $matched === []) {
+                    $manual = Db::name('fulfillment_task')->alias('t')
+                        ->join('work_process p', 'p.id=t.process_id AND p.tenant_id=t.tenant_id')
+                        ->where('t.tenant_id', $tenantId)->where('t.report_item_id', $itemId)
+                        ->whereLike('t.source_key', 'item:' . $itemId . ':process:%')
+                        ->where('p.is_enabled', 1)->whereNull('p.delete_time')
+                        ->field('p.*')->find();
+                    if ($manual) {
+                        $matched[(int)$manual['id']] = $manual;
+                    }
                 }
-                Db::name('fulfillment_task')->where('tenant_id', $tenantId)->where('report_item_id', $itemId)
-                    ->whereIn('status', ['unassigned', 'blocked', 'printable', 'print_failed', 'exception'])
-                    ->update(['is_settlement_task' => 0, 'update_time' => $now]);
-                foreach ($matched as $process) {
-                    $key = 'item:' . $itemId . ':process:' . $process['code'];
+                if ($requirement === '' || $matched === []) {
+                    $code = $requirement === '' ? 'missing_remark' : 'unrecognized_remark';
+                    $key = 'item:' . $itemId . ':exception:' . $code;
                     $desired[] = $key;
-                    self::upsertTask($report, $item, $groupId, $process, $key, [
-                        'depends_on_task_id' => $blockingPurchaseTaskId,
-                        'status' => 'printable',
-                        'is_settlement_task' => $key === $selectedSourceKey ? 1 : 0,
+                    self::upsertTask($report, $item, $groupId, null, $key, [
+                        'task_type' => 'exception',
+                        'exception_code' => $code,
+                        'status' => 'exception',
+                        'is_settlement_task' => 0,
                         'requirement' => $requirement,
                     ]);
+                } else {
+                    $matched = array_values($matched);
+                    usort($matched, static fn(array $left, array $right): int => [(int)$left['sort'], (int)$left['id']] <=> [(int)$right['sort'], (int)$right['id']]);
+                    foreach ($matched as $process) {
+                        $key = 'item:' . $itemId . ':process:' . $process['code'];
+                        $desired[] = $key;
+                        self::upsertTask($report, $item, $groupId, $process, $key, [
+                            'depends_on_task_id' => $blockingPurchaseTaskId,
+                            'status' => 'printable',
+                            'is_settlement_task' => 0,
+                            'requirement' => $requirement,
+                        ]);
+                    }
                 }
             }
         }
@@ -743,18 +760,17 @@ final class FulfillmentTaskLogic extends BaseLogic
     public static function settlementValuesForReport(int $reportId): array
     {
         $rows = Db::name('customer_report_item')->alias('i')
-            ->join('fulfillment_task t', 't.id=i.final_weight_task_id AND t.tenant_id=i.tenant_id')
             ->where('i.tenant_id', self::tenantId())->where('i.report_id', $reportId)->whereNull('i.delete_time')
             ->where('i.fulfillment_status', 'final_weight_recorded')->where('i.final_actual_weight', '>', 0)
-            ->field('i.id AS report_item_id,i.final_actual_weight,t.id,t.actual_price')->select()->toArray();
+            ->field('i.id AS report_item_id,i.final_actual_weight,i.final_weight_task_id,i.price')->select()->toArray();
         $values = [];
         foreach ($rows as $row) {
             $itemId = (int)$row['report_item_id'];
             $values[$itemId] = [
                 'final_actual_weight' => self::decimal((string)$row['final_actual_weight']),
                 'actual_weight' => self::decimal((string)$row['final_actual_weight']),
-                'actual_price' => self::decimal((string)$row['actual_price']),
-                'task_id' => (int)$row['id'],
+                'actual_price' => self::decimal((string)$row['price']),
+                'task_id' => (int)$row['final_weight_task_id'],
             ];
         }
         return $values;
@@ -795,6 +811,14 @@ final class FulfillmentTaskLogic extends BaseLogic
                 $task = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', $id)->lock(true)->find();
                 if (!$task) {
                     self::setError('工票不存在');
+                    return false;
+                }
+                $usesProcessingGroups = Db::name('customer_report_processing_group')
+                    ->where('tenant_id', self::tenantId())
+                    ->where('report_id', (int)$task['report_id'])
+                    ->count() > 0;
+                if ($usesProcessingGroups) {
+                    self::setError('加工组工票当前仅支持打印、重打和作废；最终实重请在待开单阶段按加工组录入');
                     return false;
                 }
                 $task = self::ensureContentIdentity($task);
@@ -1369,6 +1393,7 @@ final class FulfillmentTaskLogic extends BaseLogic
         $base = [
             'group_id' => $groupId,
             'report_item_id' => (int)($item['id'] ?? 0),
+            'processing_group_id' => 0,
             'process_id' => (int)($process['id'] ?? 0),
             'process_name_snapshot' => $existing && trim((string)($existing['process_name_snapshot'] ?? '')) !== ''
                 ? (string)$existing['process_name_snapshot'] : (string)($process['name'] ?? ''),
@@ -1478,9 +1503,13 @@ final class FulfillmentTaskLogic extends BaseLogic
         $itemIds = array_values(array_unique(array_filter(array_map(static fn(array $task): int => (int)$task['report_item_id'], $tasks))));
         $items = $itemIds === [] ? [] : Db::name('customer_report_item')->where('tenant_id', self::tenantId())
             ->whereIn('id', $itemIds)->column(
-                'piece_weight_confirmed,piece_weight_min,piece_weight_max,acceptable_base_qty_min,acceptable_base_qty_max,specification_verification_status,specification_verification_note',
+                'piece_weight_confirmed,piece_weight_min,piece_weight_max,acceptable_base_qty_min,acceptable_base_qty_max,'
+                . 'specification_verification_status,specification_verification_note,warehouse_id,goods_id,sku_id,sku_name,shortage_base_qty,base_unit_name',
                 'id'
             );
+        $reportIds = array_values(array_unique(array_filter(array_map(static fn(array $task): int => (int)$task['report_id'], $tasks))));
+        $reportBatchIds = $reportIds === [] ? [] : Db::name('customer_report')->where('tenant_id', self::tenantId())
+            ->whereIn('id', $reportIds)->column('batch_id', 'id');
         $settlementTaskIds = self::settlementTaskIdsForItems($itemIds);
         foreach ($tasks as &$task) {
             if (trim((string)($task['process_name_snapshot'] ?? '')) === '' && (int)$task['process_id'] > 0) {
@@ -1503,6 +1532,22 @@ final class FulfillmentTaskLogic extends BaseLogic
             $task['acceptable_base_qty_max'] = self::decimal((string)($requirementItem['acceptable_base_qty_max'] ?? '0'));
             $task['specification_verification_status'] = (string)($requirementItem['specification_verification_status'] ?? 'not_required');
             $task['specification_verification_note'] = (string)($requirementItem['specification_verification_note'] ?? '');
+            $task['is_purchase_task'] = preg_match('/^item:\d+:shortage$/', (string)$task['source_key']) === 1
+                && bccomp((string)($requirementItem['shortage_base_qty'] ?? '0'), '0.00', 2) > 0;
+            $task['purchase_source'] = $task['is_purchase_task'] ? [
+                'batch_id' => (int)($reportBatchIds[(int)$task['report_id']] ?? 0),
+                'warehouse_id' => (int)($requirementItem['warehouse_id'] ?? 0),
+                'goods_id' => (int)($requirementItem['goods_id'] ?? 0),
+                'sku_id' => (int)($requirementItem['sku_id'] ?? 0),
+                'sku_name' => (string)($requirementItem['sku_name'] ?? ''),
+                'shortage_qty' => self::decimal((string)($requirementItem['shortage_base_qty'] ?? '0')),
+                'base_unit_name' => (string)($requirementItem['base_unit_name'] ?? ''),
+            ] : null;
+            $processingGroup = (int)($task['processing_group_id'] ?? 0) > 0
+                ? Db::name('customer_report_processing_group')->where('tenant_id', self::tenantId())
+                    ->where('id', (int)$task['processing_group_id'])->field('id,group_key,name,planned_qty,final_actual_weight,sort')->find()
+                : null;
+            $task['processing_group'] = $processingGroup ?: null;
             $successfulCopies = (int)Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
                 ->where('task_id', (int)$task['id'])->where('print_type', 'task')
                 ->whereNotIn('paper_status', ['not_issued', 'print_failed'])->count();
@@ -1603,7 +1648,7 @@ final class FulfillmentTaskLogic extends BaseLogic
             'process_name' => $processName,
             'goods_name' => (string)(($item['sku_name'] ?? '') ?: ($item['goods_name'] ?? $task['goods_name'] ?? '')),
             'planned_qty' => self::decimal((string)($task['planned_qty'] ?? '0')),
-            'unit_name' => (string)(($item['base_unit_name'] ?? '') ?: ($task['unit_name'] ?? '')),
+            'unit_name' => (string)(($task['unit_name'] ?? '') ?: ($item['base_unit_name'] ?? '')),
             'requirement' => trim(implode('；', array_filter([
                 (string)($task['requirement'] ?? ''),
                 (int)($item['piece_weight_confirmed'] ?? 0) === 1

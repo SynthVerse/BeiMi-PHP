@@ -546,6 +546,100 @@ class CustomerReportLogic extends BaseLogic
         } catch (\Throwable) { if (!self::hasError()) { self::setError('取消客户报货失败'); } return false; }
     }
 
+    /** @return array<string,mixed>|false */
+    public static function saveProcessingWeights(array $params): array|false
+    {
+        self::clearError();
+        if (!WorkforceLogic::requirePermission('settlement.weight')) {
+            return false;
+        }
+        $reportId = (int)($params['id'] ?? 0);
+        $version = (int)($params['version'] ?? 0);
+        $submitted = (array)($params['groups'] ?? []);
+        if ($reportId <= 0 || $version <= 0 || $submitted === []) {
+            self::setError('报货单、版本和加工组实重不能为空');
+            return false;
+        }
+        $weights = [];
+        foreach ($submitted as $entry) {
+            $groupId = (int)($entry['id'] ?? 0);
+            $weightText = trim((string)($entry['final_actual_weight'] ?? ''));
+            if ($groupId <= 0 || isset($weights[$groupId])
+                || preg_match('/^\d+(?:\.\d{1,2})?$/', $weightText) !== 1
+                || bccomp($weightText, '0.00', self::SCALE) <= 0) {
+                self::setError('每个加工组只能提交一次且最终实重必须大于 0，最多保留两位小数');
+                return false;
+            }
+            $weights[$groupId] = self::decimal($weightText);
+        }
+        try {
+            return self::transactionWithRetry(static function () use ($reportId, $version, $weights) {
+                $report = CustomerReport::where('tenant_id', self::tenantId())->where('id', $reportId)->lock(true)->find();
+                if (!$report || (int)$report->version !== $version
+                    || !in_array((string)$report->status, self::SUBMITTED, true)) {
+                    self::setError('报货单不存在、版本冲突或当前状态不可录入实重');
+                    return false;
+                }
+                if (bccomp((string)$report->shortage_base_qty, '0.00', self::SCALE) !== 0) {
+                    self::setError('报货单仍有采购缺口，不能进入待开单称重');
+                    return false;
+                }
+                if (DeliveryInventoryLogic::hasCompletedDelivery($reportId)) {
+                    self::setError('报货单已经发生真实交付，不能再修改加工组实重');
+                    return false;
+                }
+                $groups = Db::name('customer_report_processing_group')->where('tenant_id', self::tenantId())
+                    ->where('report_id', $reportId)->order(['report_item_id' => 'asc', 'sort' => 'asc', 'id' => 'asc'])
+                    ->lock(true)->select()->toArray();
+                if ($groups === [] || count($weights) !== count($groups)) {
+                    self::setError('必须一次提交该报货单全部加工组的最终实重');
+                    return false;
+                }
+                $totals = [];
+                $now = time();
+                foreach ($groups as $group) {
+                    $groupId = (int)$group['id'];
+                    if (!isset($weights[$groupId])) {
+                        self::setError('提交的加工组与当前报货单不一致，请刷新后重试');
+                        return false;
+                    }
+                    $itemId = (int)$group['report_item_id'];
+                    $totals[$itemId] = bcadd($totals[$itemId] ?? '0.00', $weights[$groupId], self::SCALE);
+                    Db::name('customer_report_processing_group')->where('tenant_id', self::tenantId())
+                        ->where('id', $groupId)->update(['final_actual_weight' => $weights[$groupId], 'update_time' => $now]);
+                }
+                $items = CustomerReportItem::where('tenant_id', self::tenantId())->where('report_id', $reportId)
+                    ->whereNull('delete_time')->order('id')->lock(true)->select()->toArray();
+                foreach ($items as $item) {
+                    $itemId = (int)$item['id'];
+                    if (!isset($totals[$itemId])) {
+                        self::setError('报货明细缺少加工分组，不能汇总最终实重');
+                        return false;
+                    }
+                    CustomerReportItem::where('tenant_id', self::tenantId())->where('id', $itemId)->update([
+                        'final_actual_weight' => $totals[$itemId],
+                        'final_weight_task_id' => 0,
+                        'fulfillment_status' => 'final_weight_recorded',
+                        'update_time' => $now,
+                    ]);
+                }
+                $updated = CustomerReport::where('tenant_id', self::tenantId())->where('id', $reportId)
+                    ->where('version', $version)->update(['version' => $version + 1, 'update_time' => $now]);
+                if ($updated !== 1) {
+                    throw new \RuntimeException('version_conflict');
+                }
+                return self::detailById($reportId);
+            });
+        } catch (\Throwable $exception) {
+            if (!self::hasError()) {
+                self::setError($exception->getMessage() === 'version_conflict'
+                    ? '报货单已被其他操作更新，请刷新后重试'
+                    : '加工组最终实重保存失败');
+            }
+            return false;
+        }
+    }
+
     /** @param array<int,array<string,mixed>> $items @return array<string,mixed> */
     private static function writeNewItems(int $reportId, array $items, int $now): array
     {
@@ -559,11 +653,13 @@ class CustomerReportLogic extends BaseLogic
         $reserved=WarehouseSkuBalanceService::reserveUpToWithinTransaction((int)$line['warehouse_id'],(int)$line['sku_id'],(string)$line['expected_base_qty']);
         if ($reserved===false) { throw new \RuntimeException('reserve_failed'); }
         $shortage=bcsub((string)$line['expected_base_qty'],$reserved,self::SCALE); $status=bccomp($shortage,'0.00',self::SCALE)===0?'submitted_ready':'submitted_shortage';
-        $data=$line; unset($data['client_line_id']);
+        $groups = (array)($line['processing_groups'] ?? []);
+        $data=$line; unset($data['client_line_id'], $data['processing_groups']);
         $itemId = (int)Db::name('customer_report_item')->insertGetId($data+['tenant_id'=>self::tenantId(),'report_id'=>$reportId,'reserved_base_qty'=>$reserved,'shortage_base_qty'=>$shortage,'fulfilled_base_qty'=>'0.00','status'=>$status,'create_time'=>$now,'update_time'=>$now]);
+        self::replaceProcessingGroups($reportId, $itemId, $groups, $now);
         Db::name('customer_report_reservation')->insert(['tenant_id'=>self::tenantId(),'report_id'=>$reportId,'report_item_id'=>$itemId,'warehouse_id'=>(int)$line['warehouse_id'],'goods_id'=>(int)$line['goods_id'],'sku_id'=>(int)$line['sku_id'],'reserved_base_qty'=>$reserved,'consumed_base_qty'=>'0.00','released_base_qty'=>'0.00','status'=>'reserved','create_time'=>$now,'update_time'=>$now]);
         CustomerReportPreferenceService::remember($line);
-        return $line+['reserved_base_qty'=>$reserved,'shortage_base_qty'=>$shortage,'status'=>$status];
+        return $line+['id'=>$itemId,'reserved_base_qty'=>$reserved,'shortage_base_qty'=>$shortage,'status'=>$status];
     }
     /** @param array<string,mixed> $old @param array<string,mixed> $line @return array<string,mixed> */
     private static function updateItem(int $itemId, array $old, array $line, int $now): array
@@ -577,8 +673,10 @@ class CustomerReportLogic extends BaseLogic
             self::releaseLine($old); $reserved=WarehouseSkuBalanceService::reserveUpToWithinTransaction((int)$line['warehouse_id'],(int)$line['sku_id'],$target); if ($reserved===false) { throw new \RuntimeException('reserve_failed'); }
         }
         $shortage=bcsub($target,$reserved,self::SCALE); $status=bccomp($shortage,'0.00',self::SCALE)===0?'submitted_ready':'submitted_shortage';
-        $data=$line; unset($data['client_line_id']);
+        $groups = (array)($line['processing_groups'] ?? []);
+        $data=$line; unset($data['client_line_id'], $data['processing_groups']);
         CustomerReportItem::where('tenant_id',self::tenantId())->where('id',$itemId)->update($data+['reserved_base_qty'=>$reserved,'shortage_base_qty'=>$shortage,'status'=>$status,'update_time'=>$now]);
+        self::replaceProcessingGroups((int)$old['report_id'], $itemId, $groups, $now);
         CustomerReportReservation::where('tenant_id',self::tenantId())->where('report_item_id',$itemId)->update(['warehouse_id'=>(int)$line['warehouse_id'],'goods_id'=>(int)$line['goods_id'],'sku_id'=>(int)$line['sku_id'],'reserved_base_qty'=>$reserved,'status'=>'reserved','update_time'=>$now]);
         CustomerReportPreferenceService::remember($line);
         return $line+['reserved_base_qty'=>$reserved,'shortage_base_qty'=>$shortage,'status'=>$status];
@@ -647,6 +745,67 @@ class CustomerReportLogic extends BaseLogic
             return false;
         }
     }
+
+    /**
+     * 采购计划到货分配在其外层事务中调用；只预留明确分给该来源的数量。
+     */
+    public static function allocatePurchaseForItemWithinTransaction(int $itemId, string $quantity): bool
+    {
+        self::clearError();
+        $quantity = self::decimal($quantity);
+        if ($itemId <= 0 || bccomp($quantity, '0.00', self::SCALE) <= 0) {
+            self::setError('采购来源分配数量必须大于 0');
+            return false;
+        }
+        $item = CustomerReportItem::where('tenant_id', self::tenantId())->where('id', $itemId)
+            ->whereNull('delete_time')->lock(true)->find();
+        if (!$item) {
+            self::setError('采购来源关联的报货明细不存在');
+            return false;
+        }
+        $shortage = self::decimal((string)$item->shortage_base_qty);
+        if (bccomp($quantity, $shortage, self::SCALE) > 0) {
+            self::setError('采购来源分配数量超过当前未满足缺口');
+            return false;
+        }
+        $added = WarehouseSkuBalanceService::reserveUpToWithinTransaction(
+            (int)$item->warehouse_id,
+            (int)$item->sku_id,
+            $quantity
+        );
+        if ($added === false || bccomp($added, $quantity, self::SCALE) !== 0) {
+            self::setError('本次采购到货库存不足以完成所填来源分配');
+            return false;
+        }
+        $now = time();
+        $reserved = bcadd(self::decimal((string)$item->reserved_base_qty), $quantity, self::SCALE);
+        $remaining = bcsub($shortage, $quantity, self::SCALE);
+        $status = bccomp($remaining, '0.00', self::SCALE) === 0 ? 'submitted_ready' : 'submitted_shortage';
+        CustomerReportItem::where('tenant_id', self::tenantId())->where('id', $itemId)->update([
+            'reserved_base_qty' => $reserved,
+            'shortage_base_qty' => $remaining,
+            'status' => $status,
+            'update_time' => $now,
+        ]);
+        CustomerReportReservation::where('tenant_id', self::tenantId())->where('report_item_id', $itemId)->update([
+            'reserved_base_qty' => $reserved,
+            'status' => 'reserved',
+            'update_time' => $now,
+        ]);
+        $report = CustomerReport::where('tenant_id', self::tenantId())->where('id', (int)$item->report_id)
+            ->lock(true)->find();
+        if (!$report) {
+            self::setError('采购来源关联的报货单不存在');
+            return false;
+        }
+        $rows = CustomerReportItem::where('tenant_id', self::tenantId())->where('report_id', (int)$item->report_id)
+            ->whereNull('delete_time')->select()->toArray();
+        CustomerReport::where('tenant_id', self::tenantId())->where('id', (int)$report->id)->update(
+            self::summary($rows) + ['version' => (int)$report->version + 1, 'update_time' => $now]
+        );
+        FulfillmentTaskLogic::syncForReport((int)$report->id);
+        return true;
+    }
     /** @param array<int,array<string,mixed>> $items */
     private static function lockGoodsForConversion(array $items): void
     {
@@ -682,10 +841,54 @@ class CustomerReportLogic extends BaseLogic
         if (!$report) { self::setError('客户报货单不存在'); return false; }
         $data=$report->toArray();
         $data['items']=CustomerReportItem::where('tenant_id',self::tenantId())->where('report_id',$id)->whereNull('delete_time')->order('sort asc,id asc')->select()->toArray();
+        foreach ($data['items'] as &$item) {
+            $item['processing_groups'] = self::processingGroupsForItem((int)$item['id']);
+        }
+        unset($item);
         $data['sales_orders'] = self::salesOrdersByReport($id);
         $data['task_group'] = FulfillmentTaskLogic::groupForReport($id);
         $data['actions'] = self::actionStates($id, $data, $data['items']);
         return $data;
+    }
+
+    /** @param array<int,array<string,mixed>> $groups */
+    private static function replaceProcessingGroups(int $reportId, int $itemId, array $groups, int $now): void
+    {
+        $existingIds = array_map('intval', Db::name('customer_report_processing_group')->where('tenant_id', self::tenantId())
+            ->where('report_item_id', $itemId)->column('id'));
+        if ($existingIds !== []) {
+            Db::name('customer_report_processing_group_process')->where('tenant_id', self::tenantId())
+                ->whereIn('processing_group_id', $existingIds)->delete();
+        }
+        Db::name('customer_report_processing_group')->where('tenant_id', self::tenantId())->where('report_item_id', $itemId)->delete();
+        foreach ($groups as $group) {
+            $groupId = (int)Db::name('customer_report_processing_group')->insertGetId([
+                'tenant_id' => self::tenantId(), 'report_id' => $reportId, 'report_item_id' => $itemId,
+                'group_key' => (string)$group['group_key'], 'name' => (string)$group['name'],
+                'planned_qty' => (string)$group['planned_qty'], 'final_actual_weight' => '0.00',
+                'sort' => (int)$group['sort'], 'create_time' => $now, 'update_time' => $now,
+            ]);
+            foreach (array_values((array)$group['processes']) as $step => $process) {
+                Db::name('customer_report_processing_group_process')->insert([
+                    'tenant_id' => self::tenantId(), 'processing_group_id' => $groupId,
+                    'process_id' => (int)$process['id'], 'process_name_snapshot' => (string)$process['name'],
+                    'process_sort_snapshot' => (int)$process['sort'], 'step_no' => $step + 1, 'create_time' => $now,
+                ]);
+            }
+        }
+    }
+
+    /** @return array<int,array<string,mixed>> */
+    private static function processingGroupsForItem(int $itemId): array
+    {
+        $groups = Db::name('customer_report_processing_group')->where('tenant_id', self::tenantId())
+            ->where('report_item_id', $itemId)->order(['sort' => 'asc', 'id' => 'asc'])->select()->toArray();
+        foreach ($groups as &$group) {
+            $group['processes'] = Db::name('customer_report_processing_group_process')->where('tenant_id', self::tenantId())
+                ->where('processing_group_id', (int)$group['id'])->order(['step_no' => 'asc', 'id' => 'asc'])->select()->toArray();
+        }
+        unset($group);
+        return $groups;
     }
 
     /** @param array<string,mixed> $report @param array<int,array<string,mixed>> $items @return array<string,array<string,mixed>> */
@@ -693,6 +896,7 @@ class CustomerReportLogic extends BaseLogic
     {
         $canEditReport = WorkforceLogic::hasPermission('report.edit');
         $canBill = WorkforceLogic::hasPermission('settlement.bill');
+        $canRecordWeight = WorkforceLogic::hasPermission('settlement.weight');
         $conversion = $canBill
             ? self::conversionReadiness($reportId, $report, $items)
             : ['allowed' => false, 'blocked_reason' => '没有执行该操作的电子权限'];
@@ -710,6 +914,19 @@ class CustomerReportLogic extends BaseLogic
             'convert' => [
                 'allowed' => $conversion['allowed'],
                 'blocked_reason' => $conversion['blocked_reason'],
+            ],
+            'record_processing_weights' => [
+                'allowed' => $canRecordWeight
+                    && in_array((string)($report['status'] ?? ''), self::SUBMITTED, true)
+                    && bccomp((string)($report['shortage_base_qty'] ?? '0'), '0', self::SCALE) === 0
+                    && $items !== []
+                    && count(array_filter($items, static fn(array $item): bool => (array)($item['processing_groups'] ?? []) !== [])) === count($items)
+                    && !DeliveryInventoryLogic::hasCompletedDelivery($reportId),
+                'blocked_reason' => !$canRecordWeight
+                    ? '没有录入最终实重的电子权限'
+                    : (bccomp((string)($report['shortage_base_qty'] ?? '0'), '0', self::SCALE) !== 0
+                        ? '报货单仍有采购缺口'
+                        : '当前报货单不能录入加工组实重'),
             ],
         ];
     }
@@ -764,6 +981,13 @@ class CustomerReportLogic extends BaseLogic
         }
         if ($items === []) {
             return $unavailable('报货单没有可转销售的明细');
+        }
+        $usesProcessingGroups = Db::name('customer_report_processing_group')
+            ->where('tenant_id', self::tenantId())
+            ->where('report_id', $reportId)
+            ->count() > 0;
+        if ($usesProcessingGroups) {
+            return $unavailable('加工组报货请先录入分组实重并确认真实交付，系统会生成待结算销售单');
         }
         $items = array_values(array_filter(
             $items,

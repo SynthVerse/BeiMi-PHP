@@ -211,6 +211,7 @@ SQL;
             'ALTER TABLE `la_sales_order` ADD COLUMN `source_id` int unsigned NOT NULL DEFAULT 0',
             'ALTER TABLE `la_sales_order` ADD COLUMN `source_version` int unsigned NOT NULL DEFAULT 0',
             'ALTER TABLE `la_order_goods` ADD COLUMN `base_quantity` decimal(18,4) NOT NULL DEFAULT 0.0000',
+            'ALTER TABLE `la_order_goods` ADD COLUMN `actual_base_qty` decimal(18,4) NOT NULL DEFAULT 0.0000',
             'ALTER TABLE `la_order_goods` ADD COLUMN `pricing_unit_id` int unsigned NOT NULL DEFAULT 0',
             "ALTER TABLE `la_order_goods` ADD COLUMN `source_line_type` varchar(32) NOT NULL DEFAULT ''",
             'ALTER TABLE `la_order_goods` ADD COLUMN `source_line_id` int unsigned NOT NULL DEFAULT 0',
@@ -295,6 +296,10 @@ SQL;
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260819_000004_customer_sales_print_receipts.sql')));
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260922_000001_customer_report_weight_requirements.sql')));
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260925_000001_procedure_generation_modes.sql')));
+        $purchaseBatchSchema = (string)file_get_contents($root . '/database/migrations/20260827_000001_create_purchase_batch.sql');
+        $this->runStatements($this->authoritativeCreateTable($purchaseBatchSchema, 'purchase_batch'));
+        $this->runStatements($this->authoritativeCreateTable($purchaseBatchSchema, 'purchase_batch_supply_order'));
+        $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260925_000002_processing_groups_and_purchase_plans.sql')));
         self::$customerReportSchemaReady = true;
     }
 
@@ -304,7 +309,7 @@ SQL;
             Db::name('sales_delivery_correction')->where('tenant_id', self::TENANT_ID)->delete();
         } catch (\Throwable) {
         }
-        foreach (['customer_sales_print_log', 'sales_weight_difference_todo', 'sales_settlement_action', 'sales_order_version', 'customer_sales_preference', 'sales_settlement_setting', 'negative_inventory_action', 'negative_inventory_todo', 'negative_inventory_attribution', 'fulfillment_delivery_loss', 'fulfillment_delivery_remainder', 'line_vehicle_return_event', 'line_vehicle_trip_report', 'line_vehicle_trip', 'line_vehicle_schedule', 'fulfillment_delivery_item', 'fulfillment_delivery_event', 'third_party_driver', 'negative_inventory_setting', 'fulfillment_ticket_control', 'fulfillment_paper_copy', 'fulfillment_item_change', 'fulfillment_print_log', 'fulfillment_task', 'fulfillment_task_group', 'employee_permission', 'employee_process', 'employee', 'work_process', 'audit_log', 'receivable_flow', 'stock_flow', 'order_goods', 'sales_order', 'sales_return_order', 'customer_report_reservation', 'customer_report_item', 'customer_report', 'customer_report_batch', 'customer_goods_report_preference', 'warehouse_sku_balance', 'warehouse_goods_balance', 'goods_supplier_price_history', 'goods_supplier', 'goods_sku_spec_value', 'goods_dimension_setting', 'goods_spec_value', 'goods_sku', 'goods_spec', 'goods_spec_template', 'goods_alias', 'goods_units_binding', 'goods_unit', 'warehouse', 'goods', 'customer'] as $table) {
+        foreach (['purchase_plan_allocation', 'purchase_plan_arrival', 'purchase_plan_source', 'purchase_plan', 'purchase_batch_supply_order', 'purchase_batch', 'customer_report_processing_group_process', 'customer_report_processing_group', 'customer_sales_print_log', 'sales_weight_difference_todo', 'sales_settlement_action', 'sales_order_version', 'customer_sales_preference', 'sales_settlement_setting', 'negative_inventory_action', 'negative_inventory_todo', 'negative_inventory_attribution', 'fulfillment_delivery_loss', 'fulfillment_delivery_remainder', 'line_vehicle_return_event', 'line_vehicle_trip_report', 'line_vehicle_trip', 'line_vehicle_schedule', 'fulfillment_delivery_item', 'fulfillment_delivery_event', 'third_party_driver', 'negative_inventory_setting', 'fulfillment_ticket_control', 'fulfillment_paper_copy', 'fulfillment_item_change', 'fulfillment_print_log', 'fulfillment_task', 'fulfillment_task_group', 'employee_permission', 'employee_process', 'employee', 'work_process', 'audit_log', 'receivable_flow', 'stock_flow', 'order_goods', 'sales_order', 'sales_return_order', 'customer_report_reservation', 'customer_report_item', 'customer_report', 'customer_report_batch', 'customer_goods_report_preference', 'warehouse_sku_balance', 'warehouse_goods_balance', 'goods_supplier_price_history', 'goods_supplier', 'goods_sku_spec_value', 'goods_dimension_setting', 'goods_spec_value', 'goods_sku', 'goods_spec', 'goods_spec_template', 'goods_alias', 'goods_units_binding', 'goods_unit', 'warehouse', 'goods', 'customer'] as $table) {
             try {
                 Db::name($table)->where('tenant_id', self::TENANT_ID)->delete();
             } catch (\Throwable) {
