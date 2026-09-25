@@ -343,15 +343,6 @@ final class WorkforceLogic extends BaseLogic
             self::setError('员工姓名和手机号不能为空');
             return false;
         }
-        $processIds = array_values(array_unique(array_filter(array_map('intval', (array)($params['process_ids'] ?? [])), static fn(int $value): bool => $value > 0)));
-        $allowedProcessIds = Db::name('work_process')->where('tenant_id', self::tenantId())->whereIn('id', $processIds)->whereNull('delete_time')->column('id');
-        sort($processIds);
-        $allowedProcessIds = array_map('intval', $allowedProcessIds);
-        sort($allowedProcessIds);
-        if ($processIds !== $allowedProcessIds) {
-            self::setError('包含不存在的工序');
-            return false;
-        }
         $permissionKeys = self::normalizeStrings((array)($params['permission_keys'] ?? []), 80, 64);
         $known = self::permissionCatalog()['keys'];
         foreach ($permissionKeys as $permissionKey) {
@@ -363,7 +354,7 @@ final class WorkforceLogic extends BaseLogic
         sort($permissionKeys);
         $bindUserId = max(0, (int)($params['bind_user_id'] ?? 0));
         try {
-            Db::transaction(static function () use (&$id, $name, $mobile, $bindUserId, $params, $processIds, $permissionKeys): void {
+            Db::transaction(static function () use (&$id, $name, $mobile, $bindUserId, $params, $permissionKeys): void {
                 $now = time();
                 $data = [
                     'name' => $name,
@@ -380,10 +371,6 @@ final class WorkforceLogic extends BaseLogic
                     Db::name('employee')->where('tenant_id', self::tenantId())->where('id', $id)->update($data);
                 } else {
                     $id = (int)Db::name('employee')->insertGetId($data + ['tenant_id' => self::tenantId(), 'create_time' => $now]);
-                }
-                Db::name('employee_process')->where('tenant_id', self::tenantId())->where('employee_id', $id)->delete();
-                foreach ($processIds as $processId) {
-                    Db::name('employee_process')->insert(['tenant_id' => self::tenantId(), 'employee_id' => $id, 'process_id' => $processId, 'create_time' => $now]);
                 }
                 Db::name('employee_permission')->where('tenant_id', self::tenantId())->where('employee_id', $id)->delete();
                 foreach ($permissionKeys as $permissionKey) {
@@ -412,20 +399,6 @@ final class WorkforceLogic extends BaseLogic
             return false;
         }
         return self::employeeById($id);
-    }
-
-    /** @return array<int,array<string,mixed>> */
-    public static function candidatesForProcess(int $processId): array
-    {
-        $rows = Db::name('employee')->alias('e')->join('employee_process ep', 'ep.employee_id=e.id AND ep.tenant_id=e.tenant_id')
-            ->where('e.tenant_id', self::tenantId())->where('ep.process_id', $processId)->where('e.is_enabled', 1)->whereNull('e.delete_time')
-            ->field('e.id,e.name,e.mobile,e.bind_user_id')->order(['e.name' => 'asc', 'e.id' => 'asc'])->select()->toArray();
-        foreach ($rows as &$row) {
-            $row['bind_user_id'] = (int)($row['bind_user_id'] ?? 0);
-            $row['login_mode'] = $row['bind_user_id'] > 0 ? 'bound' : 'paper_only';
-        }
-        unset($row);
-        return $rows;
     }
 
     public static function hasPermission(string $permissionKey): bool
@@ -505,8 +478,8 @@ final class WorkforceLogic extends BaseLogic
     {
         $employee['bind_user_id'] = (int)($employee['bind_user_id'] ?? 0);
         $employee['login_mode'] = $employee['bind_user_id'] > 0 ? 'bound' : 'paper_only';
-        $employee['process_ids'] = array_map('intval', Db::name('employee_process')->where('tenant_id', self::tenantId())->where('employee_id', (int)$employee['id'])->order('process_id')->column('process_id'));
-        $employee['processes'] = $employee['process_ids'] === [] ? [] : Db::name('work_process')->where('tenant_id', self::tenantId())->whereIn('id', $employee['process_ids'])->order(['sort' => 'asc', 'id' => 'asc'])->field('id,code,name')->select()->toArray();
+        $employee['historical_process_ids'] = array_map('intval', Db::name('employee_process')->where('tenant_id', self::tenantId())->where('employee_id', (int)$employee['id'])->order('process_id')->column('process_id'));
+        $employee['historical_processes'] = $employee['historical_process_ids'] === [] ? [] : Db::name('work_process')->where('tenant_id', self::tenantId())->whereIn('id', $employee['historical_process_ids'])->order(['sort' => 'asc', 'id' => 'asc'])->field('id,code,name')->select()->toArray();
         $employee['permission_keys'] = Db::name('employee_permission')->where('tenant_id', self::tenantId())->where('employee_id', (int)$employee['id'])->order('permission_key')->column('permission_key');
         $employee['permission_count'] = count($employee['permission_keys']);
         return $employee;

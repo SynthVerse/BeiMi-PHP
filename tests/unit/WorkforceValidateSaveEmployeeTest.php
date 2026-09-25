@@ -19,7 +19,6 @@ final class WorkforceValidateSaveEmployeeTest extends TestCase
             'mobile' => '13900000000',
             'bind_user_id' => 0,
             'is_enabled' => 1,
-            'process_ids' => [2],
             'permission_keys' => [],
         ]), $validate->getError());
     }
@@ -34,7 +33,6 @@ final class WorkforceValidateSaveEmployeeTest extends TestCase
             'mobile' => '13900000000',
             'bind_user_id' => 0,
             'is_enabled' => 1,
-            'process_ids' => [2],
             'permission_keys' => [],
         ]), $validate->getError());
     }
@@ -49,7 +47,6 @@ final class WorkforceValidateSaveEmployeeTest extends TestCase
             'mobile' => '13900000000',
             'bind_user_id' => 0,
             'is_enabled' => 1,
-            'process_ids' => [2],
             'permission_keys' => [],
         ]));
     }

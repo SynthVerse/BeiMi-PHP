@@ -12,7 +12,6 @@ final class WorkforceValidate extends BaseValidate
         'mobile' => 'require|max:30',
         'bind_user_id' => 'integer|egt:0',
         'is_enabled' => 'in:0,1',
-        'process_ids' => 'array',
         'permission_keys' => 'array',
         'keyword' => 'max:60',
         'trigger_type' => 'in:report_selection,inventory_shortage,all_processing_completed',
@@ -23,7 +22,7 @@ final class WorkforceValidate extends BaseValidate
 
     public function sceneEmployees() { return $this->only(['keyword', 'is_enabled']); }
     public function sceneEmployee() { return $this->only(['id']); }
-    public function sceneSaveEmployee() { return $this->only(['id', 'name', 'mobile', 'bind_user_id', 'is_enabled', 'process_ids', 'permission_keys'])->remove('id', 'require|gt')->append('id', 'egt:0'); }
+    public function sceneSaveEmployee() { return $this->only(['id', 'name', 'mobile', 'bind_user_id', 'is_enabled', 'permission_keys'])->remove('id', 'require|gt')->append('id', 'egt:0'); }
     public function sceneStatusEmployee() { return $this->only(['id', 'is_enabled'])->append('is_enabled', 'require'); }
     public function sceneProcesses() { return $this->only(['keyword', 'is_enabled']); }
     public function sceneSaveProcess() { return $this->only(['id', 'name', 'trigger_type', 'keywords', 'sort', 'is_enabled'])->remove('id', 'require'); }

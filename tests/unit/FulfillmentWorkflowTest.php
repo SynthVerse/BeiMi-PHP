@@ -305,7 +305,7 @@ final class FulfillmentWorkflowTest extends TestCase
         self::assertSame('unrecognized_remark', Db::name('fulfillment_task')->where('report_id', (int)$unknown['id'])->where('task_type', 'exception')->value('exception_code'));
     }
 
-    public function test_employee_capability_and_electronic_permissions_are_only_saved_when_checked(): void
+    public function test_employee_electronic_permissions_ignore_legacy_process_capability_input(): void
     {
         $killFish = WorkforceLogic::saveProcess([
             'name' => '杀鱼', 'trigger_type' => 'report_selection', 'is_enabled' => 1, 'sort' => 10,
@@ -321,7 +321,7 @@ final class FulfillmentWorkflowTest extends TestCase
             'permission_keys' => ['task.view', 'task.print'],
         ]);
         self::assertNotFalse($employee, WorkforceLogic::getError());
-        self::assertSame([(int)$killFish['id']], $employee['process_ids']);
+        self::assertSame([], $employee['historical_process_ids']);
         self::assertSame(['task.print', 'task.view'], $employee['permission_keys']);
         self::assertNotContains('task.assign', $employee['permission_keys']);
         self::assertNotContains('employee.manage', $employee['permission_keys']);
@@ -1175,7 +1175,7 @@ final class FulfillmentWorkflowTest extends TestCase
         self::assertNotFalse($process, WorkforceLogic::getError());
         $employee = WorkforceLogic::saveEmployee([
             'name' => '仅查看员工', 'mobile' => '13800000066', 'bind_user_id' => 996601, 'is_enabled' => 1,
-            'process_ids' => [(int)$process['id']], 'permission_keys' => ['task.view'],
+            'permission_keys' => ['task.view'],
         ]);
         self::assertNotFalse($employee, WorkforceLogic::getError());
         request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID];
