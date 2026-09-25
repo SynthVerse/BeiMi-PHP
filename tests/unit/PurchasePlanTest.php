@@ -7,6 +7,7 @@ namespace tests\unit;
 use app\api\jxc\logic\CustomerReportBatchLogic;
 use app\api\jxc\logic\CustomerReportLogic;
 use app\api\jxc\logic\PurchasePlanLogic;
+use app\api\jxc\logic\SupplyOrderLogic;
 use app\api\jxc\logic\WarehouseSkuBalanceService;
 use app\api\jxc\logic\WorkforceLogic;
 use PHPUnit\Framework\TestCase;
@@ -129,6 +130,16 @@ final class PurchasePlanTest extends TestCase
         WarehouseSkuBalanceForGoodsTestAdapter::inbound($warehouseId, $goodsId, '4.0000');
         $this->holdArrivalForTest($firstBatchId, $warehouseId, $skuId, '4.0000');
         self::assertSame('0.0000', WarehouseSkuBalanceService::available($warehouseId, $skuId));
+        $firstSupplyOrderId = (int)Db::name('purchase_batch_supply_order')
+            ->where('tenant_id', self::TENANT_ID)->where('purchase_batch_id', $firstBatchId)
+            ->value('supply_order_id');
+        self::assertFalse(SupplyOrderLogic::edit(['id' => $firstSupplyOrderId]));
+        self::assertSame(
+            '采购计划到货批次的子进货单不可编辑，请按原到货事实完成分配，差异另行办理采购退货或新建到货批次',
+            SupplyOrderLogic::getError()
+        );
+        self::assertSame('4.0000', (string)Db::name('purchase_batch')
+            ->where('tenant_id', self::TENANT_ID)->where('id', $firstBatchId)->value('plan_held_qty'));
         self::assertFalse(PurchasePlanLogic::terminate([
             'id' => (int)$plan['id'],
             'reason' => '尚有未分配到货，不应终止',
@@ -275,7 +286,25 @@ final class PurchasePlanTest extends TestCase
             'create_time' => $now,
             'update_time' => $now,
         ]);
-        $supplyOrderId = 900000 + $batchId;
+        $supplyOrderId = (int)Db::name('supply_order')->insertGetId([
+            'tenant_id' => self::TENANT_ID,
+            'order_sn' => 'TEST-SO-' . uniqid(),
+            'supplier_id' => 1,
+            'supplier_name' => '测试供应商',
+            'warehouse_id' => $warehouseId,
+            'order_money' => '0.00',
+            'order_pay_money' => '0.00',
+            'order_arrears_money' => '0.00',
+            'datetimesingle' => $now,
+            'status' => 1,
+            'purpose_type' => 'supply',
+            'purchase_batch_id' => $batchId,
+            'remarks' => '',
+            'admin_id' => self::ADMIN_ID,
+            'idempotent_key' => 'test-supply-' . uniqid(),
+            'create_time' => $now,
+            'update_time' => $now,
+        ]);
         Db::name('purchase_batch_supply_order')->insert([
             'tenant_id' => self::TENANT_ID,
             'purchase_batch_id' => $batchId,

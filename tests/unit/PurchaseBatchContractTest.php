@@ -50,6 +50,7 @@ final class PurchaseBatchContractTest extends TestCase
         self::assertStringContainsString('PurchaseBatchLogic::refreshSummaryWithinTransaction', $supply);
         self::assertStringContainsString('采购批次子进货单不可变更供应商', $supply);
         self::assertStringContainsString('采购批次子进货单不可删除', $supply);
+        self::assertStringContainsString('采购计划到货批次的子进货单不可编辑', $supply);
         self::assertStringContainsString('仓库、采购日期和总备注由采购批次统一维护', $supply);
         $matrix = $this->read('app/api/jxc/logic/GoodsSupplierMatrixLogic.php');
         self::assertStringContainsString("available_for_purchase'] ?? 0) === 1", $matrix);

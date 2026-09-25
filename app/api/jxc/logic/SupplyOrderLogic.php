@@ -171,6 +171,10 @@ class SupplyOrderLogic extends BaseLogic
             self::setError('进货单不存在');
             return false;
         }
+        if (self::isPurchasePlanBatch((int)($order->purchase_batch_id ?? 0), $tenantId)) {
+            self::setError('采购计划到货批次的子进货单不可编辑，请按原到货事实完成分配，差异另行办理采购退货或新建到货批次');
+            return false;
+        }
 
 
         $built = self::buildOrderData($params, $order->toArray());
@@ -187,6 +191,9 @@ class SupplyOrderLogic extends BaseLogic
                 ->findOrEmpty();
             if ($order->isEmpty()) {
                 throw new BusinessException('进货单不存在');
+            }
+            if (self::isPurchasePlanBatch((int)($order->purchase_batch_id ?? 0), $tenantId, true)) {
+                throw new BusinessException('采购计划到货批次的子进货单不可编辑，请按原到货事实完成分配，差异另行办理采购退货或新建到货批次');
             }
             $built = self::buildOrderData($params, $order->toArray());
             if ($built === false) {
@@ -576,6 +583,19 @@ class SupplyOrderLogic extends BaseLogic
             ],
             'goods' => $goodsRows,
         ];
+    }
+
+    private static function isPurchasePlanBatch(int $purchaseBatchId, int $tenantId, bool $lock = false): bool
+    {
+        if ($purchaseBatchId <= 0) {
+            return false;
+        }
+        $query = PurchaseBatch::where('id', $purchaseBatchId)->where('tenant_id', $tenantId);
+        if ($lock) {
+            $query->lock(true);
+        }
+        $batch = $query->findOrEmpty();
+        return !$batch->isEmpty() && (int)($batch->purchase_plan_id ?? 0) > 0;
     }
 
     protected static function buildGoodsRows(array $goods, int $supplierId, int $datetimesingle): array|false
