@@ -18,16 +18,12 @@ final class CustomerReportWeightRequirementContractTest extends TestCase
         self::assertStringContainsString('{{prefix}}customer_report_item', $sql);
     }
 
-    public function test_specification_shortage_endpoint_is_wired(): void
+    public function test_legacy_specification_shortage_endpoint_is_not_exposed(): void
     {
         $root = dirname(__DIR__, 2);
-        self::assertStringContainsString(
+        self::assertStringNotContainsString(
             "Route::post('jxc/tasks/specification_shortage', 'jxc.FulfillmentTask/specificationShortage')",
             (string)file_get_contents($root . '/app/api/route/jxc.php')
-        );
-        self::assertStringContainsString(
-            'public static function specificationShortage',
-            (string)file_get_contents($root . '/app/api/jxc/logic/FulfillmentTaskLogic.php')
         );
         $logic = (string)file_get_contents($root . '/app/api/jxc/logic/FulfillmentTaskLogic.php');
         self::assertStringContainsString("\$specificationShortagePrefix . ':' . \$round", $logic);

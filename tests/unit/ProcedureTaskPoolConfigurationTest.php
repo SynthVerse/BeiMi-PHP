@@ -118,6 +118,26 @@ final class ProcedureTaskPoolConfigurationTest extends TestCase
         self::assertSame('工序已有历史任务，只能停用', WorkforceLogic::getError());
     }
 
+    public function test_historical_employee_procedure_link_is_preserved_and_blocks_deletion(): void
+    {
+        $process = WorkforceLogic::saveProcess([
+            'name' => '旧工序', 'trigger_type' => 'report_selection', 'is_enabled' => 1, 'sort' => 10,
+        ]);
+        self::assertNotFalse($process, WorkforceLogic::getError());
+        $employeeId = (int)Db::name('employee')->insertGetId([
+            'tenant_id' => self::TENANT_ID, 'name' => '历史员工', 'mobile' => '13800000088',
+            'bind_user_id' => 0, 'is_enabled' => 0, 'create_time' => time(), 'update_time' => time(),
+        ]);
+        Db::name('employee_process')->insert([
+            'tenant_id' => self::TENANT_ID, 'employee_id' => $employeeId,
+            'process_id' => (int)$process['id'], 'create_time' => time(),
+        ]);
+
+        self::assertFalse(WorkforceLogic::deleteProcess(['id' => (int)$process['id']]));
+        self::assertSame('工序已有历史员工关联，只能停用', WorkforceLogic::getError());
+        self::assertSame(1, Db::name('employee_process')->where('employee_id', $employeeId)->count());
+    }
+
     public function test_enabling_automatic_procedures_recovers_waiting_configuration_exceptions(): void
     {
         $customerId = $this->createCustomer('配置恢复客户');

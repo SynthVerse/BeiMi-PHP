@@ -189,7 +189,6 @@ final class CustomerReportRouteContractTest extends TestCase
             "Route::post('jxc/customer_report/batch_process', 'jxc.CustomerReport/batchProcess');",
             "Route::post('jxc/customer_report/batch_end', 'jxc.CustomerReport/batchEnd');",
             "Route::get('jxc/customer_report/batch_detail', 'jxc.CustomerReport/batchDetail');",
-            "Route::post('jxc/tasks/recover_exception', 'jxc.FulfillmentTask/recoverException');",
             "Route::post('jxc/tasks/paper_control', 'jxc.FulfillmentTask/paperControl');",
             "Route::post('jxc/tasks/control_print_data', 'jxc.FulfillmentTask/controlPrintData');",
             "Route::post('jxc/tasks/control_print_result', 'jxc.FulfillmentTask/controlPrintResult');",

@@ -1517,6 +1517,9 @@ final class FulfillmentTaskLogic extends BaseLogic
                     . ((int)$paperCopy['printed_time'] > 0 ? date('m-d H:i', (int)$paperCopy['printed_time']) : '打印时间待确认');
             }
             unset($paperCopy);
+            $task['paper_controls'] = Db::name('fulfillment_ticket_control')->where('tenant_id', self::tenantId())
+                ->where('task_id', (int)$task['id'])->where('status', '<>', 'closed')->order('id')
+                ->field('id,action_type,reason,status')->select()->toArray();
             $accounted = Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
                 ->where('task_id', (int)$task['id'])->where('accounted_time', '>', 0)->order('accounted_time desc,id desc')->find();
             $task['recovery_mode'] = $accounted && in_array((string)$accounted['account_reason'], ['lost', 'damaged', 'illegible'], true)

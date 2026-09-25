@@ -285,11 +285,12 @@ final class WorkforceLogic extends BaseLogic
             self::setError('工序已有历史任务，只能停用');
             return false;
         }
-        Db::transaction(static function () use ($id): void {
-            Db::name('employee_process')->where('tenant_id', self::tenantId())->where('process_id', $id)->delete();
-            Db::name('work_process')->where('tenant_id', self::tenantId())->where('id', $id)
-                ->update(['is_enabled' => 0, 'delete_time' => time(), 'update_time' => time()]);
-        });
+        if (Db::name('employee_process')->where('tenant_id', self::tenantId())->where('process_id', $id)->count() > 0) {
+            self::setError('工序已有历史员工关联，只能停用');
+            return false;
+        }
+        Db::name('work_process')->where('tenant_id', self::tenantId())->where('id', $id)
+            ->update(['is_enabled' => 0, 'delete_time' => time(), 'update_time' => time()]);
         return ['id' => $id];
     }
 
