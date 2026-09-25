@@ -43,12 +43,14 @@ final class FinanceOpeningService
                 'count' => count($rows), 'total' => $unknown ? null : $total, 'unknown_count' => $unknown,
             ];
         }
+        $blockerDetails = $this->blockerDetails($preparation, $categories, $items);
         return [
             'tenant_id' => $this->tenantId, 'status' => $book['status'], 'version' => (int)$book['version'],
             'activation_date' => $preparation['activation_date'] ?? null,
             'preparation_version' => (int)($preparation['version'] ?? 0),
             'categories' => $categories, 'items' => $items,
-            'blockers' => $this->blockers($preparation, $categories, $items),
+            'blockers' => array_column($blockerDetails, 'message'),
+            'blocker_details' => $blockerDetails,
             'activation_available' => self::isActivationAvailableForTenant($this->tenantId),
             'created_by' => json_decode($book['created_by'], true),
             'last_modified_by' => json_decode($book['last_modified_by'], true),
@@ -231,43 +233,60 @@ final class FinanceOpeningService
         }
     }
 
-    private function blockers(array $preparation, array $categories, array $items): array
+    /**
+     * 保留 blockers 的文本兼容契约，同时为客户端提供受限且可验证的处理目标。
+     * 客户端只能按 entity_type 映射到已知页面，不能消费服务端传入的任意路由。
+     */
+    private function blockerDetails(array $preparation, array $categories, array $items): array
     {
-        $errors = [];
+        $details = [];
         $date = $preparation['activation_date'] ?? null;
-        if (!$date) { $errors[] = '请先保存财务启用日期'; }
+        if (!$date) { $details[] = $this->blocker('opening_activation_date_required', '请先保存财务启用日期', null, 'preparation'); }
         foreach (['inventory_cost_reviewed', 'legacy_settlement_reviewed', 'excluded_business_reviewed'] as $flag) {
-            if (empty($preparation[$flag])) { $errors[] = '启用准备中仍有未完成的旧账核对'; break; }
+            if (empty($preparation[$flag])) { $details[] = $this->blocker('opening_preparation_incomplete', '启用准备中仍有未完成的旧账核对', null, 'preparation'); break; }
         }
         foreach ($categories as $category) {
             $state = $category['review']['state'];
-            if (in_array($state, ['unknown', 'unresolved'], true)) { $errors[] = $category['title'] . '尚未核清或承接'; }
-            if ($state === 'none' && $category['count'] > 0) { $errors[] = $category['title'] . '标记无余额但仍有明细'; }
-            if ($state === 'complete' && $category['count'] === 0) { $errors[] = $category['title'] . '尚未录入明细，无余额请明确核对'; }
+            if (in_array($state, ['unknown', 'unresolved'], true)) { $details[] = $this->blocker('opening_category_review_required', $category['title'] . '尚未核清或承接', $category['key'], 'opening_category'); }
+            if ($state === 'none' && $category['count'] > 0) { $details[] = $this->blocker('opening_category_none_with_items', $category['title'] . '标记无余额但仍有明细', $category['key'], 'opening_category'); }
+            if ($state === 'complete' && $category['count'] === 0) { $details[] = $this->blocker('opening_category_complete_without_items', $category['title'] . '尚未录入明细，无余额请明确核对', $category['key'], 'opening_category'); }
         }
         foreach ($items as $item) {
             $label = self::CATEGORIES[$item['category']] . ' #' . $item['id'];
-            if ($item['amount'] === null) { $errors[] = $label . '金额尚未核实'; }
-            if (!$item['subject_name']) { $errors[] = $label . '对象已失效'; }
-            if ($date && $item['historical_date'] && $item['historical_date'] >= $date) { $errors[] = $label . '历史日期必须早于启用日期'; }
+            if ($item['amount'] === null) { $details[] = $this->blocker('opening_item_amount_unresolved', $label . '金额尚未核实', $item['category'], 'opening_item', (int)$item['id']); }
+            if (!$item['subject_name']) { $details[] = $this->blocker('opening_item_subject_missing', $label . '对象已失效', $item['category'], 'opening_item', (int)$item['id']); }
+            if ($date && $item['historical_date'] && $item['historical_date'] >= $date) { $details[] = $this->blocker('opening_item_historical_date_invalid', $label . '历史日期必须早于启用日期', $item['category'], 'opening_item', (int)$item['id']); }
             foreach (FinanceOpeningCategory::metadata($item['category'])['detail_fields'] as $field) {
                 $value = $item['details'][$field['key']] ?? '';
-                if (($field['required'] ?? true) && ($value === '' || $value === [])) { $errors[] = $label . $field['label'] . '尚未核实'; }
+                if (($field['required'] ?? true) && ($value === '' || $value === [])) { $details[] = $this->blocker('opening_item_detail_unresolved', $label . $field['label'] . '尚未核实', $item['category'], 'opening_item', (int)$item['id']); }
                 if ($field['key'] === 'benefit_month' && $value !== '' && $date && $value > (new \DateTimeImmutable($date))->modify('-1 day')->format('Y-m')) {
-                    $errors[] = $label . '原受益月份不能晚于期初截点';
+                    $details[] = $this->blocker('opening_item_benefit_month_invalid', $label . '原受益月份不能晚于期初截点', $item['category'], 'opening_item', (int)$item['id']);
                 }
             }
-            foreach (FinanceOpeningAssets::blockers($this->tenantId, $item, $date) as $error) { $errors[] = $label . $error; }
+            foreach (FinanceOpeningAssets::blockers($this->tenantId, $item, $date) as $error) { $details[] = $this->blocker('opening_item_composition_invalid', $label . $error, $item['category'], 'opening_item', (int)$item['id']); }
         }
         $accountIds = array_column(array_filter($items, static fn(array $item): bool => $item['category'] === 'account'), 'subject_id');
         foreach (Db::name('finance_account')->where('tenant_id', $this->tenantId)->column('id') as $id) {
-            if (!in_array((int)$id, array_map('intval', $accountIds), true)) { $errors[] = '资金账户 #' . $id . '缺少核实余额，零余额也须录入'; }
+            if (!in_array((int)$id, array_map('intval', $accountIds), true)) { $details[] = $this->blocker('opening_account_subject_missing', '资金账户 #' . $id . '缺少核实余额，零余额也须录入', 'account', 'opening_category'); }
         }
         $stockIds = array_map('intval', array_column(array_filter($items, static fn(array $item): bool => $item['category'] === 'inventory'), 'subject_id'));
-        foreach (FinanceOpeningAssets::stockAtCutoff($this->tenantId, $date, $this->lockStock) as $stock) {
-            if (bccomp($stock['cutoff_qty'], '0', 4) !== 0 && !in_array((int)$stock['id'], $stockIds, true)) { $errors[] = '存在截点实物库存 #' . $stock['id'] . '，须完成仓库与 SKU 历史成本承接后启用'; }
+        $stocks = FinanceOpeningAssets::stockAtCutoff($this->tenantId, $date, $this->lockStock);
+        $stockNames = FinanceOpeningAssets::inventoryNames($this->tenantId, array_column($stocks, 'id'));
+        foreach ($stocks as $stock) {
+            if (bccomp($stock['cutoff_qty'], '0', 4) !== 0 && !in_array((int)$stock['id'], $stockIds, true)) {
+                $details[] = $this->blocker('opening_inventory_subject_missing', '存在截点实物库存 #' . $stock['id'] . '，须完成仓库与 SKU 历史成本承接后启用', 'inventory', 'opening_subject', (int)$stock['id'], $stockNames[(int)$stock['id']] ?? ('库存 #' . $stock['id']));
+            }
         }
-        return array_merge($errors, FinanceOpeningAssets::payableBlockers($items));
+        foreach (FinanceOpeningAssets::payableBlockers($items) as $error) {
+            $details[] = $this->blocker('opening_cross_category_composition_invalid', $error, 'deferred', 'opening_category');
+        }
+        return $details;
+    }
+
+    private function blocker(string $code, string $message, ?string $category = null, ?string $entityType = null, ?int $entityId = null, ?string $entityName = null): array
+    {
+        return ['code' => $code, 'message' => $message, 'category' => $category,
+            'entity_type' => $entityType, 'entity_id' => $entityId, 'entity_name' => $entityName];
     }
 
     private function items(): array

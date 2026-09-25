@@ -36,6 +36,18 @@ final class FinanceOpeningAssets
         return array_map(static fn(array $row): array => self::atCutoff($tenantId, $row, $date, $lock), $rows);
     }
 
+    /** @return array<int, string> */
+    public static function inventoryNames(int $tenantId, array $ids): array
+    {
+        $ids = array_values(array_filter(array_map('intval', $ids)));
+        if (!$ids) { return []; }
+        return array_column(
+            self::inventoryQuery($tenantId)->whereIn('b.id', $ids)->select()->toArray(),
+            'name',
+            'id',
+        );
+    }
+
     private static function atCutoff(int $tenantId, array $row, ?string $date, bool $lock): array
     {
         $row['cutoff_qty'] = $row['on_hand_qty'];

@@ -48,6 +48,9 @@ final class CustomerReportWorkflowTest extends TestCase
         self::assertSame('3.00', (string)$first['total_base_qty']);
         self::assertSame('2.00', (string)$first['reserved_base_qty']);
         self::assertSame('1.00', (string)$first['shortage_base_qty']);
+        self::assertNotEmpty($first['task_group']['tasks']);
+        self::assertSame((int)$first['id'], (int)$first['task_group']['tasks'][0]['report_id']);
+        self::assertArrayHasKey('status', $first['task_group']['tasks'][0]);
 
         $again = CustomerReportLogic::submit($payload);
         self::assertNotFalse($again, CustomerReportLogic::getError());
@@ -434,6 +437,13 @@ final class CustomerReportWorkflowTest extends TestCase
         $payload['items'][0]['pricing_unit_name'] = '件';
         $report = CustomerReportLogic::submit($payload);
         self::assertNotFalse($report, CustomerReportLogic::getError());
+        self::assertFalse($report['actions']['convert']['allowed']);
+        self::assertSame(
+            '必须先确认真实交付事件；车辆离店或手工改任务状态都不能触发出库',
+            $report['actions']['convert']['blocked_reason']
+        );
+        self::assertTrue($report['actions']['cancel']['allowed']);
+        self::assertTrue($report['actions']['cancel']['reason_required']);
 
         self::assertFalse(CustomerReportLogic::convert(['id' => $report['id'], 'version' => $report['version']]));
         self::assertSame('必须先确认真实交付事件；车辆离店或手工改任务状态都不能触发出库', CustomerReportLogic::getError());

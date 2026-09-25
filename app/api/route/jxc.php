@@ -37,8 +37,8 @@ Route::group('', function () {
     Route::post('finance/preparation/save', 'jxc.FinanceSetup/savePreparation');
     Route::get('finance/accounts', 'jxc.FinanceSetup/accounts');
     Route::post('finance/accounts/save', 'jxc.FinanceSetup/saveAccount');
-    Route::get('finance/opening', 'jxc.FinanceSetup/opening');
     Route::get('finance/opening/subjects', 'jxc.FinanceSetup/openingSubjects');
+    Route::get('finance/opening', 'jxc.FinanceSetup/opening');
     Route::post('finance/opening/item/save', 'jxc.FinanceSetup/saveOpeningItem');
     Route::post('finance/opening/item/remove', 'jxc.FinanceSetup/removeOpeningItem');
     Route::post('finance/opening/review/save', 'jxc.FinanceSetup/saveOpeningReview');

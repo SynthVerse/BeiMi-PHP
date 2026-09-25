@@ -206,46 +206,20 @@ class CustomerReportLogic extends BaseLogic
                     }
                     return self::detailById($reportId);
                 }
-                if (
-                    (int)$report->version !== $version
-                    || (string)$report->status !== 'submitted_ready'
-                    || bccomp((string)$report->shortage_base_qty, '0', self::SCALE) !== 0
-                ) {
+                if ((int)$report->version !== $version) {
                     self::setError('报货单不存在、版本冲突或不可转销售'); return false;
                 }
                 $items = CustomerReportItem::where('tenant_id', self::tenantId())->where('report_id', $reportId)
                     ->whereNull('delete_time')->order(['goods_id' => 'asc', 'warehouse_id' => 'asc', 'id' => 'asc'])
                     ->lock(true)->select()->toArray();
-                if ($items === []) { self::setError('报货单没有可转销售的明细'); return false; }
-                $items = array_values(array_filter(
-                    $items,
-                    static fn(array $item): bool => (string)($item['fulfillment_status'] ?? 'pending') !== 'undelivered'
-                ));
-                if ($items === []) { self::setError('报货单没有实际交付明细，不能生成销售单'); return false; }
-
-                $hasTaskGroup = Db::name('fulfillment_task_group')->where('tenant_id', self::tenantId())->where('report_id', $reportId)->count() > 0;
-                if ($hasTaskGroup) {
-                    if (FulfillmentTaskLogic::hasUnaccountedPaperForReport($reportId)) {
-                        self::setError('仍有未回收或未完成作废控制的纸质工票，不能结算');
-                        return false;
-                    }
-                    if (!DeliveryInventoryLogic::hasCompletedDelivery($reportId)) {
-                        self::setError('必须先确认真实交付事件；车辆离店或手工改任务状态都不能触发出库');
-                        return false;
-                    }
-                    $bookkeeping = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())
-                        ->where('report_id', $reportId)->where('source_key', 'report:' . $reportId . ':bookkeeping')->lock(true)->find();
-                    if (!$bookkeeping || (string)$bookkeeping['status'] !== 'ready_to_bill') {
-                        self::setError('送货与记账工票尚未完成，不能提前开单');
-                        return false;
-                    }
-                    $settlements = FulfillmentTaskLogic::settlementValuesForReport($reportId);
-                    foreach ($items as $item) {
-                        if (!isset($settlements[(int)$item['id']])) {
-                            self::setError('每条加工明细的最终工序票都必须先回收并录入大于 0 的最终实重、实价');
-                            return false;
-                        }
-                    }
+                $readiness = self::conversionReadiness($reportId, $report->toArray(), $items, true);
+                if (!$readiness['allowed']) {
+                    self::setError($readiness['blocked_reason']);
+                    return false;
+                }
+                $items = $readiness['items'];
+                if ($readiness['has_task_group']) {
+                    $settlements = $readiness['settlements'];
                     $now = time();
                     foreach ($items as &$item) {
                         $itemId = (int)$item['id'];
@@ -709,8 +683,143 @@ class CustomerReportLogic extends BaseLogic
         $data=$report->toArray();
         $data['items']=CustomerReportItem::where('tenant_id',self::tenantId())->where('report_id',$id)->whereNull('delete_time')->order('sort asc,id asc')->select()->toArray();
         $data['sales_orders'] = self::salesOrdersByReport($id);
-        $data['task_group'] = Db::name('fulfillment_task_group')->where('tenant_id', self::tenantId())->where('report_id', $id)->find() ?: null;
+        $data['task_group'] = FulfillmentTaskLogic::groupForReport($id);
+        $data['actions'] = self::actionStates($id, $data, $data['items']);
         return $data;
+    }
+
+    /** @param array<string,mixed> $report @param array<int,array<string,mixed>> $items @return array<string,array<string,mixed>> */
+    private static function actionStates(int $reportId, array $report, array $items): array
+    {
+        $canEditReport = WorkforceLogic::hasPermission('report.edit');
+        $canBill = WorkforceLogic::hasPermission('settlement.bill');
+        $conversion = $canBill
+            ? self::conversionReadiness($reportId, $report, $items)
+            : ['allowed' => false, 'blocked_reason' => '没有执行该操作的电子权限'];
+        $cancellation = $canEditReport
+            ? self::cancellationActionState($reportId, $report)
+            : ['allowed' => false, 'blocked_reason' => '没有执行该操作的电子权限', 'reason_required' => true];
+        return [
+            'retry' => [
+                'allowed' => $canEditReport && (string)($report['status'] ?? '') === 'submitted_shortage',
+                'blocked_reason' => !$canEditReport
+                    ? '没有执行该操作的电子权限'
+                    : ((string)($report['status'] ?? '') === 'submitted_shortage' ? '' : '当前报货单没有可重试的缺货预留'),
+            ],
+            'cancel' => $cancellation,
+            'convert' => [
+                'allowed' => $conversion['allowed'],
+                'blocked_reason' => $conversion['blocked_reason'],
+            ],
+        ];
+    }
+
+    /** @param array<string,mixed> $report @return array{allowed:bool,blocked_reason:string,reason_required:bool} */
+    private static function cancellationActionState(int $reportId, array $report): array
+    {
+        $unavailable = static fn(string $reason): array => [
+            'allowed' => false,
+            'blocked_reason' => $reason,
+            'reason_required' => true,
+        ];
+        if (in_array((string)($report['status'] ?? ''), ['cancelled', 'completed'], true)) {
+            return $unavailable('当前报货单不可取消');
+        }
+        $tasks = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())
+            ->where('report_id', $reportId)->order('id')->select()->toArray();
+        $taskIds = array_map(static fn(array $task): int => (int)$task['id'], $tasks);
+        $hasPrintAttempt = $taskIds !== [] && Db::name('fulfillment_print_log')
+            ->where('tenant_id', self::tenantId())->whereIn('task_id', $taskIds)->count() > 0;
+        $hasStartedTask = array_filter($tasks, static fn(array $task): bool => !in_array(
+            (string)$task['status'], ['unassigned', 'blocked', 'printable', 'exception', 'cancelled'], true
+        )) !== [];
+        if ($hasPrintAttempt || $hasStartedTask) {
+            return $unavailable('报货单已经开始纸票或履约作业，不能取消');
+        }
+        return ['allowed' => true, 'blocked_reason' => '', 'reason_required' => true];
+    }
+
+    /**
+     * 在详情展示和转换事务中共用同一份履约前置条件。
+     * 库存与版本仍必须在转换事务内再次裁决，避免详情读取后的并发变化绕过校验。
+     *
+     * @param array<string,mixed> $report
+     * @param array<int,array<string,mixed>> $items
+     * @return array{allowed:bool,blocked_reason:string,items:array<int,array<string,mixed>>,has_task_group:bool,settlements:array<int,array<string,mixed>>}
+     */
+    private static function conversionReadiness(int $reportId, array $report, array $items, bool $lock = false): array
+    {
+        $unavailable = static fn(string $reason): array => [
+            'allowed' => false,
+            'blocked_reason' => $reason,
+            'items' => [],
+            'has_task_group' => false,
+            'settlements' => [],
+        ];
+        if (
+            (string)($report['status'] ?? '') !== 'submitted_ready'
+            || bccomp((string)($report['shortage_base_qty'] ?? '0'), '0', self::SCALE) !== 0
+        ) {
+            return $unavailable('报货单不存在、版本冲突或不可转销售');
+        }
+        if ($items === []) {
+            return $unavailable('报货单没有可转销售的明细');
+        }
+        $items = array_values(array_filter(
+            $items,
+            static fn(array $item): bool => (string)($item['fulfillment_status'] ?? 'pending') !== 'undelivered'
+        ));
+        if ($items === []) {
+            return $unavailable('报货单没有实际交付明细，不能生成销售单');
+        }
+
+        $hasTaskGroup = Db::name('fulfillment_task_group')->where('tenant_id', self::tenantId())
+            ->where('report_id', $reportId)->count() > 0;
+        $settlements = [];
+        if ($hasTaskGroup) {
+            if (FulfillmentTaskLogic::hasUnaccountedPaperForReport($reportId)) {
+                return $unavailable('仍有未回收或未完成作废控制的纸质工票，不能结算');
+            }
+            if (!DeliveryInventoryLogic::hasCompletedDelivery($reportId)) {
+                return $unavailable('必须先确认真实交付事件；车辆离店或手工改任务状态都不能触发出库');
+            }
+            $bookkeepingQuery = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())
+                ->where('report_id', $reportId)->where('source_key', 'report:' . $reportId . ':bookkeeping');
+            if ($lock) { $bookkeepingQuery->lock(true); }
+            $bookkeeping = $bookkeepingQuery->find();
+            if (!$bookkeeping || (string)$bookkeeping['status'] !== 'ready_to_bill') {
+                return $unavailable('送货与记账工票尚未完成，不能提前开单');
+            }
+            $settlements = FulfillmentTaskLogic::settlementValuesForReport($reportId);
+            foreach ($items as $item) {
+                $itemId = (int)$item['id'];
+                if (!isset($settlements[$itemId])) {
+                    return $unavailable('每条加工明细的最终工序票都必须先回收并录入大于 0 的最终实重、实价');
+                }
+                if (bccomp((string)$settlements[$itemId]['actual_price'], '0.00', self::SCALE) <= 0) {
+                    return $unavailable('未定价明细不能开单，请先录入大于 0 的已确认单价');
+                }
+            }
+        } else {
+            foreach ($items as $item) {
+                if ((string)$item['price_status'] !== 'priced') {
+                    return $unavailable('报货单存在未定价明细，不能转销售');
+                }
+                if (
+                    bccomp((string)$item['shortage_base_qty'], '0', self::SCALE) !== 0
+                    || bccomp((string)$item['reserved_base_qty'], (string)$item['expected_base_qty'], self::SCALE) !== 0
+                ) {
+                    return $unavailable('报货单库存预留不完整，不能转销售');
+                }
+            }
+        }
+        return [
+            'allowed' => true,
+            'blocked_reason' => '',
+            'items' => $items,
+            'has_task_group' => $hasTaskGroup,
+            'settlements' => $settlements,
+        ];
     }
 
     /** @return array<int,array<string,mixed>> */

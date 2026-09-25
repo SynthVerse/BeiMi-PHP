@@ -2,6 +2,126 @@
 
 按根因去重。每条记录必须指向实际防线；仅有“不要这样做”的提醒不算已防护。
 
+## PIT-0075：关联查询用 `column()` 覆盖限定字段导致 SQL 列歧义
+
+日期：2026-09-21
+
+### 报告来源
+
+- 生成原因：工作流要求
+- 主工作流：Matt Pocock
+- 实际使用的 Skill：
+  - `Matt Pocock / diagnosing-bugs`（自动调用）
+  - `用户级自定义 / prevent-repeat-pitfalls`（自动调用）
+  - `Codex 内建 .system / computer-use`（自动调用）
+- 说明：诊断微信小程序 `GET /api/finance/opening` 的 HTTP 500；已通过 ORM 实现确认字段覆盖机制，并补充库存名称查询的回归测试。
+
+- 状态：防护中
+- 首次发生：2026-09-21
+- 最近发生：2026-09-21
+- 复发次数：0
+- 适用范围：ThinkORM 关联查询在已有 `field(...)` / 列别名时调用 `column()` 的读取路径
+- 相关问题：PIT-0074（同一财务期初入口曾出现不同根因的请求异常）
+
+### 触发场景
+
+期初快照包含至少一条仓库 SKU 余额、需要把库存余额 ID 映射为“仓库 / SKU”名称时，
+`FinanceOpeningService::snapshot()` 调用 `FinanceOpeningAssets::inventoryNames()`。小程序请求
+`GET /api/finance/opening` 因此收到 HTTP 500。
+
+### 根因
+
+`inventoryQuery()` 已用 `b.id` 和 `CONCAT(...) AS name` 限定字段；随后调用 ThinkORM
+`column('name', 'id')`。该 ORM 的 `PDOConnection::column()` 会移除原有 `field` 选项，再以未限定的
+`name,id` 重建字段。查询同时关联 `warehouse_sku_balance`、`warehouse` 和 `goods_sku`，所以 MySQL 无法判定
+`id` 属于哪张表并抛出列歧义异常；控制器只转换领域异常，PDO 异常最终成为 HTTP 500。
+
+### 错误做法
+
+在多表关联的已定义字段查询上调用 `column()`，假设它会保留原先的表前缀和别名；或只在没有库存余额的
+空结果上验证期初快照。
+
+### 正确做法
+
+保留 `inventoryQuery()` 中的 `b.id` 与 `name` 别名，使用 `select()->toArray()` 读取结果后以 PHP
+`array_column(..., 'name', 'id')` 建立名称映射。关联查询需要按列聚合时，先确认 ORM 是否会替换现有字段选项。
+
+### 防线
+
+- 自动化防线：`tests/unit/FinanceOpeningWorkflowTest.php::test_inventory_names_preserve_the_joined_id_and_name_aliases`
+  构造真实仓库、SKU 与库存余额，并直接断言库存 ID 到 `仓库 / SKU` 名称的映射；修复前该查询会由
+  未限定 `id` 触发 SQL 列歧义。
+- 架构防线：`FinanceOpeningAssets::inventoryNames()` 保留统一的 `inventoryQuery()` 字段契约，不再由 ORM
+  重新定义投影字段。
+- 决策与知识：本机隔离 MySQL `127.0.0.1:3307` 当前拒绝连接，新增 PHPUnit 防线尚无法执行；仅完成
+  PHP 语法与静态差异检查，不能宣称数据库回归或线上接口已经验证。
+
+### 发生记录
+
+| 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-09-21 | 小程序财务期初待办修复 | 页面存在 47 项库存待办时刷新期初快照，`/api/finance/opening` 返回 500 | 既有测试覆盖空库存、库存期初保存和待办结构，但没有直接执行多表关联名称映射；本机隔离数据库也不可用，无法运行 PHPUnit。 |
+
+## PIT-0074：非完全匹配下短路由抢占更具体的财务路由
+
+日期：2026-09-17
+
+### 报告来源
+
+- 生成原因：工作流要求
+- 主工作流：Matt Pocock
+- 实际使用的 Skill：`Matt Pocock / diagnosing-bugs`、`Matt Pocock / tdd`、`用户级自定义 / prevent-repeat-pitfalls`（自动调用）。
+- 说明：微信小程序期初对象列表请求收到整份期初快照；通过路由层红—绿回归确认并防止同类静态前缀路由再次被较短规则抢占。
+
+- 状态：已防护
+- 首次发生：2026-09-17
+- 最近发生：2026-09-17
+- 复发次数：0
+- 适用范围：`app/api/route/jxc.php` 中存在静态前缀关系、且未显式开启完全匹配的 ThinkPHP 路由
+- 相关问题：无
+
+### 触发场景
+
+小程序请求 `GET /api/finance/opening/subjects?category=inventory&page=1`，HTTP 与业务状态均成功，
+但 `data` 返回含 `status`、`version`、`categories`、`items` 和 `blockers` 的期初快照，缺少对象列表
+契约要求的 `lists`。同一现象在客户应收和库存对象选择器中稳定复现。
+
+### 根因
+
+项目配置 `route_complete_match=false`。ThinkPHP 对无变量静态路由允许前缀匹配，并按声明顺序返回
+第一个命中的规则。`finance/opening` 原先声明在 `finance/opening/subjects` 前，因此较长请求被短路由
+抢先分派到 `FinanceSetupController::opening()`；对象列表控制器与 `FinanceOpeningService::subjects()`
+本身均正确，逻辑层测试无法覆盖这个路由分派错误。
+
+### 错误做法
+
+只验证控制器和业务逻辑能返回 `lists`，却把更短的静态路由写在共享前缀的具体路由之前；或看到
+业务成功响应后在前端把缺失的 `lists` 静默降级为空数组，掩盖服务端分派错误。
+
+### 正确做法
+
+在当前非完全匹配配置下，始终按“更具体的长路由在前、共享前缀的短路由在后”声明；列表接口
+继续返回显式的 `lists`、`page` 和 `has_more` 契约，前端继续拒绝错误形状而不是吞掉异常。
+
+### 防线
+
+- 自动化防线：`tests/unit/FinanceOpeningRouteContractTest.php` 固定要求 `finance/opening/subjects`
+  的声明位置早于 `finance/opening`；红测为 `1 test / 3 assertions / 1 failure`，修复后同一测试为
+  `1 test / 3 assertions` 通过。
+- 业务回归：`tests/unit/FinanceOpeningWorkflowTest.php` 完整通过 `31 tests / 511 assertions`，其中对象
+  查询继续覆盖门店隔离、主客户过滤、分页和库存对象列表。
+- 架构防线：`app/api/route/jxc.php` 将具体对象路由置于快照路由之前；`sub-finance/opening/edit.vue`
+  继续对 `lists` 执行数组契约校验，避免错误响应再次扩散为模板崩溃。
+- 决策与知识：当前修复尚未部署到 `lantu.makesgoal.com`；部署后必须用登录态重新验证真实 HTTP
+  响应和微信页面。受当前协作限制未调用需要子代理的 `code-review` Skill，已执行聚焦差异复核，
+  不把未部署状态写成线上通过。
+
+### 发生记录
+
+| 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-09-17 | 财务一期测试环境留痕验收 | 客户与库存对象接口成功返回期初快照而非对象列表 | 原有测试直接调用 `FinanceSetupLogic::opening(..., true)`，绕过了 HTTP 路由匹配；没有约束共享前缀静态路由的声明顺序。 |
+
 ## PIT-0073：迁移使用隔离库不支持的索引条件语法
 
 日期：2026-09-13
@@ -2742,3 +2862,49 @@ Vue2 使用新文件、组件或顶层常量验证，不以 Options API 对象�
 ### 验证证据
 
 2026-09-14：连接失败为 1 test / 0 assertions / 1 error；恢复后完整 Finance 测试通过 328 tests / 11470 assertions，无跳过。采购回归加载旧 `FinancePurchaseBatches` 时稳定失败（预期第21条来源、实际为空），当前实现通过 1 test / 59 assertions。全程仅使用本机隔离测试库；不以这些结果宣称生产部署或实体手机验收已完成。
+
+## PIT-0076：宝塔站点 PHP 与终端 CLI PHP 版本不一致
+
+- 状态：防护中
+- 首次发生：2026-09-25
+- 最近发生：2026-09-25
+- 复发次数：0
+- 适用范围：宝塔生产发布、`scripts/migrate.php` 及其他 PHP CLI 运维命令
+- 相关问题：PIT-0016
+
+### 触发场景
+
+宝塔站点已经选择 PHP 8.x，但 SSH 终端直接执行 `php scripts/migrate.php --dry-run`
+时，系统 PATH 仍解析到 PHP 7.x；迁移器在解析 `--env=` 参数时调用 PHP 8 才提供的
+`str_starts_with()`，因此在访问数据库前报 `Call to undefined function`。不带参数执行时，
+空参数列表没有触发回调，可能表现为迁移成功，从而掩盖 CLI 运行时仍不受支持。
+
+### 根因
+
+宝塔 PHP-FPM 站点版本与 shell 中的 `php` 命令是两套独立选择。项目
+`composer.json` 要求 PHP `>=8.0`，但发布步骤只提示执行迁移，没有在所有迁移命令前
+验证实际 CLI 可执行文件和版本，也没有阻止操作人员把站点面板版本误认为终端版本。
+
+### 错误做法
+
+看到宝塔站点使用 PHP 8.x 就直接运行 PATH 中的 `php`；或因为无参数迁移偶然成功，
+就认定 `--dry-run`／`--status` 报错只是迁移器功能问题。
+
+### 正确做法
+
+发布前先执行 `php -v` 和 `which php`。若 PATH 不是项目要求的版本，使用宝塔安装目录中
+明确的 PHP 8 可执行文件，例如 `/www/server/php/82/bin/php`，依次执行
+`--dry-run`、正式迁移和 `--status`；同时确认站点 PHP-FPM 与 CLI 均满足
+`composer.json` 的版本约束。
+
+### 防线
+
+- 现有人工防线：`docs/deployment-guide.md` 已写明 PHP `>=8.0`，但只放在 Composer 故障排查中，尚未覆盖迁移前置检查和 PHP-FPM／CLI 分离。
+- 自动化防线：待后续发布任务在迁移器或宝塔发布脚本入口增加清晰的 `PHP_VERSION_ID` 前置失败，并用契约测试固定“版本检查先于参数解析和数据库连接”。本次仅诊断生产现象，未获授权修改发布代码，因此状态保持“防护中”。
+- 临时运行约束：生产运维命令显式使用经 `-v` 验证的 `/www/server/php/8x/bin/php`，不依赖 shell PATH。
+
+### 发生记录
+
+| 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-09-25 | 客户重量范围迁移宝塔发布 | `--dry-run` 因 `str_starts_with()` 未定义而失败，无参数迁移随后成功 | 部署文档没有在迁移步骤验证 CLI PHP，且无参数路径没有调用参数过滤回调，造成环境兼容的假象。 |

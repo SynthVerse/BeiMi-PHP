@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace tests\unit;
 
+use app\api\jxc\logic\FinanceOpeningAssets;
 use app\api\jxc\logic\FinanceOpeningService;
 use app\api\jxc\logic\FinanceSetupLogic;
 use app\api\jxc\logic\WorkforceLogic;
@@ -501,6 +502,36 @@ final class FinanceOpeningWorkflowTest extends TestCase
         self::assertSame('12.3456', $active['items'][0]['details']['quantity']);
         self::assertSame('12.3456', Db::name('warehouse_sku_balance')->where('id', $stockId)->value('on_hand_qty'));
         self::assertSame(0, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
+    public function test_inventory_names_preserve_the_joined_id_and_name_aliases(): void
+    {
+        $warehouse = $this->createCustomerReportWarehouse('名称映射仓库');
+        $goods = $this->createCustomerReportGoods('名称映射商品', 'NAME-MAP');
+        $sku = $this->customerReportSkuId($goods);
+        $stockId = (int)Db::name('warehouse_sku_balance')->insertGetId(['tenant_id' => self::TENANT_ID,
+            'warehouse_id' => $warehouse, 'goods_id' => $goods, 'sku_id' => $sku, 'on_hand_qty' => '1.0000', 'available_qty' => '1.0000']);
+
+        self::assertSame(['' . $stockId => '名称映射仓库 / 名称映射商品'], FinanceOpeningAssets::inventoryNames(self::TENANT_ID, [$stockId]));
+    }
+
+    public function test_missing_inventory_opening_exposes_a_structured_direct_entry(): void
+    {
+        $this->prepare();
+        $warehouse = $this->createCustomerReportWarehouse('待承接仓库');
+        $goods = $this->createCustomerReportGoods('待承接商品', 'TODO-STOCK');
+        $sku = $this->customerReportSkuId($goods);
+        $stockId = (int)Db::name('warehouse_sku_balance')->insertGetId(['tenant_id' => self::TENANT_ID,
+            'warehouse_id' => $warehouse, 'goods_id' => $goods, 'sku_id' => $sku, 'on_hand_qty' => '5.0000', 'available_qty' => '5.0000']);
+
+        $opening = FinanceSetupLogic::opening();
+        $blocker = array_values(array_filter($opening['blocker_details'], static fn(array $detail): bool => $detail['code'] === 'opening_inventory_subject_missing'))[0];
+
+        self::assertSame('inventory', $blocker['category']);
+        self::assertSame('opening_subject', $blocker['entity_type']);
+        self::assertSame($stockId, $blocker['entity_id']);
+        self::assertStringContainsString('待承接仓库', $blocker['entity_name']);
+        self::assertStringContainsString('截点实物库存 #' . $stockId, $blocker['message']);
     }
 
     public function test_inventory_cutoff_reverses_later_movements_and_does_not_omit_sold_out_sku(): void

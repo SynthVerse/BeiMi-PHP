@@ -258,6 +258,27 @@ final class FulfillmentTaskLogic extends BaseLogic
         ];
     }
 
+    /** @return array<string,mixed>|null */
+    public static function groupForReport(int $reportId): ?array
+    {
+        $group = Db::name('fulfillment_task_group')
+            ->where('tenant_id', self::tenantId())
+            ->where('report_id', $reportId)
+            ->find();
+        if (!$group) {
+            return null;
+        }
+        $tasks = Db::name('fulfillment_task')
+            ->where('tenant_id', self::tenantId())
+            ->where('group_id', (int)$group['id'])
+            ->where('status', '<>', 'cancelled')
+            ->order(['process_id' => 'asc', 'id' => 'asc'])
+            ->select()
+            ->toArray();
+        $group['tasks'] = self::hydrateTasks($tasks);
+        return $group;
+    }
+
     /** @return array{lists:array<int,array<string,mixed>>,count:int}|false */
     public static function lists(array $params): array|false
     {
