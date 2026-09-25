@@ -23,19 +23,15 @@ final class FulfillmentTaskLogic extends BaseLogic
         if ((string)$report['status'] === 'cancelled') {
             return;
         }
-        WorkforceLogic::ensureInitialProcesses();
         $processes = Db::name('work_process')->where('tenant_id', $tenantId)->where('is_enabled', 1)->whereNull('delete_time')
             ->order(['sort' => 'asc', 'id' => 'asc'])->select()->toArray();
         $purchaseProcess = null;
         $deliveryProcess = null;
-        $selectableProcesses = [];
         foreach ($processes as $process) {
             if ((string)$process['trigger_type'] === 'inventory_shortage') {
                 $purchaseProcess ??= $process;
             } elseif ((string)$process['trigger_type'] === 'all_processing_completed') {
                 $deliveryProcess ??= $process;
-            } elseif ((string)$process['trigger_type'] === 'report_selection') {
-                $selectableProcesses[] = $process;
             }
         }
         $now = time();
@@ -65,7 +61,7 @@ final class FulfillmentTaskLogic extends BaseLogic
             ->whereNull('delete_time')->order(['sort' => 'asc', 'id' => 'asc'])->select()->toArray();
         foreach ($items as $item) {
             $itemId = (int)$item['id'];
-            $requirement = trim((string)($item['processing_requirement'] ?: $item['line_remark']));
+            $requirement = trim((string)$item['processing_requirement']);
             $shortageTaskId = 0;
             if (bccomp((string)$item['shortage_base_qty'], '0.00', 2) > 0 && $purchaseProcess !== null) {
                 $key = 'item:' . $itemId . ':shortage';
@@ -112,17 +108,6 @@ final class FulfillmentTaskLogic extends BaseLogic
             $blockingPurchaseTaskId = $shortageTaskId > 0 ? $shortageTaskId : $specificationShortageTaskId;
 
             $matched = [];
-            if ($requirement !== '') {
-                foreach ($selectableProcesses as $process) {
-                    $keywords = json_decode((string)$process['trigger_keywords'], true);
-                    foreach (is_array($keywords) ? $keywords : [] as $keyword) {
-                        if ((string)$keyword !== '' && mb_stripos($requirement, (string)$keyword) !== false) {
-                            $matched[(int)$process['id']] = $process;
-                            break;
-                        }
-                    }
-                }
-            }
             if ($requirement !== '' && $matched === []) {
                 $manual = Db::name('fulfillment_task')->alias('t')
                     ->join('work_process p', 'p.id=t.process_id AND p.tenant_id=t.tenant_id')
@@ -214,6 +199,26 @@ final class FulfillmentTaskLogic extends BaseLogic
             ->update(['status' => 'cancelled', 'update_time' => time()]);
     }
 
+    public static function resyncReportsWaitingForProcess(string $triggerType): void
+    {
+        $exceptionCode = match ($triggerType) {
+            'inventory_shortage' => 'missing_inventory_shortage_process',
+            'all_processing_completed' => 'missing_delivery_process',
+            default => '',
+        };
+        if ($exceptionCode === '') {
+            return;
+        }
+        $reportIds = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())
+            ->where('status', 'exception')->where('exception_code', $exceptionCode)
+            ->distinct(true)->column('report_id');
+        foreach (array_map('intval', $reportIds) as $reportId) {
+            if ($reportId > 0) {
+                self::syncForReport($reportId);
+            }
+        }
+    }
+
     /** @return array<string,mixed>|false */
     public static function dashboard(array $params): array|false
     {
@@ -221,7 +226,6 @@ final class FulfillmentTaskLogic extends BaseLogic
         if (!WorkforceLogic::requirePermission('task.view')) {
             return false;
         }
-        WorkforceLogic::ensureInitialProcesses();
         $deliveryDate = self::date((string)($params['delivery_date'] ?? ''));
         $groupIds = Db::name('fulfillment_task_group')->where('tenant_id', self::tenantId())->where('delivery_date', $deliveryDate)
             ->where('status', '<>', 'cancelled')->column('id');
@@ -244,7 +248,6 @@ final class FulfillmentTaskLogic extends BaseLogic
             $processGroups[] = [
                 'name' => $name,
                 'process_id' => (int)($processTasks[0]['process_id'] ?? 0),
-                'assignees' => array_values(array_unique(array_filter(array_column($processTasks, 'assignee_name')))),
                 'tasks' => $processTasks,
             ];
         }
@@ -1369,7 +1372,7 @@ final class FulfillmentTaskLogic extends BaseLogic
             'process_id' => (int)($process['id'] ?? 0),
             'process_name_snapshot' => $existing && trim((string)($existing['process_name_snapshot'] ?? '')) !== ''
                 ? (string)$existing['process_name_snapshot'] : (string)($process['name'] ?? ''),
-            'process_sort_snapshot' => $existing && (int)($existing['process_sort_snapshot'] ?? 0) > 0
+            'process_sort_snapshot' => $existing
                 ? (int)$existing['process_sort_snapshot'] : (int)($process['sort'] ?? 0),
             'task_type' => 'process',
             'exception_code' => '',
@@ -1491,7 +1494,6 @@ final class FulfillmentTaskLogic extends BaseLogic
             $task = self::ensureContentIdentity($task);
             $task['process_name'] = (string)($task['process_name_snapshot'] ?? '');
             $task['is_supplement'] = (int)Db::name('fulfillment_task_group')->where('tenant_id', self::tenantId())->where('id', (int)$task['group_id'])->value('is_supplement');
-            $task['candidates_count'] = (int)$task['process_id'] > 0 ? count(WorkforceLogic::candidatesForProcess((int)$task['process_id'])) : 0;
             $task['requires_settlement'] = (int)($settlementTaskIds[(int)$task['report_item_id']] ?? 0) === (int)$task['id'];
             $requirementItem = $items[(int)$task['report_item_id']] ?? [];
             $task['piece_weight_confirmed'] = (int)($requirementItem['piece_weight_confirmed'] ?? 0);
@@ -1522,6 +1524,7 @@ final class FulfillmentTaskLogic extends BaseLogic
             $task['recovery_exception_reason'] = $task['recovery_mode'] === 'exception' ? (string)$accounted['account_reason'] : '';
             $task['recovery_exception_note'] = $task['recovery_mode'] === 'exception' ? (string)$accounted['account_note'] : '';
             $task['ticket_display'] = self::ticketSnapshot($task);
+            unset($task['assignee_employee_id'], $task['assignee_name']);
         }
         unset($task);
         return $tasks;
@@ -1630,7 +1633,7 @@ final class FulfillmentTaskLogic extends BaseLogic
         return $result;
     }
 
-    /** @param array<string,mixed> $task @return array{label:string,type:string} */
+    /** @param array<string,mixed> $task @return array{label:string,type:string,trigger_type?:string} */
     private static function exceptionAction(array $task): array
     {
         if ($task['status'] === 'blocked') {
@@ -1639,10 +1642,15 @@ final class FulfillmentTaskLogic extends BaseLogic
         if ($task['status'] === 'print_failed') {
             return ['label' => '重试', 'type' => 'retry_print'];
         }
-        if ($task['status'] === 'unassigned') {
+        if (in_array((string)$task['exception_code'], ['missing_inventory_shortage_process', 'missing_delivery_process'], true)) {
+            if (!WorkforceLogic::hasPermission('process.manage')) {
+                return ['label' => '联系管理员', 'type' => 'contact_admin'];
+            }
             return [
-                'label' => (string)$task['process_name'] === '采购' ? '生成采购票' : '去分配',
-                'type' => 'assign',
+                'label' => '配置工序',
+                'type' => 'configure_process',
+                'trigger_type' => (string)$task['exception_code'] === 'missing_inventory_shortage_process'
+                    ? 'inventory_shortage' : 'all_processing_completed',
             ];
         }
         return match ((string)$task['exception_code']) {

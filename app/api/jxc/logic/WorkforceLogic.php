@@ -23,7 +23,6 @@ final class WorkforceLogic extends BaseLogic
             ['key' => 'task.view', 'name' => '查看任务看板'],
             ['key' => 'task.print', 'name' => '首次打印工票'],
             ['key' => 'task.reprint', 'name' => '补打与重试工票'],
-            ['key' => 'task.recover', 'name' => '确认纸质工票回收'],
             ['key' => 'task.control', 'name' => '处理工票作废、异常补录与履约变更'],
         ],
         '结算' => [
@@ -202,7 +201,11 @@ final class WorkforceLogic extends BaseLogic
                 'create_time' => $now,
             ]);
         }
-        return self::processById($id);
+        $process = self::processById($id);
+        if ($process !== false && $isEnabled === 1) {
+            FulfillmentTaskLogic::resyncReportsWaitingForProcess($triggerType);
+        }
+        return $process;
     }
 
     /** @return array<string,mixed>|false */
@@ -231,7 +234,11 @@ final class WorkforceLogic extends BaseLogic
             self::setError('工序不存在或状态未变化');
             return false;
         }
-        return self::processById($id);
+        $result = self::processById($id);
+        if ($result !== false && $isEnabled === 1) {
+            FulfillmentTaskLogic::resyncReportsWaitingForProcess((string)$process['trigger_type']);
+        }
+        return $result;
     }
 
     /** @return array{lists:array<int,array<string,mixed>>,count:int} */
@@ -336,7 +343,6 @@ final class WorkforceLogic extends BaseLogic
             self::setError('员工姓名和手机号不能为空');
             return false;
         }
-        self::ensureInitialProcesses();
         $processIds = array_values(array_unique(array_filter(array_map('intval', (array)($params['process_ids'] ?? [])), static fn(int $value): bool => $value > 0)));
         $allowedProcessIds = Db::name('work_process')->where('tenant_id', self::tenantId())->whereIn('id', $processIds)->whereNull('delete_time')->column('id');
         sort($processIds);

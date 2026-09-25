@@ -307,9 +307,10 @@ final class FulfillmentWorkflowTest extends TestCase
 
     public function test_employee_capability_and_electronic_permissions_are_only_saved_when_checked(): void
     {
-        $processes = WorkforceLogic::processes([])['lists'];
-        $killFish = current(array_filter($processes, static fn(array $process): bool => $process['code'] === 'kill_fish'));
-        self::assertIsArray($killFish);
+        $killFish = WorkforceLogic::saveProcess([
+            'name' => '杀鱼', 'trigger_type' => 'report_selection', 'is_enabled' => 1, 'sort' => 10,
+        ]);
+        self::assertNotFalse($killFish, WorkforceLogic::getError());
 
         $employee = WorkforceLogic::saveEmployee([
             'name' => '阿强',
@@ -317,75 +318,45 @@ final class FulfillmentWorkflowTest extends TestCase
             'bind_user_id' => 0,
             'is_enabled' => 1,
             'process_ids' => [(int)$killFish['id']],
-            'permission_keys' => ['task.view', 'task.recover'],
+            'permission_keys' => ['task.view', 'task.print'],
         ]);
         self::assertNotFalse($employee, WorkforceLogic::getError());
         self::assertSame([(int)$killFish['id']], $employee['process_ids']);
-        self::assertSame(['task.recover', 'task.view'], $employee['permission_keys']);
+        self::assertSame(['task.print', 'task.view'], $employee['permission_keys']);
         self::assertNotContains('task.assign', $employee['permission_keys']);
         self::assertNotContains('employee.manage', $employee['permission_keys']);
     }
 
-    public function test_repeated_initial_process_upsert_preserves_operator_configuration(): void
+    public function test_legacy_initial_process_hook_does_not_mutate_operator_configuration(): void
     {
-        WorkforceLogic::ensureInitialProcesses();
-        $killFish = Db::name('work_process')->where('tenant_id', self::TENANT_ID)->where('code', 'kill_fish')->find();
-        $purchase = Db::name('work_process')->where('tenant_id', self::TENANT_ID)->where('code', 'purchase')->find();
-        self::assertIsArray($killFish);
-        self::assertIsArray($purchase);
-
-        Db::name('work_process')->where('id', (int)$killFish['id'])->update([
-            'name' => '水产精加工',
-            'trigger_keywords' => '["精加工"]',
-            'sort' => 88,
-            'is_enabled' => 0,
+        $process = WorkforceLogic::saveProcess([
+            'name' => '水产精加工', 'trigger_type' => 'report_selection', 'is_enabled' => 0, 'sort' => 88,
         ]);
-        Db::name('work_process')->where('id', (int)$purchase['id'])->update([
-            'name' => '紧急采购',
-            'trigger_keywords' => '["紧急"]',
-            'sort' => 99,
-            'trigger_type' => 'remark',
-            'is_enabled' => 0,
-        ]);
+        self::assertNotFalse($process, WorkforceLogic::getError());
 
         WorkforceLogic::ensureInitialProcesses();
 
-        $killFish = Db::name('work_process')->where('id', (int)$killFish['id'])->find();
-        self::assertSame('水产精加工', $killFish['name']);
-        self::assertSame('["精加工"]', $killFish['trigger_keywords']);
-        self::assertSame(88, (int)$killFish['sort']);
-        self::assertSame(0, (int)$killFish['is_enabled']);
-
-        $purchase = Db::name('work_process')->where('id', (int)$purchase['id'])->find();
-        self::assertSame('紧急采购', $purchase['name']);
-        self::assertSame('["紧急"]', $purchase['trigger_keywords']);
-        self::assertSame(99, (int)$purchase['sort']);
-        self::assertSame('shortage', $purchase['trigger_type']);
-        self::assertSame(1, (int)$purchase['is_enabled']);
+        $stored = Db::name('work_process')->where('id', (int)$process['id'])->find();
+        self::assertSame('水产精加工', $stored['name']);
+        self::assertSame('report_selection', $stored['trigger_type']);
+        self::assertSame(88, (int)$stored['sort']);
+        self::assertSame(0, (int)$stored['is_enabled']);
+        self::assertSame(1, Db::name('work_process')->where('tenant_id', self::TENANT_ID)->count());
     }
 
-    public function test_assignment_print_failure_retry_and_ticket_recovery_follow_state_machine(): void
+    public function test_public_pool_task_print_failure_and_retry_follow_print_state_machine(): void
     {
-        $processes = WorkforceLogic::processes([])['lists'];
-        $killFish = current(array_filter($processes, static fn(array $process): bool => $process['code'] === 'kill_fish'));
-        $packing = current(array_filter($processes, static fn(array $process): bool => $process['code'] === 'live_pack'));
-        $employee = WorkforceLogic::saveEmployee([
-            'name' => '阿强', 'mobile' => '13800000002', 'bind_user_id' => 0, 'is_enabled' => 1,
-            'process_ids' => [(int)$killFish['id']], 'permission_keys' => [],
+        $process = WorkforceLogic::saveProcess([
+            'name' => '杀鱼', 'trigger_type' => 'report_selection', 'is_enabled' => 1, 'sort' => 10,
         ]);
-        self::assertNotFalse($employee, WorkforceLogic::getError());
+        self::assertNotFalse($process, WorkforceLogic::getError());
 
         $taskId = (int)Db::name('fulfillment_task')->insertGetId([
             'tenant_id' => self::TENANT_ID, 'group_id' => 1, 'report_id' => 1, 'report_item_id' => 1,
-            'process_id' => (int)$packing['id'], 'task_type' => 'process', 'source_key' => 'test:assignment',
-            'status' => 'unassigned', 'is_settlement_task' => 0, 'ticket_no' => 'WT-TEST', 'create_time' => time(), 'update_time' => time(),
+            'process_id' => (int)$process['id'], 'process_name_snapshot' => '杀鱼', 'process_sort_snapshot' => 10,
+            'task_type' => 'process', 'source_key' => 'test:public-pool', 'status' => 'printable',
+            'is_settlement_task' => 0, 'ticket_no' => 'WT-TEST', 'create_time' => time(), 'update_time' => time(),
         ]);
-        self::assertFalse(FulfillmentTaskLogic::assign(['id' => $taskId, 'employee_id' => (int)$employee['id']]));
-
-        Db::name('fulfillment_task')->where('id', $taskId)->update(['process_id' => (int)$killFish['id']]);
-        $assigned = FulfillmentTaskLogic::assign(['id' => $taskId, 'employee_id' => (int)$employee['id']]);
-        self::assertNotFalse($assigned, FulfillmentTaskLogic::getError());
-        self::assertSame('printable', $assigned['status']);
 
         $print = FulfillmentTaskLogic::printData(['id' => $taskId]);
         self::assertNotFalse($print, FulfillmentTaskLogic::getError());
@@ -399,11 +370,6 @@ final class FulfillmentWorkflowTest extends TestCase
         self::assertNotFalse($retry, FulfillmentTaskLogic::getError());
         self::assertNotFalse(FulfillmentTaskLogic::printResult(['id' => $taskId, 'print_log_id' => $retry['print_log_id'], 'success' => 1, 'error_message' => '']));
         self::assertSame('printed', Db::name('fulfillment_task')->where('id', $taskId)->value('status'));
-
-        $recovered = FulfillmentTaskLogic::recover(['id' => $taskId, 'actual_weight' => '3.25', 'actual_price' => '28.00', 'recovery_note' => '纸票已回收']);
-        self::assertNotFalse($recovered, FulfillmentTaskLogic::getError());
-        self::assertSame('recovered', $recovered['status']);
-        self::assertSame('3.25', (string)$recovered['actual_weight']);
     }
 
     public function test_cancelled_report_idempotency_replay_does_not_revive_tasks(): void
@@ -1203,12 +1169,13 @@ final class FulfillmentWorkflowTest extends TestCase
         self::assertNotFalse($report, CustomerReportLogic::getError());
         $itemId = (int)$report['items'][0]['id'];
 
-        $process = current(array_filter(
-            WorkforceLogic::processes([])['lists'], static fn(array $row): bool => $row['code'] === 'kill_fish'
-        ));
+        $process = WorkforceLogic::saveProcess([
+            'name' => '杀鱼', 'trigger_type' => 'report_selection', 'is_enabled' => 1, 'sort' => 10,
+        ]);
+        self::assertNotFalse($process, WorkforceLogic::getError());
         $employee = WorkforceLogic::saveEmployee([
-            'name' => '仅回收员工', 'mobile' => '13800000066', 'bind_user_id' => 996601, 'is_enabled' => 1,
-            'process_ids' => [(int)$process['id']], 'permission_keys' => ['task.recover'],
+            'name' => '仅查看员工', 'mobile' => '13800000066', 'bind_user_id' => 996601, 'is_enabled' => 1,
+            'process_ids' => [(int)$process['id']], 'permission_keys' => ['task.view'],
         ]);
         self::assertNotFalse($employee, WorkforceLogic::getError());
         request()->adminInfo = ['root' => 0, 'tenant_id' => self::TENANT_ID];

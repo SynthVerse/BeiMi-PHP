@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace tests\unit;
 
+use app\api\jxc\logic\CustomerReportLogic;
+use app\api\jxc\logic\FulfillmentTaskLogic;
 use app\api\jxc\logic\WorkforceLogic;
 use PHPUnit\Framework\TestCase;
 use think\facade\Db;
@@ -20,6 +22,7 @@ final class ProcedureTaskPoolConfigurationTest extends TestCase
         $this->prepareCustomerReportRequestContext();
         $this->ensureCustomerReportTables();
         $this->cleanCustomerReportData();
+        $this->createCustomerReportUnit('件');
     }
 
     protected function tearDown(): void
@@ -113,5 +116,72 @@ final class ProcedureTaskPoolConfigurationTest extends TestCase
         ]), WorkforceLogic::getError());
         self::assertFalse(WorkforceLogic::deleteProcess(['id' => (int)$process['id']]));
         self::assertSame('工序已有历史任务，只能停用', WorkforceLogic::getError());
+    }
+
+    public function test_enabling_automatic_procedures_recovers_waiting_configuration_exceptions(): void
+    {
+        $customerId = $this->createCustomer('配置恢复客户');
+        $goodsId = $this->createCustomerReportGoods('配置恢复商品', 'CONFIG-RECOVERY');
+        $warehouseId = $this->createCustomerReportWarehouse('配置恢复仓');
+        $report = CustomerReportLogic::submit($this->fulfillmentPayload(
+            $customerId,
+            $goodsId,
+            $warehouseId,
+            'configuration-recovery-1',
+            '2',
+            ''
+        ));
+        self::assertNotFalse($report, CustomerReportLogic::getError());
+        self::assertSame(2, Db::name('fulfillment_task')->where('report_id', (int)$report['id'])
+            ->whereIn('exception_code', ['missing_inventory_shortage_process', 'missing_delivery_process'])
+            ->where('status', 'exception')->count());
+
+        self::assertNotFalse(WorkforceLogic::saveProcess([
+            'name' => '采购', 'trigger_type' => 'inventory_shortage', 'is_enabled' => 1, 'sort' => 10,
+        ]), WorkforceLogic::getError());
+        self::assertNotFalse(WorkforceLogic::saveProcess([
+            'name' => '送货', 'trigger_type' => 'all_processing_completed', 'is_enabled' => 1, 'sort' => 30,
+        ]), WorkforceLogic::getError());
+
+        self::assertSame(0, Db::name('fulfillment_task')->where('report_id', (int)$report['id'])
+            ->whereIn('exception_code', ['missing_inventory_shortage_process', 'missing_delivery_process'])
+            ->where('status', 'exception')->count());
+        self::assertSame(2, Db::name('fulfillment_task')->where('report_id', (int)$report['id'])
+            ->whereIn('source_key', [
+                'item:' . (int)$report['items'][0]['id'] . ':shortage',
+                'report:' . (int)$report['id'] . ':delivery',
+            ])->where('status', 'printable')->count());
+    }
+
+    public function test_zero_execution_order_snapshot_is_not_rewritten_after_catalog_reorder(): void
+    {
+        $delivery = WorkforceLogic::saveProcess([
+            'name' => '送货', 'trigger_type' => 'all_processing_completed', 'is_enabled' => 1, 'sort' => 0,
+        ]);
+        self::assertNotFalse($delivery, WorkforceLogic::getError());
+        $customerId = $this->createCustomer('顺序快照客户');
+        $goodsId = $this->createCustomerReportGoods('顺序快照商品', 'ORDER-SNAPSHOT');
+        $warehouseId = $this->createCustomerReportWarehouse('顺序快照仓');
+        $report = CustomerReportLogic::submit($this->fulfillmentPayload(
+            $customerId,
+            $goodsId,
+            $warehouseId,
+            'procedure-order-snapshot-1',
+            '1',
+            ''
+        ));
+        self::assertNotFalse($report, CustomerReportLogic::getError());
+        $taskId = (int)Db::name('fulfillment_task')->where('report_id', (int)$report['id'])
+            ->where('source_key', 'report:' . (int)$report['id'] . ':delivery')->value('id');
+        self::assertGreaterThan(0, $taskId);
+        self::assertSame(0, (int)Db::name('fulfillment_task')->where('id', $taskId)->value('process_sort_snapshot'));
+
+        self::assertNotFalse(WorkforceLogic::saveProcess([
+            'id' => (int)$delivery['id'], 'name' => '送货', 'trigger_type' => 'all_processing_completed',
+            'is_enabled' => 1, 'sort' => 50,
+        ]), WorkforceLogic::getError());
+        FulfillmentTaskLogic::syncForReport((int)$report['id']);
+
+        self::assertSame(0, (int)Db::name('fulfillment_task')->where('id', $taskId)->value('process_sort_snapshot'));
     }
 }
