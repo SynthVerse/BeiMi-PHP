@@ -384,6 +384,10 @@ class CustomerReportLogic extends BaseLogic
                 if ($report === false) { return false; }
                 $reportTasks = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('report_id', $reportId)
                     ->order('id asc')->lock(true)->field('id,status')->select()->toArray();
+                if (self::hasActivePurchasePlanSource($reportId, true)) {
+                    self::setError('报货缺货来源已归入活动采购计划，请先终止采购计划后再编辑');
+                    return false;
+                }
                 $startedTaskIds = [];
                 foreach ($reportTasks as $reportTask) {
                     if (in_array((string)$reportTask['status'], ['printed', 'in_progress', 'recovered', 'ready_to_bill', 'completed'], true)) {
@@ -448,6 +452,12 @@ class CustomerReportLogic extends BaseLogic
             return self::transactionWithRetry(static function () use ($reportId, $version) {
                 $report = self::editableReport($reportId, $version);
                 if ($report === false) { return false; }
+                Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('report_id', $reportId)
+                    ->order('id')->lock(true)->field('id')->select()->toArray();
+                if (self::hasActivePurchasePlanSource($reportId, true)) {
+                    self::setError('报货缺货来源已归入活动采购计划，请先终止采购计划后再重试缺货预留');
+                    return false;
+                }
                 $rows = CustomerReportItem::where('tenant_id', self::tenantId())->where('report_id', $reportId)->order(['sku_id' => 'asc', 'goods_id' => 'asc', 'warehouse_id' => 'asc', 'id' => 'asc'])->lock(true)->select()->toArray();
                 $now = time(); $summaryRows = [];
                 foreach ($rows as $row) {
@@ -506,6 +516,10 @@ class CustomerReportLogic extends BaseLogic
                     ->where('report_id', $reportId)->lock(true)->find();
                 $tasks = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())
                     ->where('report_id', $reportId)->order('id')->lock(true)->select()->toArray();
+                if (self::hasActivePurchasePlanSource($reportId, true)) {
+                    self::setError('报货缺货来源已归入活动采购计划，请先终止采购计划后再取消报货');
+                    return false;
+                }
                 $taskIds = array_map(static fn(array $task): int => (int)$task['id'], $tasks);
                 $hasPrintAttempt = $taskIds !== [] && Db::name('fulfillment_print_log')
                     ->where('tenant_id', self::tenantId())->whereIn('task_id', $taskIds)->lock(true)->count() > 0;
@@ -595,27 +609,38 @@ class CustomerReportLogic extends BaseLogic
                     self::setError('必须一次提交该报货单全部加工组的最终实重');
                     return false;
                 }
+                $expectedGroupIds = array_map(static fn(array $group): int => (int)$group['id'], $groups);
+                $submittedGroupIds = array_map('intval', array_keys($weights));
+                sort($expectedGroupIds, SORT_NUMERIC);
+                sort($submittedGroupIds, SORT_NUMERIC);
+                if ($expectedGroupIds !== $submittedGroupIds) {
+                    self::setError('提交的加工组与当前报货单不一致，请刷新后重试');
+                    return false;
+                }
+                $items = CustomerReportItem::where('tenant_id', self::tenantId())->where('report_id', $reportId)
+                    ->whereNull('delete_time')->order('id')->lock(true)->select()->toArray();
+                $groupedItemIds = array_values(array_unique(array_map(
+                    static fn(array $group): int => (int)$group['report_item_id'],
+                    $groups
+                )));
+                $reportItemIds = array_map(static fn(array $item): int => (int)$item['id'], $items);
+                sort($groupedItemIds, SORT_NUMERIC);
+                sort($reportItemIds, SORT_NUMERIC);
+                if ($items === [] || $groupedItemIds !== $reportItemIds) {
+                    self::setError('报货明细缺少加工分组，不能汇总最终实重');
+                    return false;
+                }
                 $totals = [];
                 $now = time();
                 foreach ($groups as $group) {
                     $groupId = (int)$group['id'];
-                    if (!isset($weights[$groupId])) {
-                        self::setError('提交的加工组与当前报货单不一致，请刷新后重试');
-                        return false;
-                    }
                     $itemId = (int)$group['report_item_id'];
                     $totals[$itemId] = bcadd($totals[$itemId] ?? '0.00', $weights[$groupId], self::SCALE);
                     Db::name('customer_report_processing_group')->where('tenant_id', self::tenantId())
                         ->where('id', $groupId)->update(['final_actual_weight' => $weights[$groupId], 'update_time' => $now]);
                 }
-                $items = CustomerReportItem::where('tenant_id', self::tenantId())->where('report_id', $reportId)
-                    ->whereNull('delete_time')->order('id')->lock(true)->select()->toArray();
                 foreach ($items as $item) {
                     $itemId = (int)$item['id'];
-                    if (!isset($totals[$itemId])) {
-                        self::setError('报货明细缺少加工分组，不能汇总最终实重');
-                        return false;
-                    }
                     CustomerReportItem::where('tenant_id', self::tenantId())->where('id', $itemId)->update([
                         'final_actual_weight' => $totals[$itemId],
                         'final_weight_task_id' => 0,
@@ -747,9 +772,9 @@ class CustomerReportLogic extends BaseLogic
     }
 
     /**
-     * 采购计划到货分配在其外层事务中调用；只预留明确分给该来源的数量。
+     * 采购计划到货已在采购批次事务内整体锁定；此处只把持有量归因到明确选择的来源。
      */
-    public static function allocatePurchaseForItemWithinTransaction(int $itemId, string $quantity): bool
+    public static function allocateHeldPurchaseForItemWithinTransaction(int $itemId, string $quantity): bool
     {
         self::clearError();
         $quantity = self::decimal($quantity);
@@ -766,15 +791,6 @@ class CustomerReportLogic extends BaseLogic
         $shortage = self::decimal((string)$item->shortage_base_qty);
         if (bccomp($quantity, $shortage, self::SCALE) > 0) {
             self::setError('采购来源分配数量超过当前未满足缺口');
-            return false;
-        }
-        $added = WarehouseSkuBalanceService::reserveUpToWithinTransaction(
-            (int)$item->warehouse_id,
-            (int)$item->sku_id,
-            $quantity
-        );
-        if ($added === false || bccomp($added, $quantity, self::SCALE) !== 0) {
-            self::setError('本次采购到货库存不足以完成所填来源分配');
             return false;
         }
         $now = time();
@@ -897,6 +913,7 @@ class CustomerReportLogic extends BaseLogic
         $canEditReport = WorkforceLogic::hasPermission('report.edit');
         $canBill = WorkforceLogic::hasPermission('settlement.bill');
         $canRecordWeight = WorkforceLogic::hasPermission('settlement.weight');
+        $hasActivePurchasePlanSource = self::hasActivePurchasePlanSource($reportId);
         $conversion = $canBill
             ? self::conversionReadiness($reportId, $report, $items)
             : ['allowed' => false, 'blocked_reason' => '没有执行该操作的电子权限'];
@@ -905,10 +922,14 @@ class CustomerReportLogic extends BaseLogic
             : ['allowed' => false, 'blocked_reason' => '没有执行该操作的电子权限', 'reason_required' => true];
         return [
             'retry' => [
-                'allowed' => $canEditReport && (string)($report['status'] ?? '') === 'submitted_shortage',
+                'allowed' => $canEditReport
+                    && !$hasActivePurchasePlanSource
+                    && (string)($report['status'] ?? '') === 'submitted_shortage',
                 'blocked_reason' => !$canEditReport
                     ? '没有执行该操作的电子权限'
-                    : ((string)($report['status'] ?? '') === 'submitted_shortage' ? '' : '当前报货单没有可重试的缺货预留'),
+                    : ($hasActivePurchasePlanSource
+                        ? '报货缺货来源已归入活动采购计划，请先终止采购计划'
+                        : ((string)($report['status'] ?? '') === 'submitted_shortage' ? '' : '当前报货单没有可重试的缺货预留')),
             ],
             'cancel' => $cancellation,
             'convert' => [
@@ -942,6 +963,9 @@ class CustomerReportLogic extends BaseLogic
         if (in_array((string)($report['status'] ?? ''), ['cancelled', 'completed'], true)) {
             return $unavailable('当前报货单不可取消');
         }
+        if (self::hasActivePurchasePlanSource($reportId)) {
+            return $unavailable('报货缺货来源已归入活动采购计划，请先终止采购计划');
+        }
         $tasks = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())
             ->where('report_id', $reportId)->order('id')->select()->toArray();
         $taskIds = array_map(static fn(array $task): int => (int)$task['id'], $tasks);
@@ -954,6 +978,20 @@ class CustomerReportLogic extends BaseLogic
             return $unavailable('报货单已经开始纸票或履约作业，不能取消');
         }
         return ['allowed' => true, 'blocked_reason' => '', 'reason_required' => true];
+    }
+
+    private static function hasActivePurchasePlanSource(int $reportId, bool $lock = false): bool
+    {
+        $query = Db::name('purchase_plan_source')->alias('s')
+            ->join('purchase_plan p', 'p.id=s.purchase_plan_id AND p.tenant_id=s.tenant_id')
+            ->where('s.tenant_id', self::tenantId())
+            ->where('s.report_id', $reportId)
+            ->whereIn('p.status', ['pending', 'partial'])
+            ->field('s.id');
+        if ($lock) {
+            $query->lock(true);
+        }
+        return (bool)$query->find();
     }
 
     /**

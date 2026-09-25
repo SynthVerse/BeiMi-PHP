@@ -33,6 +33,12 @@ final class PurchaseBatchContractTest extends TestCase
         self::assertStringContainsString('AuditService::logWithinTransaction(', $logic);
         self::assertStringContainsString('AuditService::MODULE_PURCHASE_BATCH', $logic);
         self::assertStringContainsString('refreshSummaryWithinTransaction', $logic);
+        self::assertStringContainsString('PurchasePlanLogic::holdArrivalWithinTransaction(', $logic);
+
+        $planLogic = $this->read('app/api/jxc/logic/PurchasePlanLogic.php');
+        self::assertStringContainsString('WarehouseSkuBalanceService::reserveUpToWithinTransaction(', $planLogic);
+        self::assertStringContainsString('allocateHeldPurchaseForItemWithinTransaction(', $planLogic);
+        self::assertStringContainsString("'plan_held_qty' => '0.0000'", $planLogic);
 
         self::assertStringContainsString('public static function publishWithinTransaction(array $params, bool $auditWithinTransaction = true): array|false', $supply);
         self::assertStringContainsString('PurchaseArrivalService::rebuildForSupplyOrder(', $supply);
@@ -54,6 +60,7 @@ final class PurchaseBatchContractTest extends TestCase
     {
         $logic = $this->read('app/api/jxc/logic/PurchaseBatchLogic.php');
         $migration = $this->read('database/migrations/20260827_000001_create_purchase_batch.sql');
+        $planMigration = $this->read('database/migrations/20260925_000002_processing_groups_and_purchase_plans.sql');
 
         self::assertStringContainsString('idempotency_key', $logic);
         self::assertStringContainsString('request_fingerprint', $logic);
@@ -68,6 +75,8 @@ final class PurchaseBatchContractTest extends TestCase
         self::assertStringContainsString('`purchase_batch_id`', $migration);
         self::assertStringNotContainsString('order_pay_money', $migration);
         self::assertStringNotContainsString('order_paid_money', $migration);
+        self::assertStringContainsString('plan_held_qty', $planMigration);
+        self::assertStringContainsString('采购计划待显式分配的锁定库存', $planMigration);
     }
 
     private function read(string $relativePath): string

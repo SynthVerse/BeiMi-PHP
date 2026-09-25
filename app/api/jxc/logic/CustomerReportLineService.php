@@ -95,7 +95,7 @@ class CustomerReportLineService extends BaseLogic
             return false;
         }
         $processingGroupsInput = (array)($item['processing_groups'] ?? []);
-        if (array_key_exists('processing_groups', $item) && $processingGroupsInput === []) {
+        if ($processingGroupsInput === []) {
             self::setError('每条报货明细必须至少添加一个加工分组');
             return false;
         }
@@ -277,7 +277,8 @@ class CustomerReportLineService extends BaseLogic
     private static function normalizeProcessingGroups(array $groups, string $orderQuantity): array|false
     {
         if ($groups === []) {
-            return [];
+            self::setError('每条报货明细必须至少添加一个加工分组');
+            return false;
         }
         $normalized = [];
         $keys = [];

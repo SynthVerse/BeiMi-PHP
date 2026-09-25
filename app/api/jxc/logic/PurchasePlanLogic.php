@@ -68,13 +68,17 @@ final class PurchasePlanLogic extends BaseLogic
             self::setError('采购计划或采购批次不存在，或入库仓库不一致');
             return false;
         }
-        if ((int)($batch['purchase_plan_id'] ?? 0) > 0 && (int)$batch['purchase_plan_id'] !== (int)$plan['id']) {
-            self::setError('该采购批次已归属其他采购计划');
+        if ((int)($batch['purchase_plan_id'] ?? 0) !== (int)$plan['id']) {
+            self::setError('该采购批次不属于当前采购计划');
             return false;
         }
         $quantity = self::arrivalQuantity((int)$batch['id'], (int)$plan['sku_id']);
         if (bccomp($quantity, '0.0000', self::SCALE) <= 0) {
             self::setError('采购批次没有该计划 SKU 的实际到货数量');
+            return false;
+        }
+        if (bccomp((string)($batch['plan_held_qty'] ?? '0'), $quantity, self::SCALE) !== 0) {
+            self::setError('采购批次的计划到货库存未完整锁定，不能进入来源分配');
             return false;
         }
         return [
@@ -84,6 +88,37 @@ final class PurchasePlanLogic extends BaseLogic
             'arrival_qty' => $quantity,
             'base_unit_name' => (string)$plan['base_unit_name'],
         ];
+    }
+
+    /**
+     * 采购批次入库事务内锁定计划 SKU 的全部实际到货；显式分配前不得成为通用可用库存。
+     */
+    public static function holdArrivalWithinTransaction(int $planId, int $purchaseBatchId): string|false
+    {
+        self::clearError();
+        $plan = Db::name('purchase_plan')->where('tenant_id', self::tenantId())->where('id', $planId)
+            ->whereIn('status', self::ACTIVE)->lock(true)->find();
+        $batch = Db::name('purchase_batch')->where('tenant_id', self::tenantId())->where('id', $purchaseBatchId)
+            ->where('purchase_plan_id', $planId)->lock(true)->find();
+        if (!$plan || !$batch || (int)$plan['warehouse_id'] !== (int)$batch['warehouse_id']) {
+            self::setError('采购计划不存在、已结束或采购批次归属不一致');
+            return false;
+        }
+        $quantity = self::arrivalQuantity($purchaseBatchId, (int)$plan['sku_id']);
+        if (bccomp($quantity, '0.0000', self::SCALE) <= 0) {
+            self::setError('采购批次没有采购计划对应 SKU 的实际到货数量');
+            return false;
+        }
+        $reserved = WarehouseSkuBalanceService::reserveUpToWithinTransaction(
+            (int)$plan['warehouse_id'],
+            (int)$plan['sku_id'],
+            $quantity
+        );
+        if ($reserved === false || bccomp($reserved, $quantity, self::SCALE) !== 0) {
+            self::setError('采购计划到货库存无法完整锁定，请检查该 SKU 的库存余额');
+            return false;
+        }
+        return $quantity;
     }
 
     /** @return array<string,mixed>|false */
@@ -122,15 +157,19 @@ final class PurchasePlanLogic extends BaseLogic
                         self::setError('只能选择仍有缺口的库存不足采购任务');
                         return false;
                     }
-                    $current = [(int)$row['batch_id'], (int)$row['warehouse_id'], (int)$row['sku_id']];
+                    $reportScope = (int)$row['batch_id'] > 0
+                        ? 'batch:' . (int)$row['batch_id']
+                        : 'report:' . (int)$row['report_id'];
+                    $current = [$reportScope, (int)$row['warehouse_id'], (int)$row['sku_id']];
                     if ($scope !== null && $scope !== $current) {
                         self::setError('同一采购计划只能归集相同报货批次、仓库和 SKU 的任务');
                         return false;
                     }
                     $scope = $current;
                 }
-                [$batchId, $warehouseId, $skuId] = $scope;
-                $scopeKey = hash('sha256', $batchId . ':' . $warehouseId . ':' . $skuId);
+                [$reportScope, $warehouseId, $skuId] = $scope;
+                $batchId = (int)$rows[0]['batch_id'];
+                $scopeKey = hash('sha256', $reportScope . ':' . $warehouseId . ':' . $skuId);
                 $plan = Db::name('purchase_plan')->where('tenant_id', self::tenantId())
                     ->where('active_scope_key', $scopeKey)->whereIn('status', self::ACTIVE)->lock(true)->find();
                 $now = time();
@@ -159,7 +198,7 @@ final class PurchasePlanLogic extends BaseLogic
                         ->whereIn('p.status', self::ACTIVE)->lock(true)->field('s.id,s.purchase_plan_id')->find();
                     if ($activeSource && (int)$activeSource['purchase_plan_id'] !== $planId) {
                         self::setError('所选采购任务已经归入其他活动采购计划');
-                        return false;
+                        throw new \RuntimeException('active_purchase_source_conflict');
                     }
                     if ($activeSource) {
                         continue;
@@ -225,8 +264,8 @@ final class PurchasePlanLogic extends BaseLogic
                     self::setError('采购批次不存在或入库仓库与计划不一致');
                     return false;
                 }
-                if ((int)($batch['purchase_plan_id'] ?? 0) > 0 && (int)$batch['purchase_plan_id'] !== $planId) {
-                    self::setError('该采购批次已归属其他采购计划');
+                if ((int)($batch['purchase_plan_id'] ?? 0) !== $planId) {
+                    self::setError('该采购批次不属于当前采购计划');
                     return false;
                 }
                 $existing = Db::name('purchase_plan_arrival')->where('tenant_id', self::tenantId())
@@ -261,6 +300,10 @@ final class PurchasePlanLogic extends BaseLogic
                     self::setError('采购批次没有该计划 SKU 的实际到货数量');
                     return false;
                 }
+                if (bccomp((string)($batch['plan_held_qty'] ?? '0'), $arrivalQty, self::SCALE) !== 0) {
+                    self::setError('采购批次的计划到货库存未完整锁定，不能完成来源分配');
+                    return false;
+                }
                 $sources = Db::name('purchase_plan_source')->where('tenant_id', self::tenantId())
                     ->where('purchase_plan_id', $planId)->order('id')->lock(true)->select()->toArray();
                 $sourcesById = [];
@@ -293,7 +336,7 @@ final class PurchasePlanLogic extends BaseLogic
                 ]);
                 foreach ($allocations as $sourceId => $quantity) {
                     $source = $sourcesById[$sourceId];
-                    if (!CustomerReportLogic::allocatePurchaseForItemWithinTransaction(
+                    if (!CustomerReportLogic::allocateHeldPurchaseForItemWithinTransaction(
                         (int)$source['report_item_id'],
                         $quantity
                     )) {
@@ -312,8 +355,17 @@ final class PurchasePlanLogic extends BaseLogic
                         'allocated_qty' => $quantity, 'create_time' => $now,
                     ]);
                 }
+                if (bccomp($surplus, '0.0000', self::SCALE) > 0
+                    && WarehouseSkuBalanceService::releaseWithinTransaction(
+                        (int)$plan['warehouse_id'],
+                        (int)$plan['sku_id'],
+                        $surplus
+                    ) === false) {
+                    self::setError('采购到货库存余量释放失败');
+                    throw new \RuntimeException('arrival_surplus_release_failed');
+                }
                 Db::name('purchase_batch')->where('tenant_id', self::tenantId())->where('id', $purchaseBatchId)
-                    ->update(['purchase_plan_id' => $planId, 'update_time' => $now]);
+                    ->update(['plan_held_qty' => '0.0000', 'update_time' => $now]);
                 self::refreshPlanTotals($planId, $now);
                 return self::detailById($planId);
             });
@@ -345,6 +397,19 @@ final class PurchasePlanLogic extends BaseLogic
                 if (!$plan || !in_array((string)$plan['status'], self::ACTIVE, true)) {
                     self::setError('采购计划不存在或已结束');
                     return false;
+                }
+                $purchaseBatches = Db::name('purchase_batch')->where('tenant_id', self::tenantId())
+                    ->where('purchase_plan_id', $id)->order('id')->lock(true)->field('id')->select()->toArray();
+                if ($purchaseBatches !== []) {
+                    $purchaseBatchIds = array_map('intval', array_column($purchaseBatches, 'id'));
+                    $allocatedBatchIds = array_map('intval', Db::name('purchase_plan_arrival')
+                        ->where('tenant_id', self::tenantId())->where('purchase_plan_id', $id)
+                        ->whereIn('purchase_batch_id', $purchaseBatchIds)->lock(true)
+                        ->column('purchase_batch_id'));
+                    if (array_diff($purchaseBatchIds, $allocatedBatchIds) !== []) {
+                        self::setError('采购计划仍有已入库但未分配的采购批次，请先完成来源分配');
+                        return false;
+                    }
                 }
                 $now = time();
                 Db::name('purchase_plan_source')->where('tenant_id', self::tenantId())->where('purchase_plan_id', $id)
@@ -424,11 +489,20 @@ final class PurchasePlanLogic extends BaseLogic
             $arrived = bcadd($arrived, (string)$arrival['arrival_qty'], self::SCALE);
             $surplus = bcadd($surplus, (string)$arrival['surplus_qty'], self::SCALE);
         }
-        $complete = $sources !== [] && bccomp($planned, $allocated, self::SCALE) === 0;
+        $arrivalBatchIds = array_map('intval', array_column($arrivals, 'purchase_batch_id'));
+        $pendingBatchQuery = Db::name('purchase_batch')->where('tenant_id', self::tenantId())
+            ->where('purchase_plan_id', $planId);
+        if ($arrivalBatchIds !== []) {
+            $pendingBatchQuery->whereNotIn('id', $arrivalBatchIds);
+        }
+        $hasPendingArrivalBatch = $pendingBatchQuery->count() > 0;
+        $complete = $sources !== []
+            && bccomp($planned, $allocated, self::SCALE) === 0
+            && !$hasPendingArrivalBatch;
         $update = [
             'planned_qty' => $planned, 'arrived_qty' => $arrived,
             'allocated_qty' => $allocated, 'surplus_qty' => $surplus,
-            'status' => $complete ? 'complete' : ($arrivals === [] ? 'pending' : 'partial'),
+            'status' => $complete ? 'complete' : (($arrivals === [] && !$hasPendingArrivalBatch) ? 'pending' : 'partial'),
             'update_time' => $now,
         ];
         if ($complete) {

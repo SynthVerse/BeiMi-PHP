@@ -101,6 +101,7 @@ class PurchaseBatchLogic extends BaseLogic
                     $batch = PurchaseBatch::create([
                         'tenant_id' => $tenantId,
                         'purchase_plan_id' => $base['purchase_plan_id'],
+                        'plan_held_qty' => '0.0000',
                         'batch_no' => self::generateBatchNo($tenantId),
                         'warehouse_id' => $base['warehouse_id'],
                         'warehouse_name' => $base['warehouse_name'],
@@ -155,9 +156,23 @@ class PurchaseBatchLogic extends BaseLogic
                         $children[] = $child;
                     }
 
+                    $planHeldQty = '0.0000';
+                    if ($base['purchase_plan_id'] > 0) {
+                        $held = PurchasePlanLogic::holdArrivalWithinTransaction(
+                            $base['purchase_plan_id'],
+                            (int)$batch->id
+                        );
+                        if ($held === false) {
+                            self::fail(PurchasePlanLogic::getError() ?: '采购计划到货库存锁定失败');
+                            throw new BusinessException(self::getError());
+                        }
+                        $planHeldQty = $held;
+                    }
+
                     $batch->save([
                         'line_count' => $lineCount,
                         'total_amount' => $totalAmount,
+                        'plan_held_qty' => $planHeldQty,
                         'update_time' => $now,
                     ]);
                     AuditService::logWithinTransaction(
@@ -336,8 +351,10 @@ class PurchaseBatchLogic extends BaseLogic
         $purchasePlanSkuId = 0;
         if ($purchasePlanId > 0) {
             $plan = Db::name('purchase_plan')->where('tenant_id', $tenantId)->where('id', $purchasePlanId)
-                ->whereIn('status', ['pending', 'partial'])->field('id,warehouse_id,sku_id')->find();
-            if (!$plan || (int)$plan['warehouse_id'] !== $warehouseId) {
+                ->whereIn('status', ['pending', 'partial'])->lock(true)
+                ->field('id,warehouse_id,sku_id,planned_qty,allocated_qty')->find();
+            if (!$plan || (int)$plan['warehouse_id'] !== $warehouseId
+                || bccomp((string)$plan['planned_qty'], (string)$plan['allocated_qty'], 4) <= 0) {
                 self::fail('采购计划不存在、已结束或入库仓库不一致', [[
                     'client_line_id' => '', 'field' => 'purchase_plan_id',
                     'code' => 'PURCHASE_PLAN_UNAVAILABLE', 'message' => '请从有效采购计划发起采购到货',

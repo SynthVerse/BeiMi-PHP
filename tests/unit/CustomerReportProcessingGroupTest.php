@@ -83,12 +83,18 @@ final class CustomerReportProcessingGroupTest extends TestCase
         self::assertSame('加工分组计划数量之和必须等于报货数量', CustomerReportLogic::getError());
     }
 
-    public function test_explicit_processing_group_payload_requires_at_least_one_group(): void
+    public function test_processing_group_payload_is_required_and_cannot_be_empty(): void
     {
         $customerId = $this->createCustomer('空分组校验客户');
         $goodsId = $this->createCustomerReportGoods('石斑鱼', 'GROUP-EMPTY');
         $warehouseId = $this->createCustomerReportWarehouse('空分组校验仓');
         $payload = $this->fulfillmentPayload($customerId, $goodsId, $warehouseId, 'processing-group-empty', '5', '');
+        unset($payload['items'][0]['processing_groups']);
+
+        self::assertFalse(CustomerReportLogic::submit($payload));
+        self::assertSame('每条报货明细必须至少添加一个加工分组', CustomerReportLogic::getError());
+
+        $payload['idempotency_key'] = 'processing-group-explicit-empty';
         $payload['items'][0]['processing_groups'] = [];
 
         self::assertFalse(CustomerReportLogic::submit($payload));
@@ -112,6 +118,20 @@ final class CustomerReportProcessingGroupTest extends TestCase
         self::assertNotFalse($report, CustomerReportLogic::getError());
 
         $groups = $report['items'][0]['processing_groups'];
+        self::assertFalse(CustomerReportLogic::saveProcessingWeights([
+            'id' => (int)$report['id'],
+            'version' => (int)$report['version'],
+            'groups' => [
+                ['id' => (int)$groups[0]['id'], 'final_actual_weight' => '6.80'],
+                ['id' => 999999, 'final_actual_weight' => '3.10'],
+            ],
+        ]));
+        self::assertSame('提交的加工组与当前报货单不一致，请刷新后重试', CustomerReportLogic::getError());
+        self::assertSame(
+            ['0.00', '0.00'],
+            Db::name('customer_report_processing_group')->where('report_id', (int)$report['id'])
+                ->order('sort')->column('final_actual_weight')
+        );
         $weighted = CustomerReportLogic::saveProcessingWeights([
             'id' => (int)$report['id'],
             'version' => (int)$report['version'],

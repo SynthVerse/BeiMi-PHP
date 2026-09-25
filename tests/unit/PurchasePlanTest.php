@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace tests\unit;
 
+use app\api\jxc\logic\CustomerReportBatchLogic;
 use app\api\jxc\logic\CustomerReportLogic;
 use app\api\jxc\logic\PurchasePlanLogic;
+use app\api\jxc\logic\WarehouseSkuBalanceService;
 use app\api\jxc\logic\WorkforceLogic;
 use PHPUnit\Framework\TestCase;
 use think\facade\Db;
@@ -40,13 +42,22 @@ final class PurchasePlanTest extends TestCase
         $customerId = $this->createCustomer('采购计划客户');
         $goodsId = $this->createCustomerReportGoods('采购鲈鱼', 'PLAN-BASS');
         $warehouseId = $this->createCustomerReportWarehouse('采购计划仓');
+        $batch = CustomerReportBatchLogic::start([
+            'delivery_date' => '2026-08-10',
+            'idempotency_key' => 'purchase-plan-report-batch',
+        ]);
+        self::assertNotFalse($batch, CustomerReportBatchLogic::getError());
 
-        $first = CustomerReportLogic::submit($this->fulfillmentPayload(
+        $firstPayload = $this->fulfillmentPayload(
             $customerId, $goodsId, $warehouseId, 'purchase-plan-first', '4', '20'
-        ));
-        $second = CustomerReportLogic::submit($this->fulfillmentPayload(
+        );
+        $firstPayload['batch_id'] = (int)$batch['id'];
+        $secondPayload = $this->fulfillmentPayload(
             $customerId, $goodsId, $warehouseId, 'purchase-plan-second', '6', '20'
-        ));
+        );
+        $secondPayload['batch_id'] = (int)$batch['id'];
+        $first = CustomerReportLogic::submit($firstPayload);
+        $second = CustomerReportLogic::submit($secondPayload);
         self::assertNotFalse($first, CustomerReportLogic::getError());
         self::assertNotFalse($second, CustomerReportLogic::getError());
 
@@ -59,6 +70,34 @@ final class PurchasePlanTest extends TestCase
         self::assertSame((int)$plan['id'], (int)$samePlan['id']);
         self::assertSame('10.0000', $samePlan['planned_qty']);
         self::assertCount(2, $samePlan['sources']);
+
+        $editPayload = $firstPayload;
+        $editPayload['id'] = (int)$first['id'];
+        $editPayload['version'] = (int)$first['version'];
+        $editPayload['items'][0]['id'] = (int)$first['items'][0]['id'];
+        self::assertFalse(CustomerReportLogic::edit($editPayload));
+        self::assertSame(
+            '报货缺货来源已归入活动采购计划，请先终止采购计划后再编辑',
+            CustomerReportLogic::getError()
+        );
+
+        self::assertFalse(CustomerReportLogic::retry([
+            'id' => (int)$first['id'],
+            'version' => (int)$first['version'],
+        ]));
+        self::assertSame(
+            '报货缺货来源已归入活动采购计划，请先终止采购计划后再重试缺货预留',
+            CustomerReportLogic::getError()
+        );
+        self::assertFalse(CustomerReportLogic::cancel([
+            'id' => (int)$first['id'],
+            'version' => (int)$first['version'],
+            'reason' => '活动采购计划期间不可取消',
+        ]));
+        self::assertSame(
+            '报货缺货来源已归入活动采购计划，请先终止采购计划后再取消报货',
+            CustomerReportLogic::getError()
+        );
 
         $terminated = PurchasePlanLogic::terminate(['id' => (int)$plan['id'], 'reason' => '供应商无法供货']);
         self::assertNotFalse($terminated, PurchasePlanLogic::getError());
@@ -88,6 +127,16 @@ final class PurchasePlanTest extends TestCase
 
         $firstBatchId = $this->createArrivalBatch((int)$plan['id'], $warehouseId, $goodsId, $skuId, '4.0000');
         WarehouseSkuBalanceForGoodsTestAdapter::inbound($warehouseId, $goodsId, '4.0000');
+        $this->holdArrivalForTest($firstBatchId, $warehouseId, $skuId, '4.0000');
+        self::assertSame('0.0000', WarehouseSkuBalanceService::available($warehouseId, $skuId));
+        self::assertFalse(PurchasePlanLogic::terminate([
+            'id' => (int)$plan['id'],
+            'reason' => '尚有未分配到货，不应终止',
+        ]));
+        self::assertSame(
+            '采购计划仍有已入库但未分配的采购批次，请先完成来源分配',
+            PurchasePlanLogic::getError()
+        );
         $partial = PurchasePlanLogic::attachArrival([
             'id' => (int)$plan['id'],
             'purchase_batch_id' => $firstBatchId,
@@ -118,28 +167,75 @@ final class PurchasePlanTest extends TestCase
 
         $secondBatchId = $this->createArrivalBatch((int)$plan['id'], $warehouseId, $goodsId, $skuId, '7.0000');
         WarehouseSkuBalanceForGoodsTestAdapter::inbound($warehouseId, $goodsId, '7.0000');
-        $complete = PurchasePlanLogic::attachArrival([
+        $this->holdArrivalForTest($secondBatchId, $warehouseId, $skuId, '7.0000');
+        $thirdBatchId = $this->createArrivalBatch((int)$plan['id'], $warehouseId, $goodsId, $skuId, '1.0000');
+        WarehouseSkuBalanceForGoodsTestAdapter::inbound($warehouseId, $goodsId, '1.0000');
+        $this->holdArrivalForTest($thirdBatchId, $warehouseId, $skuId, '1.0000');
+        $sourceSatisfiedWithPendingArrival = PurchasePlanLogic::attachArrival([
             'id' => (int)$plan['id'],
             'purchase_batch_id' => $secondBatchId,
             'allocations' => [['source_id' => $sourceId, 'allocated_qty' => '7.00']],
             'surplus_qty' => '0.0000',
         ]);
+        self::assertNotFalse($sourceSatisfiedWithPendingArrival, PurchasePlanLogic::getError());
+        self::assertSame('partial', $sourceSatisfiedWithPendingArrival['status']);
+        self::assertCount(1, $sourceSatisfiedWithPendingArrival['pending_arrival_batches']);
+        self::assertSame($thirdBatchId, (int)$sourceSatisfiedWithPendingArrival['pending_arrival_batches'][0]['id']);
+
+        $complete = PurchasePlanLogic::attachArrival([
+            'id' => (int)$plan['id'],
+            'purchase_batch_id' => $thirdBatchId,
+            'allocations' => [],
+            'surplus_qty' => '1.0000',
+        ]);
         self::assertNotFalse($complete, PurchasePlanLogic::getError());
         self::assertSame('complete', $complete['status']);
-        self::assertSame('11.0000', $complete['arrived_qty']);
+        self::assertSame('12.0000', $complete['arrived_qty']);
         self::assertSame('10.0000', $complete['allocated_qty']);
-        self::assertSame('1.0000', $complete['surplus_qty']);
+        self::assertSame('2.0000', $complete['surplus_qty']);
         self::assertSame('0.0000', $complete['sources'][0]['remaining_qty']);
         $completeReplay = PurchasePlanLogic::attachArrival([
             'id' => (int)$plan['id'],
-            'purchase_batch_id' => $secondBatchId,
-            'allocations' => [['source_id' => $sourceId, 'allocated_qty' => '7.00']],
-            'surplus_qty' => '0.0000',
+            'purchase_batch_id' => $thirdBatchId,
+            'allocations' => [],
+            'surplus_qty' => '1.0000',
         ]);
         self::assertNotFalse($completeReplay, PurchasePlanLogic::getError());
         self::assertSame('complete', $completeReplay['status']);
         self::assertSame('0.00', (string)Db::name('customer_report_item')
             ->where('tenant_id', self::TENANT_ID)->where('id', (int)$report['items'][0]['id'])->value('shortage_base_qty'));
+    }
+
+    public function test_unbatched_reports_do_not_share_a_purchase_plan_scope(): void
+    {
+        $purchaseProcess = WorkforceLogic::saveProcess([
+            'name' => '采购', 'trigger_type' => 'inventory_shortage', 'is_enabled' => 1, 'sort' => 1,
+        ]);
+        self::assertNotFalse($purchaseProcess, WorkforceLogic::getError());
+        $customerId = $this->createCustomer('未编批采购客户');
+        $goodsId = $this->createCustomerReportGoods('未编批鲈鱼', 'PLAN-UNBATCHED');
+        $warehouseId = $this->createCustomerReportWarehouse('未编批采购仓');
+        $first = CustomerReportLogic::submit($this->fulfillmentPayload(
+            $customerId, $goodsId, $warehouseId, 'purchase-plan-unbatched-first', '2', ''
+        ));
+        $second = CustomerReportLogic::submit($this->fulfillmentPayload(
+            $customerId, $goodsId, $warehouseId, 'purchase-plan-unbatched-second', '3', ''
+        ));
+        self::assertNotFalse($first, CustomerReportLogic::getError());
+        self::assertNotFalse($second, CustomerReportLogic::getError());
+        $firstTaskId = $this->shortageTaskId($first);
+        $secondTaskId = $this->shortageTaskId($second);
+
+        self::assertFalse(PurchasePlanLogic::create(['task_ids' => [$firstTaskId, $secondTaskId]]));
+        self::assertSame(
+            '同一采购计划只能归集相同报货批次、仓库和 SKU 的任务',
+            PurchasePlanLogic::getError()
+        );
+        $firstPlan = PurchasePlanLogic::create(['task_ids' => [$firstTaskId]]);
+        $secondPlan = PurchasePlanLogic::create(['task_ids' => [$secondTaskId]]);
+        self::assertNotFalse($firstPlan, PurchasePlanLogic::getError());
+        self::assertNotFalse($secondPlan, PurchasePlanLogic::getError());
+        self::assertNotSame((int)$firstPlan['id'], (int)$secondPlan['id']);
     }
 
     /** @param array<string,mixed> $report */
@@ -209,5 +305,15 @@ final class PurchasePlanTest extends TestCase
             'update_time' => $now,
         ]);
         return $batchId;
+    }
+
+    private function holdArrivalForTest(int $batchId, int $warehouseId, int $skuId, string $quantity): void
+    {
+        self::assertNotFalse(
+            WarehouseSkuBalanceService::reserve($warehouseId, $skuId, $quantity),
+            '测试采购到货应先从通用可用库存锁定'
+        );
+        Db::name('purchase_batch')->where('tenant_id', self::TENANT_ID)->where('id', $batchId)
+            ->update(['plan_held_qty' => $quantity, 'update_time' => time()]);
     }
 }

@@ -146,6 +146,19 @@ PREPARE statement FROM @column_sql;
 EXECUTE statement;
 DEALLOCATE PREPARE statement;
 
+SET @column_exists := (
+  SELECT COUNT(1) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{{prefix}}purchase_batch' AND COLUMN_NAME = 'plan_held_qty'
+);
+SET @column_sql := IF(
+  @table_exists = 1 AND @column_exists = 0,
+  'ALTER TABLE `{{prefix}}purchase_batch` ADD COLUMN `plan_held_qty` decimal(18,4) NOT NULL DEFAULT 0.0000 COMMENT ''采购计划待显式分配的锁定库存'' AFTER `purchase_plan_id`',
+  'SELECT 1'
+);
+PREPARE statement FROM @column_sql;
+EXECUTE statement;
+DEALLOCATE PREPARE statement;
+
 SET @index_exists := (
   SELECT COUNT(1) FROM information_schema.STATISTICS
   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{{prefix}}purchase_batch'

@@ -359,6 +359,63 @@ SQL;
             ->value('id');
     }
 
+    /** @return array<string,mixed> */
+    protected function fulfillmentPayload(
+        int $customerId,
+        int $goodsId,
+        int $warehouseId,
+        string $key,
+        string $quantity,
+        string $processing
+    ): array {
+        $processId = (int)Db::name('work_process')->where('tenant_id', self::TENANT_ID)
+            ->where('trigger_type', 'report_selection')->where('is_enabled', 1)
+            ->whereNull('delete_time')->order(['sort' => 'asc', 'id' => 'asc'])->value('id');
+        if ($processId <= 0) {
+            $now = time();
+            $processId = (int)Db::name('work_process')->insertGetId([
+                'tenant_id' => self::TENANT_ID,
+                'code' => 'test_processing_' . substr(sha1(uniqid('', true)), 0, 12),
+                'name' => '测试加工',
+                'trigger_type' => 'report_selection',
+                'trigger_keywords' => '[]',
+                'sort' => 10,
+                'is_enabled' => 1,
+                'is_system' => 0,
+                'create_time' => $now,
+                'update_time' => $now,
+                'delete_time' => null,
+            ]);
+        }
+        return [
+            'main_customer_id' => $customerId,
+            'delivery_date' => '2026-08-10',
+            'is_supplement' => 0,
+            'idempotency_key' => $key,
+            'remark' => '',
+            'items' => [[
+                'goods_id' => $goodsId,
+                'warehouse_id' => $warehouseId,
+                'unit_id' => 0,
+                'unit_name' => '件',
+                'order_qty' => $quantity,
+                'piece_weight_confirmed' => 1,
+                'piece_weight_min' => '1.00',
+                'piece_weight_max' => '1.00',
+                'price_status' => 'unpriced',
+                'processing_requirement' => $processing,
+                'processing' => $processing,
+                'line_remark' => $processing,
+                'processing_groups' => [[
+                    'group_key' => 'default',
+                    'name' => $processing !== '' ? $processing : '默认加工',
+                    'planned_qty' => $quantity,
+                    'process_ids' => [$processId],
+                ]],
+            ]],
+        ];
+    }
+
     private function runStatements(string $sql): void
     {
         foreach (array_filter(array_map('trim', explode(';', $sql))) as $statement) {
