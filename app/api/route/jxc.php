@@ -227,14 +227,9 @@ Route::group('', function () {
     Route::get('jxc/tasks/dashboard', 'jxc.FulfillmentTask/dashboard');
     Route::get('jxc/tasks/lists', 'jxc.FulfillmentTask/lists');
     Route::get('jxc/tasks/detail', 'jxc.FulfillmentTask/detail');
-    Route::get('jxc/tasks/candidates', 'jxc.FulfillmentTask/candidates');
-    Route::post('jxc/tasks/assign', 'jxc.FulfillmentTask/assign');
     Route::post('jxc/tasks/resolve', 'jxc.FulfillmentTask/resolve');
     Route::post('jxc/tasks/print_data', 'jxc.FulfillmentTask/printData');
     Route::post('jxc/tasks/print_result', 'jxc.FulfillmentTask/printResult');
-    Route::post('jxc/tasks/recover', 'jxc.FulfillmentTask/recover');
-    Route::post('jxc/tasks/specification_shortage', 'jxc.FulfillmentTask/specificationShortage');
-    Route::post('jxc/tasks/recover_exception', 'jxc.FulfillmentTask/recoverException');
     Route::post('jxc/tasks/paper_control', 'jxc.FulfillmentTask/paperControl');
     Route::post('jxc/tasks/control_print_data', 'jxc.FulfillmentTask/controlPrintData');
     Route::post('jxc/tasks/control_print_result', 'jxc.FulfillmentTask/controlPrintResult');

@@ -15,7 +15,7 @@ final class WorkforceValidate extends BaseValidate
         'process_ids' => 'array',
         'permission_keys' => 'array',
         'keyword' => 'max:60',
-        'trigger_type' => 'in:remark,shortage,group_ready,ticket_recovered,manual',
+        'trigger_type' => 'in:report_selection,inventory_shortage,all_processing_completed',
         'keywords' => 'array',
         'sort' => 'integer',
         'ids' => 'require|array',

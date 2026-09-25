@@ -11,13 +11,6 @@ use think\facade\Db;
 /** 员工档案、可执行工序与显式电子权限。这里不创建默认角色，也不自动授权。 */
 final class WorkforceLogic extends BaseLogic
 {
-    /** @var array<string,string> */
-    private const CORE_PROCESS_TRIGGERS = [
-        'purchase' => 'shortage',
-        'delivery' => 'group_ready',
-        'bookkeeping' => 'ticket_recovered',
-    ];
-
     /** @var array<string,array<int,array{key:string,name:string}>> */
     private const PERMISSION_CATALOG = [
         '报货' => [
@@ -28,7 +21,6 @@ final class WorkforceLogic extends BaseLogic
         ],
         '任务' => [
             ['key' => 'task.view', 'name' => '查看任务看板'],
-            ['key' => 'task.assign', 'name' => '分配任务'],
             ['key' => 'task.print', 'name' => '首次打印工票'],
             ['key' => 'task.reprint', 'name' => '补打与重试工票'],
             ['key' => 'task.recover', 'name' => '确认纸质工票回收'],
@@ -101,16 +93,6 @@ final class WorkforceLogic extends BaseLogic
         ],
     ];
 
-    /** @var array<int,array<string,mixed>> */
-    private const INITIAL_PROCESSES = [
-        ['code' => 'purchase', 'name' => '采购', 'trigger_type' => 'shortage', 'keywords' => [], 'sort' => 10],
-        ['code' => 'kill_fish', 'name' => '杀鱼', 'trigger_type' => 'remark', 'keywords' => ['杀好', '杀鱼', '宰杀', '劏', '去鳞', '开肚'], 'sort' => 20],
-        ['code' => 'live_pack', 'name' => '活鱼打包', 'trigger_type' => 'remark', 'keywords' => ['活鱼打包', '活鱼装袋', '活包', '打氧', '氧气袋'], 'sort' => 30],
-        ['code' => 'abalone_pack', 'name' => '鲍鱼打包', 'trigger_type' => 'remark', 'keywords' => ['鲍鱼打包', '鲍鱼装袋', '鲍鱼包', '冰袋', '泡沫箱'], 'sort' => 40],
-        ['code' => 'delivery', 'name' => '送货', 'trigger_type' => 'group_ready', 'keywords' => [], 'sort' => 50],
-        ['code' => 'bookkeeping', 'name' => '记账', 'trigger_type' => 'ticket_recovered', 'keywords' => [], 'sort' => 60],
-    ];
-
     /** @return array{groups:array<string,array<int,array{key:string,name:string}>>,keys:array<int,string>} */
     public static function permissionCatalog(): array|false
     {
@@ -147,43 +129,16 @@ final class WorkforceLogic extends BaseLogic
 
     public static function ensureInitialProcesses(): void
     {
-        $tenantId = self::tenantId();
-        if ($tenantId <= 0) {
-            return;
-        }
-        $now = time();
-        foreach (self::INITIAL_PROCESSES as $process) {
-            Db::name('work_process')->duplicate(['code'])->insert([
-                'tenant_id' => $tenantId,
-                'code' => $process['code'],
-                'name' => $process['name'],
-                'trigger_type' => $process['trigger_type'],
-                'trigger_keywords' => json_encode($process['keywords'], JSON_UNESCAPED_UNICODE),
-                'sort' => $process['sort'],
-                'is_enabled' => 1,
-                'is_system' => 1,
-                'create_time' => $now,
-                'update_time' => $now,
-            ]);
-            if (isset(self::CORE_PROCESS_TRIGGERS[(string)$process['code']])) {
-                Db::name('work_process')->where('tenant_id', $tenantId)->where('code', $process['code'])->update([
-                    'trigger_type' => self::CORE_PROCESS_TRIGGERS[(string)$process['code']],
-                    'is_enabled' => 1,
-                    'delete_time' => null,
-                    'update_time' => $now,
-                ]);
-            }
-        }
+        // 兼容旧调用点。执行工序必须由店铺管理员显式创建，新店铺不再写入固定目录。
     }
 
     /** @return array{lists:array<int,array<string,mixed>>,count:int} */
     public static function processes(array $params): array|false
     {
         self::clearError();
-        if (!self::requireAnyPermission(['process.manage', 'employee.manage', 'task.assign'])) {
+        if (!self::requireAnyPermission(['process.manage', 'employee.manage', 'task.view'])) {
             return false;
         }
-        self::ensureInitialProcesses();
         $query = Db::name('work_process')->where('tenant_id', self::tenantId())->whereNull('delete_time');
         $keyword = trim((string)($params['keyword'] ?? ''));
         if ($keyword !== '') {
@@ -193,13 +148,8 @@ final class WorkforceLogic extends BaseLogic
             $query->where('is_enabled', (int)$params['is_enabled']);
         }
         $lists = $query->order(['sort' => 'asc', 'id' => 'asc'])->select()->toArray();
-        $counts = Db::name('employee_process')->alias('ep')
-            ->join('employee e', 'e.id=ep.employee_id AND e.tenant_id=ep.tenant_id')
-            ->where('ep.tenant_id', self::tenantId())->where('e.is_enabled', 1)->whereNull('e.delete_time')
-            ->group('ep.process_id')->column('COUNT(DISTINCT ep.employee_id)', 'ep.process_id');
         foreach ($lists as &$process) {
             $process['keywords'] = self::decodeKeywords((string)$process['trigger_keywords']);
-            $process['employee_count'] = (int)($counts[$process['id']] ?? 0);
         }
         unset($process);
         return ['lists' => $lists, 'count' => count($lists)];
@@ -214,19 +164,25 @@ final class WorkforceLogic extends BaseLogic
         }
         $id = (int)($params['id'] ?? 0);
         $name = trim((string)($params['name'] ?? ''));
-        $triggerType = (string)($params['trigger_type'] ?? 'remark');
-        if ($name === '' || !in_array($triggerType, ['remark', 'shortage', 'group_ready', 'ticket_recovered', 'manual'], true)) {
+        $triggerType = (string)($params['trigger_type'] ?? 'report_selection');
+        if ($name === '' || !in_array($triggerType, ['report_selection', 'inventory_shortage', 'all_processing_completed'], true)) {
             self::setError('工序名称或触发方式无效');
             return false;
         }
-        $keywords = self::normalizeStrings((array)($params['keywords'] ?? []), 30, 40);
+        $isEnabled = (int)($params['is_enabled'] ?? 1) === 1 ? 1 : 0;
+        if ($isEnabled === 1 && self::automaticProcessExists($triggerType, $id)) {
+            self::setError($triggerType === 'inventory_shortage'
+                ? '库存不足自动产生只能启用一个工序'
+                : '全部加工完成后自动产生只能启用一个工序');
+            return false;
+        }
         $now = time();
         $data = [
             'name' => $name,
             'trigger_type' => $triggerType,
-            'trigger_keywords' => json_encode($keywords, JSON_UNESCAPED_UNICODE),
+            'trigger_keywords' => '[]',
             'sort' => (int)($params['sort'] ?? 0),
-            'is_enabled' => (int)($params['is_enabled'] ?? 1) === 1 ? 1 : 0,
+            'is_enabled' => $isEnabled,
             'update_time' => $now,
         ];
         if ($id > 0) {
@@ -235,23 +191,10 @@ final class WorkforceLogic extends BaseLogic
                 self::setError('工序不存在');
                 return false;
             }
-            $coreTrigger = self::CORE_PROCESS_TRIGGERS[(string)$exists['code']] ?? null;
-            if ($coreTrigger !== null && ($triggerType !== $coreTrigger || (int)$data['is_enabled'] !== 1)) {
-                self::setError('采购、送货和记账是闭环核心工序，只能调整名称与排序');
-                return false;
-            }
-            if ($coreTrigger === null && $triggerType !== 'remark') {
-                self::setError('当前仅备注关键词工序支持自定义；其他触发类型由闭环核心工序专用');
-                return false;
-            }
             Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('process_id', $id)
                 ->where('process_name_snapshot', '')->update(['process_name_snapshot' => (string)$exists['name']]);
             Db::name('work_process')->where('tenant_id', self::tenantId())->where('id', $id)->update($data);
         } else {
-            if ($triggerType !== 'remark') {
-                self::setError('当前仅备注关键词工序支持自定义；其他触发类型由闭环核心工序专用');
-                return false;
-            }
             $id = (int)Db::name('work_process')->insertGetId($data + [
                 'tenant_id' => self::tenantId(),
                 'code' => 'custom_' . substr(sha1($name . ':' . microtime(true)), 0, 16),
@@ -275,12 +218,15 @@ final class WorkforceLogic extends BaseLogic
             self::setError('工序不存在');
             return false;
         }
-        if (isset(self::CORE_PROCESS_TRIGGERS[(string)$process['code']]) && (int)($params['is_enabled'] ?? 0) !== 1) {
-            self::setError('采购、送货和记账是闭环核心工序，不能停用');
+        $isEnabled = (int)($params['is_enabled'] ?? 0) === 1 ? 1 : 0;
+        if ($isEnabled === 1 && self::automaticProcessExists((string)$process['trigger_type'], $id)) {
+            self::setError((string)$process['trigger_type'] === 'inventory_shortage'
+                ? '库存不足自动产生只能启用一个工序'
+                : '全部加工完成后自动产生只能启用一个工序');
             return false;
         }
         $updated = Db::name('work_process')->where('tenant_id', self::tenantId())->where('id', $id)->whereNull('delete_time')
-            ->update(['is_enabled' => (int)($params['is_enabled'] ?? 0) === 1 ? 1 : 0, 'update_time' => time()]);
+            ->update(['is_enabled' => $isEnabled, 'update_time' => time()]);
         if ($updated < 1) {
             self::setError('工序不存在或状态未变化');
             return false;
@@ -326,10 +272,6 @@ final class WorkforceLogic extends BaseLogic
         $process = Db::name('work_process')->where('tenant_id', self::tenantId())->where('id', $id)->whereNull('delete_time')->find();
         if (!$process) {
             self::setError('工序不存在');
-            return false;
-        }
-        if (isset(self::CORE_PROCESS_TRIGGERS[(string)$process['code']])) {
-            self::setError('采购、送货和记账是闭环核心工序，不能删除');
             return false;
         }
         if (Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('process_id', $id)->count() > 0) {
@@ -573,9 +515,23 @@ final class WorkforceLogic extends BaseLogic
             return false;
         }
         $process['keywords'] = self::decodeKeywords((string)$process['trigger_keywords']);
-        $process['employee_count'] = Db::name('employee_process')->alias('ep')->join('employee e', 'e.id=ep.employee_id AND e.tenant_id=ep.tenant_id')
-            ->where('ep.tenant_id', self::tenantId())->where('ep.process_id', $id)->where('e.is_enabled', 1)->whereNull('e.delete_time')->count();
         return $process;
+    }
+
+    private static function automaticProcessExists(string $triggerType, int $exceptId = 0): bool
+    {
+        if (!in_array($triggerType, ['inventory_shortage', 'all_processing_completed'], true)) {
+            return false;
+        }
+        $query = Db::name('work_process')
+            ->where('tenant_id', self::tenantId())
+            ->where('trigger_type', $triggerType)
+            ->where('is_enabled', 1)
+            ->whereNull('delete_time');
+        if ($exceptId > 0) {
+            $query->where('id', '<>', $exceptId);
+        }
+        return $query->count() > 0;
     }
 
     /** @return array<int,string> */

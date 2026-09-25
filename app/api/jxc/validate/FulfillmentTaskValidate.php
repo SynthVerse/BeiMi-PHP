@@ -8,7 +8,6 @@ final class FulfillmentTaskValidate extends BaseValidate
 {
     protected $rule = [
         'id' => 'require|integer|gt:0',
-        'employee_id' => 'require|integer|gt:0',
         'process_id' => 'require|integer|gt:0',
         'print_log_id' => 'integer|gt:0',
         'control_id' => 'integer|gt:0',
@@ -42,8 +41,6 @@ final class FulfillmentTaskValidate extends BaseValidate
     public function sceneDashboard() { return $this->only(['delivery_date']); }
     public function sceneLists() { return $this->only(['status_scope']); }
     public function sceneDetail() { return $this->only(['id']); }
-    public function sceneCandidates() { return $this->only(['id']); }
-    public function sceneAssign() { return $this->only(['id', 'employee_id']); }
     public function sceneResolve() { return $this->only(['id', 'process_id', 'requirement']); }
     public function scenePrintData() { return $this->only(['id']); }
     public function scenePrintResult() { return $this->only(['id', 'print_log_id', 'success', 'error_message'])->append('print_log_id', 'require'); }
