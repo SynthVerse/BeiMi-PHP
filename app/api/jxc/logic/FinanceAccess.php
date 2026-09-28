@@ -15,12 +15,18 @@ final class FinanceAccess
     public static function owner(): bool
     {
         if (self::tenant() <= 0 || self::operator() <= 0) { return false; }
+        $snapshot = self::todoSnapshot();
+        if ($snapshot !== null) { return (bool)$snapshot['owner']; }
         if (self::userIdentity()) { return StoreMembershipService::isTenantAdmin(self::operator(), self::tenant()); }
         $info = (array)(request()->adminInfo ?? []);
         return (int)($info['root'] ?? 0) === 1 && (int)($info['tenant_id'] ?? 0) === self::tenant();
     }
     public static function has(string $permission): bool
     {
+        $snapshot = self::todoSnapshot();
+        if ($snapshot !== null) {
+            return (bool)$snapshot['owner'] || in_array($permission, (array)$snapshot['permissions'], true);
+        }
         return self::owner() || (self::userIdentity() && self::tenant() > 0 && self::operator() > 0 && WorkforceLogic::hasPermission($permission));
     }
     public static function require(string $permission, bool $ownerOnly = false): void
@@ -32,5 +38,17 @@ final class FinanceAccess
     {
         return ['id' => self::operator(), 'type' => self::userIdentity() ? 'user' : 'tenant_admin',
             'name' => (string)(request()->adminInfo['name'] ?? '') ?: '操作人 #' . self::operator()];
+    }
+
+
+    /** @return array<string,mixed>|null */
+    private static function todoSnapshot(): ?array
+    {
+        $snapshot = request()->todoPermissionSnapshot ?? null;
+        if (!is_array($snapshot)) { return null; }
+        $identity = self::userIdentity() ? 'user' : 'tenant_admin';
+        return (int)($snapshot['tenant_id'] ?? 0) === self::tenant()
+            && (int)($snapshot['operator_id'] ?? 0) === self::operator()
+            && (string)($snapshot['identity'] ?? '') === $identity ? $snapshot : null;
     }
 }

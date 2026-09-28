@@ -19,72 +19,174 @@ final class FinanceTransitReviews
         return $month;
     }
 
+    /** @param array<int,string> $sources @return array<string,array<string,mixed>> */
+    private static function latestMany(array $sources, string $month): array
+    {
+        if (!$sources) { return []; }
+        $latest = [];
+        $rows = Db::name('finance_transit_reconciliation')->where('tenant_id', FinanceAccess::tenant())
+            ->whereIn('source_ref', $sources)->where('month', $month)->order('id')->select()->toArray();
+        foreach ($rows as $row) {
+            $latest[(string)$row['source_ref']] = FinanceValue::decode((string)$row['snapshot']) + ['document_id' => (int)$row['document_id']];
+        }
+        return $latest;
+    }
+
     private static function latest(string $source, string $month): ?array
     {
-        $row = Db::name('finance_transit_reconciliation')->where('tenant_id', FinanceAccess::tenant())->where('source_ref', $source)->where('month', $month)->order('id', 'desc')->find();
-        return $row ? FinanceValue::decode($row['snapshot']) + ['document_id' => (int)$row['document_id']] : null;
+        return self::latestMany([$source], $month)[$source] ?? null;
+    }
+
+    /** @param array<int,string> $references @return array<string,array<string,mixed>> */
+    private static function atMonthMany(array $references, string $month): array
+    {
+        $references = array_values(array_unique($references));
+        if (!$references) { return []; }
+        $tenant = FinanceAccess::tenant(); $cutoff = date('Y-m-t', strtotime($month . '-01'));
+        $ids = ['o' => [], 'n' => []];
+        foreach ($references as $reference) {
+            if (!preg_match('/^([on]):([1-9][0-9]{0,17})$/D', $reference, $match)) { throw new \DomainException('未结来源标识无效'); }
+            $ids[$match[1]][(int)$match[2]] = $reference;
+        }
+        $sources = [];
+        foreach (['o' => ['finance_opening_source', 'source_snapshot'], 'n' => ['finance_source', 'snapshot']] as $kind => [$table, $snapshotColumn]) {
+            if (!$ids[$kind]) { continue; }
+            foreach (Db::name($table)->where('tenant_id', $tenant)->whereIn('id', array_keys($ids[$kind]))->select()->toArray() as $sourceRow) {
+                $reference = $ids[$kind][(int)$sourceRow['id']]; $snapshot = FinanceValue::decode((string)$sourceRow[$snapshotColumn]);
+                $sources[$reference] = ['reference' => $reference, 'category' => (string)$sourceRow['category'],
+                    'subject_id' => (int)$sourceRow['subject_id'], 'confirmed_amount' => (string)$sourceRow['amount'],
+                    'business_date' => $kind === 'o' ? ($snapshot['historical_date'] ?? null) : ($sourceRow['business_date'] ?? null),
+                    'snapshot' => $snapshot, 'document_id' => $kind === 'o' ? null : (int)$sourceRow['document_id']];
+            }
+        }
+        foreach ($references as $reference) {
+            if (!isset($sources[$reference])) { throw new \DomainException('未结来源不存在或不属于本门店'); }
+        }
+
+        $period = Db::name('finance_period')->where('tenant_id', $tenant)->where('month', $month)->find();
+        $frozenBySource = [];
+        foreach ($period ? (FinanceValue::decode((string)$period['snapshot'])['balances']['sources'] ?? []) : [] as $original) {
+            if (($original['category'] ?? null) === 'transit' && isset($sources[(string)($original['reference'] ?? '')])) {
+                $frozenBySource[(string)$original['reference']] = $original;
+            }
+        }
+
+        $accountIds = [];
+        foreach ($sources as $reference => $source) {
+            $facts = str_starts_with($reference, 'o:') ? ($source['snapshot']['details'] ?? []) : $source['snapshot'];
+            $accountIds[(int)$source['subject_id']] = true;
+            if (isset($facts['target_account_id'])) { $accountIds[FinanceValue::id($facts['target_account_id'])] = true; }
+        }
+        $accounts = [];
+        if ($accountIds) {
+            foreach (Db::name('finance_account')->where('tenant_id', $tenant)->whereIn('id', array_keys($accountIds))
+                ->field('id,name')->select()->toArray() as $account) { $accounts[(int)$account['id']] = $account; }
+        }
+
+        $changes = array_fill_keys($references, '0.00');
+        $entries = Db::name('finance_entry')->where('tenant_id', $tenant)->where('metric', 'balance')
+            ->whereIn('source_ref', $references)->where('business_date', '<=', $cutoff)
+            ->field('source_ref,amount,posting_month')->select()->toArray();
+        foreach ($entries as $entry) {
+            $reference = (string)$entry['source_ref']; $frozen = isset($frozenBySource[$reference]);
+            if (($frozen && (string)$entry['posting_month'] <= $month) || (!$frozen && (string)$entry['posting_month'] > $month)) { continue; }
+            $changes[$reference] = bcadd($changes[$reference], (string)$entry['amount'], 2);
+        }
+        $settlements = FinanceAccountTransfers::settlementsMany($references);
+        $result = [];
+        foreach ($references as $reference) {
+            $source = $sources[$reference]; $snapshot = $source['snapshot']; $opening = str_starts_with($reference, 'o:');
+            $frozen = $frozenBySource[$reference] ?? null;
+            if ($source['category'] !== 'transit' || (!$opening && (($snapshot['type'] ?? '') !== 'account_transfer_out'
+                || $source['business_date'] > $cutoff || ($snapshot['posting_month'] ?? '') > $month))) {
+                throw new \DomainException('此来源不是本月末已入账的互转在途');
+            }
+            $facts = $opening ? ($snapshot['details'] ?? []) : $snapshot;
+            $account = $accounts[(int)$source['subject_id']] ?? null;
+            if (!$account) { throw new \DomainException('资金账户不存在、已停用或不属于本门店'); }
+            $targetId = isset($facts['target_account_id']) ? FinanceValue::id($facts['target_account_id']) : 0;
+            $target = $targetId ? ($accounts[$targetId] ?? null) : null;
+            if ($targetId && !$target) { throw new \DomainException('资金账户不存在、已停用或不属于本门店'); }
+            $row = ['transfer_source' => $reference, 'source_reference' => $snapshot['source_reference'] ?? $reference,
+                'source_account_id' => $source['subject_id'], 'source_account_name' => $account['name'],
+                'target_account_id' => $targetId, 'target_account_name' => $target['name'] ?? null,
+                'actual_date' => $source['business_date'], 'actual_cutoff' => $cutoff . ' 23:59:59',
+                'principal' => isset($facts['principal']) ? FinanceValue::money($facts['principal'], true) : null,
+                'arrived_amount' => isset($facts['arrived_amount']) ? FinanceValue::money($facts['arrived_amount'], true) : null,
+                'returned_amount' => isset($facts['returned_amount']) ? FinanceValue::money($facts['returned_amount'], true) : null,
+                'withheld_fee' => isset($facts['withheld_fee']) ? FinanceValue::money($facts['withheld_fee'], true) : null,
+                'extra_fee' => $opening ? (isset($facts['additional_fee']) ? FinanceValue::money($facts['additional_fee'], true) : null) : ($facts['extra_fee'] ?? null),
+                'original_document_id' => $source['document_id'], 'opening_item_id' => $opening ? (int)($snapshot['id'] ?? 0) : null,
+                'transfer_correction_amount' => '0.00', 'rebased_arrived_amount' => '0.00', 'rebased_returned_amount' => '0.00',
+                'rebased_withheld_fee' => '0.00', 'replacement_transfer_source' => null, 'replacement_document_id' => null];
+            foreach ($settlements[$reference] ?? [] as $entry) {
+                $settled = FinanceValue::decode((string)$entry['snapshot']);
+                if ($settled['actual_date'] > $cutoff || (!$frozen && $settled['posting_month'] > $month)) { continue; }
+                if ($entry['kind'] === 'transfer_out_correction') {
+                    $row['transfer_correction_amount'] = bcadd($row['transfer_correction_amount'], (string)$entry['amount'], 2);
+                    $row['replacement_transfer_source'] = $settled['replacement_transfer_source'];
+                    $row['replacement_document_id'] = (int)$settled['replacement_document_id']; continue;
+                }
+                if ($entry['kind'] === 'transfer_settlement_rebase') {
+                    $key = ($settled['settlement_kind'] ?? '') === 'arrival' ? 'rebased_arrived_amount' : 'rebased_returned_amount';
+                    $row[$key] = bcadd($row[$key], (string)$entry['amount'], 2);
+                    $row['rebased_withheld_fee'] = bcadd($row['rebased_withheld_fee'], (string)$entry['withheld_fee'], 2); continue;
+                }
+                $key = $entry['kind'] === 'arrival' ? 'arrived_amount' : 'returned_amount';
+                if ($row[$key] !== null) { $row[$key] = bcadd($row[$key], (string)$entry['amount'], 2); }
+                if ($row['withheld_fee'] !== null) { $row['withheld_fee'] = bcadd($row['withheld_fee'], (string)$entry['withheld_fee'], 2); }
+            }
+            $row['remaining_amount'] = bcadd((string)($frozen['closing'] ?? $source['confirmed_amount']), $changes[$reference], 2);
+            $row['composition_known'] = $targetId > 0 && $targetId !== $source['subject_id'] && $row['actual_date'] !== null
+                && $row['actual_date'] <= $cutoff && $row['principal'] !== null && $row['arrived_amount'] !== null
+                && $row['returned_amount'] !== null && $row['withheld_fee'] !== null;
+            if ($row['composition_known']) {
+                $composed = bcsub(bcsub(bcadd($row['principal'], $row['transfer_correction_amount'], 2), $row['arrived_amount'], 2), $row['returned_amount'], 2);
+                $composed = bcsub($composed, $row['withheld_fee'], 2);
+                $composed = bcsub(bcsub(bcsub($composed, $row['rebased_arrived_amount'], 2), $row['rebased_returned_amount'], 2), $row['rebased_withheld_fee'], 2);
+                $row['composition_known'] = bccomp($composed, $row['remaining_amount'], 2) === 0 && bccomp($composed, '0', 2) >= 0;
+            }
+            $fingerprint = $row;
+            if ($fingerprint['rebased_arrived_amount'] === '0.00' && $fingerprint['rebased_returned_amount'] === '0.00' && $fingerprint['rebased_withheld_fee'] === '0.00') {
+                unset($fingerprint['rebased_arrived_amount'], $fingerprint['rebased_returned_amount'], $fingerprint['rebased_withheld_fee']);
+            }
+            if ($fingerprint['replacement_transfer_source'] === null) {
+                unset($fingerprint['transfer_correction_amount'], $fingerprint['replacement_transfer_source'], $fingerprint['replacement_document_id']);
+            }
+            $row['fingerprint'] = hash('sha256', FinanceValue::json($fingerprint));
+            $row['closed_period_followup'] = $frozen !== null; $row['frozen_remaining_amount'] = $frozen['closing'] ?? null;
+            $row['post_close_adjustments'] = $frozen ? bcadd($changes[$reference], '0', 2) : '0.00';
+            $result[$reference] = $row;
+        }
+        return $result;
     }
 
     private static function atMonth(FinanceLedger $ledger, string $reference, string $month): array
     {
-        $source = $ledger->source($reference); $snapshot = $source['snapshot']; $opening = str_starts_with($reference, 'o:'); $cutoff = date('Y-m-t', strtotime($month . '-01'));
-        $period = Db::name('finance_period')->where('tenant_id', FinanceAccess::tenant())->where('month', $month)->find(); $frozen = null;
-        foreach ($period ? (FinanceValue::decode($period['snapshot'])['balances']['sources'] ?? []) : [] as $original) {
-            if ($original['reference'] === $reference && $original['category'] === 'transit') { $frozen = $original; break; }
-        }
-        if ($source['category'] !== 'transit' || (!$opening && (($snapshot['type'] ?? '') !== 'account_transfer_out' || $source['business_date'] > $cutoff || ($snapshot['posting_month'] ?? '') > $month))) { throw new \DomainException('此来源不是本月末已入账的互转在途'); }
-        $facts = $opening ? ($snapshot['details'] ?? []) : $snapshot;
-        $account = $ledger->account($source['subject_id'], false); $targetId = isset($facts['target_account_id']) ? FinanceValue::id($facts['target_account_id']) : 0;
-        $target = $targetId ? $ledger->account($targetId, false) : null;
-        $row = ['transfer_source' => $reference, 'source_reference' => $snapshot['source_reference'] ?? $reference, 'source_account_id' => $source['subject_id'], 'source_account_name' => $account['name'],
-            'target_account_id' => $targetId, 'target_account_name' => $target['name'] ?? null, 'actual_date' => $source['business_date'], 'actual_cutoff' => $cutoff . ' 23:59:59',
-            'principal' => isset($facts['principal']) ? FinanceValue::money($facts['principal'], true) : null,
-            'arrived_amount' => isset($facts['arrived_amount']) ? FinanceValue::money($facts['arrived_amount'], true) : null,
-            'returned_amount' => isset($facts['returned_amount']) ? FinanceValue::money($facts['returned_amount'], true) : null,
-            'withheld_fee' => isset($facts['withheld_fee']) ? FinanceValue::money($facts['withheld_fee'], true) : null,
-            'extra_fee' => $opening ? (isset($facts['additional_fee']) ? FinanceValue::money($facts['additional_fee'], true) : null) : ($facts['extra_fee'] ?? null), 'original_document_id' => $source['document_id'], 'opening_item_id' => $opening ? (int)($snapshot['id'] ?? 0) : null,
-            'transfer_correction_amount' => '0.00', 'rebased_arrived_amount' => '0.00', 'rebased_returned_amount' => '0.00', 'rebased_withheld_fee' => '0.00',
-            'replacement_transfer_source' => null, 'replacement_document_id' => null];
-        foreach (FinanceAccountTransfers::settlements($reference) as $entry) {
-            $settled = FinanceValue::decode($entry['snapshot']);
-            if ($settled['actual_date'] > $cutoff || (!$frozen && $settled['posting_month'] > $month)) { continue; }
-            if ($entry['kind'] === 'transfer_out_correction') {
-                $row['transfer_correction_amount'] = bcadd($row['transfer_correction_amount'], $entry['amount'], 2); $row['replacement_transfer_source'] = $settled['replacement_transfer_source']; $row['replacement_document_id'] = (int)$settled['replacement_document_id']; continue;
-            }
-            if ($entry['kind'] === 'transfer_settlement_rebase') {
-                $key = ($settled['settlement_kind'] ?? '') === 'arrival' ? 'rebased_arrived_amount' : 'rebased_returned_amount';
-                $row[$key] = bcadd($row[$key], $entry['amount'], 2); $row['rebased_withheld_fee'] = bcadd($row['rebased_withheld_fee'], $entry['withheld_fee'], 2); continue;
-            }
-            $key = $entry['kind'] === 'arrival' ? 'arrived_amount' : 'returned_amount';
-            if ($row[$key] !== null) { $row[$key] = bcadd($row[$key], $entry['amount'], 2); }
-            if ($row['withheld_fee'] !== null) { $row['withheld_fee'] = bcadd($row['withheld_fee'], $entry['withheld_fee'], 2); }
-        }
-        $changes = (string)Db::name('finance_entry')->where('tenant_id', FinanceAccess::tenant())->where('metric', 'balance')->where('source_ref', $reference)->where('business_date', '<=', $cutoff)->where('posting_month', $frozen ? '>' : '<=', $month)->sum('amount');
-        $row['remaining_amount'] = bcadd($frozen ? $frozen['closing'] : $source['confirmed_amount'], $changes ?: '0', 2);
-        $row['composition_known'] = $targetId > 0 && $targetId !== $source['subject_id'] && $row['actual_date'] !== null && $row['actual_date'] <= $cutoff && $row['principal'] !== null && $row['arrived_amount'] !== null && $row['returned_amount'] !== null && $row['withheld_fee'] !== null;
-        if ($row['composition_known']) {
-            $composed = bcsub(bcsub(bcadd($row['principal'], $row['transfer_correction_amount'], 2), $row['arrived_amount'], 2), $row['returned_amount'], 2); $composed = bcsub($composed, $row['withheld_fee'], 2);
-            $composed = bcsub(bcsub(bcsub($composed, $row['rebased_arrived_amount'], 2), $row['rebased_returned_amount'], 2), $row['rebased_withheld_fee'], 2);
-            $row['composition_known'] = bccomp($composed, $row['remaining_amount'], 2) === 0 && bccomp($composed, '0', 2) >= 0;
-        }
-        $fingerprint = $row;
-        if ($fingerprint['rebased_arrived_amount'] === '0.00' && $fingerprint['rebased_returned_amount'] === '0.00' && $fingerprint['rebased_withheld_fee'] === '0.00') { unset($fingerprint['rebased_arrived_amount'], $fingerprint['rebased_returned_amount'], $fingerprint['rebased_withheld_fee']); }
-        if ($fingerprint['replacement_transfer_source'] === null) { unset($fingerprint['transfer_correction_amount'], $fingerprint['replacement_transfer_source'], $fingerprint['replacement_document_id']); }
-        $row['fingerprint'] = hash('sha256', FinanceValue::json($fingerprint));
-        // 展示元数据不属于业务组成，新增字段不能使升级前的正式核对凭空失效。
-        $row['closed_period_followup'] = $frozen !== null; $row['frozen_remaining_amount'] = $frozen['closing'] ?? null;
-        $row['post_close_adjustments'] = $frozen ? bcadd($changes ?: '0', '0', 2) : '0.00';
-        return $row;
+        return self::atMonthMany([$reference], $month)[$reference];
     }
 
     private static function present(FinanceLedger $ledger, string $reference, string $month, bool $closed): array
     {
-        $current = self::atMonth($ledger, $reference, $month); $latest = self::latest($reference, $month);
-        $replaced = $current['replacement_transfer_source'] !== null; $allowed = !$replaced && (!$closed || $current['closed_period_followup']);
-        if ($closed && !$current['closed_period_followup'] && $latest) { $current = $latest['transfer']; }
-        $settled = $current['composition_known'] && $current['extra_fee'] !== null && bccomp($current['remaining_amount'], '0', 2) === 0;
-        $state = $replaced ? 'replaced' : (!$latest ? ($settled ? 'settled' : 'unreviewed') : ($latest['transfer']['fingerprint'] !== $current['fingerprint'] ? 'needs_review' : $latest['review_state']));
-        return $current + ['state' => $state, 'latest' => $latest, 'can_reconcile' => $allowed, 'ordinary_close_allowed' => in_array($state, ['normal', 'settled', 'replaced'], true)];
+        return self::presentMany([$reference], $month, $closed)[$reference];
+    }
+
+    /** @param array<int,string> $references @return array<string,array<string,mixed>> */
+    public static function presentMany(array $references, string $month, bool $closed = false): array
+    {
+        $currentRows = self::atMonthMany($references, $month); $latestRows = self::latestMany($references, $month); $rows = [];
+        foreach ($references as $reference) {
+            $current = $currentRows[$reference]; $latest = $latestRows[$reference] ?? null;
+            $replaced = $current['replacement_transfer_source'] !== null;
+            $allowed = !$replaced && (!$closed || $current['closed_period_followup']);
+            if ($closed && !$current['closed_period_followup'] && $latest) { $current = $latest['transfer']; }
+            $settled = $current['composition_known'] && $current['extra_fee'] !== null && bccomp($current['remaining_amount'], '0', 2) === 0;
+            $state = $replaced ? 'replaced' : (!$latest ? ($settled ? 'settled' : 'unreviewed')
+                : ($latest['transfer']['fingerprint'] !== $current['fingerprint'] ? 'needs_review' : $latest['review_state']));
+            $rows[$reference] = $current + ['state' => $state, 'latest' => $latest, 'can_reconcile' => $allowed,
+                'ordinary_close_allowed' => in_array($state, ['normal', 'settled', 'replaced'], true)];
+        }
+        return $rows;
     }
 
     public static function followup(FinanceLedger $ledger, string $reference, string $month): array { return self::present($ledger, $reference, $month, true); }
@@ -106,7 +208,7 @@ final class FinanceTransitReviews
             $refs = array_column(Db::query(implode(' UNION ALL ', $parts) . ' ORDER BY reference LIMIT ' . (($page - 1) * 20) . ',21'), 'reference');
         }
         $more = count($refs) > 20; $refs = array_slice($refs, 0, 20);
-        $rows = array_map(static fn(string $ref): array => self::present($ledger, $ref, $month, $closed), $refs);
+        $rows = array_values(self::presentMany($refs, $month, $closed));
         return ['month' => $month, 'actual_cutoff' => date('Y-m-t', strtotime($month . '-01')) . ' 23:59:59', 'closed' => $closed,
             'closed_followup_allowed' => $closed && (bool)array_filter($rows, static fn(array $row): bool => $row['can_reconcile']), 'transfers' => $rows, 'transfer_has_more' => $more, 'selected_transfer' => $exact ? $rows[0] : null];
     }

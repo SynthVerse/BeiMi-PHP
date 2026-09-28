@@ -32,6 +32,9 @@ Route::group('', function () {
 
 // JXC 业务接口 —— 使用 JxcLoginMiddleware（双 Token 查询）
 Route::group('', function () {
+    // 统一待办必须位于 JXC 登录与当前门店上下文内，且使用精确路由避免公共前缀误分派。
+    Route::get('jxc/todos/summary', 'jxc.Todo/summary');
+    Route::get('jxc/todos/lists', 'jxc.Todo/lists');
     Route::get('finance/workbench', 'jxc.FinanceSetup/workbench');
     Route::get('finance/preparation', 'jxc.FinanceSetup/preparation');
     Route::post('finance/preparation/save', 'jxc.FinanceSetup/savePreparation');

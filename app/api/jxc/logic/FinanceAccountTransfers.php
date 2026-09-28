@@ -77,23 +77,118 @@ final class FinanceAccountTransfers
     /** 原结清事实与关联冲正分别保留日期、入账月，供当前余额和历史月末共同使用。 */
     public static function settlements(string $reference, int $correctingDocument = 0): array
     {
-        $tenant = FinanceAccess::tenant();
-        $rows = Db::name('finance_transfer_settlement')->where('tenant_id', $tenant)->where('source_ref', $reference)->order('id')->select()->toArray();
-        $events = [];
-        foreach ($rows as $row) {
-            if ((int)$row['document_id'] === $correctingDocument) { continue; }
-            $events[] = $row + ['settlement_event_id' => (int)$row['id'] * 10];
-            $correction = Db::name('finance_correction')->where('tenant_id', $tenant)->where('original_document_id', $row['document_id'])->find();
-            if (!$correction) { continue; }
-            $reversal = Db::name('finance_entry')->where('tenant_id', $tenant)->where('document_id', $correction['replacement_document_id'])
-                ->where('metric', 'balance')->where('purpose', 'correction_reversal')->where('source_ref', $reference)->find();
-            if (!$reversal) { throw new \DomainException('互转更正缺少原在途反向依据'); }
-            $snapshot = FinanceValue::decode($row['snapshot']);
-            $events[] = array_replace($row, ['document_id' => $correction['replacement_document_id'], 'settlement_event_id' => (int)$row['id'] * 10 + 1, 'amount' => bcsub('0', $row['amount'], 2), 'withheld_fee' => bcsub('0', $row['withheld_fee'], 2),
-                'snapshot' => FinanceValue::json(array_replace($snapshot, ['actual_date' => $reversal['business_date'], 'posting_month' => $reversal['posting_month'], 'reverses_document_id' => (int)$row['document_id']]))]);
+        return self::settlementsMany([$reference], $correctingDocument)[$reference] ?? [];
+    }
+
+    /** @param array<int,string> $references @return array<string,array<int,array<string,mixed>>> */
+    public static function settlementsMany(array $references, int $correctingDocument = 0): array
+    {
+        $references = array_values(array_unique($references));
+        if (!$references) { return []; }
+        $tenant = FinanceAccess::tenant(); $events = array_fill_keys($references, []);
+        $settlements = Db::name('finance_transfer_settlement')->where('tenant_id', $tenant)
+            ->whereIn('source_ref', $references)->order('id')->select()->toArray();
+
+        $newSourceIds = [];
+        foreach ($references as $reference) {
+            if (preg_match('/^n:([1-9][0-9]*)$/D', $reference, $match)) { $newSourceIds[(int)$match[1]] = $reference; }
         }
-        if ($correction = self::outCorrection($reference)) { $events[] = $correction; }
-        foreach (self::rebaseEvents($reference) as $event) { $events[] = $event; }
+        $sourceDocuments = [];
+        if ($newSourceIds) {
+            foreach (Db::name('finance_source')->where('tenant_id', $tenant)->whereIn('id', array_keys($newSourceIds))
+                ->field('id,document_id')->select()->toArray() as $row) {
+                $sourceDocuments[$newSourceIds[(int)$row['id']]] = (int)$row['document_id'];
+            }
+        }
+
+        $originalDocuments = array_values(array_unique(array_merge(
+            array_map(static fn(array $row): int => (int)$row['document_id'], $settlements),
+            array_values($sourceDocuments)
+        )));
+        $corrections = [];
+        if ($originalDocuments) {
+            foreach (Db::name('finance_correction')->where('tenant_id', $tenant)->whereIn('original_document_id', $originalDocuments)
+                ->select()->toArray() as $row) {
+                $corrections[(int)$row['original_document_id']] = $row;
+            }
+        }
+        $replacementIds = array_values(array_unique(array_map(
+            static fn(array $row): int => (int)$row['replacement_document_id'], $corrections
+        )));
+        $replacementDocuments = [];
+        if ($replacementIds) {
+            foreach (Db::name('finance_document')->where('tenant_id', $tenant)->whereIn('id', $replacementIds)->select()->toArray() as $row) {
+                $replacementDocuments[(int)$row['id']] = $row;
+            }
+        }
+        $entryMap = [];
+        if ($replacementIds) {
+            foreach (Db::name('finance_entry')->where('tenant_id', $tenant)->whereIn('document_id', $replacementIds)
+                ->whereIn('source_ref', $references)->whereIn('metric', ['balance', 'transit'])
+                ->whereIn('purpose', ['correction_reversal', 'correction_source'])->select()->toArray() as $row) {
+                $entryMap[(int)$row['document_id'] . '|' . $row['source_ref'] . '|' . $row['metric'] . '|' . $row['purpose']] = $row;
+            }
+        }
+
+        $settlementsBySource = [];
+        foreach ($settlements as $row) { $settlementsBySource[(string)$row['source_ref']][] = $row; }
+        $rebasesById = [];
+        foreach (['original_source_ref', 'replacement_source_ref'] as $column) {
+            foreach (Db::name('finance_transfer_settlement_rebase')->where('tenant_id', $tenant)->whereIn($column, $references)
+                ->order('id')->select()->toArray() as $row) { $rebasesById[(int)$row['id']] = $row; }
+        }
+        ksort($rebasesById);
+
+        foreach ($references as $reference) {
+            foreach ($settlementsBySource[$reference] ?? [] as $row) {
+                if ((int)$row['document_id'] === $correctingDocument) { continue; }
+                $events[$reference][] = $row + ['settlement_event_id' => (int)$row['id'] * 10];
+                $correction = $corrections[(int)$row['document_id']] ?? null;
+                if (!$correction) { continue; }
+                $replacementId = (int)$correction['replacement_document_id'];
+                $reversal = $entryMap[$replacementId . '|' . $reference . '|balance|correction_reversal'] ?? null;
+                if (!$reversal) { throw new \DomainException('互转更正缺少原在途反向依据'); }
+                $snapshot = FinanceValue::decode((string)$row['snapshot']);
+                $events[$reference][] = array_replace($row, ['document_id' => $replacementId,
+                    'settlement_event_id' => (int)$row['id'] * 10 + 1, 'amount' => bcsub('0', (string)$row['amount'], 2),
+                    'withheld_fee' => bcsub('0', (string)$row['withheld_fee'], 2),
+                    'snapshot' => FinanceValue::json(array_replace($snapshot, ['actual_date' => $reversal['business_date'],
+                        'posting_month' => $reversal['posting_month'], 'reverses_document_id' => (int)$row['document_id']]))]);
+            }
+
+            $originalDocument = $sourceDocuments[$reference] ?? 0;
+            $outCorrection = $corrections[$originalDocument] ?? null;
+            if ($outCorrection) {
+                $replacementId = (int)$outCorrection['replacement_document_id'];
+                $replacement = $replacementDocuments[$replacementId] ?? null;
+                if (!$replacement || $replacement['type'] !== 'account_transfer_out') { throw new \DomainException('互转更正缺少替代转出记录'); }
+                $result = FinanceValue::decode((string)$replacement['confirmed_result']);
+                $replacementSource = FinanceValue::text($result['transfer_source'] ?? '', 40);
+                $reversal = $entryMap[$replacementId . '|' . $reference . '|transit|correction_reversal'] ?? null;
+                $source = $entryMap[$replacementId . '|' . $reference . '|balance|correction_source'] ?? null;
+                if (!$reversal || !$source || bccomp((string)$reversal['amount'], '0', 2) >= 0 || bccomp((string)$source['amount'], '0', 2) > 0) {
+                    throw new \DomainException('互转更正缺少旧在途冲销依据');
+                }
+                $events[$reference][] = ['document_id' => $replacementId, 'kind' => 'transfer_out_correction',
+                    'amount' => (string)$reversal['amount'], 'withheld_fee' => '0.00',
+                    'snapshot' => FinanceValue::json(['actual_date' => $reversal['business_date'], 'posting_month' => $reversal['posting_month'],
+                        'reverses_document_id' => $originalDocument, 'replacement_document_id' => $replacementId,
+                        'replacement_transfer_source' => $replacementSource])];
+            }
+
+            foreach ($rebasesById as $row) {
+                if ($row['original_source_ref'] !== $reference && $row['replacement_source_ref'] !== $reference) { continue; }
+                $removesFromOriginal = $row['original_source_ref'] === $reference; $snapshot = FinanceValue::decode((string)$row['snapshot']);
+                $events[$reference][] = ['document_id' => (int)$row['correction_document_id'],
+                    'settlement_event_id' => (int)($snapshot['settlement_event_id'] ?? $row['settlement_document_id']),
+                    'kind' => 'transfer_settlement_rebase',
+                    'amount' => $removesFromOriginal ? bcsub('0', (string)$row['amount'], 2) : (string)$row['amount'],
+                    'withheld_fee' => $removesFromOriginal ? bcsub('0', (string)$row['withheld_fee'], 2) : (string)$row['withheld_fee'],
+                    'snapshot' => FinanceValue::json($snapshot + ['settlement_kind' => $row['kind'],
+                        'original_source_ref' => $row['original_source_ref'], 'replacement_source_ref' => $row['replacement_source_ref'],
+                        'rebase_direction' => $removesFromOriginal ? 'remove' : 'apply'])];
+            }
+        }
         return $events;
     }
 
