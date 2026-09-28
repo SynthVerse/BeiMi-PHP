@@ -48,6 +48,7 @@ class SupplyOrderLogic extends BaseLogic
             if ($idempotentKey !== '') {
                 $existing = SupplyOrder::where('tenant_id', $tenantId)
                     ->where('idempotent_key', $idempotentKey)
+                    ->lock(true)
                     ->find();
                 if ($existing) {
                     Db::commit();

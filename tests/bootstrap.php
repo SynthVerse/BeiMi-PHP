@@ -10,6 +10,7 @@ if (!is_file($autoload)) {
 }
 
 require $autoload;
+require_once __DIR__ . DIRECTORY_SEPARATOR . 'support' . DIRECTORY_SEPARATOR . 'IsolatedDatabaseGuard.php';
 
 // PHPUnit must never inherit the root .env connection. The dedicated file is
 // intentionally untracked and is checked before ThinkPHP initializes facades.
@@ -26,17 +27,8 @@ if (!is_file($testingEnvFile)) {
 }
 
 $testingEnv = parse_ini_file($testingEnvFile, true, INI_SCANNER_RAW) ?: [];
-$isolated = strtolower(trim((string)($testingEnv['PHPUNIT']['ISOLATED_DATABASE'] ?? '')));
-$database = trim((string)($testingEnv['DATABASE']['DATABASE'] ?? ''));
-$hostname = strtolower(trim((string)($testingEnv['DATABASE']['HOSTNAME'] ?? '')));
-$driver = strtolower(trim((string)($testingEnv['DATABASE']['TYPE'] ?? '')));
-$port = trim((string)($testingEnv['DATABASE']['HOSTPORT'] ?? $testingEnv['DATABASE']['PORT'] ?? ''));
-if (!in_array($isolated, ['1', 'true', 'yes'], true)
-    || !preg_match('/^beimi_test_[a-z0-9_]+$/i', $database)
-    || !in_array($hostname, ['127.0.0.1', 'localhost', '::1'], true)
-    || $driver !== 'mysql'
-    || $port !== '3307') {
-    fwrite(STDERR, "Refusing PHPUnit: require local MySQL on port 3307, a beimi_test_* database, and an explicit isolated marker.\n");
+if (!\tests\support\IsolatedDatabaseGuard::acceptsEnvironment($testingEnv)) {
+    fwrite(STDERR, "Refusing PHPUnit: require TCP MySQL at 127.0.0.1:3307, a beimi_test_* database, the la_ prefix, a non-empty test password, and an explicit isolated marker.\n");
     exit(1);
 }
 

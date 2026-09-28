@@ -45,6 +45,7 @@ class PurchaseReturnOrderLogic extends BaseLogic
             if ($idempotentKey !== '') {
                 $existing = PurchaseReturnOrder::where('tenant_id', $tenantId)
                     ->where('idempotent_key', $idempotentKey)
+                    ->lock(true)
                     ->find();
                 if ($existing) {
                     Db::commit();
@@ -547,7 +548,7 @@ class PurchaseReturnOrderLogic extends BaseLogic
             $byGoods[self::goodsSkuPurchaseReturnKey($row)] = $row;
         }
 
-        $returnedMap = self::returnedSupplyQtyMap($originalOrderId, $ignoreReturnOrderId);
+        $returnedMap = self::returnedSupplyQtyMap($originalOrderId, $ignoreReturnOrderId, true);
         $rows = [];
         foreach (array_values($goods) as $index => $item) {
             $originLineId = (int)($item['original_supply_order_list_id'] ?? $item['original_order_goods_id'] ?? $item['order_goods_id'] ?? 0);
@@ -635,21 +636,33 @@ class PurchaseReturnOrderLogic extends BaseLogic
         }
     }
 
-    protected static function returnedSupplyQtyMap(int $originalOrderId, int $ignoreReturnOrderId = 0): array
+    protected static function returnedSupplyQtyMap(
+        int $originalOrderId,
+        int $ignoreReturnOrderId = 0,
+        bool $lockRows = false
+    ): array
     {
         $query = PurchaseReturnOrderDetail::where('original_supply_order_id', $originalOrderId)
             ->where('tenant_id', (int)(request()->tenantId ?? 0));
         if ($ignoreReturnOrderId > 0) {
             $query->where('purchase_return_order_id', '<>', $ignoreReturnOrderId);
         }
-        $rows = $query->field('original_supply_order_list_id,SUM(return_num) as returned_num')
-            ->group('original_supply_order_list_id')
+        // Use a current locking read instead of a grouped consistent read. The
+        // finance availability probe can create a REPEATABLE READ snapshot before
+        // the shared tenant/original-order lock is acquired, which otherwise lets
+        // a waiter validate against quantities from before the preceding commit.
+        $query->field('original_supply_order_list_id,return_num');
+        if ($lockRows) {
+            $query->lock(true);
+        }
+        $rows = $query
             ->select()
             ->toArray();
 
         $map = [];
         foreach ($rows as $row) {
-            $map[(int)$row['original_supply_order_list_id']] = (string)$row['returned_num'];
+            $lineId = (int)$row['original_supply_order_list_id'];
+            $map[$lineId] = bcadd($map[$lineId] ?? '0.0000', (string)$row['return_num'], 4);
         }
         return $map;
     }
@@ -672,7 +685,7 @@ class PurchaseReturnOrderLogic extends BaseLogic
             return;
         }
 
-        $returnedMap = self::returnedSupplyQtyMap($supplyOrderId);
+        $returnedMap = self::returnedSupplyQtyMap($supplyOrderId, 0, true);
         $hasReturned = false;
         $allReturned = true;
         foreach ($originalRows as $row) {

@@ -7,14 +7,19 @@ namespace tests\unit;
 use app\api\jxc\logic\PurchaseReturnOrderLogic;
 use app\api\jxc\logic\SalesReturnOrderLogic;
 use app\api\jxc\logic\SupplyOrderLogic;
+use BeiMi\Migration\MigrationSqlPreprocessor;
 use PHPUnit\Framework\TestCase;
 use ReflectionClass;
+use tests\support\IsolatedDatabaseGuard;
 use think\facade\Db;
 use think\facade\Log;
+
+require_once dirname(__DIR__, 2) . '/scripts/lib/MigrationSqlPreprocessor.php';
 
 final class SalesReturnRollbackGuardTest extends TestCase
 {
     private const LOGIC_FILE = __DIR__ . '/../../app/api/jxc/logic/SalesReturnOrderLogic.php';
+    private static bool $behaviorSchemaReady = false;
 
     public function testEditStopsBeforeNewWritesWhenOldStockRollbackFails(): void
     {
@@ -230,6 +235,7 @@ final class SalesReturnRollbackGuardTest extends TestCase
                 'idempotent_key' => 'supply-' . $fixture['suffix'],
                 'goods' => [[
                     'goods_id' => $fixture['goods_id'],
+                    'sku_id' => $fixture['sku_id'],
                     'number' => 1,
                     'actual_base_qty' => 1,
                     'units' => 'kg',
@@ -409,56 +415,56 @@ final class SalesReturnRollbackGuardTest extends TestCase
         }
     }
 
-    public function testFinanceFlowTriggerFailuresRollbackReturnPublishesCompletely(): void
+    public function testFinanceFlowWriteFailuresRollbackReturnPublishesCompletely(): void
     {
         self::requireIsolatedDatabase();
         Log::channel()->close();
 
         $salesFixture = self::createBehaviorFixture('sales-flow');
         self::setRequestTenant($salesFixture['tenant_id']);
-        $salesTrigger = self::safeTriggerName('sales_flow');
+        $salesConstraint = self::safeConstraintName('sales_flow');
         try {
             $params = self::salesReturnParams($salesFixture, 'SF', 2, 10);
             $before = self::salesRollbackSnapshot($salesFixture, $params['idempotent_key']);
-            self::createFailureTrigger($salesTrigger, 'receivable_flow');
+            self::createFailureConstraint($salesConstraint, 'receivable_flow', $salesFixture['tenant_id']);
             try {
                 self::assertFalse(SalesReturnOrderLogic::publish($params));
                 self::assertSame('RETURN_FINANCE_FAILED', self::returnErrorCode(SalesReturnOrderLogic::getReturnData()));
                 self::assertSame($before, self::salesRollbackSnapshot($salesFixture, $params['idempotent_key']));
             } finally {
-                self::dropFailureTrigger($salesTrigger);
-                self::assertFalse(self::triggerExists($salesTrigger));
+                self::dropFailureConstraint($salesConstraint, 'receivable_flow');
+                self::assertFalse(self::constraintExists($salesConstraint));
             }
             self::assertIsArray(
                 SalesReturnOrderLogic::publish($params),
                 'The rolled-back sales-return idempotency key must be reusable.'
             );
         } finally {
-            self::dropFailureTrigger($salesTrigger);
+            self::dropFailureConstraint($salesConstraint, 'receivable_flow');
             self::cleanBehaviorFixture($salesFixture['tenant_id']);
         }
 
         $purchaseFixture = self::createBehaviorFixture('purchase-flow');
         self::setRequestTenant($purchaseFixture['tenant_id']);
-        $purchaseTrigger = self::safeTriggerName('purchase_flow');
+        $purchaseConstraint = self::safeConstraintName('purchase_flow');
         try {
             $params = self::purchaseReturnParams($purchaseFixture, 'PF', 2, 10);
             $before = self::purchaseRollbackSnapshot($purchaseFixture, $params['idempotent_key']);
-            self::createFailureTrigger($purchaseTrigger, 'payable_flow');
+            self::createFailureConstraint($purchaseConstraint, 'payable_flow', $purchaseFixture['tenant_id']);
             try {
                 self::assertFalse(PurchaseReturnOrderLogic::publish($params));
                 self::assertSame('RETURN_FINANCE_FAILED', self::returnErrorCode(PurchaseReturnOrderLogic::getReturnData()));
                 self::assertSame($before, self::purchaseRollbackSnapshot($purchaseFixture, $params['idempotent_key']));
             } finally {
-                self::dropFailureTrigger($purchaseTrigger);
-                self::assertFalse(self::triggerExists($purchaseTrigger));
+                self::dropFailureConstraint($purchaseConstraint, 'payable_flow');
+                self::assertFalse(self::constraintExists($purchaseConstraint));
             }
             self::assertIsArray(
                 PurchaseReturnOrderLogic::publish($params),
                 'The rolled-back purchase-return idempotency key must be reusable.'
             );
         } finally {
-            self::dropFailureTrigger($purchaseTrigger);
+            self::dropFailureConstraint($purchaseConstraint, 'payable_flow');
             self::cleanBehaviorFixture($purchaseFixture['tenant_id']);
         }
     }
@@ -467,18 +473,10 @@ final class SalesReturnRollbackGuardTest extends TestCase
     {
         $default = config('database.default');
         $mysql = config('database.connections.mysql');
-        $isolated = $default === 'mysql'
-            && is_array($mysql)
-            && ($mysql['type'] ?? null) === 'mysql'
-            && ($mysql['hostname'] ?? null) === '127.0.0.1'
-            && preg_match('/^beimi_full_suite_[a-f0-9]{16,32}$/', (string)($mysql['database'] ?? '')) === 1
-            && (int)($mysql['hostport'] ?? 3306) > 0
-            && (int)($mysql['hostport'] ?? 3306) !== 3306
-            && ($mysql['prefix'] ?? null) === 'la_'
-            && is_string($mysql['password'] ?? null)
-            && $mysql['password'] !== '';
-        if (!$isolated) {
-            self::markTestSkipped('Requires the isolated beimi_full_suite database.');
+        if ($default !== 'mysql'
+            || !is_array($mysql)
+            || !IsolatedDatabaseGuard::acceptsConnection($mysql)) {
+            self::fail('PHPUnit bootstrap accepted a database that does not satisfy the shared isolation guard.');
         }
         if (!extension_loaded('pdo_mysql')) {
             self::fail('The isolated behavior gate requires pdo_mysql.');
@@ -490,6 +488,7 @@ final class SalesReturnRollbackGuardTest extends TestCase
 
     private static function createBehaviorFixture(string $label): array
     {
+        self::ensureRequiredBehaviorSchema();
         self::assertRequiredBehaviorSchema();
         $suffix = substr($label, 0, 8) . '_' . bin2hex(random_bytes(6));
         $tenantName = 'Fixture ' . $suffix;
@@ -542,6 +541,65 @@ final class SalesReturnRollbackGuardTest extends TestCase
                 'create_time' => $now,
                 'update_time' => $now,
             ]);
+            $skuId = (int)Db::name('goods_sku')->insertGetId([
+                'tenant_id' => $tenantId,
+                'goods_id' => $goodsId,
+                'sku_name' => 'Default SKU ' . $suffix,
+                'sku_code' => 'SKU_' . $suffix,
+                'quality_status' => '',
+                'quality_label' => '',
+                'specification_status' => '',
+                'specification_label' => '',
+                'base_unit_id' => 0,
+                'base_unit_name' => 'kg',
+                'purchase_status' => 1,
+                'sale_status' => 1,
+                'status' => 1,
+                'sort' => 0,
+                'remark' => '',
+                'is_auto_generated' => 1,
+                'dimension_disabled_snapshot' => 0,
+                'create_time' => $now,
+                'update_time' => $now,
+            ]);
+            Db::name('warehouse_sku_balance')->insert([
+                'tenant_id' => $tenantId,
+                'warehouse_id' => $warehouseId,
+                'goods_id' => $goodsId,
+                'sku_id' => $skuId,
+                'base_unit_id' => 0,
+                'base_unit_name' => 'kg',
+                'on_hand_qty' => '100.0000',
+                'reserved_qty' => '0.0000',
+                'available_qty' => '100.0000',
+                'version' => 1,
+                'create_time' => $now,
+                'update_time' => $now,
+            ]);
+            Db::name('goods_supplier')->insert([
+                'tenant_id' => $tenantId,
+                'goods_id' => $goodsId,
+                'sku_id' => $skuId,
+                'supplier_id' => $vendorId,
+                'is_primary' => 1,
+                'is_preferred' => 1,
+                'supplier_product_code' => 'SUP_' . $suffix,
+                'supplier_goods_name' => 'Goods ' . $suffix,
+                'purchase_price' => '10.00',
+                'purchase_unit_id' => 0,
+                'purchase_unit_name' => 'kg',
+                'settlement_unit_id' => 0,
+                'settlement_unit_name' => 'kg',
+                'min_purchase_qty' => '0.0000',
+                'daily_capacity_qty' => '0.0000',
+                'lead_time_days' => 0,
+                'last_purchase_price' => '10.00',
+                'last_purchase_time' => 0,
+                'status' => 1,
+                'remark' => '',
+                'create_time' => $now,
+                'update_time' => $now,
+            ]);
             $salesOrderId = (int)Db::name('sales_order')->insertGetId([
                 'tenant_id' => $tenantId,
                 'order_sn' => 'SO-' . $suffix,
@@ -562,6 +620,7 @@ final class SalesReturnRollbackGuardTest extends TestCase
                 $salesOrderId,
                 'sales',
                 $goodsId,
+                $skuId,
                 $suffix,
                 $now
             ));
@@ -586,6 +645,7 @@ final class SalesReturnRollbackGuardTest extends TestCase
                 $supplyOrderId,
                 'supply',
                 $goodsId,
+                $skuId,
                 $suffix,
                 $now
             ));
@@ -597,6 +657,7 @@ final class SalesReturnRollbackGuardTest extends TestCase
                 'customer_id' => $customerId,
                 'warehouse_id' => $warehouseId,
                 'goods_id' => $goodsId,
+                'sku_id' => $skuId,
                 'sales_order_id' => $salesOrderId,
                 'sales_line_id' => $salesLineId,
                 'supply_order_id' => $supplyOrderId,
@@ -613,6 +674,7 @@ final class SalesReturnRollbackGuardTest extends TestCase
         int $orderId,
         string $orderType,
         int $goodsId,
+        int $skuId,
         string $suffix,
         int $now
     ): array {
@@ -621,6 +683,7 @@ final class SalesReturnRollbackGuardTest extends TestCase
             'order_id' => $orderId,
             'order_type' => $orderType,
             'goods_id' => $goodsId,
+            'sku_id' => $skuId,
             'name' => 'Goods ' . $suffix,
             'units' => 'kg',
             'number' => '10.0000',
@@ -659,6 +722,65 @@ final class SalesReturnRollbackGuardTest extends TestCase
             );
             self::assertCount(1, $rows, "Required isolated column {$table}.{$column} is missing.");
         }
+    }
+
+    private static function ensureRequiredBehaviorSchema(): void
+    {
+        if (self::$behaviorSchemaReady) {
+            return;
+        }
+
+        $root = dirname(__DIR__, 2);
+        $purchaseReturnMigration = MigrationSqlPreprocessor::prepare(
+            (string)file_get_contents($root . '/database/migrations/20260630_000001_create_purchase_return_order.sql'),
+            'la_'
+        );
+        foreach (['purchase_return_order', 'purchase_return_order_lists'] as $table) {
+            self::executeCreateTableStatement($purchaseReturnMigration, $table);
+        }
+
+        if (!self::schemaColumnExists('la_supply_order', 'return_status')) {
+            $start = strpos($purchaseReturnMigration, 'ALTER TABLE `la_supply_order`');
+            $end = $start === false ? false : strpos($purchaseReturnMigration, ';', $start);
+            if ($start === false || $end === false) {
+                self::fail('The authoritative purchase-return migration is missing the supply return-status ALTER.');
+            }
+            Db::execute(substr($purchaseReturnMigration, $start, $end - $start + 1));
+        }
+
+        if (!self::schemaColumnExists('la_order_goods', 'original_sales_order_list_id')) {
+            $salesReturnMigration = MigrationSqlPreprocessor::prepare(
+                (string)file_get_contents($root . '/database/migrations/20260630_000002_add_sales_return_original_line_to_order_goods.sql'),
+                'la_'
+            );
+            foreach (array_filter(array_map('trim', explode(';', $salesReturnMigration))) as $statement) {
+                Db::execute($statement);
+            }
+        }
+
+        self::$behaviorSchemaReady = true;
+    }
+
+    private static function executeCreateTableStatement(string $migration, string $table): void
+    {
+        $marker = 'CREATE TABLE IF NOT EXISTS `la_' . $table . '`';
+        $start = strpos($migration, $marker);
+        $end = $start === false ? false : strpos($migration, ';', $start);
+        if ($start === false || $end === false) {
+            self::fail('The authoritative migration is missing the ' . $table . ' table definition.');
+        }
+        Db::execute(substr($migration, $start, $end - $start + 1));
+    }
+
+    private static function schemaColumnExists(string $table, string $column): bool
+    {
+        $rows = Db::query(
+            'SELECT COLUMN_NAME FROM information_schema.COLUMNS '
+            . 'WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table AND COLUMN_NAME = :column',
+            ['table' => $table, 'column' => $column]
+        );
+
+        return count($rows) === 1;
     }
 
     private static function salesReturnParams(array $fixture, string $tag, int $quantity, int $price): array
@@ -708,13 +830,25 @@ $class = $argv[2];
 $method = $argv[3];
 $tenantId = (int)$argv[4];
 $payload = json_decode(base64_decode($argv[5], true), true, 512, JSON_THROW_ON_ERROR);
-require $root . '/vendor/autoload.php';
-$app = new \think\App($root);
-$app->initialize();
+$barrier = $argv[6];
+$workerId = $argv[7];
+$_SERVER['JXC_PHPUNIT_ENV'] = 'testing';
+require $root . '/tests/bootstrap.php';
 \think\facade\Log::channel()->close();
 request()->tenantId = $tenantId;
 request()->adminId = 0;
 try {
+    if (!is_dir($barrier)
+        || file_put_contents($barrier . DIRECTORY_SEPARATOR . 'ready-' . $workerId, 'ready', LOCK_EX) === false) {
+        throw new \RuntimeException('Unable to enter the concurrency barrier.');
+    }
+    $barrierDeadline = microtime(true) + 10.0;
+    while (!is_file($barrier . DIRECTORY_SEPARATOR . 'go')) {
+        if (microtime(true) >= $barrierDeadline) {
+            throw new \RuntimeException('Timed out at the concurrency barrier.');
+        }
+        usleep(10000);
+    }
     $result = $class::$method($payload);
     $response = [
         'ok' => $result !== false,
@@ -733,33 +867,51 @@ try {
 PHP;
         $payloads = [$firstParams, $secondParams];
         $running = [];
-        foreach ($payloads as $params) {
-            $command = [
-                PHP_BINARY,
-                '-d',
-                'display_errors=0',
-                '-r',
-                $code,
-                '--',
-                $root,
-                $class,
-                $method,
-                (string)$tenantId,
-                base64_encode(json_encode($params, JSON_THROW_ON_ERROR)),
-            ];
-            $pipes = [];
-            $process = proc_open($command, [
-                0 => ['pipe', 'r'],
-                1 => ['pipe', 'w'],
-                2 => ['pipe', 'w'],
-            ], $pipes, $root, null, ['bypass_shell' => true]);
-            self::assertIsResource($process, "{$class}::{$method} child process must start.");
-            fclose($pipes[0]);
-            $running[] = ['process' => $process, 'pipes' => $pipes, 'exit_code' => null];
-        }
-
-        $deadline = microtime(true) + 30.0;
+        $barrier = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'beimi-concurrency-' . bin2hex(random_bytes(12));
+        self::assertTrue(mkdir($barrier, 0700), 'The concurrency barrier directory must be created.');
         try {
+            foreach ($payloads as $workerId => $params) {
+                $command = [
+                    PHP_BINARY,
+                    '-d',
+                    'display_errors=0',
+                    '-r',
+                    $code,
+                    '--',
+                    $root,
+                    $class,
+                    $method,
+                    (string)$tenantId,
+                    base64_encode(json_encode($params, JSON_THROW_ON_ERROR)),
+                    $barrier,
+                    (string)$workerId,
+                ];
+                $pipes = [];
+                $process = proc_open($command, [
+                    0 => ['pipe', 'r'],
+                    1 => ['pipe', 'w'],
+                    2 => ['pipe', 'w'],
+                ], $pipes, $root, null, ['bypass_shell' => true]);
+                self::assertIsResource($process, "{$class}::{$method} child process must start.");
+                fclose($pipes[0]);
+                $running[] = ['process' => $process, 'pipes' => $pipes, 'exit_code' => null];
+            }
+
+            $readyDeadline = microtime(true) + 10.0;
+            do {
+                $readyFiles = glob($barrier . DIRECTORY_SEPARATOR . 'ready-*') ?: [];
+                if (count($readyFiles) === count($payloads)) {
+                    break;
+                }
+                usleep(10000);
+            } while (microtime(true) < $readyDeadline);
+            self::assertCount(count($payloads), $readyFiles, 'Every child must reach the concurrency barrier.');
+            self::assertNotFalse(
+                file_put_contents($barrier . DIRECTORY_SEPARATOR . 'go', 'go', LOCK_EX),
+                'The concurrency barrier must release every ready child.'
+            );
+
+            $deadline = microtime(true) + 30.0;
             do {
                 $anyRunning = false;
                 foreach ($running as $index => $entry) {
@@ -804,11 +956,22 @@ PHP;
                         fclose($pipe);
                     }
                 }
+                if (!is_resource($entry['process'])) {
+                    continue;
+                }
                 $status = proc_get_status($entry['process']);
                 if ($status['running']) {
                     proc_terminate($entry['process']);
                 }
                 proc_close($entry['process']);
+            }
+            foreach (glob($barrier . DIRECTORY_SEPARATOR . '*') ?: [] as $barrierFile) {
+                if (is_file($barrierFile)) {
+                    unlink($barrierFile);
+                }
+            }
+            if (is_dir($barrier)) {
+                rmdir($barrier);
             }
         }
     }
@@ -928,40 +1091,46 @@ PHP;
         ];
     }
 
-    private static function safeTriggerName(string $label): string
+    private static function safeConstraintName(string $label): string
     {
-        $name = 'tr_beimi_' . $label . '_' . bin2hex(random_bytes(8));
+        $name = 'chk_beimi_' . $label . '_' . bin2hex(random_bytes(8));
         self::assertLessThanOrEqual(64, strlen($name));
         self::assertMatchesRegularExpression('/^[A-Za-z0-9_]+$/', $name);
         return $name;
     }
 
-    private static function createFailureTrigger(string $trigger, string $logicalTable): void
+    private static function createFailureConstraint(string $constraint, string $logicalTable, int $tenantId): void
     {
-        self::assertMatchesRegularExpression('/^[A-Za-z0-9_]+$/', $trigger);
+        self::assertMatchesRegularExpression('/^[A-Za-z0-9_]+$/', $constraint);
         self::assertContains($logicalTable, ['receivable_flow', 'payable_flow']);
+        self::assertGreaterThan(0, $tenantId);
         $prefix = (string)config('database.connections.mysql.prefix');
         $table = $prefix . $logicalTable;
         self::assertMatchesRegularExpression('/^[A-Za-z0-9_]+$/', $table);
         Db::execute(
-            "CREATE TRIGGER `{$trigger}` BEFORE INSERT ON `{$table}` "
-            . "FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'forced finance rollback'"
+            "ALTER TABLE `{$table}` ADD CONSTRAINT `{$constraint}` CHECK (`tenant_id` <> {$tenantId})"
         );
-        self::assertTrue(self::triggerExists($trigger));
+        self::assertTrue(self::constraintExists($constraint));
     }
 
-    private static function dropFailureTrigger(string $trigger): void
+    private static function dropFailureConstraint(string $constraint, string $logicalTable): void
     {
-        self::assertMatchesRegularExpression('/^[A-Za-z0-9_]+$/', $trigger);
-        Db::execute("DROP TRIGGER IF EXISTS `{$trigger}`");
+        self::assertMatchesRegularExpression('/^[A-Za-z0-9_]+$/', $constraint);
+        self::assertContains($logicalTable, ['receivable_flow', 'payable_flow']);
+        if (!self::constraintExists($constraint)) {
+            return;
+        }
+        $table = (string)config('database.connections.mysql.prefix') . $logicalTable;
+        self::assertMatchesRegularExpression('/^[A-Za-z0-9_]+$/', $table);
+        Db::execute("ALTER TABLE `{$table}` DROP CHECK `{$constraint}`");
     }
 
-    private static function triggerExists(string $trigger): bool
+    private static function constraintExists(string $constraint): bool
     {
         $rows = Db::query(
-            'SELECT TRIGGER_NAME FROM information_schema.TRIGGERS '
-            . 'WHERE TRIGGER_SCHEMA = DATABASE() AND TRIGGER_NAME = :trigger',
-            ['trigger' => $trigger]
+            'SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS '
+            . "WHERE CONSTRAINT_SCHEMA = DATABASE() AND CONSTRAINT_TYPE = 'CHECK' AND CONSTRAINT_NAME = :constraint",
+            ['constraint' => $constraint]
         );
         return count($rows) > 0;
     }
@@ -987,6 +1156,8 @@ PHP;
             'sales_order',
             'supply_order',
             'goods_supplier',
+            'warehouse_sku_balance',
+            'goods_sku',
             'goods',
             'customer',
             'vendor',

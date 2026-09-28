@@ -47,6 +47,7 @@ class SalesReturnOrderLogic extends BaseLogic
             if ($idempotentKey !== '') {
                 $existing = SalesReturnOrder::where('tenant_id', $tenantId)
                     ->where('idempotent_key', $idempotentKey)
+                    ->lock(true)
                     ->find();
                 if ($existing) {
                     Db::commit();
@@ -618,7 +619,7 @@ class SalesReturnOrderLogic extends BaseLogic
             $originalByGoodsSku[self::goodsSkuSalesReturnKey($row)] = $row;
         }
 
-        $returnedMap = self::returnedSalesQtyMap($originalOrderId, $ignoreReturnOrderId);
+        $returnedMap = self::returnedSalesQtyMap($originalOrderId, $ignoreReturnOrderId, true);
         $rows = [];
         foreach (array_values($goods) as $index => $item) {
             $originLineId = (int)($item['original_sales_order_list_id'] ?? $item['original_order_goods_id'] ?? $item['order_goods_id'] ?? 0);
@@ -703,21 +704,35 @@ class SalesReturnOrderLogic extends BaseLogic
         return $rows;
     }
 
-    protected static function returnedSalesQtyMap(int $originalOrderId, int $ignoreReturnOrderId = 0): array
+    protected static function returnedSalesQtyMap(
+        int $originalOrderId,
+        int $ignoreReturnOrderId = 0,
+        bool $lockRows = false
+    ): array
     {
         $returnIdsQuery = SalesReturnOrder::where('original_sales_order_id', $originalOrderId)
             ->where('tenant_id', (int)(request()->tenantId ?? 0));
         if ($ignoreReturnOrderId > 0) {
             $returnIdsQuery->where('id', '<>', $ignoreReturnOrderId);
         }
+        // FinanceIntegration::installed() may establish a REPEATABLE READ snapshot
+        // before the tenant/original-order mutex is acquired. A locking read is
+        // required here so a waiter validates against the preceding edit's commit.
+        if ($lockRows) {
+            $returnIdsQuery->lock(true);
+        }
         $returnIds = $returnIdsQuery->column('id');
         if (empty($returnIds)) {
             return [];
         }
 
-        $rows = OrderGoods::whereIn('order_id', $returnIds)
+        $rowsQuery = OrderGoods::whereIn('order_id', $returnIds)
             ->where('order_type', self::ORDER_TYPE)
-            ->where('tenant_id', (int)(request()->tenantId ?? 0))
+            ->where('tenant_id', (int)(request()->tenantId ?? 0));
+        if ($lockRows) {
+            $rowsQuery->lock(true);
+        }
+        $rows = $rowsQuery
             ->select()
             ->toArray();
 
@@ -752,7 +767,7 @@ class SalesReturnOrderLogic extends BaseLogic
             return;
         }
 
-        $returnedMap = self::returnedSalesQtyMap($salesOrderId);
+        $returnedMap = self::returnedSalesQtyMap($salesOrderId, 0, true);
         $status = self::salesReturnStatusFromRows($originalRows, $returnedMap);
         SalesOrder::where('id', $salesOrderId)
             ->where('tenant_id', (int)(request()->tenantId ?? 0))

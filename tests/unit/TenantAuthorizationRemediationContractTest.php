@@ -6,6 +6,7 @@ namespace tests\unit;
 
 use app\api\jxc\logic\CustomerLogic;
 use PHPUnit\Framework\TestCase;
+use tests\support\IsolatedDatabaseGuard;
 use think\facade\Db;
 
 final class TenantAuthorizationRemediationContractTest extends TestCase
@@ -200,18 +201,10 @@ final class TenantAuthorizationRemediationContractTest extends TestCase
     {
         $default = config('database.default');
         $mysql = config('database.connections.mysql');
-        $isolated = $default === 'mysql'
-            && is_array($mysql)
-            && ($mysql['type'] ?? null) === 'mysql'
-            && ($mysql['hostname'] ?? null) === '127.0.0.1'
-            && preg_match('/^beimi_full_suite_[a-f0-9]{16,32}$/', (string)($mysql['database'] ?? '')) === 1
-            && (int)($mysql['hostport'] ?? 3306) > 0
-            && (int)($mysql['hostport'] ?? 3306) !== 3306
-            && ($mysql['prefix'] ?? null) === 'la_'
-            && is_string($mysql['password'] ?? null)
-            && $mysql['password'] !== '';
-        if (!$isolated) {
-            self::markTestSkipped('Requires the isolated beimi_full_suite database.');
+        if ($default !== 'mysql'
+            || !is_array($mysql)
+            || !IsolatedDatabaseGuard::acceptsConnection($mysql)) {
+            self::fail('PHPUnit bootstrap accepted a database that does not satisfy the shared isolation guard.');
         }
         if (!extension_loaded('pdo_mysql')) {
             self::fail('The isolated behavior gate requires pdo_mysql.');
