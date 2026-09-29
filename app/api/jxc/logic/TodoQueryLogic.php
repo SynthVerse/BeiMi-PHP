@@ -13,7 +13,7 @@ use app\common\logic\BaseLogic;
  */
 final class TodoQueryLogic extends BaseLogic
 {
-    private const CURSOR_VERSION = 2;
+    private const CURSOR_VERSION = 3;
     private const MAX_IDENTITIES_PER_REQUEST = 200000;
     private const TASK_SOURCES = ['S01', 'S02', 'S03', 'S04'];
 

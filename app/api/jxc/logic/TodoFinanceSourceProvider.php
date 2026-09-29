@@ -185,18 +185,8 @@ final class TodoFinanceSourceProvider
     private static function inventoryCounts(TodoItemBuffer $buffer): void
     {
         if (!FinanceAccess::has('finance.inventory.confirm')) { return; }
-        self::chunks('finance_inventory_count', static fn($query) => $query->where('status', 'pending'),
-            static function (array $row) use ($buffer): void {
-                $documentId = (int)$row['result_document_id'];
-                if ($documentId <= 0) { return; }
-                $snapshot = FinanceValue::decode((string)$row['snapshot']);
-                $item = self::item('finance-document:' . $documentId, 'finance_inventory_count', (int)$row['id'],
-                    '盘点结果待确认', (string)($snapshot['warehouse_name'] ?? ('仓库 #' . $row['warehouse_id'])),
-                    self::dateFromTime((int)$row['create_time']), null, '实盘已提交，库存差异尚未确认', '确认盘点',
-                    'finance_document', ['type' => 'inventory_count', 'id' => $documentId]);
-                $item['dedupe_key'] = 'finance-document:' . $documentId;
-                $buffer->add($item);
-            });
+        // 待确认的实盘结果单仅由 S05 投影；两份不同排序的投影无法靠当前页去重。
+        // S12 只跟踪结果确认之后仍需核实的差额。
         self::chunks('finance_inventory_count', static fn($query) => $query->where('status', 'confirmed'),
             static function (array $row) use ($buffer): void {
                 $document = Db::name('finance_document')->where('tenant_id', FinanceAccess::tenant())
@@ -445,7 +435,7 @@ final class TodoFinanceSourceProvider
 
     private static function printRecovery(TodoItemBuffer $buffer): void
     {
-        if (!self::any(['settlement.view', 'settlement.bill'])) { return; }
+        if (!FinanceAccess::has('settlement.view')) { return; }
         $owner = FinanceAccess::owner();
         $actor = FinanceAccess::actor();
         $identity = FinanceValue::json([(int)$actor['id'], (string)$actor['type']]);

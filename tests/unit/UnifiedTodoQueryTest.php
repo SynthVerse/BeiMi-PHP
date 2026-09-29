@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace tests\unit;
 
 use app\api\jxc\logic\FulfillmentTaskLogic;
+use app\api\jxc\logic\FinanceInventoryCounts;
 use app\api\jxc\logic\NegativeInventoryLogic;
 use app\api\jxc\logic\TodoQueryLogic;
 use PHPUnit\Framework\TestCase;
@@ -441,15 +442,34 @@ final class UnifiedTodoQueryTest extends TestCase
 
     public function test_pending_inventory_count_uses_result_document_and_is_deduplicated_across_sources_and_pages(): void
     {
-        $startDocument = $this->insertFinanceDocument('inventory_count_start', 'confirmed', ['actual_date' => date('Y-m-d')]);
-        $resultDocument = $this->insertFinanceDocument('inventory_count', 'pending', ['actual_date' => date('Y-m-d')]);
+        $startDocument = $this->insertFinanceDocument('inventory_count_start', 'confirmed', ['warehouse_id' => 71, 'scope' => 'all']);
+        $resultDocument = $this->insertFinanceDocument('inventory_count', 'pending', FinanceInventoryCounts::input('inventory_count', [
+            'count_document_id' => $startDocument, 'reason' => '实盘待核实',
+            'lines' => [['sku_id' => 1, 'counted_quantity' => '2.0000', 'reason' => '', 'reason_verified' => 0]],
+        ]));
         Db::name('finance_inventory_count')->insert([
             'tenant_id' => self::TENANT_ID, 'document_id' => $startDocument, 'warehouse_id' => 71,
             'status' => 'pending', 'snapshot' => json_encode(['warehouse_name' => '盘点测试仓']),
-            'result_document_id' => $resultDocument, 'create_time' => time(),
+            'result_document_id' => $resultDocument, 'create_time' => strtotime('-1 day'),
         ]);
 
-        $items = $this->allFinanceTodoItems(1);
+        $expectedKeys = ['finance-document:' . $resultDocument];
+        for ($index = 0; $index < 21; $index++) {
+            $expense = $this->insertFinanceDocument('expense', 'pending', ['actual_date' => date('Y-m-d')]);
+            $expectedKeys[] = 'finance-document:' . $expense;
+        }
+        sort($expectedKeys);
+        foreach ([1, 20] as $pageSize) {
+            $items = $this->allFinanceTodoItems($pageSize);
+            $keys = array_column($items, 'key');
+            self::assertCount(count(array_unique($keys)), $keys, '不同来源排序日期不同时，跨页也不得重复返回同一动作');
+            $documentKeys = array_values(array_filter($keys, static fn(string $key): bool => str_starts_with($key, 'finance-document:')));
+            sort($documentKeys);
+            self::assertSame($expectedKeys, $documentKeys, '跨来源去重不得漏掉其他待确认单据');
+            $summary = TodoQueryLogic::summary();
+            self::assertNotFalse($summary, TodoQueryLogic::getError());
+            self::assertSame($summary['total_count'], count($items));
+        }
         $related = array_values(array_filter($items, static fn(array $item): bool =>
             $item['key'] === 'finance-document:' . $resultDocument || $item['kind'] === 'finance_inventory_count'));
         self::assertCount(1, $related, '同一张盘点结果单不得以 S05 与 S12 两种身份重复出现');
@@ -527,6 +547,16 @@ final class UnifiedTodoQueryTest extends TestCase
 
         $employeeItems = $this->financeTodoItemsByPrefix('finance-print:');
         self::assertSame(['finance-print:' . $sameUser], array_column($employeeItems, 'key'));
+
+        $employeeId = (int)Db::name('employee')->where('tenant_id', self::TENANT_ID)->where('bind_user_id', $userId)->value('id');
+        Db::name('employee_permission')->where('tenant_id', self::TENANT_ID)->where('employee_id', $employeeId)
+            ->where('permission_key', 'settlement.view')->delete();
+        Db::name('employee_permission')->insert([
+            'tenant_id' => self::TENANT_ID, 'employee_id' => $employeeId,
+            'permission_key' => 'settlement.bill', 'create_time' => time(),
+        ]);
+        self::assertSame([], $this->financeTodoItemsByPrefix('finance-print:'),
+            '原打印人员被撤销核实所需的查看权限后，仅有结算权限也不能继续收到恢复待办');
 
         $this->prepareCustomerReportRequestContext();
         $ownerKeys = array_column($this->financeTodoItemsByPrefix('finance-print:'), 'key');
