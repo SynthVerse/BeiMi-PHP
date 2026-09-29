@@ -23,6 +23,7 @@ final class DeliveryInventoryValidate extends BaseValidate
         'reason' => 'max:500',
         'cost_status' => 'in:confirmed,pending',
         'status' => 'in:open,closed,all',
+        'attribution_id' => 'integer|gt:0',
         'version' => 'integer|gt:0',
         'name' => 'require|max:120',
         'mobile' => 'require|max:32',
@@ -36,7 +37,7 @@ final class DeliveryInventoryValidate extends BaseValidate
     public function sceneDriverSave() { return $this->only(['id', 'version', 'name', 'mobile', 'platform', 'vehicle_no', 'is_enabled']); }
     public function sceneDriverLists() { return $this->only(['is_enabled']); }
     public function sceneDetail() { return $this->only(['id'])->append('id', 'require'); }
-    public function sceneNegativeTodos() { return $this->only(['status']); }
+    public function sceneNegativeTodos() { return $this->only(['status', 'attribution_id']); }
     public function sceneResolveNegative()
     {
         return $this->only(['id', 'action', 'quantity', 'amount', 'reason', 'cost_status', 'idempotency_key'])

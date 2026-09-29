@@ -95,10 +95,7 @@ final class TodoFinanceSourceProvider
         if ($target === 'receivable') {
             if (!self::any(['finance.receivable.view', 'finance.receivable.prepare', 'finance.receipt.prepare', 'finance.receipt.confirm'])) { return; }
         } else {
-            $canGeneral = self::any(['finance.payable.view', 'finance.payment.prepare', 'finance.reimbursement.prepare', 'finance.equipment.prepare']);
-            $canSalary = FinanceAccess::has('finance.salary.view') && FinanceAccess::has('finance.salary.prepare');
-            $categories = array_values(array_filter($categories,
-                static fn(string $category): bool => $category === 'salary' ? $canSalary : $canGeneral));
+            $categories = array_values(array_filter($categories, static fn(string $category): bool => self::canPreparePayable($category)));
             if (!$categories) { return; }
         }
         $tenant = FinanceAccess::tenant(); $changes = Db::name('finance_entry')->where('tenant_id', $tenant)
@@ -119,11 +116,16 @@ final class TodoFinanceSourceProvider
                 foreach (TodoQueryBudget::candidates($rows) as $row) {
                     $last = (int)$row['id']; $snapshot = FinanceValue::decode((string)($row[$kind === 'o' ? 'source_snapshot' : 'snapshot'] ?? ''));
                     $reference = $kind . ':' . $row['id'];
+                    $params = ['source' => $reference, 'subject_id' => (int)$row['subject_id'], 'category' => (string)$row['category']];
+                    if ($target === 'payable') {
+                        $payableTarget = self::payableTarget((string)$row['category']);
+                        $params += ['action' => $payableTarget['action'], 'subject_kind' => $payableTarget['subject_kind']];
+                    }
                     $buffer->add(self::item($target . '-due:' . $reference, $table, (int)$row['id'], $title,
                         (string)($snapshot['subject_name'] ?? $snapshot['source_reference'] ?? ('对象 #' . $row['subject_id'])),
                         (string)$row['current_business_date'], (string)$row['current_due_date'], '到期且仍有未结余额',
                         $target === 'receivable' ? '跟进应收' : '处理应付', $target,
-                        ['source' => $reference, 'subject_id' => (int)$row['subject_id'], 'category' => (string)$row['category']],
+                        $params,
                         ['value' => bcadd((string)$row['balance'], '0', 2), 'unit' => '元']));
                 }
             } while (count($rows) === 500);
@@ -185,11 +187,15 @@ final class TodoFinanceSourceProvider
         if (!FinanceAccess::has('finance.inventory.confirm')) { return; }
         self::chunks('finance_inventory_count', static fn($query) => $query->where('status', 'pending'),
             static function (array $row) use ($buffer): void {
+                $documentId = (int)$row['result_document_id'];
+                if ($documentId <= 0) { return; }
                 $snapshot = FinanceValue::decode((string)$row['snapshot']);
-                $buffer->add(self::item('inventory-count:' . $row['id'], 'finance_inventory_count', (int)$row['id'],
+                $item = self::item('finance-document:' . $documentId, 'finance_inventory_count', (int)$row['id'],
                     '盘点结果待确认', (string)($snapshot['warehouse_name'] ?? ('仓库 #' . $row['warehouse_id'])),
                     self::dateFromTime((int)$row['create_time']), null, '实盘已提交，库存差异尚未确认', '确认盘点',
-                    'inventory_count', ['document_id' => (int)$row['document_id']]));
+                    'finance_document', ['type' => 'inventory_count', 'id' => $documentId]);
+                $item['dedupe_key'] = 'finance-document:' . $documentId;
+                $buffer->add($item);
             });
         self::chunks('finance_inventory_count', static fn($query) => $query->where('status', 'confirmed'),
             static function (array $row) use ($buffer): void {
@@ -211,7 +217,7 @@ final class TodoFinanceSourceProvider
     private static function inventoryExceptions(TodoItemBuffer $buffer): void
     {
         if (FinanceAccess::has('inventory.negative.manage')) {
-            self::chunks('negative_inventory_todo', static fn($query) => $query->where('status', '<>', 'resolved'),
+            self::chunks('negative_inventory_todo', static fn($query) => $query->where('status', 'open'),
                 static function (array $row) use ($buffer): void {
                     $buffer->add(self::item('negative-inventory:' . $row['id'], 'negative_inventory_todo', (int)$row['id'],
                         '负库存异常待处理', '负库存来源 #' . $row['attribution_id'], self::dateFromTime((int)$row['create_time']),
@@ -440,7 +446,14 @@ final class TodoFinanceSourceProvider
     private static function printRecovery(TodoItemBuffer $buffer): void
     {
         if (!self::any(['settlement.view', 'settlement.bill'])) { return; }
-        self::chunks('finance_sales_print', static fn($query) => $query->where('status', 'pending'),
+        $owner = FinanceAccess::owner();
+        $actor = FinanceAccess::actor();
+        $identity = FinanceValue::json([(int)$actor['id'], (string)$actor['type']]);
+        self::chunks('finance_sales_print', static function ($query) use ($owner, $identity) {
+            $query->where('status', 'pending');
+            if (!$owner) { $query->where('actor', $identity); }
+            return $query;
+        },
             static function (array $row) use ($buffer): void {
                 $buffer->add(self::item('finance-print:' . $row['id'], 'finance_sales_print', (int)$row['id'],
                     '销售单打印结果待恢复核实', '销售结算 #' . $row['sales_id'], self::dateFromTime((int)$row['create_time']),
@@ -516,6 +529,27 @@ final class TodoFinanceSourceProvider
         if (!$policy) { return false; }
         if (in_array($type, ['salary_payment', 'salary_expense', 'salary_adjustment'], true) && !FinanceAccess::has('finance.salary.view')) { return false; }
         return $policy['owner'] ? FinanceAccess::owner() : ($policy['confirm'] !== '' && FinanceAccess::has($policy['confirm']));
+    }
+
+    private static function canPreparePayable(string $category): bool
+    {
+        $target = self::payableTarget($category);
+        if ($target === []) { return false; }
+        if ($category === 'salary' && !FinanceAccess::has('finance.salary.view')) { return false; }
+        return FinanceAccess::has((string)$target['permission']);
+    }
+
+    /** @return array{action:string,subject_kind:string,permission:string}|array{} */
+    private static function payableTarget(string $category): array
+    {
+        return match ($category) {
+            'payable', 'expense_payable' => ['action' => 'supplier_payment', 'subject_kind' => 'vendor', 'permission' => 'finance.payment.prepare'],
+            'salary' => ['action' => 'salary_payment', 'subject_kind' => 'employee', 'permission' => 'finance.salary.prepare'],
+            'reimbursement' => ['action' => 'reimbursement_payment', 'subject_kind' => 'employee', 'permission' => 'finance.reimbursement.prepare'],
+            'customer_refund' => ['action' => 'customer_refund', 'subject_kind' => 'customer', 'permission' => 'finance.refund.prepare'],
+            'equipment' => ['action' => 'equipment_payment', 'subject_kind' => 'vendor', 'permission' => 'finance.equipment.prepare'],
+            default => [],
+        };
     }
 
     /** @param array<int,string> $permissions */

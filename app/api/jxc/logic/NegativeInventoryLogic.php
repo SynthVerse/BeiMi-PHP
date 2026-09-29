@@ -58,6 +58,10 @@ final class NegativeInventoryLogic extends BaseLogic
             ->join('negative_inventory_attribution source', 'source.id=todo.attribution_id AND source.tenant_id=todo.tenant_id')
             ->leftJoin('sales_order sales', 'sales.id=source.sales_order_id AND sales.tenant_id=source.tenant_id')
             ->where('todo.tenant_id', self::tenantId());
+        $attributionId = (int)($params['attribution_id'] ?? 0);
+        if ($attributionId > 0) {
+            $query->where('todo.attribution_id', $attributionId);
+        }
         if (in_array($status, ['open', 'closed'], true)) {
             $query->where('todo.status', $status);
         }

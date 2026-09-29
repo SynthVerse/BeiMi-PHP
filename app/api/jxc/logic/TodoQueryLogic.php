@@ -131,7 +131,8 @@ final class TodoQueryLogic extends BaseLogic
             $state = $branchState[$name];
             $branchKnownCount = count($state['identities']);
             $branches[$name] = ['count' => $state['complete'] ? $branchKnownCount : null,
-                'known_count' => $branchKnownCount, 'complete' => $state['complete']];
+                'known_count' => $branchKnownCount, 'complete' => $state['complete'],
+                'entry_visible' => $name !== 'task' || (bool)$scope['owner'] || in_array('task.view', (array)$scope['permissions'], true)];
         }
         $response = [
             'tenant_id' => $scope['tenant_id'],

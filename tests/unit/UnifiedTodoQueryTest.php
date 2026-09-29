@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace tests\unit;
 
+use app\api\jxc\logic\FulfillmentTaskLogic;
+use app\api\jxc\logic\NegativeInventoryLogic;
 use app\api\jxc\logic\TodoQueryLogic;
 use PHPUnit\Framework\TestCase;
 use think\facade\Db;
@@ -413,13 +415,254 @@ final class UnifiedTodoQueryTest extends TestCase
         self::assertTrue($result['has_more']);
     }
 
+    public function test_negative_inventory_todo_uses_open_closed_state_and_disappears_after_processing(): void
+    {
+        $openAttribution = 980001;
+        $closedAttribution = 980002;
+        foreach ([[$openAttribution, 'open'], [$closedAttribution, 'closed']] as [$attributionId, $status]) {
+            Db::name('negative_inventory_todo')->insert([
+                'tenant_id' => self::TENANT_ID, 'attribution_id' => $attributionId, 'status' => $status,
+                'severity' => 'red', 'assignee_scope' => 'highest_privilege', 'resolved_by' => 0,
+                'resolved_time' => 0, 'create_time' => time(), 'update_time' => time(),
+            ]);
+        }
+
+        $before = TodoQueryLogic::lists(['branch' => 'finance', 'page_size' => 100]);
+        self::assertNotFalse($before, TodoQueryLogic::getError());
+        self::assertContains('negative-inventory:' . Db::name('negative_inventory_todo')->where('attribution_id', $openAttribution)->value('id'), array_column($before['items'], 'key'));
+        self::assertNotContains('negative-inventory:' . Db::name('negative_inventory_todo')->where('attribution_id', $closedAttribution)->value('id'), array_column($before['items'], 'key'));
+
+        Db::name('negative_inventory_todo')->where('tenant_id', self::TENANT_ID)
+            ->where('attribution_id', $openAttribution)->update(['status' => 'closed', 'resolved_by' => self::ADMIN_ID, 'resolved_time' => time()]);
+        $after = TodoQueryLogic::lists(['branch' => 'finance', 'page_size' => 100]);
+        self::assertNotFalse($after, TodoQueryLogic::getError());
+        self::assertSame([], array_values(array_filter($after['items'], static fn(array $item): bool => $item['kind'] === 'negative_inventory_todo')));
+    }
+
+    public function test_pending_inventory_count_uses_result_document_and_is_deduplicated_across_sources_and_pages(): void
+    {
+        $startDocument = $this->insertFinanceDocument('inventory_count_start', 'confirmed', ['actual_date' => date('Y-m-d')]);
+        $resultDocument = $this->insertFinanceDocument('inventory_count', 'pending', ['actual_date' => date('Y-m-d')]);
+        Db::name('finance_inventory_count')->insert([
+            'tenant_id' => self::TENANT_ID, 'document_id' => $startDocument, 'warehouse_id' => 71,
+            'status' => 'pending', 'snapshot' => json_encode(['warehouse_name' => '盘点测试仓']),
+            'result_document_id' => $resultDocument, 'create_time' => time(),
+        ]);
+
+        $items = $this->allFinanceTodoItems(1);
+        $related = array_values(array_filter($items, static fn(array $item): bool =>
+            $item['key'] === 'finance-document:' . $resultDocument || $item['kind'] === 'finance_inventory_count'));
+        self::assertCount(1, $related, '同一张盘点结果单不得以 S05 与 S12 两种身份重复出现');
+        $matching = array_values(array_filter($items, static fn(array $item): bool =>
+            (int)($item['target']['params']['id'] ?? $item['target']['params']['document_id'] ?? 0) === $resultDocument));
+        self::assertCount(1, $matching);
+        self::assertSame('finance-document:' . $resultDocument, $matching[0]['key']);
+        self::assertSame('finance_document', $matching[0]['target']['type']);
+        self::assertSame($resultDocument, (int)$matching[0]['target']['params']['id']);
+    }
+
+    public function test_due_payables_keep_category_source_and_exact_action_permissions(): void
+    {
+        $categories = [
+            'payable' => ['finance.payment.prepare'],
+            'expense_payable' => ['finance.payment.prepare'],
+            'salary' => ['finance.salary.view', 'finance.salary.prepare'],
+            'reimbursement' => ['finance.reimbursement.prepare'],
+            'customer_refund' => ['finance.refund.prepare'],
+            'equipment' => ['finance.equipment.prepare'],
+        ];
+        $sourceIds = [];
+        $targets = [
+            'payable' => ['supplier_payment', 'vendor'],
+            'expense_payable' => ['supplier_payment', 'vendor'],
+            'salary' => ['salary_payment', 'employee'],
+            'reimbursement' => ['reimbursement_payment', 'employee'],
+            'customer_refund' => ['customer_refund', 'customer'],
+            'equipment' => ['equipment_payment', 'vendor'],
+        ];
+        $subjectId = 30;
+        foreach (array_keys($categories) as $category) {
+            $subjectId++;
+            $sourceIds[$category] = (int)Db::name('finance_source')->insertGetId([
+                'tenant_id' => self::TENANT_ID, 'document_id' => 900000 + $subjectId, 'category' => $category,
+                'subject_id' => $subjectId, 'amount' => '12.00', 'business_date' => date('Y-m-d'),
+                'due_date' => date('Y-m-d'), 'snapshot' => json_encode(['subject_name' => $category]), 'create_time' => time(),
+            ]);
+        }
+
+        $ownerItems = $this->financeTodoItemsByPrefix('payable-due:');
+        self::assertCount(6, $ownerItems);
+        foreach ($ownerItems as $item) {
+            $category = (string)$item['target']['params']['category'];
+            self::assertArrayHasKey($category, $categories);
+            self::assertSame('n:' . $sourceIds[$category], $item['target']['params']['source']);
+            self::assertSame($category, $item['target']['params']['category']);
+            self::assertSame($targets[$category][0], $item['target']['params']['action']);
+            self::assertSame($targets[$category][1], $item['target']['params']['subject_kind']);
+        }
+
+        $permissionCases = [
+            [['finance.payment.prepare'], ['expense_payable', 'payable']],
+            [['finance.salary.view', 'finance.salary.prepare'], ['salary']],
+            [['finance.reimbursement.prepare'], ['reimbursement']],
+            [['finance.refund.prepare'], ['customer_refund']],
+            [['finance.equipment.prepare'], ['equipment']],
+        ];
+        foreach ($permissionCases as $index => [$permissions, $expected]) {
+            $this->useEmployeePermissions(993410 + $index, $permissions);
+            $items = $this->financeTodoItemsByPrefix('payable-due:');
+            $actual = array_map(static fn(array $item): string => (string)$item['target']['params']['category'], $items);
+            sort($actual); sort($expected);
+            self::assertSame($expected, $actual, '应付到期待办必须按真实可执行动作授权');
+        }
+    }
+
+    public function test_print_recovery_is_visible_only_to_original_actor_identity_or_owner(): void
+    {
+        $userId = 993420;
+        $this->useEmployeePermissions($userId, ['settlement.view']);
+        $sameUser = $this->insertSalesPrint([$userId, 'user'], 'same-user');
+        $otherUser = $this->insertSalesPrint([$userId + 1, 'user'], 'other-user');
+        $sameNumberOtherIdentity = $this->insertSalesPrint([$userId, 'tenant_admin'], 'same-number-admin');
+
+        $employeeItems = $this->financeTodoItemsByPrefix('finance-print:');
+        self::assertSame(['finance-print:' . $sameUser], array_column($employeeItems, 'key'));
+
+        $this->prepareCustomerReportRequestContext();
+        $ownerKeys = array_column($this->financeTodoItemsByPrefix('finance-print:'), 'key');
+        self::assertContains('finance-print:' . $sameUser, $ownerKeys);
+        self::assertContains('finance-print:' . $otherUser, $ownerKeys);
+        self::assertContains('finance-print:' . $sameNumberOtherIdentity, $ownerKeys);
+    }
+
+    public function test_focused_task_detail_has_action_and_negative_lookup_accepts_exact_attribution(): void
+    {
+        $taskId = (int)Db::name('fulfillment_task')->insertGetId([
+            'tenant_id' => self::TENANT_ID, 'group_id' => 1, 'report_id' => 990001,
+            'source_key' => 'focus:print-failed', 'status' => 'print_failed', 'task_type' => 'process',
+            'exception_code' => '', 'create_time' => time(), 'update_time' => time(),
+        ]);
+        $task = FulfillmentTaskLogic::detail(['id' => $taskId]);
+        self::assertNotFalse($task, FulfillmentTaskLogic::getError());
+        self::assertSame('retry_print', $task['action']['type'] ?? null);
+
+        foreach ([980101, 980102] as $attributionId) {
+            Db::name('negative_inventory_attribution')->insert([
+                'id' => $attributionId, 'tenant_id' => self::TENANT_ID, 'delivery_event_id' => 0,
+                'delivery_item_id' => null, 'sales_order_id' => 0, 'report_id' => 0, 'report_item_id' => 0,
+                'warehouse_id' => 1, 'goods_id' => 1, 'sku_id' => $attributionId, 'negative_qty' => '1.0000',
+                'remaining_qty' => '1.0000', 'negative_amount' => '0.00', 'cost_status' => 'confirmed',
+                'reason' => '聚焦定位测试', 'threshold_explanation' => '', 'threshold_confirmed' => 1,
+                'resolution_status' => 'open', 'operator_id' => self::ADMIN_ID, 'occurred_time' => time(),
+                'resolved_time' => 0, 'update_time' => time(),
+            ]);
+            Db::name('negative_inventory_todo')->insert([
+                'tenant_id' => self::TENANT_ID, 'attribution_id' => $attributionId, 'status' => 'open',
+                'severity' => 'red', 'assignee_scope' => 'highest_privilege', 'resolved_by' => 0,
+                'resolved_time' => 0, 'create_time' => time(), 'update_time' => time(),
+            ]);
+        }
+        $negative = NegativeInventoryLogic::todos(['status' => 'open', 'attribution_id' => 980102]);
+        self::assertNotFalse($negative, NegativeInventoryLogic::getError());
+        self::assertSame([980102], array_map('intval', array_column($negative['lists'], 'attribution_id')));
+    }
+
+    public function test_task_branch_entry_visibility_requires_task_view_even_when_count_is_zero(): void
+    {
+        $userId = 993430;
+        $this->useEmployeePermissions($userId, []);
+        $hidden = TodoQueryLogic::summary();
+        self::assertNotFalse($hidden, TodoQueryLogic::getError());
+        self::assertFalse($hidden['branches']['task']['entry_visible']);
+        self::assertSame(0, $hidden['branches']['task']['count']);
+
+        $employeeId = (int)Db::name('employee')->where('tenant_id', self::TENANT_ID)->where('bind_user_id', $userId)->value('id');
+        Db::name('employee_permission')->insert([
+            'tenant_id' => self::TENANT_ID, 'employee_id' => $employeeId,
+            'permission_key' => 'task.view', 'create_time' => time(),
+        ]);
+        $visible = TodoQueryLogic::summary();
+        self::assertNotFalse($visible, TodoQueryLogic::getError());
+        self::assertTrue($visible['branches']['task']['entry_visible']);
+        self::assertSame(0, $visible['branches']['task']['count']);
+    }
+
     /** @param array<int,int> $tenants */
     private function cleanTodoFixtures(array $tenants): void
     {
-        foreach (['finance_entry', 'finance_source', 'finance_document', 'finance_period', 'finance_opening_book',
+        foreach (['finance_sales_print', 'finance_inventory_count_measurement', 'finance_inventory_count_line',
+            'finance_inventory_count', 'finance_entry', 'finance_source', 'finance_document', 'finance_period', 'finance_opening_book',
+            'negative_inventory_action', 'negative_inventory_todo', 'negative_inventory_attribution',
             'employee_permission', 'employee', 'tenant_member', 'fulfillment_delivery_event',
             'fulfillment_task', 'customer_report_item', 'customer_report'] as $table) {
             Db::name($table)->whereIn('tenant_id', $tenants)->delete();
         }
+    }
+
+    /** @param array<string,mixed> $payload */
+    private function insertFinanceDocument(string $type, string $status, array $payload): int
+    {
+        return (int)Db::name('finance_document')->insertGetId([
+            'tenant_id' => self::TENANT_ID, 'type' => $type, 'status' => $status,
+            'payload' => json_encode($payload), 'confirmed_result' => '{}', 'created_by' => '{}',
+            'last_modified_by' => '{}', 'confirmed_by' => '{}', 'create_time' => time(), 'update_time' => time(),
+        ]);
+    }
+
+    /** @return array<int,array<string,mixed>> */
+    private function allFinanceTodoItems(int $pageSize = 100): array
+    {
+        $items = []; $cursor = null; $pages = 0;
+        do {
+            self::assertLessThan(100, ++$pages, '财务待办游标分页未收敛');
+            $params = ['branch' => 'finance', 'page_size' => $pageSize];
+            if ($cursor) { $params['cursor'] = $cursor; }
+            $result = TodoQueryLogic::lists($params);
+            self::assertNotFalse($result, TodoQueryLogic::getError());
+            $items = array_merge($items, $result['items']);
+            $cursor = $result['next_cursor'];
+        } while ($result['has_more']);
+        return $items;
+    }
+
+    /** @return array<int,array<string,mixed>> */
+    private function financeTodoItemsByPrefix(string $prefix): array
+    {
+        return array_values(array_filter($this->allFinanceTodoItems(),
+            static fn(array $item): bool => str_starts_with((string)$item['key'], $prefix)));
+    }
+
+    /** @param array<int,string> $permissions */
+    private function useEmployeePermissions(int $userId, array $permissions): void
+    {
+        $employeeId = (int)Db::name('employee')->insertGetId([
+            'tenant_id' => self::TENANT_ID, 'name' => '待办权限员工 ' . $userId,
+            'mobile' => '139' . substr((string)$userId, -8), 'bind_user_id' => $userId,
+            'is_enabled' => 1, 'create_time' => time(), 'update_time' => time(),
+        ]);
+        foreach ($permissions as $permission) {
+            Db::name('employee_permission')->insert([
+                'tenant_id' => self::TENANT_ID, 'employee_id' => $employeeId,
+                'permission_key' => $permission, 'create_time' => time(),
+            ]);
+        }
+        request()->tenantId = self::TENANT_ID;
+        request()->adminId = $userId;
+        request()->userId = $userId;
+        request()->jxcFromUserToken = true;
+        request()->adminInfo = ['user_id' => $userId, 'tenant_id' => self::TENANT_ID, 'root' => 0];
+    }
+
+    /** @param array{0:int,1:string} $actor */
+    private function insertSalesPrint(array $actor, string $suffix): int
+    {
+        static $copy = 0; $copy++;
+        return (int)Db::name('finance_sales_print')->insertGetId([
+            'tenant_id' => self::TENANT_ID, 'sales_id' => 770000 + $copy,
+            'document_id' => 880000 + $copy, 'copy_no' => 1,
+            'idempotency_key' => 'todo-print-' . $suffix . '-' . uniqid(), 'fingerprint' => hash('sha256', $suffix),
+            'actor' => json_encode($actor), 'status' => 'pending', 'prepared_result' => '{}',
+            'error_message' => '', 'create_time' => time(), 'finished_at' => 0,
+        ]);
     }
 }

@@ -349,7 +349,12 @@ final class FulfillmentTaskLogic extends BaseLogic
         if (!WorkforceLogic::requirePermission('task.view')) {
             return false;
         }
-        return self::taskById((int)($params['id'] ?? 0));
+        $task = self::taskById((int)($params['id'] ?? 0));
+        if ($task !== false && (in_array((string)$task['status'], ['exception', 'print_failed', 'unassigned'], true)
+            || ((string)$task['status'] === 'blocked' && (int)$task['depends_on_task_id'] > 0))) {
+            $task['action'] = self::exceptionAction($task);
+        }
+        return $task;
     }
 
     /** @return array<string,mixed>|false */
