@@ -25,7 +25,7 @@ require_once __DIR__ . '/CustomerReportTestSupport.php';
 
 final class FulfillmentWorkflowTest extends TestCase
 {
-    use CustomerReportTestSupport;
+    use CustomerReportTestSupport { fulfillmentPayload as supportFulfillmentPayload; }
 
     protected function setUp(): void
     {
@@ -290,19 +290,79 @@ final class FulfillmentWorkflowTest extends TestCase
         }
     }
 
-    public function test_blank_or_unrecognized_requirement_becomes_explicit_exception(): void
+    public function test_structured_processing_groups_do_not_fall_back_to_legacy_remark_exceptions(): void
     {
         $customerId = $this->createCustomer('码头饭店');
         $goodsId = $this->createCustomerReportGoods('鲍鱼', 'TASK-ABALONE');
         $warehouseId = $this->createCustomerReportWarehouse('冰鲜仓');
 
-        $blank = CustomerReportLogic::submit($this->fulfillmentPayload($customerId, $goodsId, $warehouseId, 'task-blank', '1', ''));
+        $blank = CustomerReportLogic::submit($this->supportFulfillmentPayload($customerId, $goodsId, $warehouseId, 'task-blank', '1', ''));
         self::assertNotFalse($blank, CustomerReportLogic::getError());
-        self::assertSame('missing_remark', Db::name('fulfillment_task')->where('report_id', (int)$blank['id'])->where('task_type', 'exception')->value('exception_code'));
+        self::assertSame(0, Db::name('fulfillment_task')->where('report_id', (int)$blank['id'])
+            ->whereIn('exception_code', ['missing_remark', 'unrecognized_remark'])->count());
+        self::assertSame(1, Db::name('customer_report_processing_group')->where('report_item_id', (int)$blank['items'][0]['id'])->count());
 
-        $unknown = CustomerReportLogic::submit($this->fulfillmentPayload($customerId, $goodsId, $warehouseId, 'task-unknown', '1', '按老板习惯处理'));
+        $unknown = CustomerReportLogic::submit($this->supportFulfillmentPayload($customerId, $goodsId, $warehouseId, 'task-unknown', '1', '按老板习惯处理'));
         self::assertNotFalse($unknown, CustomerReportLogic::getError());
-        self::assertSame('unrecognized_remark', Db::name('fulfillment_task')->where('report_id', (int)$unknown['id'])->where('task_type', 'exception')->value('exception_code'));
+        self::assertSame(0, Db::name('fulfillment_task')->where('report_id', (int)$unknown['id'])
+            ->whereIn('exception_code', ['missing_remark', 'unrecognized_remark'])->count());
+    }
+
+    public function test_dashboard_orders_each_process_by_delivery_time_and_puts_missing_time_last(): void
+    {
+        $customerId = $this->createCustomer('任务排序客户');
+        $goodsId = $this->createCustomerReportGoods('任务排序鲈鱼', 'TASK-SORT');
+        $warehouseId = $this->createCustomerReportWarehouse('任务排序仓');
+        $reports = [];
+        foreach ([
+            ['key' => 'task-sort-0800', 'time' => '08:00', 'plate' => '辽A08000'],
+            ['key' => 'task-sort-0600-a', 'time' => '06:00', 'plate' => '辽A06001'],
+            ['key' => 'task-sort-0600-b', 'time' => '06:00', 'plate' => '辽A06002'],
+            ['key' => 'task-sort-missing', 'time' => '', 'plate' => ''],
+        ] as $case) {
+            $payload = $this->supportFulfillmentPayload($customerId, $goodsId, $warehouseId, $case['key'], '1', '切配');
+            $payload['delivery_arrangement'] = ['delivery_method' => 'customer_vehicle'];
+            if ($case['time'] !== '') {
+                $payload['delivery_arrangement'] += [
+                    'earliest_delivery_time' => $case['time'],
+                    'plate_number' => $case['plate'],
+                    'vehicle_location' => '东门交接区',
+                ];
+            }
+            $report = CustomerReportLogic::submit($payload);
+            self::assertNotFalse($report, CustomerReportLogic::getError());
+            $reports[$case['key']] = $report;
+        }
+
+        $dashboard = FulfillmentTaskLogic::dashboard(['delivery_date' => '2026-08-10']);
+        self::assertNotFalse($dashboard, FulfillmentTaskLogic::getError());
+        $processGroup = current(array_filter(
+            $dashboard['process_groups'],
+            static fn(array $group): bool => (string)$group['name'] === '测试加工'
+        ));
+        self::assertIsArray($processGroup);
+        self::assertSame([
+            (int)$reports['task-sort-0600-a']['id'],
+            (int)$reports['task-sort-0600-b']['id'],
+            (int)$reports['task-sort-0800']['id'],
+            (int)$reports['task-sort-missing']['id'],
+        ], array_column($processGroup['tasks'], 'report_id'));
+        self::assertSame([0, 0, 0, 1], array_column($processGroup['tasks'], 'delivery_time_missing'));
+        self::assertSame(['06:00', '06:00', '08:00', ''], array_column($processGroup['tasks'], 'earliest_delivery_time'));
+        self::assertSame('辽A06001', $processGroup['tasks'][0]['delivery_plate_number']);
+        self::assertSame('东门交接区', $processGroup['tasks'][0]['delivery_vehicle_location']);
+        self::assertSame('missing', $processGroup['tasks'][3]['delivery_time_status']);
+
+        $selfDeliveryPayload = $this->supportFulfillmentPayload(
+            $customerId, $goodsId, $warehouseId, 'task-sort-self-delivery', '1', '切配'
+        );
+        $selfDeliveryPayload['delivery_arrangement'] = ['delivery_method' => 'self_delivery'];
+        $selfDelivery = CustomerReportLogic::submit($selfDeliveryPayload);
+        self::assertNotFalse($selfDelivery, CustomerReportLogic::getError());
+        $selfDeliveryGroup = FulfillmentTaskLogic::groupForReport((int)$selfDelivery['id']);
+        self::assertNotFalse($selfDeliveryGroup, FulfillmentTaskLogic::getError());
+        self::assertSame(0, (int)$selfDeliveryGroup['tasks'][0]['delivery_time_missing']);
+        self::assertSame('not_applicable', $selfDeliveryGroup['tasks'][0]['delivery_time_status']);
     }
 
     public function test_employee_electronic_permissions_ignore_legacy_process_capability_input(): void

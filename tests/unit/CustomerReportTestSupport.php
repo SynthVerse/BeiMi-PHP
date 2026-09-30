@@ -300,6 +300,9 @@ SQL;
             (string)file_get_contents($root . '/database/sql/jxc_phase1_schema.sql'),
             'supply_order'
         ));
+        if (Db::query("SHOW COLUMNS FROM `la_supply_order` LIKE 'purchase_batch_id'") === []) {
+            Db::execute('ALTER TABLE `la_supply_order` ADD COLUMN `purchase_batch_id` int(11) UNSIGNED NOT NULL DEFAULT 0 AFTER `tenant_id`');
+        }
         $purchaseBatchSchema = (string)file_get_contents($root . '/database/migrations/20260827_000001_create_purchase_batch.sql');
         $this->runStatements($this->authoritativeCreateTable($purchaseBatchSchema, 'purchase_batch'));
         $this->runStatements($this->authoritativeCreateTable($purchaseBatchSchema, 'purchase_batch_supply_order'));
@@ -307,6 +310,7 @@ SQL;
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260930_000001_create_customer_delivery_vehicle.sql')));
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260930_000002_customer_report_delivery_arrangement.sql')));
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260930_000003_customer_report_grouped_submission.sql')));
+        $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260930_000004_purchase_plan_delivery_priority.sql')));
         self::$customerReportSchemaReady = true;
     }
 

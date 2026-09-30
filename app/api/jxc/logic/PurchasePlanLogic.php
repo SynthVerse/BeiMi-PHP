@@ -29,6 +29,7 @@ final class PurchasePlanLogic extends BaseLogic
         }
         $count = (int)(clone $query)->count();
         $rows = $query->order('id desc')->page($page, $size)->select()->toArray();
+        $suggestions = self::prioritySuggestions(array_map('intval', array_column($rows, 'id')));
         foreach ($rows as &$row) {
             $row['remaining_qty'] = self::decimal(bcsub(
                 (string)$row['planned_qty'],
@@ -37,6 +38,7 @@ final class PurchasePlanLogic extends BaseLogic
             ));
             $row['source_count'] = (int)Db::name('purchase_plan_source')->where('tenant_id', self::tenantId())
                 ->where('purchase_plan_id', (int)$row['id'])->count();
+            $row['priority_suggestion'] = $suggestions[(int)$row['id']] ?? self::emptyPrioritySuggestion();
         }
         unset($row);
         return ['lists' => $rows, 'count' => $count, 'page_no' => $page, 'page_size' => $size];
@@ -139,11 +141,12 @@ final class PurchasePlanLogic extends BaseLogic
                 $rows = Db::name('fulfillment_task')->alias('t')
                     ->join('customer_report_item i', 'i.id=t.report_item_id AND i.tenant_id=t.tenant_id')
                     ->join('customer_report r', 'r.id=t.report_id AND r.tenant_id=t.tenant_id')
+                    ->leftJoin('fulfillment_task_group g', 'g.id=t.group_id AND g.tenant_id=t.tenant_id')
                     ->where('t.tenant_id', self::tenantId())->whereIn('t.id', $taskIds)
                     ->whereNull('i.delete_time')->whereNull('r.delete_time')
                     ->field('t.id AS task_id,t.source_key,t.status AS task_status,t.report_id,t.report_item_id,'
                         . 'i.warehouse_id,i.goods_id,i.goods_name,i.sku_id,i.sku_name,i.base_unit_name,i.shortage_base_qty,'
-                        . 'r.batch_id,r.main_customer_name,r.delivery_date')
+                        . 'i.delivery_customer_name,r.batch_id,r.main_customer_name,r.delivery_date,g.earliest_delivery_time')
                     ->order('t.id')->lock(true)->select()->toArray();
                 if (count($rows) !== count($taskIds)) {
                     self::setError('所选采购任务不存在或已失效');
@@ -207,8 +210,10 @@ final class PurchasePlanLogic extends BaseLogic
                         'tenant_id' => self::tenantId(), 'purchase_plan_id' => $planId,
                         'task_id' => (int)$row['task_id'], 'report_id' => (int)$row['report_id'],
                         'report_item_id' => (int)$row['report_item_id'],
-                        'customer_name' => (string)$row['main_customer_name'],
+                        'customer_name' => trim((string)($row['delivery_customer_name'] ?? ''))
+                            ?: (string)$row['main_customer_name'],
                         'delivery_date' => $row['delivery_date'] ?: null,
+                        'earliest_delivery_time' => trim((string)($row['earliest_delivery_time'] ?? '')) ?: null,
                         'shortage_qty' => self::decimal((string)$row['shortage_base_qty']),
                         'allocated_qty' => '0.0000', 'status' => 'pending',
                         'create_time' => $now, 'update_time' => $now,
@@ -468,7 +473,65 @@ final class PurchasePlanLogic extends BaseLogic
         $plan['sources'] = $sources;
         $plan['arrivals'] = $arrivals;
         $plan['pending_arrival_batches'] = $pendingArrivalBatches;
+        $plan['priority_suggestion'] = self::prioritySuggestions([$id])[$id] ?? self::emptyPrioritySuggestion();
         return $plan;
+    }
+
+    /**
+     * @param array<int,int> $planIds
+     * @return array<int,array<string,mixed>>
+     */
+    public static function prioritySuggestions(array $planIds): array
+    {
+        $planIds = array_values(array_unique(array_filter(array_map('intval', $planIds))));
+        if ($planIds === []) {
+            return [];
+        }
+        $suggestions = [];
+        foreach ($planIds as $planId) {
+            $suggestions[$planId] = self::emptyPrioritySuggestion();
+        }
+        $sources = Db::name('purchase_plan_source')->where('tenant_id', self::tenantId())
+            ->whereIn('purchase_plan_id', $planIds)
+            ->whereIn('status', ['pending', 'partial'])
+            ->whereRaw('shortage_qty > allocated_qty')
+            ->order(['delivery_date' => 'asc', 'id' => 'asc'])
+            ->select()->toArray();
+        $priorityKeys = [];
+        foreach ($sources as $source) {
+            $planId = (int)$source['purchase_plan_id'];
+            $suggestions[$planId]['unsatisfied_source_count']++;
+            $date = trim((string)($source['delivery_date'] ?? ''));
+            $time = trim((string)($source['earliest_delivery_time'] ?? ''));
+            $validTime = preg_match('/^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/', $time) === 1;
+            if (!$validTime) {
+                $suggestions[$planId]['missing_time_source_count']++;
+            }
+            $time = $validTime ? substr($time, 0, 5) : '';
+            $key = ($date !== '' ? $date : '9999-12-31') . '|'
+                . ($validTime ? '0|' . $time : '1|99:99') . '|'
+                . str_pad((string)(int)$source['id'], 20, '0', STR_PAD_LEFT);
+            if (!isset($priorityKeys[$planId]) || strcmp($key, $priorityKeys[$planId]) < 0) {
+                $priorityKeys[$planId] = $key;
+                $suggestions[$planId] = array_replace($suggestions[$planId], [
+                    'status' => $validTime ? 'ready' : 'missing', 'delivery_date' => $date,
+                    'earliest_delivery_time' => $time, 'source_id' => (int)$source['id'],
+                    'customer_name' => (string)$source['customer_name'],
+                ]);
+            }
+        }
+        return $suggestions;
+    }
+
+    /** @return array<string,mixed> */
+    public static function emptyPrioritySuggestion(): array
+    {
+        return [
+            'status' => 'none', 'delivery_date' => '', 'earliest_delivery_time' => '',
+            'source_id' => 0, 'customer_name' => '', 'unsatisfied_source_count' => 0,
+            'missing_time_source_count' => 0, 'basis' => 'unsatisfied_sources',
+            'automatic_allocation' => false,
+        ];
     }
 
     private static function refreshPlanTotals(int $planId, int $now): void

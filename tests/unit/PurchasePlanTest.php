@@ -7,6 +7,7 @@ namespace tests\unit;
 use app\api\jxc\logic\CustomerReportBatchLogic;
 use app\api\jxc\logic\CustomerReportLogic;
 use app\api\jxc\logic\PurchasePlanLogic;
+use app\api\jxc\logic\PurchaseBatchLogic;
 use app\api\jxc\logic\SupplyOrderLogic;
 use app\api\jxc\logic\WarehouseSkuBalanceService;
 use app\api\jxc\logic\WorkforceLogic;
@@ -41,6 +42,7 @@ final class PurchasePlanTest extends TestCase
         ]);
         self::assertNotFalse($purchaseProcess, WorkforceLogic::getError());
         $customerId = $this->createCustomer('采购计划客户');
+        $deliveryCustomerId = $this->createCustomer('采购计划实际收货门店', $customerId);
         $goodsId = $this->createCustomerReportGoods('采购鲈鱼', 'PLAN-BASS');
         $warehouseId = $this->createCustomerReportWarehouse('采购计划仓');
         $batch = CustomerReportBatchLogic::start([
@@ -53,6 +55,7 @@ final class PurchasePlanTest extends TestCase
             $customerId, $goodsId, $warehouseId, 'purchase-plan-first', '4', '20'
         );
         $firstPayload['batch_id'] = (int)$batch['id'];
+        $firstPayload['items'][0]['delivery_customer_id'] = $deliveryCustomerId;
         $secondPayload = $this->fulfillmentPayload(
             $customerId, $goodsId, $warehouseId, 'purchase-plan-second', '6', '20'
         );
@@ -71,6 +74,12 @@ final class PurchasePlanTest extends TestCase
         self::assertSame((int)$plan['id'], (int)$samePlan['id']);
         self::assertSame('10.0000', $samePlan['planned_qty']);
         self::assertCount(2, $samePlan['sources']);
+        $firstSource = current(array_filter(
+            $samePlan['sources'],
+            static fn(array $source): bool => (int)$source['report_id'] === (int)$first['id']
+        ));
+        self::assertIsArray($firstSource);
+        self::assertSame('采购计划实际收货门店', $firstSource['customer_name']);
 
         $editPayload = $firstPayload;
         $editPayload['id'] = (int)$first['id'];
@@ -106,6 +115,105 @@ final class PurchasePlanTest extends TestCase
         $replacement = PurchasePlanLogic::create(['task_ids' => [$firstTask]]);
         self::assertNotFalse($replacement, PurchasePlanLogic::getError());
         self::assertNotSame((int)$plan['id'], (int)$replacement['id']);
+    }
+
+    public function test_priority_suggestion_uses_only_unsatisfied_sources_and_never_invents_midnight(): void
+    {
+        $now = time();
+        $planId = (int)Db::name('purchase_plan')->insertGetId([
+            'tenant_id' => self::TENANT_ID, 'batch_id' => 0,
+            'warehouse_id' => 1, 'warehouse_name' => '优先建议仓',
+            'goods_id' => 1, 'goods_name' => '优先建议商品',
+            'sku_id' => 1, 'sku_name' => '默认 SKU', 'base_unit_name' => '斤',
+            'planned_qty' => '9.0000', 'arrived_qty' => '0.0000',
+            'allocated_qty' => '3.0000', 'surplus_qty' => '0.0000',
+            'status' => 'partial', 'active_scope_key' => hash('sha256', 'priority-suggestion'),
+            'termination_reason' => '', 'create_time' => $now, 'update_time' => $now,
+        ]);
+        $missingId = (int)Db::name('purchase_plan_source')->insertGetId([
+            'tenant_id' => self::TENANT_ID, 'purchase_plan_id' => $planId,
+            'task_id' => 101, 'report_id' => 201, 'report_item_id' => 301,
+            'customer_name' => '时间待完善客户', 'delivery_date' => '2026-10-01',
+            'earliest_delivery_time' => null,
+            'shortage_qty' => '4.0000', 'allocated_qty' => '0.0000', 'status' => 'pending',
+            'create_time' => $now, 'update_time' => $now,
+        ]);
+        $readyId = (int)Db::name('purchase_plan_source')->insertGetId([
+            'tenant_id' => self::TENANT_ID, 'purchase_plan_id' => $planId,
+            'task_id' => 102, 'report_id' => 202, 'report_item_id' => 302,
+            'customer_name' => '六点收货客户', 'delivery_date' => '2026-09-30',
+            'earliest_delivery_time' => '06:00:00',
+            'shortage_qty' => '3.0000', 'allocated_qty' => '1.0000', 'status' => 'partial',
+            'create_time' => $now, 'update_time' => $now,
+        ]);
+        Db::name('purchase_plan_source')->insert([
+            'tenant_id' => self::TENANT_ID, 'purchase_plan_id' => $planId,
+            'task_id' => 103, 'report_id' => 203, 'report_item_id' => 303,
+            'customer_name' => '已满足客户', 'delivery_date' => '2026-09-29',
+            'earliest_delivery_time' => '05:00:00',
+            'shortage_qty' => '2.0000', 'allocated_qty' => '2.0000', 'status' => 'fulfilled',
+            'create_time' => $now, 'update_time' => $now,
+        ]);
+
+        $detail = PurchasePlanLogic::detail(['id' => $planId]);
+        self::assertNotFalse($detail, PurchasePlanLogic::getError());
+        self::assertSame('ready', $detail['priority_suggestion']['status']);
+        self::assertSame('2026-09-30', $detail['priority_suggestion']['delivery_date']);
+        self::assertSame('06:00', $detail['priority_suggestion']['earliest_delivery_time']);
+        self::assertSame($readyId, $detail['priority_suggestion']['source_id']);
+        self::assertSame(2, $detail['priority_suggestion']['unsatisfied_source_count']);
+        self::assertSame(1, $detail['priority_suggestion']['missing_time_source_count']);
+        self::assertFalse($detail['priority_suggestion']['automatic_allocation']);
+
+        Db::name('purchase_plan_source')->where('id', $missingId)->update([
+            'delivery_date' => '2026-09-29', 'update_time' => time(),
+        ]);
+        $earlierMissing = PurchasePlanLogic::detail(['id' => $planId]);
+        self::assertNotFalse($earlierMissing, PurchasePlanLogic::getError());
+        self::assertSame('missing', $earlierMissing['priority_suggestion']['status']);
+        self::assertSame('2026-09-29', $earlierMissing['priority_suggestion']['delivery_date']);
+        self::assertSame($missingId, $earlierMissing['priority_suggestion']['source_id']);
+
+        Db::name('purchase_plan_source')->where('id', $missingId)->update([
+            'delivery_date' => '2026-10-01', 'update_time' => time(),
+        ]);
+
+        $batchId = (int)Db::name('purchase_batch')->insertGetId([
+            'tenant_id' => self::TENANT_ID, 'purchase_plan_id' => $planId,
+            'batch_no' => 'PB-PRIORITY', 'warehouse_id' => 1, 'warehouse_name' => '优先建议仓',
+            'datetimesingle' => $now, 'remarks' => '', 'status' => 'submitted',
+            'supplier_count' => 0, 'line_count' => 0, 'total_amount' => '0.00',
+            'idempotency_key' => 'pb-priority', 'request_fingerprint' => hash('sha256', 'pb-priority'),
+            'admin_id' => self::ADMIN_ID, 'create_time' => $now, 'update_time' => $now,
+        ]);
+        $batch = PurchaseBatchLogic::detail(['id' => $batchId]);
+        self::assertNotFalse($batch, PurchaseBatchLogic::getError());
+        self::assertSame('06:00', $batch['priority_suggestion']['earliest_delivery_time']);
+
+        Db::name('purchase_plan_source')->where('id', $readyId)->update([
+            'allocated_qty' => '3.0000', 'status' => 'fulfilled', 'update_time' => time(),
+        ]);
+        $after = PurchasePlanLogic::detail(['id' => $planId]);
+        self::assertNotFalse($after, PurchasePlanLogic::getError());
+        self::assertSame('missing', $after['priority_suggestion']['status']);
+        self::assertSame('2026-10-01', $after['priority_suggestion']['delivery_date']);
+        self::assertSame('', $after['priority_suggestion']['earliest_delivery_time']);
+        self::assertSame($missingId, $after['priority_suggestion']['source_id']);
+        self::assertSame(1, $after['priority_suggestion']['unsatisfied_source_count']);
+    }
+
+    public function test_purchase_plan_delivery_priority_migration_is_safe_to_replay(): void
+    {
+        $root = dirname(__DIR__, 2);
+        $migration = $this->prepareMigration((string)file_get_contents(
+            $root . '/database/migrations/20260930_000004_purchase_plan_delivery_priority.sql'
+        ));
+
+        $this->runStatements($migration);
+        $this->runStatements($migration);
+
+        self::assertNotEmpty(Db::query("SHOW COLUMNS FROM `la_purchase_plan_source` LIKE 'earliest_delivery_time'"));
+        self::assertNotEmpty(Db::query("SHOW INDEX FROM `la_purchase_plan_source` WHERE Key_name = 'idx_purchase_plan_source_priority'"));
     }
 
     public function test_partial_arrivals_are_explicitly_allocated_to_sources_or_surplus(): void

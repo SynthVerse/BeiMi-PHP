@@ -2,6 +2,7 @@
 
 namespace app\api\jxc\lists;
 
+use app\api\jxc\logic\PurchasePlanLogic;
 use app\common\lists\BaseDataLists;
 use app\common\model\jxc\PurchaseBatch;
 
@@ -15,7 +16,7 @@ class PurchaseBatchLists extends BaseDataLists
         }
 
         $query = PurchaseBatch::field([
-            'id', 'batch_no', 'warehouse_id', 'warehouse_name', 'datetimesingle', 'remarks',
+            'id', 'purchase_plan_id', 'batch_no', 'warehouse_id', 'warehouse_name', 'datetimesingle', 'remarks',
             'status', 'supplier_count', 'line_count', 'total_amount', 'create_time', 'update_time',
         ])->where('tenant_id', $tenantId);
 
@@ -44,10 +45,17 @@ class PurchaseBatchLists extends BaseDataLists
 
     public function lists(): array
     {
-        return $this->baseQuery()
+        $rows = $this->baseQuery()
             ->limit($this->limitOffset, $this->limitLength)
             ->select()
             ->toArray();
+        $suggestions = PurchasePlanLogic::prioritySuggestions(array_map('intval', array_column($rows, 'purchase_plan_id')));
+        foreach ($rows as &$row) {
+            $planId = (int)($row['purchase_plan_id'] ?? 0);
+            $row['priority_suggestion'] = $suggestions[$planId] ?? PurchasePlanLogic::emptyPrioritySuggestion();
+        }
+        unset($row);
+        return $rows;
     }
 
     public function count(): int

@@ -324,7 +324,12 @@ class PurchaseBatchLogic extends BaseLogic
             ->order(['id' => 'asc'])
             ->select()
             ->toArray();
-        return array_merge($batch->toArray(), ['supply_orders' => $children]);
+        $planId = (int)($batch->purchase_plan_id ?? 0);
+        $suggestions = PurchasePlanLogic::prioritySuggestions($planId > 0 ? [$planId] : []);
+        return array_merge($batch->toArray(), [
+            'supply_orders' => $children,
+            'priority_suggestion' => $suggestions[$planId] ?? PurchasePlanLogic::emptyPrioritySuggestion(),
+        ]);
     }
 
     /** @return array{warehouse_id:int,warehouse_name:string,datetimesingle:int,remarks:string,purchase_plan_id:int,purchase_plan_sku_id:int}|false */

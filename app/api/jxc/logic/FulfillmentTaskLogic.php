@@ -265,8 +265,10 @@ final class FulfillmentTaskLogic extends BaseLogic
             }
             $groups[$task['process_name'] ?: '待确认'][] = $task;
         }
+        $exceptions = self::sortTasksByDeliverySchedule($exceptions);
         $processGroups = [];
         foreach ($groups as $name => $processTasks) {
+            $processTasks = self::sortTasksByDeliverySchedule($processTasks);
             $processGroups[] = [
                 'name' => $name,
                 'process_id' => (int)($processTasks[0]['process_id'] ?? 0),
@@ -322,7 +324,7 @@ final class FulfillmentTaskLogic extends BaseLogic
             ->order(['process_id' => 'asc', 'id' => 'asc'])
             ->select()
             ->toArray();
-        $group['tasks'] = self::hydrateTasks($tasks);
+        $group['tasks'] = self::sortTasksByDeliverySchedule(self::hydrateTasks($tasks));
         return $group;
     }
 
@@ -344,7 +346,7 @@ final class FulfillmentTaskLogic extends BaseLogic
         } elseif ($scope === 'exception') {
             $query->whereIn('status', ['exception', 'print_failed']);
         }
-        $rows = self::hydrateTasks($query->order('id desc')->select()->toArray());
+        $rows = self::sortTasksByDeliverySchedule(self::hydrateTasks($query->order('id desc')->select()->toArray()));
         return ['lists' => $rows, 'count' => count($rows)];
     }
 
@@ -1544,6 +1546,25 @@ final class FulfillmentTaskLogic extends BaseLogic
             $taskGroup = $taskGroups[(int)$task['group_id']] ?? [];
             $task['is_supplement'] = (int)($taskGroup['is_supplement'] ?? 0);
             $task['delivery_arrangement'] = CustomerReportDeliveryArrangementService::fromRow($taskGroup);
+            $deliveryMethod = trim((string)($task['delivery_arrangement']['delivery_method'] ?? ''));
+            $deliveryDate = trim((string)($task['delivery_arrangement']['delivery_date'] ?? ''));
+            $deliveryTime = trim((string)($task['delivery_arrangement']['earliest_delivery_time'] ?? ''));
+            if (preg_match('/^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/', $deliveryTime) !== 1) {
+                $deliveryTime = '';
+            } else {
+                $deliveryTime = substr($deliveryTime, 0, 5);
+            }
+            $task['delivery_date'] = $deliveryDate;
+            $task['delivery_method'] = $deliveryMethod;
+            $task['earliest_delivery_time'] = $deliveryTime;
+            $task['delivery_plate_number'] = trim((string)($task['delivery_arrangement']['plate_number'] ?? ''));
+            $task['delivery_vehicle_location'] = trim((string)($task['delivery_arrangement']['vehicle_location'] ?? ''));
+            $deliveryTimeMissing = $deliveryTime === '' && in_array($deliveryMethod, ['', 'customer_vehicle'], true);
+            $task['delivery_time_missing'] = $deliveryTimeMissing ? 1 : 0;
+            $task['delivery_time_status'] = $deliveryTimeMissing ? 'missing' : ($deliveryTime === '' ? 'not_applicable' : 'ready');
+            $task['delivery_sort_key'] = ($deliveryDate !== '' ? $deliveryDate : '9999-12-31')
+                . '|' . ($deliveryTimeMissing ? '1|99:99' : '0|' . ($deliveryTime !== '' ? $deliveryTime : '99:98'))
+                . '|' . str_pad((string)(int)$task['id'], 20, '0', STR_PAD_LEFT);
             $task['requires_settlement'] = (int)($settlementTaskIds[(int)$task['report_item_id']] ?? 0) === (int)$task['id'];
             $requirementItem = $items[(int)$task['report_item_id']] ?? [];
             $task['piece_weight_confirmed'] = (int)($requirementItem['piece_weight_confirmed'] ?? 0);
@@ -1596,6 +1617,15 @@ final class FulfillmentTaskLogic extends BaseLogic
             unset($task['assignee_employee_id'], $task['assignee_name']);
         }
         unset($task);
+        return $tasks;
+    }
+
+    /** @param array<int,array<string,mixed>> $tasks @return array<int,array<string,mixed>> */
+    private static function sortTasksByDeliverySchedule(array $tasks): array
+    {
+        usort($tasks, static function (array $left, array $right): int {
+            return strcmp((string)($left['delivery_sort_key'] ?? ''), (string)($right['delivery_sort_key'] ?? ''));
+        });
         return $tasks;
     }
 
