@@ -3,6 +3,7 @@
 namespace app\api\jxc\controller;
 
 use app\api\jxc\lists\CustomerLists;
+use app\api\jxc\logic\CustomerDeliveryVehicleLogic;
 use app\api\jxc\logic\CustomerLogic;
 use app\api\jxc\validate\CustomerValidate;
 
@@ -17,6 +18,32 @@ class CustomerController extends BaseJxcController
     {
         $params = (new CustomerValidate())->get()->goCheck('detail');
         return $this->data(CustomerLogic::detail($params));
+    }
+
+    public function deliveryVehicles()
+    {
+        $params = (new CustomerValidate())->get()->goCheck('deliveryVehicles');
+        return $this->data(CustomerDeliveryVehicleLogic::lists($params));
+    }
+
+    public function deliveryVehicleSave()
+    {
+        $params = (new CustomerValidate())->post()->goCheck('deliveryVehicleSave');
+        $result = CustomerDeliveryVehicleLogic::save($params);
+        if ($result === false) {
+            return $this->fail(CustomerDeliveryVehicleLogic::getError());
+        }
+        return $this->success('保存成功', $result, 1, 1);
+    }
+
+    public function deliveryVehicleDelete()
+    {
+        $params = (new CustomerValidate())->post()->goCheck('deliveryVehicleDelete');
+        $result = CustomerDeliveryVehicleLogic::delete($params);
+        if ($result === false) {
+            return $this->fail(CustomerDeliveryVehicleLogic::getError());
+        }
+        return $this->success('删除成功', $result, 1, 1);
     }
 
     public function add()

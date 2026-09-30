@@ -240,7 +240,13 @@ class CustomerLogic extends BaseLogic
             return [];
         }
 
-        return self::formatItem($model->toArray(), true, [], [], $tenantId);
+        $detail = self::formatItem($model->toArray(), true, [], [], $tenantId);
+        return [
+            ...$detail,
+            'delivery_vehicles' => CustomerDeliveryVehicleLogic::lists([
+                'customer_id' => (int)$model->id,
+            ]),
+        ];
     }
 
     public static function children(array $params): array
