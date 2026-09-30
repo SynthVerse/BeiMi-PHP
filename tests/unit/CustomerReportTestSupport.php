@@ -311,6 +311,7 @@ SQL;
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260930_000002_customer_report_delivery_arrangement.sql')));
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260930_000003_customer_report_grouped_submission.sql')));
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260930_000004_purchase_plan_delivery_priority.sql')));
+        $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260930_000005_delivery_arrangement_change.sql')));
         self::$customerReportSchemaReady = true;
     }
 

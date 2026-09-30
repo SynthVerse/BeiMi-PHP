@@ -78,9 +78,13 @@ class AuditService
         ?array $afterData,
         string $remark
     ): void {
+        $operatorId = (int)(request()->adminId ?? 0);
+        if ($operatorId <= 0) {
+            $operatorId = (int)(request()->userId ?? 0);
+        }
         $inserted = Db::name('audit_log')->insert([
             'tenant_id' => (int)(request()->tenantId ?? 0),
-            'admin_id' => (int)(request()->adminId ?? 0),
+            'admin_id' => $operatorId,
             'module' => $module,
             'action' => $action,
             'target_id' => $targetId,

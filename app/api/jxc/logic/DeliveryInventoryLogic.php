@@ -280,6 +280,7 @@ final class DeliveryInventoryLogic extends BaseLogic
                         'trip_report_id' => $tripReport ? (int)$tripReport['id'] : 0,
                         'line_schedule_id' => $tripReport ? (int)$tripReport['schedule_id'] : 0,
                         'delivery_method' => $deliveryMethod,
+                        'delivery_arrangement_snapshot' => (string)($report['delivery_arrangement_snapshot'] ?? ''),
                         'event_type' => $eventType,
                         'status' => 'completed',
                         'idempotency_key' => $idempotencyKey,

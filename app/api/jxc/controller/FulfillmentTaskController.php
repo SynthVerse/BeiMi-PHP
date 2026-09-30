@@ -17,6 +17,7 @@ class FulfillmentTaskController extends BaseJxcController
     public function paperControl() { return $this->write('paperControl'); }
     public function controlPrintData() { return $this->write('controlPrintData'); }
     public function controlPrintResult() { return $this->write('controlPrintResult'); }
+    public function changeDeliveryArrangement() { return $this->write('changeDeliveryArrangement'); }
     public function reduceItem() { return $this->writeChange('reduceItem'); }
     public function markUndelivered() { return $this->writeChange('markUndelivered'); }
     public function bill() { return $this->write('bill'); }

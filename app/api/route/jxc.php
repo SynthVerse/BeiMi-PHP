@@ -240,6 +240,7 @@ Route::group('', function () {
     Route::post('jxc/tasks/paper_control', 'jxc.FulfillmentTask/paperControl');
     Route::post('jxc/tasks/control_print_data', 'jxc.FulfillmentTask/controlPrintData');
     Route::post('jxc/tasks/control_print_result', 'jxc.FulfillmentTask/controlPrintResult');
+    Route::post('jxc/tasks/change_delivery_arrangement', 'jxc.FulfillmentTask/changeDeliveryArrangement');
     Route::post('jxc/tasks/reduce_item', 'jxc.FulfillmentTask/reduceItem');
     Route::post('jxc/tasks/mark_undelivered', 'jxc.FulfillmentTask/markUndelivered');
     Route::post('jxc/tasks/bill', 'jxc.FulfillmentTask/bill');

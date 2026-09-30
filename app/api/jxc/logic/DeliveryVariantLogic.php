@@ -230,6 +230,7 @@ final class DeliveryVariantLogic extends BaseLogic
                         'actual_handoff_time' => $hasActualDelivery ? (int)$handoffTime : 0,
                         'delivery_outcome' => $hasActualDelivery ? 'partial' : 'handled_without_delivery',
                         'delivery_method' => $deliveryMethod,
+                        'delivery_arrangement_snapshot' => (string)($report['delivery_arrangement_snapshot'] ?? ''),
                         'event_type' => $hasActualDelivery ? $eventType : 'delivery_exception',
                         'status' => $hasActualDelivery ? 'completed' : 'handled_without_delivery',
                         'idempotency_key' => $idempotencyKey, 'request_fingerprint' => $fingerprint,
