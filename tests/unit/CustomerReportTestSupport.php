@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace tests\unit;
 
 use BeiMi\Migration\MigrationSqlPreprocessor;
+use app\api\jxc\logic\CustomerReportLogic;
+use app\api\jxc\logic\FulfillmentClock;
+use app\api\jxc\logic\FulfillmentTaskLogic;
 use app\api\jxc\logic\WarehouseSkuBalanceService;
 use app\common\service\goods\GoodsAliasService;
 use app\common\service\goods\GoodsBaseSkuService;
@@ -427,6 +430,43 @@ SQL;
                 ]],
             ]],
         ];
+    }
+
+    /**
+     * Finish the single processing group created by fulfillmentPayload through the
+     * same public weight-recording boundary used by production workflows.
+     *
+     * @param array<string,mixed> $report
+     * @return array<string,mixed>
+     */
+    protected function finishSingleGroupProcessing(array $report, string $finalWeight): array
+    {
+        self::assertCount(1, $report['items'] ?? [], '测试夹具仅支持单明细报货单');
+        $item = $report['items'][0];
+        $now = FulfillmentClock::now();
+        Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)
+            ->where('report_item_id', (int)$item['id'])->where('task_type', 'process')->update([
+                'status' => 'recovered',
+                'actual_weight' => $finalWeight,
+                'process_weight' => $finalWeight,
+                'actual_price' => '20.00',
+                'recovered_time' => $now,
+                'update_time' => $now,
+            ]);
+        $groups = Db::name('customer_report_processing_group')->where('tenant_id', self::TENANT_ID)
+            ->where('report_id', (int)$report['id'])->order('id')->select()->toArray();
+        self::assertCount(1, $groups, '测试夹具必须保留一个加工分组');
+        $weighted = CustomerReportLogic::saveProcessingWeights([
+            'id' => (int)$report['id'],
+            'version' => (int)$report['version'],
+            'groups' => [[
+                'id' => (int)$groups[0]['id'],
+                'final_actual_weight' => bcadd($finalWeight, '0', 2),
+            ]],
+        ]);
+        self::assertNotFalse($weighted, CustomerReportLogic::getError());
+        FulfillmentTaskLogic::refreshGroupForItem((int)$item['id']);
+        return $weighted;
     }
 
     private function runStatements(string $sql): void

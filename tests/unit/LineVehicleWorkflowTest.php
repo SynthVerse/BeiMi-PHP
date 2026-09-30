@@ -7,10 +7,10 @@ namespace tests\unit;
 use app\api\jxc\logic\CustomerReportLogic;
 use app\api\jxc\logic\DeliveryInventoryLogic;
 use app\api\jxc\logic\FulfillmentClock;
-use app\api\jxc\logic\FulfillmentTaskLogic;
 use app\api\jxc\logic\LineVehicleLogic;
 use app\api\jxc\logic\ThirdPartyDriverLogic;
 use app\api\jxc\logic\WarehouseSkuBalanceService;
+use app\api\jxc\logic\WorkforceLogic;
 use PHPUnit\Framework\TestCase;
 use tests\unit\WarehouseSkuBalanceForGoodsTestAdapter as WarehouseGoodsBalanceService;
 use think\facade\Db;
@@ -28,6 +28,12 @@ final class LineVehicleWorkflowTest extends TestCase
         $this->ensureCustomerReportTables();
         $this->cleanCustomerReportData();
         $this->createCustomerReportUnit('件');
+        self::assertNotFalse(WorkforceLogic::saveProcess([
+            'name' => '固定线收尾送货',
+            'trigger_type' => 'all_processing_completed',
+            'is_enabled' => 1,
+            'sort' => 900,
+        ]), WorkforceLogic::getError());
         FulfillmentClock::freezeForTesting(strtotime('2026-08-20 07:00:00'));
     }
 
@@ -250,7 +256,7 @@ final class LineVehicleWorkflowTest extends TestCase
         self::assertSame('门店送站趟次不存在', LineVehicleLogic::getError());
         self::assertFalse(LineVehicleLogic::reroute([
             'trip_report_id' => (int)$tripReport['id'],
-            'reroute_method' => 'fixed_line_vehicle',
+            'reroute_method' => 'self_delivery',
             'reroute_reason' => '跨租户猜测改派身份',
         ]));
         self::assertSame('送站报货单不存在', LineVehicleLogic::getError());
@@ -399,7 +405,7 @@ final class LineVehicleWorkflowTest extends TestCase
         ]), LineVehicleLogic::getError());
         self::assertFalse(LineVehicleLogic::reroute([
             'trip_report_id' => (int)$tripReport['id'],
-            'reroute_method' => 'fixed_line_vehicle',
+            'reroute_method' => 'self_delivery',
             'reroute_reason' => '尚未实际出车不能记成错过线车',
         ]));
         self::assertSame('只有已装车、已实际出车且已错过截止的货物才能记为改派', LineVehicleLogic::getError());
@@ -411,7 +417,7 @@ final class LineVehicleWorkflowTest extends TestCase
         FulfillmentClock::freezeForTesting(strtotime('2026-08-20 05:40:00'));
         self::assertFalse(LineVehicleLogic::reroute([
             'trip_report_id' => (int)$tripReport['id'],
-            'reroute_method' => 'fixed_line_vehicle',
+            'reroute_method' => 'self_delivery',
             'reroute_reason' => '截止时刻仍可交接，不能提前记为错过',
         ]));
         self::assertSame('只有已装车、已实际出车且已错过截止的货物才能记为改派', LineVehicleLogic::getError());
@@ -428,12 +434,12 @@ final class LineVehicleWorkflowTest extends TestCase
 
         $rerouted = LineVehicleLogic::reroute([
             'trip_report_id' => (int)$tripReport['id'],
-            'reroute_method' => 'fixed_line_vehicle',
+            'reroute_method' => 'self_delivery',
             'reroute_reason' => '原线车已过截止时间，改派下一班',
         ]);
         self::assertNotFalse($rerouted, LineVehicleLogic::getError());
         self::assertSame('rerouted', (string)$rerouted['status']);
-        self::assertSame('fixed_line_vehicle', (string)$rerouted['reroute_method']);
+        self::assertSame('self_delivery', (string)$rerouted['reroute_method']);
         self::assertNull($rerouted['active_report_id']);
         self::assertSame('closed', (string)Db::name('line_vehicle_trip')->where('id', (int)$trip['id'])->value('status'));
         $oldManifest = LineVehicleLogic::loadingManifest(['trip_id' => (int)$trip['id']]);
@@ -499,7 +505,7 @@ final class LineVehicleWorkflowTest extends TestCase
             'action' => 'reroute',
             'params' => [
                 'trip_report_id' => (int)$tripReport['id'],
-                'reroute_method' => 'fixed_line_vehicle',
+                'reroute_method' => 'self_delivery',
                 'reroute_reason' => '并发时改派后续班次',
             ],
         ]]);
@@ -635,7 +641,7 @@ final class LineVehicleWorkflowTest extends TestCase
         $firstItem = $trip['items'][0]['report_id'] === $first['report_id'] ? $trip['items'][0] : $trip['items'][1];
         self::assertNotFalse(LineVehicleLogic::reroute([
             'trip_report_id' => (int)$firstItem['id'],
-            'reroute_method' => 'fixed_line_vehicle',
+            'reroute_method' => 'self_delivery',
             'reroute_reason' => '第一位客户改派后续班次',
         ]), LineVehicleLogic::getError());
 
@@ -926,49 +932,21 @@ final class LineVehicleWorkflowTest extends TestCase
         $goodsId = $this->createCustomerReportGoods('固定线商品-' . $key, 'LINE-' . $key);
         $warehouseId = $this->createCustomerReportWarehouse('固定线仓-' . $key);
         self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, $stock));
-        $payload = [
-            'main_customer_id' => $mainCustomerId,
-            'delivery_date' => '2026-08-20',
-            'is_supplement' => 0,
-            'idempotency_key' => $key,
-            'remark' => '',
-            'items' => [[
-                'delivery_customer_id' => $deliveryCustomerId,
-                'goods_id' => $goodsId,
-                'warehouse_id' => $warehouseId,
-                'unit_id' => 0,
-                'unit_name' => '件',
-                'order_qty' => '1',
-                'piece_weight_confirmed' => 1,
-                'piece_weight_min' => '1.00',
-                'piece_weight_max' => '1.00',
-                'price_status' => 'unpriced',
-                'processing_requirement' => '杀好',
-                'processing' => '杀好',
-                'line_remark' => '杀好',
-            ]],
-        ];
+        $payload = $this->fulfillmentPayload(
+            $mainCustomerId,
+            $goodsId,
+            $warehouseId,
+            $key,
+            '1',
+            '杀好'
+        );
+        $payload['delivery_date'] = '2026-08-20';
+        $payload['delivery_arrangement'] = ['delivery_method' => 'self_delivery'];
+        $payload['items'][0]['delivery_customer_id'] = $deliveryCustomerId;
         $report = CustomerReportLogic::submit($payload);
         self::assertNotFalse($report, CustomerReportLogic::getError());
         $item = $report['items'][0];
-        $finalTask = Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)
-            ->where('report_item_id', (int)$item['id'])->where('is_settlement_task', 1)->find();
-        self::assertNotEmpty($finalTask);
-        Db::name('fulfillment_task')->where('id', (int)$finalTask['id'])->update([
-            'status' => 'recovered',
-            'actual_weight' => $finalWeight,
-            'process_weight' => $finalWeight,
-            'actual_price' => '20.00',
-            'recovered_time' => time(),
-            'update_time' => time(),
-        ]);
-        Db::name('customer_report_item')->where('id', (int)$item['id'])->update([
-            'final_actual_weight' => $finalWeight,
-            'final_weight_task_id' => (int)$finalTask['id'],
-            'fulfillment_status' => 'final_weight_recorded',
-            'update_time' => time(),
-        ]);
-        FulfillmentTaskLogic::refreshGroupForItem((int)$item['id']);
+        $this->finishSingleGroupProcessing($report, $finalWeight);
         $deliveryTask = Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)
             ->where('report_id', (int)$report['id'])
             ->where('source_key', 'report:' . (int)$report['id'] . ':delivery')->find();

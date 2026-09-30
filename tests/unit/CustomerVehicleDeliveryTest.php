@@ -7,7 +7,6 @@ namespace tests\unit;
 use app\api\jxc\logic\CustomerReportLogic;
 use app\api\jxc\logic\DeliveryInventoryLogic;
 use app\api\jxc\logic\FulfillmentClock;
-use app\api\jxc\logic\FulfillmentTaskLogic;
 use app\api\jxc\logic\ThirdPartyDriverLogic;
 use app\api\jxc\logic\WarehouseSkuBalanceService;
 use app\api\jxc\logic\WorkforceLogic;
@@ -310,23 +309,7 @@ final class CustomerVehicleDeliveryTest extends TestCase
         $report = CustomerReportLogic::submit($payload);
         self::assertNotFalse($report, CustomerReportLogic::getError());
         $item = $report['items'][0];
-        Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)
-            ->where('report_item_id', (int)$item['id'])->where('task_type', 'process')->update([
-            'status' => 'recovered', 'actual_weight' => $finalWeight, 'process_weight' => $finalWeight,
-            'actual_price' => '20.00', 'recovered_time' => FulfillmentClock::now(), 'update_time' => FulfillmentClock::now(),
-        ]);
-        $groups = Db::name('customer_report_processing_group')->where('tenant_id', self::TENANT_ID)
-            ->where('report_id', (int)$report['id'])->order('id')->select()->toArray();
-        self::assertNotEmpty($groups);
-        self::assertNotFalse(CustomerReportLogic::saveProcessingWeights([
-            'id' => (int)$report['id'],
-            'version' => (int)$report['version'],
-            'groups' => array_map(static fn(array $group): array => [
-                'id' => (int)$group['id'],
-                'final_actual_weight' => bcadd($finalWeight, '0', 2),
-            ], $groups),
-        ]), CustomerReportLogic::getError());
-        FulfillmentTaskLogic::refreshGroupForItem((int)$item['id']);
+        $this->finishSingleGroupProcessing($report, $finalWeight);
         $deliveryTask = Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)
             ->where('report_id', (int)$report['id'])
             ->where('source_key', 'report:' . (int)$report['id'] . ':delivery')->find();

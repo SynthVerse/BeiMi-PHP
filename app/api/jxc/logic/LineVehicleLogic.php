@@ -633,7 +633,7 @@ final class LineVehicleLogic extends BaseLogic
         $id = (int)($params['trip_report_id'] ?? 0);
         $method = trim((string)($params['reroute_method'] ?? ''));
         $reason = mb_substr(trim((string)($params['reroute_reason'] ?? '')), 0, 500);
-        if ($id <= 0 || !in_array($method, ['fixed_line_vehicle', 'third_party', 'self_delivery'], true)
+        if ($id <= 0 || !in_array($method, ['customer_vehicle', 'third_party', 'self_delivery'], true)
             || $reason === '') {
             self::setError('改派方式和原因不能为空');
             return false;

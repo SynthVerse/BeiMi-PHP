@@ -9,9 +9,7 @@ class LineVehicleController extends BaseJxcController
 {
     public function scheduleSave()
     {
-        $params = (new LineVehicleValidate())->post()->goCheck('scheduleSave');
-        $result = LineVehicleLogic::saveSchedule($params);
-        return $result === false ? $this->fail(LineVehicleLogic::getError()) : $this->data($result);
+        return $this->legacyCreationRetired();
     }
 
     public function schedules()
@@ -23,11 +21,7 @@ class LineVehicleController extends BaseJxcController
 
     public function tripCreate()
     {
-        $params = (new LineVehicleValidate())->post()->goCheck('tripCreate');
-        $result = LineVehicleLogic::createTrip($params);
-        return $result === false
-            ? $this->fail(LineVehicleLogic::getError())
-            : $this->success('送站趟次创建成功', $result, 1, 1);
+        return $this->legacyCreationRetired();
     }
 
     public function trips()
@@ -86,5 +80,21 @@ class LineVehicleController extends BaseJxcController
         $params = (new LineVehicleValidate())->get()->goCheck('manifest');
         $result = LineVehicleLogic::loadingManifest($params);
         return $result === false ? $this->fail(LineVehicleLogic::getError()) : $this->data($result);
+    }
+
+    private function legacyCreationRetired()
+    {
+        return json([
+            'code' => 0,
+            'show' => 1,
+            'msg' => '旧固定线车调度已退役，不能新建或修改班次和送站趟次',
+            'data' => [
+                'retirement_marker' => 'LEGACY_LINE_VEHICLE_RETIRED',
+                'allowed_actions' => [
+                    'history_view', 'package_record', 'trip_depart',
+                    'reroute', 'return_pending', 'handoff_confirm', 'manifest_view',
+                ],
+            ],
+        ], 410);
     }
 }

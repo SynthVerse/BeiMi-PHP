@@ -29,7 +29,7 @@ final class LineVehicleValidate extends BaseValidate
         'idempotency_key' => 'max:96',
         'reports' => 'require|array|min:1',
         'items' => 'array|min:1',
-        'reroute_method' => 'require|in:fixed_line_vehicle,third_party,self_delivery',
+        'reroute_method' => 'require|in:customer_vehicle,third_party,self_delivery',
         'reroute_reason' => 'require|max:500',
         'return_reason' => 'require|max:500',
         'status' => 'in:planned,loading,departed,completed,closed',
