@@ -120,6 +120,26 @@ final class CustomerDeliveryVehicleTest extends TestCase
         ]));
     }
 
+    public function test_candidate_vehicles_are_sorted_by_maintained_order_before_delivery_time(): void
+    {
+        $customerId = $this->createCustomer('海鲜城东门店');
+        foreach ([
+            ['plate_number' => '粤A00002', 'earliest_delivery_time' => '04:30', 'sort' => 20],
+            ['plate_number' => '粤A00001', 'earliest_delivery_time' => '06:30', 'sort' => 10],
+        ] as $row) {
+            self::assertNotFalse(CustomerDeliveryVehicleLogic::save([
+                'customer_id' => $customerId,
+                'vehicle_location' => '市场停车区',
+                ...$row,
+            ]));
+        }
+
+        self::assertSame(
+            ['粤A00001', '粤A00002'],
+            array_column(CustomerDeliveryVehicleLogic::lists(['customer_id' => $customerId]), 'plate_number')
+        );
+    }
+
     public function test_candidate_vehicles_are_isolated_by_tenant(): void
     {
         $customerId = $this->createCustomer('海鲜城东门店');
@@ -143,25 +163,9 @@ final class CustomerDeliveryVehicleTest extends TestCase
 
     private function ensureCustomerDeliveryVehicleTable(): void
     {
-        Db::execute(<<<'SQL'
-CREATE TABLE IF NOT EXISTS `la_customer_delivery_vehicle` (
-  `id` int unsigned NOT NULL AUTO_INCREMENT,
-  `tenant_id` int unsigned NOT NULL DEFAULT 0,
-  `customer_id` int unsigned NOT NULL DEFAULT 0,
-  `earliest_delivery_time` char(5) NOT NULL DEFAULT '',
-  `plate_number` varchar(32) NOT NULL DEFAULT '',
-  `vehicle_location` varchar(255) NOT NULL DEFAULT '',
-  `driver_phone` varchar(20) NOT NULL DEFAULT '',
-  `sort` int NOT NULL DEFAULT 0,
-  `is_enabled` tinyint unsigned NOT NULL DEFAULT 1,
-  `operator_id` int unsigned NOT NULL DEFAULT 0,
-  `version` int unsigned NOT NULL DEFAULT 1,
-  `create_time` int unsigned NOT NULL DEFAULT 0,
-  `update_time` int unsigned NOT NULL DEFAULT 0,
-  `delete_time` int unsigned DEFAULT NULL,
-  PRIMARY KEY (`id`),
-  KEY `idx_customer_delivery_vehicle_customer` (`tenant_id`,`customer_id`,`is_enabled`,`sort`,`earliest_delivery_time`,`id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-SQL);
+        $migration = (string)file_get_contents(
+            dirname(__DIR__, 2) . '/database/migrations/20260930_000001_create_customer_delivery_vehicle.sql'
+        );
+        Db::execute($this->authoritativeCreateTable($migration, 'customer_delivery_vehicle'));
     }
 }

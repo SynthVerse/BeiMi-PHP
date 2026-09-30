@@ -82,7 +82,7 @@ final class CustomerDeliveryVehicleLogic extends BaseLogic
 
         return array_map(
             [self::class, 'formatItem'],
-            $query->order(['earliest_delivery_time' => 'asc', 'sort' => 'asc', 'id' => 'asc'])
+            $query->order(['sort' => 'asc', 'earliest_delivery_time' => 'asc', 'id' => 'asc'])
                 ->select()
                 ->toArray()
         );

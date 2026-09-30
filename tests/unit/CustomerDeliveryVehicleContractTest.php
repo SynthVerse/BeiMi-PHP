@@ -27,6 +27,10 @@ final class CustomerDeliveryVehicleContractTest extends TestCase
         self::assertStringContainsString("'delivery_vehicles' => CustomerDeliveryVehicleLogic::lists", $customerLogic);
         self::assertStringContainsString("where('version'", $vehicleLogic);
         self::assertStringContainsString('客户候选车辆已被修改，请重新加载', $vehicleLogic);
+        self::assertStringContainsString(
+            "order(['sort' => 'asc', 'earliest_delivery_time' => 'asc', 'id' => 'asc'])",
+            $vehicleLogic
+        );
     }
 
     public function test_customer_delivery_vehicle_migration_keeps_tenant_customer_and_schedule_fields(): void
