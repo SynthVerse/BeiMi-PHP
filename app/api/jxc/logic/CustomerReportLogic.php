@@ -16,6 +16,7 @@ class CustomerReportLogic extends BaseLogic
 {
     private const SCALE = 2;
     private const SUBMITTED = ['submitted_ready', 'submitted_shortage'];
+    private const GROUPED_SUBMIT_ROLLBACK_CODE = 40901;
 
     /** @return array<string,mixed>|false */
     public static function submit(array $params): array|false
@@ -34,80 +35,12 @@ class CustomerReportLogic extends BaseLogic
         $exception = null;
         for ($attempt = 0; $attempt < 3; $attempt++) {
             try {
-                return Db::transaction(static function () use ($params, $tenantId, $key, $fingerprint) {
-                $existing = CustomerReport::where('tenant_id', $tenantId)->where('idempotency_key', $key)->find();
-                if ($existing) {
-                    if ((string)$existing->request_fingerprint !== $fingerprint) {
-                        self::setError('幂等键已用于不同的报货内容');
-                        return false;
-                    }
-                    return self::detailById((int)$existing->id);
-                }
-                $deliveryDate = self::deliveryDate((string)($params['delivery_date'] ?? ''));
-                if ($deliveryDate === false) {
-                    return false;
-                }
-                $isSupplement = (int)($params['is_supplement'] ?? 0) === 1;
-                $batchId = (int)($params['batch_id'] ?? 0);
-                $supplementForReportId = (int)($params['supplement_for_report_id'] ?? 0);
-                $items = CustomerReportLineService::normalizeItems((array)($params['items'] ?? []), (int)($params['main_customer_id'] ?? 0));
-                if ($items === false) {
-                    self::setError(CustomerReportLineService::getError());
-                    return false;
-                }
-                $deliveryArrangement = CustomerReportDeliveryArrangementService::forSubmit(
+                return Db::transaction(static fn() => self::submitWithinTransaction(
                     $params,
-                    (int)$items[0]['delivery_customer_id'],
-                    $deliveryDate,
-                    $tenantId
-                );
-                if ($deliveryArrangement === false) {
-                    self::setError(CustomerReportDeliveryArrangementService::getError());
-                    return false;
-                }
-                if (self::lockBatchForSubmit(
-                    $batchId,
-                    $deliveryDate,
-                    $isSupplement,
-                    $supplementForReportId,
-                    $items
-                ) === false) {
-                    return false;
-                }
-                $now = time();
-                $reportId = (int)Db::name('customer_report')->insertGetId([
-                    'tenant_id' => $tenantId, 'batch_id' => $batchId,
-                    'supplement_for_report_id' => $supplementForReportId, 'sn' => self::sn(),
-                    'main_customer_id' => (int)$items[0]['main_customer_id'], 'main_customer_name' => (string)$items[0]['main_customer_name'],
-                    'status' => 'submitted_ready', 'idempotency_key' => $key, 'request_fingerprint' => $fingerprint,
-                    'version' => 1, 'submitted_time' => $now,
-                    'delivery_date' => $deliveryDate,
-                    'is_supplement' => $isSupplement ? 1 : 0,
-                    ...$deliveryArrangement['storage'],
-                    'remark' => trim((string)($params['remark'] ?? '')),
-                    'create_time' => $now, 'update_time' => $now,
-                ]);
-                $summary = self::writeNewItems($reportId, $items, $now);
-                Db::name('customer_report')->where('id', $reportId)->where('tenant_id', $tenantId)->update($summary + ['update_time' => $now]);
-                FulfillmentTaskLogic::syncForReport($reportId);
-                if ($isSupplement) {
-                    AuditService::logWithinTransaction(
-                        AuditService::MODULE_CUSTOMER_REPORT,
-                        AuditService::ACTION_SUPPLEMENT,
-                        $reportId,
-                        (string)Db::name('customer_report')->where('tenant_id', $tenantId)->where('id', $reportId)->value('sn'),
-                        null,
-                        [
-                            'batch_id' => $batchId,
-                            'supplement_for_report_id' => $supplementForReportId,
-                            'delivery_date' => $deliveryDate,
-                            'is_supplement' => 1,
-                        ],
-                        '补报进入原报货批次'
-                    );
-                }
-                return self::detailById($reportId);
-                });
+                    $tenantId,
+                    $key,
+                    $fingerprint
+                ));
             } catch (\Throwable $caught) {
                 $exception = $caught;
                 if (self::isRetryableTransactionError($caught) && $attempt < 2) {
@@ -1137,6 +1070,205 @@ class CustomerReportLogic extends BaseLogic
             return self::decimal((string)$item['order_qty']);
         }
         self::setError('计价单位暂不支持转换为标准销售单');
+        return false;
+    }
+
+    /** @return array<string,mixed>|false */
+    private static function submitWithinTransaction(array $params, int $tenantId, string $key, string $fingerprint): array|false
+    {
+        $existing = CustomerReport::where('tenant_id', $tenantId)->where('idempotency_key', $key)->find();
+        if ($existing) {
+            if ((string)$existing->request_fingerprint !== $fingerprint) {
+                self::setError('幂等键已用于不同的报货内容');
+                return false;
+            }
+            return self::detailById((int)$existing->id);
+        }
+        $deliveryDate = self::deliveryDate((string)($params['delivery_date'] ?? ''));
+        if ($deliveryDate === false) {
+            return false;
+        }
+        $isSupplement = (int)($params['is_supplement'] ?? 0) === 1;
+        $batchId = (int)($params['batch_id'] ?? 0);
+        $supplementForReportId = (int)($params['supplement_for_report_id'] ?? 0);
+        $items = CustomerReportLineService::normalizeItems((array)($params['items'] ?? []), (int)($params['main_customer_id'] ?? 0));
+        if ($items === false) {
+            self::setError(CustomerReportLineService::getError());
+            return false;
+        }
+        $deliveryArrangement = CustomerReportDeliveryArrangementService::forSubmit(
+            $params,
+            (int)$items[0]['delivery_customer_id'],
+            $deliveryDate,
+            $tenantId
+        );
+        if ($deliveryArrangement === false) {
+            self::setError(CustomerReportDeliveryArrangementService::getError());
+            return false;
+        }
+        if (self::lockBatchForSubmit(
+            $batchId,
+            $deliveryDate,
+            $isSupplement,
+            $supplementForReportId,
+            $items
+        ) === false) {
+            return false;
+        }
+        $now = time();
+        $reportId = (int)Db::name('customer_report')->insertGetId([
+            'tenant_id' => $tenantId, 'batch_id' => $batchId,
+            'supplement_for_report_id' => $supplementForReportId, 'sn' => self::sn(),
+            'main_customer_id' => (int)$items[0]['main_customer_id'], 'main_customer_name' => (string)$items[0]['main_customer_name'],
+            'status' => 'submitted_ready', 'idempotency_key' => $key, 'request_fingerprint' => $fingerprint,
+            'version' => 1, 'submitted_time' => $now,
+            'delivery_date' => $deliveryDate,
+            'is_supplement' => $isSupplement ? 1 : 0,
+            ...$deliveryArrangement['storage'],
+            'remark' => trim((string)($params['remark'] ?? '')),
+            'create_time' => $now, 'update_time' => $now,
+        ]);
+        $summary = self::writeNewItems($reportId, $items, $now);
+        Db::name('customer_report')->where('id', $reportId)->where('tenant_id', $tenantId)->update($summary + ['update_time' => $now]);
+        FulfillmentTaskLogic::syncForReport($reportId);
+        if ($isSupplement) {
+            AuditService::logWithinTransaction(
+                AuditService::MODULE_CUSTOMER_REPORT,
+                AuditService::ACTION_SUPPLEMENT,
+                $reportId,
+                (string)Db::name('customer_report')->where('tenant_id', $tenantId)->where('id', $reportId)->value('sn'),
+                null,
+                [
+                    'batch_id' => $batchId,
+                    'supplement_for_report_id' => $supplementForReportId,
+                    'delivery_date' => $deliveryDate,
+                    'is_supplement' => 1,
+                ],
+                '补报进入原报货批次'
+            );
+        }
+        return self::detailById($reportId);
+    }
+
+    /** @return array{idempotency_key:string,reports:array<int,array<string,mixed>>}|false */
+    public static function submitGrouped(array $params): array|false
+    {
+        self::clearError();
+        if (!WorkforceLogic::requirePermission('report.create')) {
+            return false;
+        }
+        $tenantId = self::tenantId();
+        $key = trim((string)($params['idempotency_key'] ?? ''));
+        $groups = array_values((array)($params['groups'] ?? []));
+        if ($tenantId <= 0 || $key === '' || strlen($key) > 96) {
+            self::setError('分组提交需要有效的幂等键');
+            return false;
+        }
+        if ($groups === [] || count($groups) > 50) {
+            self::setError('分组提交必须包含 1 至 50 个实际收货客户组');
+            return false;
+        }
+        $fingerprint = self::fingerprint($params);
+        $groupKeys = [];
+        $mainCustomerId = 0;
+        foreach ($groups as $group) {
+            if (!is_array($group)) {
+                self::setError('分组报货内容格式无效');
+                return false;
+            }
+            $groupKey = trim((string)($group['idempotency_key'] ?? ''));
+            if ($groupKey === '' || strlen($groupKey) > 96 || isset($groupKeys[$groupKey])) {
+                self::setError('每个实际收货客户组必须使用唯一幂等键');
+                return false;
+            }
+            $groupKeys[$groupKey] = true;
+            $groupMainCustomerId = (int)($group['main_customer_id'] ?? 0);
+            if ($groupMainCustomerId <= 0) {
+                self::setError('分组报货必须指定统一的主客户');
+                return false;
+            }
+            if ($mainCustomerId === 0) {
+                $mainCustomerId = $groupMainCustomerId;
+            } elseif ($mainCustomerId !== $groupMainCustomerId) {
+                self::setError('一次统一代报只能属于同一个主客户');
+                return false;
+            }
+        }
+
+        for ($attempt = 0; $attempt < 3; $attempt++) {
+            try {
+                $result = Db::transaction(static function () use ($groups, $tenantId, $key, $fingerprint, $mainCustomerId): array|false {
+                    $existing = Db::name('customer_report_grouped_submission')
+                        ->where('tenant_id', $tenantId)
+                        ->where('idempotency_key', $key)
+                        ->lock(true)
+                        ->find();
+                    if ($existing) {
+                        if (!hash_equals((string)$existing['request_fingerprint'], $fingerprint)) {
+                            self::setError('幂等键已用于不同的分组报货内容');
+                            return false;
+                        }
+                        $reportIds = json_decode((string)$existing['report_ids'], true);
+                        if (!is_array($reportIds) || count($reportIds) !== count($groups)) {
+                            self::setError('分组报货幂等记录不完整');
+                            return false;
+                        }
+                        $reports = [];
+                        foreach ($reportIds as $reportId) {
+                            $report = self::detailById((int)$reportId);
+                            if ($report === false) {
+                                self::setError('分组报货幂等结果不存在');
+                                return false;
+                            }
+                            $reports[] = $report;
+                        }
+                        return ['idempotency_key' => $key, 'reports' => $reports];
+                    }
+                    $created = [];
+                    foreach ($groups as $group) {
+                        $groupKey = trim((string)$group['idempotency_key']);
+                        $report = self::submitWithinTransaction(
+                            $group,
+                            $tenantId,
+                            $groupKey,
+                            self::fingerprint($group)
+                        );
+                        if ($report === false) {
+                            throw new \RuntimeException(
+                                self::getError() ?: '分组报货提交失败',
+                                self::GROUPED_SUBMIT_ROLLBACK_CODE
+                            );
+                        }
+                        $created[] = $report;
+                    }
+                    $now = time();
+                    Db::name('customer_report_grouped_submission')->insert([
+                        'tenant_id' => $tenantId,
+                        'idempotency_key' => $key,
+                        'request_fingerprint' => $fingerprint,
+                        'main_customer_id' => $mainCustomerId,
+                        'report_ids' => json_encode(array_column($created, 'id'), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                        'create_time' => $now,
+                        'update_time' => $now,
+                    ]);
+                    return ['idempotency_key' => $key, 'reports' => $created];
+                });
+                return $result;
+            } catch (\Throwable $error) {
+                if ($error->getCode() === self::GROUPED_SUBMIT_ROLLBACK_CODE) {
+                    self::setError($error->getMessage());
+                    return false;
+                }
+                if (self::isRetryableTransactionError($error) && $attempt < 2) {
+                    usleep(($attempt + 1) * 20_000);
+                    continue;
+                }
+                break;
+            }
+        }
+        if (!self::hasError()) {
+            self::setError('分组报货提交失败');
+        }
         return false;
     }
     /** @template T @param callable():T $operation @return T */

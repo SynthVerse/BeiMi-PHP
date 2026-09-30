@@ -88,6 +88,61 @@ final class CustomerReportWorkflowTest extends TestCase
         self::assertSame(0, Db::name('customer_report_reservation')->where('tenant_id', self::TENANT_ID)->count());
     }
 
+    public function test_grouped_submit_rolls_back_every_report_and_retries_idempotently(): void
+    {
+        $mainCustomerId = $this->createCustomer('统一代报总店');
+        $childCustomerId = $this->createCustomer('统一代报分店', $mainCustomerId);
+        $goodsId = $this->createCustomerReportGoods('分组桂鱼', 'CR-GROUPED');
+        $warehouseId = $this->createCustomerReportWarehouse('分组报货仓');
+        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, '10.0000'));
+
+        $main = $this->submitPayload($mainCustomerId, $goodsId, $warehouseId, 'grouped-main', '2', '1.00', '1.00');
+        $child = $this->submitPayload($mainCustomerId, $goodsId, $warehouseId, 'grouped-child', '3', '1.00', '1.00');
+        $child['items'][0]['delivery_customer_id'] = 999999;
+
+        self::assertFalse(CustomerReportLogic::submitGrouped([
+            'idempotency_key' => 'grouped-batch',
+            'groups' => [$main, $child],
+        ]));
+        self::assertSame('配送客户必须是该主客户或其一级子客户', CustomerReportLogic::getError());
+        self::assertSame(0, Db::name('customer_report')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame('0.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
+
+        $otherMainCustomerId = $this->createCustomer('另一结算主体');
+        $other = $this->submitPayload($otherMainCustomerId, $goodsId, $warehouseId, 'grouped-other-main', '1', '1.00', '1.00');
+        self::assertFalse(CustomerReportLogic::submitGrouped([
+            'idempotency_key' => 'grouped-cross-main',
+            'groups' => [$main, $other],
+        ]));
+        self::assertSame('一次统一代报只能属于同一个主客户', CustomerReportLogic::getError());
+        self::assertSame(0, Db::name('customer_report')->where('tenant_id', self::TENANT_ID)->count());
+
+        $child['items'][0]['delivery_customer_id'] = $childCustomerId;
+        $payload = ['idempotency_key' => 'grouped-batch', 'groups' => [$main, $child]];
+        $created = CustomerReportLogic::submitGrouped($payload);
+        self::assertNotFalse($created, CustomerReportLogic::getError());
+        self::assertCount(2, $created['reports']);
+        self::assertSame([$mainCustomerId, $childCustomerId], array_map(
+            static fn(array $report): int => (int)$report['items'][0]['delivery_customer_id'],
+            $created['reports']
+        ));
+        self::assertSame('5.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
+
+        $retried = CustomerReportLogic::submitGrouped($payload);
+        self::assertNotFalse($retried, CustomerReportLogic::getError());
+        self::assertSame(array_column($created['reports'], 'id'), array_column($retried['reports'], 'id'));
+        self::assertSame(2, Db::name('customer_report')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame('5.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
+        self::assertSame(1, Db::name('customer_report_grouped_submission')->where('tenant_id', self::TENANT_ID)->count());
+
+        $changed = $payload;
+        $changed['groups'][1]['idempotency_key'] = 'grouped-child-altered';
+        self::assertFalse(CustomerReportLogic::submitGrouped($changed));
+        self::assertSame('幂等键已用于不同的分组报货内容', CustomerReportLogic::getError());
+        self::assertSame(2, Db::name('customer_report')->where('tenant_id', self::TENANT_ID)->count());
+        self::assertSame('5.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
+    }
+
     public function test_duplicate_child_customer_names_require_parent_aware_confirmation(): void
     {
         $firstMainId = $this->createCustomer('大学城总店');

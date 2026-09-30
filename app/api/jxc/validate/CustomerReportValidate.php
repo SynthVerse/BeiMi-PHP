@@ -37,6 +37,7 @@ class CustomerReportValidate extends BaseValidate
     public function sceneRecognize() { return $this->only(['text']); }
     public function sceneQuickCreateGoods() { return $this->only(['name','category_id','unit_id','dimensions','combinations']); }
     public function sceneSubmit() { return $this->only(['main_customer_id','items','remark','idempotency_key','delivery_date','delivery_arrangement','is_supplement','batch_id','supplement_for_report_id']); }
+    public function sceneSubmitGrouped() { return $this->only(['idempotency_key','groups']); }
     public function sceneDetail() { return $this->only(['id']); }
     public function sceneLists() { return $this->only(['page_no','page_size','status_scope']); }
     public function sceneAvailability() { return $this->only(['warehouse_id','sku_id']); }

@@ -31,6 +31,7 @@ class CustomerReportController extends BaseJxcController
     }
 
     public function submit() { return $this->respond('submit'); }
+    public function submitGrouped() { return $this->respond('submitGrouped'); }
     public function edit() { return $this->respond('edit'); }
     public function retry() { return $this->respond('retry'); }
     public function convert() { return $this->respond('convert'); }
