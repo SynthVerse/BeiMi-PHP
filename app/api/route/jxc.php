@@ -247,6 +247,7 @@ Route::group('', function () {
 
     // === 真实交付出库与真负库存待办 ===
     Route::post('jxc/delivery/self_confirm', 'jxc.DeliveryInventory/confirmSelf');
+    Route::post('jxc/delivery/customer_vehicle_confirm', 'jxc.DeliveryInventory/confirmCustomerVehicle');
     Route::post('jxc/delivery/third_party_confirm', 'jxc.DeliveryInventory/confirmThirdParty');
     Route::get('jxc/delivery/third_party_drivers', 'jxc.DeliveryInventory/drivers');
     Route::post('jxc/delivery/third_party_driver_save', 'jxc.DeliveryInventory/driverSave');

@@ -7,7 +7,7 @@ namespace app\api\jxc\logic;
 use app\common\logic\BaseLogic;
 use think\facade\Db;
 
-/** 三种配送共用的真实交付事件与受控库存出库。 */
+/** 四种配送共用的真实交付事件与受控库存出库。 */
 final class DeliveryInventoryLogic extends BaseLogic
 {
     private const SCALE = 4;
@@ -37,6 +37,13 @@ final class DeliveryInventoryLogic extends BaseLogic
     {
         $params['event_type'] = 'third_party_driver_handoff';
         return self::confirmVariant($params, 'third_party', 'third_party_driver_handoff');
+    }
+
+    /** @return array<string,mixed>|false */
+    public static function confirmCustomerVehicleDelivery(array $params): array|false
+    {
+        $params['event_type'] = 'customer_vehicle_handoff';
+        return self::confirmVariant($params, 'customer_vehicle', 'customer_vehicle_handoff');
     }
 
     /** @return array<string,mixed>|false */

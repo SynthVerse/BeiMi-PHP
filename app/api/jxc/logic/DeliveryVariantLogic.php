@@ -45,10 +45,12 @@ final class DeliveryVariantLogic extends BaseLogic
         ] ?? '')), 0, 500);
         $exceptionReason = mb_substr(trim((string)($params['exception_reason'] ?? '')), 0, 500);
         $secondConfirmed = (int)($params['second_confirmed'] ?? 0) === 1 ? 1 : 0;
+        $earlyDeliveryReason = mb_substr(trim((string)($params['early_delivery_reason'] ?? '')), 0, 500);
+        $earlyDeliveryConfirmed = (int)($params['early_delivery_confirmed'] ?? 0) === 1 ? 1 : 0;
         $actualPackages = $deliveryMethod === 'fixed_line_vehicle' && $hasActualDelivery
             ? (int)($params['actual_handoff_packages'] ?? 0) : 0;
         $handoffTime = $hasActualDelivery
-            && in_array($deliveryMethod, ['fixed_line_vehicle', 'third_party'], true)
+            && in_array($deliveryMethod, ['fixed_line_vehicle', 'third_party', 'customer_vehicle'], true)
             ? self::timestamp((string)($params['actual_handoff_time'] ?? '')) : FulfillmentClock::now();
 
         if ($deliveryMethod === 'fixed_line_vehicle') {
@@ -67,6 +69,10 @@ final class DeliveryVariantLogic extends BaseLogic
         if ($deliveryMethod === 'third_party'
             && ($driverId <= 0 || ($hasActualDelivery && $handoffTime === false))) {
             self::setError($hasActualDelivery ? '第三方司机和实际交接时间不能为空' : '第三方司机不能为空');
+            return false;
+        }
+        if ($deliveryMethod === 'customer_vehicle' && $hasActualDelivery && $handoffTime === false) {
+            self::setError('客户车辆实际交接时间不能为空');
             return false;
         }
         if ($hasActualDelivery && ($handoffTime === false || $handoffTime > FulfillmentClock::now())) {
@@ -96,11 +102,13 @@ final class DeliveryVariantLogic extends BaseLogic
             // by the server. They must not make an idempotency fingerprint vary when
             // concurrent retries cross a second boundary.
             'actual_handoff_time' => $hasActualDelivery
-                && in_array($deliveryMethod, ['fixed_line_vehicle', 'third_party'], true)
+                && in_array($deliveryMethod, ['fixed_line_vehicle', 'third_party', 'customer_vehicle'], true)
                 ? $handoffTime : 0,
             'handoff_note' => $handoffNote,
             'exception_reason' => $exceptionReason,
             'second_confirmed' => $secondConfirmed,
+            'early_delivery_reason' => $earlyDeliveryReason,
+            'early_delivery_confirmed' => $earlyDeliveryConfirmed,
             'items' => $items,
         ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
 
@@ -109,6 +117,7 @@ final class DeliveryVariantLogic extends BaseLogic
                 $result = Db::transaction(static function () use (
                     $taskId, $tripReportId, $driverId, $deliveryMethod, $eventType, $actualPackages,
                     $handoffTime, $handoffNote, $exceptionReason, $secondConfirmed,
+                    $earlyDeliveryReason, $earlyDeliveryConfirmed,
                     $idempotencyKey, $fingerprint, $items, $hasActualDelivery
                 ) {
                     FinanceIntegration::lock();
@@ -161,6 +170,45 @@ final class DeliveryVariantLogic extends BaseLogic
                     if (!$report) {
                         self::setError('关联报货单不存在');
                         return false;
+                    }
+                    $arrangement = CustomerReportDeliveryArrangementService::fromRow($report);
+                    if ((string)$arrangement['delivery_method'] === '') {
+                        self::setError('本次送货安排缺失，请先明确送货安排');
+                        return false;
+                    }
+                    if ($deliveryMethod !== 'fixed_line_vehicle'
+                        && (string)$arrangement['delivery_method'] !== $deliveryMethod) {
+                        $methodLabel = match ($deliveryMethod) {
+                            'customer_vehicle' => '客户车辆交付',
+                            'third_party' => '第三方即时配送',
+                            default => '自配送',
+                        };
+                        self::setError('本次送货安排不是' . $methodLabel . '，请先变更送货安排');
+                        return false;
+                    }
+                    $eventEarlyDeliveryReason = '';
+                    $eventEarlyDeliveryConfirmed = 0;
+                    if ($deliveryMethod === 'customer_vehicle') {
+                        if ((string)$arrangement['delivery_method'] !== 'customer_vehicle') {
+                            self::setError('本次送货安排不是客户车辆交付，请先变更送货安排');
+                            return false;
+                        }
+                        if ((string)$arrangement['status'] !== 'ready') {
+                            self::setError('客户车辆资料待完善，不能确认实际交付');
+                            return false;
+                        }
+                        $plannedTime = self::timestamp(
+                            (string)$arrangement['delivery_date'] . ' '
+                            . (string)$arrangement['earliest_delivery_time'] . ':00'
+                        );
+                        if ($hasActualDelivery && $plannedTime !== false && (int)$handoffTime < $plannedTime) {
+                            if ($earlyDeliveryConfirmed !== 1 || $earlyDeliveryReason === '') {
+                                self::setError('实际交接早于计划时间，必须明确确认并填写提前交付原因');
+                                return false;
+                            }
+                            $eventEarlyDeliveryReason = $earlyDeliveryReason;
+                            $eventEarlyDeliveryConfirmed = 1;
+                        }
                     }
                     if ($deliveryMethod !== 'fixed_line_vehicle'
                         && self::hasActiveLineAssignment((int)$report['id'])) {
@@ -228,6 +276,8 @@ final class DeliveryVariantLogic extends BaseLogic
                         'line_schedule_id' => $tripReport ? (int)$tripReport['schedule_id'] : 0,
                         'driver_id' => $driver ? (int)$driver['id'] : 0, 'driver_snapshot' => $driverSnapshot,
                         'actual_handoff_time' => $hasActualDelivery ? (int)$handoffTime : 0,
+                        'early_delivery_reason' => $eventEarlyDeliveryReason,
+                        'early_delivery_confirmed' => $eventEarlyDeliveryConfirmed,
                         'delivery_outcome' => $hasActualDelivery ? 'partial' : 'handled_without_delivery',
                         'delivery_method' => $deliveryMethod,
                         'delivery_arrangement_snapshot' => (string)($report['delivery_arrangement_snapshot'] ?? ''),
@@ -507,6 +557,8 @@ final class DeliveryVariantLogic extends BaseLogic
                             'driver_id' => $driver ? (int)$driver['id'] : 0,
                             'trip_report_id' => $tripReport ? (int)$tripReport['id'] : 0,
                             'operator_id' => self::operatorId(),
+                            'early_delivery_reason' => $eventEarlyDeliveryReason,
+                            'early_delivery_confirmed' => $eventEarlyDeliveryConfirmed,
                             'delivered_time' => $hasActualDelivery ? (int)$handoffTime : 0],
                         $handoffNote
                     );
@@ -616,7 +668,7 @@ final class DeliveryVariantLogic extends BaseLogic
             }
             if (!in_array((string)$item['fulfillment_status'], [
                 'final_weight_recorded', 'partially_delivered_pending',
-            ], true) || (int)$item['final_weight_task_id'] <= 0) {
+            ], true)) {
                 self::setError('每条交付明细必须先完成最终称重');
                 return false;
             }
@@ -920,12 +972,16 @@ final class DeliveryVariantLogic extends BaseLogic
             return false;
         }
         foreach (['id', 'report_id', 'task_id', 'trip_id', 'trip_report_id', 'line_schedule_id',
-            'driver_id', 'actual_handoff_time', 'operator_id', 'delivered_time'] as $field) {
+            'driver_id', 'actual_handoff_time', 'early_delivery_confirmed', 'operator_id', 'delivered_time'] as $field) {
             $event[$field] = (int)($event[$field] ?? 0);
         }
         $event['driver'] = $event['driver_snapshot']
             ? (json_decode((string)$event['driver_snapshot'], true) ?: null) : null;
         unset($event['driver_snapshot']);
+        $event['delivery_arrangement'] = json_decode(
+            (string)($event['delivery_arrangement_snapshot'] ?? ''),
+            true
+        ) ?: [];
         $event['items'] = Db::name('fulfillment_delivery_item')->where('tenant_id', self::tenantId())
             ->where('delivery_event_id', $eventId)->order('id')->select()->toArray();
         foreach ($event['items'] as &$item) {

@@ -12,6 +12,8 @@ final class DeliveryInventoryValidate extends BaseValidate
         'event_type' => 'require|in:customer_handoff,vehicle_departed,third_party_driver_handoff',
         'driver_id' => 'require|integer|gt:0',
         'actual_handoff_time' => 'max:19',
+        'early_delivery_reason' => 'max:500',
+        'early_delivery_confirmed' => 'in:0,1',
         'items' => 'array|min:1',
         'handoff_note' => 'max:500',
         'exception_reason' => 'max:500',
@@ -33,6 +35,7 @@ final class DeliveryInventoryValidate extends BaseValidate
     ];
 
     public function sceneConfirmSelf() { return $this->only(['task_id', 'event_type', 'items', 'handoff_note', 'exception_reason', 'second_confirmed', 'idempotency_key']); }
+    public function sceneConfirmCustomerVehicle() { return $this->only(['task_id', 'actual_handoff_time', 'early_delivery_reason', 'early_delivery_confirmed', 'items', 'handoff_note', 'exception_reason', 'second_confirmed', 'idempotency_key']); }
     public function sceneConfirmThirdParty() { return $this->only(['task_id', 'driver_id', 'actual_handoff_time', 'items', 'handoff_note', 'exception_reason', 'second_confirmed', 'idempotency_key']); }
     public function sceneDriverSave() { return $this->only(['id', 'version', 'name', 'mobile', 'platform', 'vehicle_no', 'is_enabled']); }
     public function sceneDriverLists() { return $this->only(['is_enabled']); }

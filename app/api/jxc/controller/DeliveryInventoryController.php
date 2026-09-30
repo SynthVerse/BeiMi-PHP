@@ -27,6 +27,15 @@ class DeliveryInventoryController extends BaseJxcController
             : $this->success('第三方司机交接成功', $result, 1, 1);
     }
 
+    public function confirmCustomerVehicle()
+    {
+        $params = (new DeliveryInventoryValidate())->post()->goCheck('confirmCustomerVehicle');
+        $result = DeliveryInventoryLogic::confirmCustomerVehicleDelivery($params);
+        return $result === false
+            ? $this->fail(DeliveryInventoryLogic::getError())
+            : $this->success('客户车辆交付确认成功', $result, 1, 1);
+    }
+
     public function driverSave()
     {
         $params = (new DeliveryInventoryValidate())->post()->goCheck('driverSave');
