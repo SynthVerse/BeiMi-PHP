@@ -36,24 +36,29 @@ final class FulfillmentTaskLogic extends BaseLogic
         }
         $now = time();
         $deliveryDate = self::date((string)($report['delivery_date'] ?? ''));
+        $deliverySnapshot = [
+            'delivery_date' => $deliveryDate,
+            'is_supplement' => (int)($report['is_supplement'] ?? 0),
+            'delivery_method' => (string)($report['delivery_method'] ?? ''),
+            'delivery_arrangement_status' => (string)($report['delivery_arrangement_status'] ?? ''),
+            'delivery_customer_id' => (int)($report['delivery_customer_id'] ?? 0),
+            'earliest_delivery_time' => (string)($report['earliest_delivery_time'] ?? ''),
+            'delivery_arrangement_snapshot' => $report['delivery_arrangement_snapshot'] ?? null,
+        ];
         $group = Db::name('fulfillment_task_group')->where('tenant_id', $tenantId)->where('report_id', $reportId)->lock(true)->find();
         if ($group) {
             $groupId = (int)$group['id'];
-            Db::name('fulfillment_task_group')->where('id', $groupId)->update([
-                'delivery_date' => $deliveryDate,
-                'is_supplement' => (int)($report['is_supplement'] ?? 0),
+            Db::name('fulfillment_task_group')->where('id', $groupId)->update(array_merge($deliverySnapshot, [
                 'update_time' => $now,
-            ]);
+            ]));
         } else {
-            $groupId = (int)Db::name('fulfillment_task_group')->insertGetId([
+            $groupId = (int)Db::name('fulfillment_task_group')->insertGetId(array_merge($deliverySnapshot, [
                 'tenant_id' => $tenantId,
                 'report_id' => $reportId,
-                'delivery_date' => $deliveryDate,
-                'is_supplement' => (int)($report['is_supplement'] ?? 0),
                 'status' => 'open',
                 'create_time' => $now,
                 'update_time' => $now,
-            ]);
+            ]));
         }
 
         $desired = [];
@@ -309,6 +314,7 @@ final class FulfillmentTaskLogic extends BaseLogic
         if (!$group) {
             return null;
         }
+        $group['delivery_arrangement'] = CustomerReportDeliveryArrangementService::fromRow($group);
         $tasks = Db::name('fulfillment_task')
             ->where('tenant_id', self::tenantId())
             ->where('group_id', (int)$group['id'])
@@ -1515,6 +1521,14 @@ final class FulfillmentTaskLogic extends BaseLogic
         $reportIds = array_values(array_unique(array_filter(array_map(static fn(array $task): int => (int)$task['report_id'], $tasks))));
         $reportBatchIds = $reportIds === [] ? [] : Db::name('customer_report')->where('tenant_id', self::tenantId())
             ->whereIn('id', $reportIds)->column('batch_id', 'id');
+        $groupIds = array_values(array_unique(array_filter(array_map(static fn(array $task): int => (int)$task['group_id'], $tasks))));
+        $taskGroups = [];
+        if ($groupIds !== []) {
+            foreach (Db::name('fulfillment_task_group')->where('tenant_id', self::tenantId())
+                ->whereIn('id', $groupIds)->select()->toArray() as $group) {
+                $taskGroups[(int)$group['id']] = $group;
+            }
+        }
         $settlementTaskIds = self::settlementTaskIdsForItems($itemIds);
         foreach ($tasks as &$task) {
             if (trim((string)($task['process_name_snapshot'] ?? '')) === '' && (int)$task['process_id'] > 0) {
@@ -1527,7 +1541,9 @@ final class FulfillmentTaskLogic extends BaseLogic
             }
             $task = self::ensureContentIdentity($task);
             $task['process_name'] = (string)($task['process_name_snapshot'] ?? '');
-            $task['is_supplement'] = (int)Db::name('fulfillment_task_group')->where('tenant_id', self::tenantId())->where('id', (int)$task['group_id'])->value('is_supplement');
+            $taskGroup = $taskGroups[(int)$task['group_id']] ?? [];
+            $task['is_supplement'] = (int)($taskGroup['is_supplement'] ?? 0);
+            $task['delivery_arrangement'] = CustomerReportDeliveryArrangementService::fromRow($taskGroup);
             $task['requires_settlement'] = (int)($settlementTaskIds[(int)$task['report_item_id']] ?? 0) === (int)$task['id'];
             $requirementItem = $items[(int)$task['report_item_id']] ?? [];
             $task['piece_weight_confirmed'] = (int)($requirementItem['piece_weight_confirmed'] ?? 0);

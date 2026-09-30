@@ -413,7 +413,7 @@ final class CustomerReportWorkflowTest extends TestCase
         self::assertSame('submitted_ready', $report['status']);
 
         self::assertFalse(CustomerReportLogic::convert(['id' => $report['id'], 'version' => $report['version']]));
-        self::assertSame('必须先确认真实交付事件；车辆离店或手工改任务状态都不能触发出库', CustomerReportLogic::getError());
+        self::assertSame('加工组报货请先录入分组实重并确认真实交付，系统会生成待结算销售单', CustomerReportLogic::getError());
         self::assertSame(0, Db::name('sales_order')->where('tenant_id', self::TENANT_ID)->count());
         self::assertSame('1.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
     }
@@ -439,14 +439,14 @@ final class CustomerReportWorkflowTest extends TestCase
         self::assertNotFalse($report, CustomerReportLogic::getError());
         self::assertFalse($report['actions']['convert']['allowed']);
         self::assertSame(
-            '必须先确认真实交付事件；车辆离店或手工改任务状态都不能触发出库',
+            '加工组报货请先录入分组实重并确认真实交付，系统会生成待结算销售单',
             $report['actions']['convert']['blocked_reason']
         );
         self::assertTrue($report['actions']['cancel']['allowed']);
         self::assertTrue($report['actions']['cancel']['reason_required']);
 
         self::assertFalse(CustomerReportLogic::convert(['id' => $report['id'], 'version' => $report['version']]));
-        self::assertSame('必须先确认真实交付事件；车辆离店或手工改任务状态都不能触发出库', CustomerReportLogic::getError());
+        self::assertSame('加工组报货请先录入分组实重并确认真实交付，系统会生成待结算销售单', CustomerReportLogic::getError());
         self::assertSame(0, Db::name('sales_order')->where('tenant_id', self::TENANT_ID)->count());
         self::assertSame(0, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->where('order_type', 'sales')->count());
         self::assertSame(0, Db::name('receivable_flow')->where('tenant_id', self::TENANT_ID)->count());
@@ -470,15 +470,17 @@ final class CustomerReportWorkflowTest extends TestCase
         $warehouseB = $this->createCustomerReportWarehouse('多仓乙');
         self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseA, $goodsA, '2.0000'));
         self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseB, $goodsB, '3.0000'));
-        $priced = static fn(int $goodsId, int $warehouseId, string $price): array => [
-            'goods_id' => $goodsId, 'warehouse_id' => $warehouseId,
-            'unit_id' => 1, 'unit_name' => '件', 'order_qty' => '1',
-            'piece_weight_confirmed' => 1, 'piece_weight_min' => '1.00', 'piece_weight_max' => '1.00',
-            'price_status' => 'priced', 'price' => $price,
-            'pricing_unit_id' => 1, 'pricing_unit_name' => '件',
-        ];
+        $priced = function (int $goodsId, int $warehouseId, string $price) use ($customerId): array {
+            $item = $this->fulfillmentPayload($customerId, $goodsId, $warehouseId, 'multi-line-' . $goodsId, '1', '')['items'][0];
+            return array_replace($item, [
+                'unit_id' => 1, 'unit_name' => '件',
+                'price_status' => 'priced', 'price' => $price,
+                'pricing_unit_id' => 1, 'pricing_unit_name' => '件',
+            ]);
+        };
         $report = CustomerReportLogic::submit([
             'main_customer_id' => $customerId,
+            'delivery_date' => '2026-09-30',
             'idempotency_key' => 'multi-warehouse-sale',
             'items' => [
                 $priced($goodsA, $warehouseA, '10.00'),
@@ -488,7 +490,7 @@ final class CustomerReportWorkflowTest extends TestCase
         self::assertNotFalse($report, CustomerReportLogic::getError());
 
         self::assertFalse(CustomerReportLogic::convert(['id' => $report['id'], 'version' => $report['version']]));
-        self::assertSame('必须先确认真实交付事件；车辆离店或手工改任务状态都不能触发出库', CustomerReportLogic::getError());
+        self::assertSame('加工组报货请先录入分组实重并确认真实交付，系统会生成待结算销售单', CustomerReportLogic::getError());
         self::assertSame(0, Db::name('sales_order')->where('tenant_id', self::TENANT_ID)->count());
         self::assertSame(0, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->where('order_type', 'sales')->count());
         self::assertSame('1.0000', WarehouseGoodsBalanceService::reserved($warehouseA, $goodsA));
@@ -535,15 +537,17 @@ final class CustomerReportWorkflowTest extends TestCase
         $warehouseB = $this->createCustomerReportWarehouse('多仓回滚乙');
         self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseA, $goodsA, '2.0000'));
         self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseB, $goodsB, '2.0000'));
-        $priced = static fn(int $goodsId, int $warehouseId): array => [
-            'goods_id' => $goodsId, 'warehouse_id' => $warehouseId,
-            'unit_id' => 1, 'unit_name' => '件', 'order_qty' => '1',
-            'piece_weight_confirmed' => 1, 'piece_weight_min' => '1.00', 'piece_weight_max' => '1.00',
-            'price_status' => 'priced', 'price' => '10.00',
-            'pricing_unit_id' => 1, 'pricing_unit_name' => '件',
-        ];
+        $priced = function (int $goodsId, int $warehouseId) use ($customerId): array {
+            $item = $this->fulfillmentPayload($customerId, $goodsId, $warehouseId, 'rollback-line-' . $goodsId, '1', '')['items'][0];
+            return array_replace($item, [
+                'unit_id' => 1, 'unit_name' => '件',
+                'price_status' => 'priced', 'price' => '10.00',
+                'pricing_unit_id' => 1, 'pricing_unit_name' => '件',
+            ]);
+        };
         $report = CustomerReportLogic::submit([
             'main_customer_id' => $customerId,
+            'delivery_date' => '2026-09-30',
             'idempotency_key' => 'multi-warehouse-rollback',
             'items' => [
                 $priced($goodsA, $warehouseA),
@@ -562,7 +566,7 @@ final class CustomerReportWorkflowTest extends TestCase
             'id' => $report['id'],
             'version' => $report['version'],
         ]));
-        self::assertSame('必须先确认真实交付事件；车辆离店或手工改任务状态都不能触发出库', CustomerReportLogic::getError());
+        self::assertSame('加工组报货请先录入分组实重并确认真实交付，系统会生成待结算销售单', CustomerReportLogic::getError());
         self::assertSame(0, Db::name('sales_order')->where('tenant_id', self::TENANT_ID)->count());
         self::assertSame(0, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->where('order_type', 'sales')->count());
         self::assertSame(0, Db::name('receivable_flow')->where('tenant_id', self::TENANT_ID)->where('order_type', 'sales')->count());
@@ -583,12 +587,15 @@ final class CustomerReportWorkflowTest extends TestCase
         self::assertSame('4.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
 
         $item = $report['items'][0];
+        $editedLine = $this->fulfillmentPayload($customerId, $goodsId, $warehouseId, 'edit-delta-line', '2', '')['items'][0];
+        $editedLine = array_replace($editedLine, [
+            'id' => $item['id'],
+            'piece_weight_min' => '1.00',
+            'piece_weight_max' => '1.00',
+        ]);
         $edited = CustomerReportLogic::edit([
             'id' => $report['id'], 'version' => $report['version'], 'main_customer_id' => $customerId, 'remark' => '',
-            'items' => [[
-                'id' => $item['id'], 'goods_id' => $goodsId, 'warehouse_id' => $warehouseId, 'unit_id' => 0, 'unit_name' => '件',
-                'order_qty' => '2', 'piece_weight_confirmed' => 1, 'piece_weight_min' => '1.00', 'piece_weight_max' => '1.00', 'price_status' => 'unpriced',
-            ]],
+            'items' => [$editedLine],
         ]);
         self::assertNotFalse($edited, CustomerReportLogic::getError());
         self::assertSame('2.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
@@ -605,20 +612,21 @@ final class CustomerReportWorkflowTest extends TestCase
         self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseA, $goodsA, '2.0000'));
         self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseA, $goodsB, '2.0000'));
         self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseB, $goodsA, '2.0000'));
+        $firstPayload = $this->fulfillmentPayload($customerId, $goodsA, $warehouseA, 'edit-move-line-a', '1', '');
+        $secondPayload = $this->fulfillmentPayload($customerId, $goodsB, $warehouseA, 'edit-move-line-b', '1', '');
         $report = CustomerReportLogic::submit([
-            'main_customer_id' => $customerId, 'idempotency_key' => 'edit-move-delete', 'items' => [
-                ['goods_id' => $goodsA, 'warehouse_id' => $warehouseA, 'unit_id' => 0, 'unit_name' => '件', 'order_qty' => '1', 'piece_weight_confirmed' => 1, 'piece_weight_min' => '1.00', 'piece_weight_max' => '1.00', 'price_status' => 'unpriced'],
-                ['goods_id' => $goodsB, 'warehouse_id' => $warehouseA, 'unit_id' => 0, 'unit_name' => '件', 'order_qty' => '1', 'piece_weight_confirmed' => 1, 'piece_weight_min' => '1.00', 'piece_weight_max' => '1.00', 'price_status' => 'unpriced'],
-            ],
+            'main_customer_id' => $customerId,
+            'delivery_date' => '2026-09-30',
+            'idempotency_key' => 'edit-move-delete',
+            'items' => [$firstPayload['items'][0], $secondPayload['items'][0]],
         ]);
         self::assertNotFalse($report, CustomerReportLogic::getError());
         $itemA = array_values(array_filter($report['items'], static fn(array $item): bool => (int)$item['goods_id'] === $goodsA))[0];
+        $editedLine = $this->fulfillmentPayload($customerId, $goodsA, $warehouseB, 'edit-move-line-edit', '1', '')['items'][0];
+        $editedLine['id'] = $itemA['id'];
         $edited = CustomerReportLogic::edit([
             'id' => $report['id'], 'version' => $report['version'], 'main_customer_id' => $customerId, 'remark' => '',
-            'items' => [[
-                'id' => $itemA['id'], 'goods_id' => $goodsA, 'warehouse_id' => $warehouseB, 'unit_id' => 0, 'unit_name' => '件',
-                'order_qty' => '1', 'piece_weight_confirmed' => 1, 'piece_weight_min' => '1.00', 'piece_weight_max' => '1.00', 'price_status' => 'unpriced',
-            ]],
+            'items' => [$editedLine],
         ]);
         self::assertNotFalse($edited, CustomerReportLogic::getError());
         self::assertCount(1, $edited['items']);
@@ -641,6 +649,175 @@ final class CustomerReportWorkflowTest extends TestCase
                 self::assertSame('decimal(18,2)', strtolower((string)$types[$field]), $table . '.' . $field);
             }
         }
+    }
+
+    public function test_customer_vehicle_arrangement_is_snapshotted_for_report_detail_and_task_group(): void
+    {
+        $customerId = $this->createCustomer('车辆快照客户');
+        $goodsId = $this->createCustomerReportGoods('车辆快照桂鱼', 'CR-DELIVERY-SNAPSHOT');
+        $warehouseId = $this->createCustomerReportWarehouse('车辆快照仓');
+        $now = time();
+        $vehicleId = (int)Db::name('customer_delivery_vehicle')->insertGetId([
+            'tenant_id' => self::TENANT_ID,
+            'customer_id' => $customerId,
+            'earliest_delivery_time' => '05:30',
+            'plate_number' => '辽A12345',
+            'vehicle_location' => '东门停车区',
+            'driver_phone' => '13800000001',
+            'sort' => 10,
+            'is_enabled' => 1,
+            'operator_id' => self::ADMIN_ID,
+            'version' => 1,
+            'create_time' => $now,
+            'update_time' => $now,
+            'delete_time' => null,
+        ]);
+
+        $payload = $this->fulfillmentPayload($customerId, $goodsId, $warehouseId, 'delivery-snapshot', '1', '');
+        $payload['delivery_arrangement'] = [
+            'delivery_method' => 'customer_vehicle',
+            'source_vehicle_id' => $vehicleId,
+        ];
+        $submitted = CustomerReportLogic::submit($payload);
+        self::assertNotFalse($submitted, CustomerReportLogic::getError());
+        self::assertSame([
+            'delivery_method' => 'customer_vehicle',
+            'status' => 'ready',
+            'delivery_date' => '2026-08-10',
+            'delivery_customer_id' => $customerId,
+            'source_vehicle_id' => $vehicleId,
+            'source_vehicle_version' => 1,
+            'earliest_delivery_time' => '05:30',
+            'plate_number' => '辽A12345',
+            'vehicle_location' => '东门停车区',
+            'driver_phone' => '13800000001',
+            'missing_fields' => [],
+        ], $submitted['delivery_arrangement']);
+        self::assertSame($submitted['delivery_arrangement'], $submitted['task_group']['delivery_arrangement']);
+        self::assertSame(
+            $submitted['delivery_arrangement'],
+            $submitted['task_group']['tasks'][0]['delivery_arrangement']
+        );
+
+        Db::name('customer_delivery_vehicle')->where('tenant_id', self::TENANT_ID)->where('id', $vehicleId)->update([
+            'earliest_delivery_time' => '08:00',
+            'plate_number' => '辽A99999',
+            'vehicle_location' => '西门新地点',
+            'driver_phone' => '',
+            'version' => 2,
+            'update_time' => time(),
+        ]);
+        $detail = CustomerReportLogic::detail(['id' => (int)$submitted['id']]);
+        self::assertNotFalse($detail, CustomerReportLogic::getError());
+        self::assertSame('05:30', $detail['delivery_arrangement']['earliest_delivery_time']);
+        self::assertSame('辽A12345', $detail['delivery_arrangement']['plate_number']);
+        self::assertSame('东门停车区', $detail['delivery_arrangement']['vehicle_location']);
+        self::assertSame('13800000001', $detail['delivery_arrangement']['driver_phone']);
+    }
+
+    public function test_customer_vehicle_arrangement_allows_one_time_override_and_rejects_another_customer_vehicle(): void
+    {
+        $customerId = $this->createCustomer('临时安排客户');
+        $otherCustomerId = $this->createCustomer('其他车辆客户');
+        $goodsId = $this->createCustomerReportGoods('临时安排鲈鱼', 'CR-DELIVERY-OVERRIDE');
+        $warehouseId = $this->createCustomerReportWarehouse('临时安排仓');
+        $now = time();
+        $vehicleId = (int)Db::name('customer_delivery_vehicle')->insertGetId([
+            'tenant_id' => self::TENANT_ID,
+            'customer_id' => $customerId,
+            'earliest_delivery_time' => '05:00',
+            'plate_number' => '辽B11111',
+            'vehicle_location' => '默认地点',
+            'driver_phone' => '',
+            'sort' => 0,
+            'is_enabled' => 1,
+            'operator_id' => self::ADMIN_ID,
+            'version' => 1,
+            'create_time' => $now,
+            'update_time' => $now,
+            'delete_time' => null,
+        ]);
+        $otherVehicleId = (int)Db::name('customer_delivery_vehicle')->insertGetId([
+            'tenant_id' => self::TENANT_ID,
+            'customer_id' => $otherCustomerId,
+            'earliest_delivery_time' => '06:00',
+            'plate_number' => '辽B22222',
+            'vehicle_location' => '其他地点',
+            'driver_phone' => '',
+            'sort' => 0,
+            'is_enabled' => 1,
+            'operator_id' => self::ADMIN_ID,
+            'version' => 1,
+            'create_time' => $now,
+            'update_time' => $now,
+            'delete_time' => null,
+        ]);
+
+        $payload = $this->fulfillmentPayload($customerId, $goodsId, $warehouseId, 'delivery-override', '1', '');
+        $payload['delivery_arrangement'] = [
+            'delivery_method' => 'customer_vehicle',
+            'source_vehicle_id' => $vehicleId,
+            'earliest_delivery_time' => '04:45',
+            'plate_number' => '辽B临时01',
+            'vehicle_location' => '本次临时交接点',
+            'driver_phone' => '13900000002',
+        ];
+        $submitted = CustomerReportLogic::submit($payload);
+        self::assertNotFalse($submitted, CustomerReportLogic::getError());
+        self::assertSame('04:45', $submitted['delivery_arrangement']['earliest_delivery_time']);
+        self::assertSame('辽B临时01', $submitted['delivery_arrangement']['plate_number']);
+        self::assertSame('本次临时交接点', $submitted['delivery_arrangement']['vehicle_location']);
+        self::assertSame('13900000002', $submitted['delivery_arrangement']['driver_phone']);
+
+        $invalid = $this->fulfillmentPayload($customerId, $goodsId, $warehouseId, 'delivery-wrong-customer', '1', '');
+        $invalid['delivery_arrangement'] = [
+            'delivery_method' => 'customer_vehicle',
+            'source_vehicle_id' => $otherVehicleId,
+        ];
+        self::assertFalse(CustomerReportLogic::submit($invalid));
+        self::assertSame('所选客户候选车辆不属于本次实际收货客户', CustomerReportLogic::getError());
+    }
+
+    public function test_delivery_arrangement_supports_all_methods_and_explicit_incomplete_or_legacy_missing_states(): void
+    {
+        $customerId = $this->createCustomer('配送方式客户');
+        $goodsId = $this->createCustomerReportGoods('配送方式多宝鱼', 'CR-DELIVERY-METHODS');
+        $warehouseId = $this->createCustomerReportWarehouse('配送方式仓');
+
+        $missingDate = $this->fulfillmentPayload($customerId, $goodsId, $warehouseId, 'delivery-date-required', '1', '');
+        unset($missingDate['delivery_date']);
+        self::assertFalse(CustomerReportLogic::submit($missingDate));
+        self::assertSame('请选择明确的送货日期', CustomerReportLogic::getError());
+
+        foreach (['third_party', 'self_delivery'] as $method) {
+            $payload = $this->fulfillmentPayload($customerId, $goodsId, $warehouseId, 'delivery-' . $method, '1', '');
+            $payload['delivery_arrangement'] = ['delivery_method' => $method];
+            $report = CustomerReportLogic::submit($payload);
+            self::assertNotFalse($report, CustomerReportLogic::getError());
+            self::assertSame($method, $report['delivery_arrangement']['delivery_method']);
+            self::assertSame('ready', $report['delivery_arrangement']['status']);
+        }
+
+        $pendingPayload = $this->fulfillmentPayload($customerId, $goodsId, $warehouseId, 'delivery-pending', '1', '');
+        $pendingPayload['delivery_arrangement'] = ['delivery_method' => 'customer_vehicle'];
+        $pending = CustomerReportLogic::submit($pendingPayload);
+        self::assertNotFalse($pending, CustomerReportLogic::getError());
+        self::assertSame('pending_completion', $pending['delivery_arrangement']['status']);
+        self::assertSame(['earliest_delivery_time', 'plate_number', 'vehicle_location'], $pending['delivery_arrangement']['missing_fields']);
+        self::assertSame('pending_completion', $pending['task_group']['delivery_arrangement']['status']);
+
+        Db::name('customer_report')->where('tenant_id', self::TENANT_ID)->where('id', (int)$pending['id'])->update([
+            'delivery_method' => '',
+            'delivery_arrangement_status' => '',
+            'delivery_customer_id' => 0,
+            'earliest_delivery_time' => '',
+            'delivery_arrangement_snapshot' => null,
+        ]);
+        $legacy = CustomerReportLogic::detail(['id' => (int)$pending['id']]);
+        self::assertNotFalse($legacy, CustomerReportLogic::getError());
+        self::assertSame('', $legacy['delivery_arrangement']['delivery_method']);
+        self::assertSame('missing', $legacy['delivery_arrangement']['status']);
+        self::assertContains('delivery_method', $legacy['delivery_arrangement']['missing_fields']);
     }
 
     public function test_submission_rejects_mixed_actual_receiving_customers_without_side_effects(): void
@@ -840,11 +1017,11 @@ final class CustomerReportWorkflowTest extends TestCase
 
     private function submitPayload(int $customerId, int $goodsId, int $warehouseId, string $key, string $quantity, string $minimum, string $maximum): array
     {
-        return ['main_customer_id' => $customerId, 'idempotency_key' => $key, 'remark' => '', 'items' => [[
-            'goods_id' => $goodsId, 'warehouse_id' => $warehouseId, 'unit_id' => 0, 'unit_name' => '件', 'order_qty' => $quantity,
-            'piece_weight_confirmed' => 1, 'piece_weight_min' => $minimum, 'piece_weight_max' => $maximum,
-            'price_status' => 'unpriced',
-        ]]];
+        $payload = $this->fulfillmentPayload($customerId, $goodsId, $warehouseId, $key, $quantity, '');
+        $payload['delivery_date'] = '2026-09-30';
+        $payload['items'][0]['piece_weight_min'] = $minimum;
+        $payload['items'][0]['piece_weight_max'] = $maximum;
+        return $payload;
     }
 
 }

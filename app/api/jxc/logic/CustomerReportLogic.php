@@ -44,12 +44,25 @@ class CustomerReportLogic extends BaseLogic
                     return self::detailById((int)$existing->id);
                 }
                 $deliveryDate = self::deliveryDate((string)($params['delivery_date'] ?? ''));
+                if ($deliveryDate === false) {
+                    return false;
+                }
                 $isSupplement = (int)($params['is_supplement'] ?? 0) === 1;
                 $batchId = (int)($params['batch_id'] ?? 0);
                 $supplementForReportId = (int)($params['supplement_for_report_id'] ?? 0);
                 $items = CustomerReportLineService::normalizeItems((array)($params['items'] ?? []), (int)($params['main_customer_id'] ?? 0));
                 if ($items === false) {
                     self::setError(CustomerReportLineService::getError());
+                    return false;
+                }
+                $deliveryArrangement = CustomerReportDeliveryArrangementService::forSubmit(
+                    $params,
+                    (int)$items[0]['delivery_customer_id'],
+                    $deliveryDate,
+                    $tenantId
+                );
+                if ($deliveryArrangement === false) {
+                    self::setError(CustomerReportDeliveryArrangementService::getError());
                     return false;
                 }
                 if (self::lockBatchForSubmit(
@@ -70,6 +83,7 @@ class CustomerReportLogic extends BaseLogic
                     'version' => 1, 'submitted_time' => $now,
                     'delivery_date' => $deliveryDate,
                     'is_supplement' => $isSupplement ? 1 : 0,
+                    ...$deliveryArrangement['storage'],
                     'remark' => trim((string)($params['remark'] ?? '')),
                     'create_time' => $now, 'update_time' => $now,
                 ]);
@@ -856,6 +870,7 @@ class CustomerReportLogic extends BaseLogic
         $report=CustomerReport::where('tenant_id',self::tenantId())->where('id',$id)->find();
         if (!$report) { self::setError('客户报货单不存在'); return false; }
         $data=$report->toArray();
+        $data['delivery_arrangement'] = CustomerReportDeliveryArrangementService::fromRow($data);
         $data['items']=CustomerReportItem::where('tenant_id',self::tenantId())->where('report_id',$id)->whereNull('delete_time')->order('sort asc,id asc')->select()->toArray();
         foreach ($data['items'] as &$item) {
             $item['processing_groups'] = self::processingGroupsForItem((int)$item['id']);
@@ -1146,15 +1161,17 @@ class CustomerReportLogic extends BaseLogic
     private static function sort(array $value): array { foreach($value as $key=>$item){if(is_array($item)){$value[$key]=self::sort($item);}} if(array_keys($value)!==range(0,count($value)-1)){ksort($value);} return $value; }
     private static function quantity(mixed $value,bool $allowZero=false): string|false { $value=trim((string)$value); if($value===''||preg_match('/^\d+(?:\.\d{1,2})?$/',$value)!==1){return false;} $value=self::decimal($value); return bccomp($value,'0.00',self::SCALE)>0||($allowZero&&bccomp($value,'0.00',self::SCALE)===0)?$value:false; }
     private static function decimal(string $value): string { return bcadd($value,'0',self::SCALE); }
-    private static function deliveryDate(string $value): string
+    private static function deliveryDate(string $value): string|false
     {
         $value = trim($value);
         if ($value === '') {
-            return date('Y-m-d');
+            self::setError('请选择明确的送货日期');
+            return false;
         }
         $date = \DateTimeImmutable::createFromFormat('!Y-m-d', $value);
         if (!$date || $date->format('Y-m-d') !== $value) {
-            throw new \InvalidArgumentException('invalid_delivery_date');
+            self::setError('送货日期格式无效');
+            return false;
         }
         return $value;
     }

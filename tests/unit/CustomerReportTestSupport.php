@@ -304,6 +304,8 @@ SQL;
         $this->runStatements($this->authoritativeCreateTable($purchaseBatchSchema, 'purchase_batch'));
         $this->runStatements($this->authoritativeCreateTable($purchaseBatchSchema, 'purchase_batch_supply_order'));
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260925_000002_processing_groups_and_purchase_plans.sql')));
+        $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260930_000001_create_customer_delivery_vehicle.sql')));
+        $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260930_000002_customer_report_delivery_arrangement.sql')));
         self::$customerReportSchemaReady = true;
     }
 
