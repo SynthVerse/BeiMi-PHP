@@ -31,7 +31,10 @@ final class CustomerDeliveryVehicleLogic extends BaseLogic
             'driver_phone' => trim((string)($params['driver_phone'] ?? '')),
             'sort' => (int)($params['sort'] ?? 0),
             'is_enabled' => (int)($params['is_enabled'] ?? 1) === 0 ? 0 : 1,
-            'vehicle_is_enabled' => (int)($params['vehicle_is_enabled'] ?? $params['is_enabled'] ?? 1) === 0 ? 0 : 1,
+            // -1 表示旧客户端没有提交车辆主档状态；绑定启停不能隐式改写共享车辆。
+            'vehicle_is_enabled' => array_key_exists('vehicle_is_enabled', $params)
+                ? ((int)$params['vehicle_is_enabled'] === 0 ? 0 : 1)
+                : -1,
         ];
     }
 
@@ -162,8 +165,10 @@ final class CustomerDeliveryVehicleLogic extends BaseLogic
             ->select()
             ->toArray();
 
-        $data = array_map(static function (array $vehicle) use ($tenantId): array {
-            $primary = self::firstBindingForVehicle((int)$vehicle['id'], $tenantId);
+        $vehicleIds = array_map(static fn(array $vehicle): int => (int)$vehicle['id'], $rows);
+        $primaryBindings = self::representativeBindings($vehicleIds, $tenantId);
+        $data = array_map(static function (array $vehicle) use ($primaryBindings): array {
+            $primary = $primaryBindings[(int)$vehicle['id']] ?? null;
             return [
                 ...self::formatVehicle($vehicle),
                 'bound_customer_count' => (int)($vehicle['bound_customer_count'] ?? 0),
@@ -292,7 +297,7 @@ final class CustomerDeliveryVehicleLogic extends BaseLogic
                     }
                 }
 
-                $vehicle = self::resolveVehicle($data, $tenantId, $id > 0);
+                $vehicle = self::resolveVehicle($data, $tenantId);
                 if ($vehicle === false) {
                     return false;
                 }
@@ -430,7 +435,7 @@ final class CustomerDeliveryVehicleLogic extends BaseLogic
     }
 
     /** @return array<string,mixed>|false */
-    private static function resolveVehicle(array $data, int $tenantId, bool $allowUpdate): array|false
+    private static function resolveVehicle(array $data, int $tenantId): array|false
     {
         $vehicle = null;
         if ((int)$data['vehicle_id'] > 0) {
@@ -455,7 +460,9 @@ final class CustomerDeliveryVehicleLogic extends BaseLogic
                 'tenant_id' => $tenantId,
                 'plate_number' => (string)$data['plate_number'],
                 'driver_phone' => (string)$data['driver_phone'],
-                'is_enabled' => (int)$data['vehicle_is_enabled'],
+                'is_enabled' => (int)$data['vehicle_is_enabled'] >= 0
+                    ? (int)$data['vehicle_is_enabled']
+                    : 1,
                 'operator_id' => self::operatorId(),
                 'version' => 1,
                 'create_time' => $now,
@@ -467,50 +474,9 @@ final class CustomerDeliveryVehicleLogic extends BaseLogic
             return self::findVehicle($vehicleId, $tenantId) ?: false;
         }
 
-        if (!$allowUpdate && (int)$data['vehicle_id'] <= 0) {
-            return $vehicle;
-        }
-
-        $changed = (string)$vehicle['plate_number'] !== (string)$data['plate_number']
-            || (string)$vehicle['driver_phone'] !== (string)$data['driver_phone']
-            || (int)$vehicle['is_enabled'] !== (int)$data['vehicle_is_enabled'];
-        if (!$changed) {
-            return $vehicle;
-        }
-        if ((int)$data['vehicle_version'] <= 0 || (int)$data['vehicle_version'] !== (int)$vehicle['version']) {
-            self::setError('车辆档案已被修改，请重新加载');
-            return false;
-        }
-
-        $duplicate = Db::name('delivery_vehicle')
-            ->where('tenant_id', $tenantId)
-            ->where('plate_number', $data['plate_number'])
-            ->where('id', '<>', $vehicle['id'])
-            ->whereNull('delete_time')
-            ->find();
-        if ($duplicate) {
-            self::setError('该车牌已存在车辆档案');
-            return false;
-        }
-
-        $updated = Db::name('delivery_vehicle')
-            ->where('tenant_id', $tenantId)
-            ->where('id', $vehicle['id'])
-            ->where('version', $data['vehicle_version'])
-            ->whereNull('delete_time')
-            ->update([
-                'plate_number' => (string)$data['plate_number'],
-                'driver_phone' => (string)$data['driver_phone'],
-                'is_enabled' => (int)$data['vehicle_is_enabled'],
-                'operator_id' => self::operatorId(),
-                'version' => (int)$data['vehicle_version'] + 1,
-                'update_time' => time(),
-            ]);
-        if ($updated !== 1) {
-            self::setError('车辆档案已被修改，请重新加载');
-            return false;
-        }
-        return self::findVehicle((int)$vehicle['id'], $tenantId) ?: false;
+        // 客户绑定接口只维护绑定资料。已有车辆的车牌、电话和主档状态必须通过
+        // 独立的车辆主档流程修改，避免一次客户编辑影响所有绑定客户。
+        return $vehicle;
     }
 
     private static function bindingQuery(int $tenantId)
@@ -585,15 +551,21 @@ final class CustomerDeliveryVehicleLogic extends BaseLogic
         ];
     }
 
-    private static function firstBindingForVehicle(int $vehicleId, int $tenantId): ?array
+    /** @param array<int,int> $vehicleIds @return array<int,array<string,mixed>> */
+    private static function representativeBindings(array $vehicleIds, int $tenantId): array
     {
-        $row = Db::name('customer_delivery_vehicle')
+        if ($vehicleIds === []) {
+            return [];
+        }
+
+        $rows = Db::name('customer_delivery_vehicle')
             ->alias('binding')
             ->join('customer customer', 'customer.id=binding.customer_id AND customer.tenant_id=binding.tenant_id')
             ->where('binding.tenant_id', $tenantId)
-            ->where('binding.vehicle_id', $vehicleId)
+            ->whereIn('binding.vehicle_id', array_values(array_unique($vehicleIds)))
             ->whereNull('binding.delete_time')
             ->field([
+                'binding.vehicle_id',
                 'binding.customer_id',
                 'customer.customer_name',
                 'binding.earliest_delivery_time',
@@ -601,12 +573,22 @@ final class CustomerDeliveryVehicleLogic extends BaseLogic
                 'binding.is_enabled' => 'binding_is_enabled',
             ])
             ->order([
+                'binding.vehicle_id' => 'asc',
                 'binding.is_enabled' => 'desc',
                 'binding.earliest_delivery_time' => 'asc',
                 'binding.id' => 'asc',
             ])
-            ->find();
-        return $row ?: null;
+            ->select()
+            ->toArray();
+
+        $result = [];
+        foreach ($rows as $row) {
+            $vehicleId = (int)$row['vehicle_id'];
+            if (!isset($result[$vehicleId])) {
+                $result[$vehicleId] = $row;
+            }
+        }
+        return $result;
     }
 
     private static function tenantId(): int

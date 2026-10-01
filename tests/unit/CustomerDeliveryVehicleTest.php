@@ -124,6 +124,7 @@ final class CustomerDeliveryVehicleTest extends TestCase
             'plate_number' => '粤A12345',
             'vehicle_location' => '市场停车区',
             'is_enabled' => 0,
+            'vehicle_is_enabled' => 0,
         ]);
 
         self::assertNotFalse($vehicle);
@@ -190,6 +191,7 @@ final class CustomerDeliveryVehicleTest extends TestCase
                 'plate_number' => $plateNumber,
                 'vehicle_location' => $customerId === $eastCustomerId ? '东门停车区' : '西门停车区',
                 'is_enabled' => $enabled,
+                'vehicle_is_enabled' => $enabled,
             ]));
         }
 
@@ -229,6 +231,110 @@ final class CustomerDeliveryVehicleTest extends TestCase
         self::assertSame(1, $otherTenantList['total']);
         self::assertSame(['粤B00001'], array_column($otherTenantList['data'], 'plate_number'));
         $this->prepareCustomerReportRequestContext();
+    }
+
+    public function test_binding_edit_cannot_change_shared_vehicle_master_and_legacy_disable_only_changes_binding(): void
+    {
+        $firstCustomerId = $this->createCustomer('共享车辆客户甲');
+        $secondCustomerId = $this->createCustomer('共享车辆客户乙');
+        $first = CustomerDeliveryVehicleLogic::save([
+            'customer_id' => $firstCustomerId,
+            'earliest_delivery_time' => '05:30',
+            'plate_number' => '粤A88888',
+            'vehicle_location' => '东门停车区',
+            'driver_phone' => '13800000001',
+        ]);
+        self::assertNotFalse($first);
+        $second = CustomerDeliveryVehicleLogic::save([
+            'customer_id' => $secondCustomerId,
+            'vehicle_id' => $first['vehicle_id'],
+            'earliest_delivery_time' => '06:00',
+            'plate_number' => '粤A88888',
+            'vehicle_location' => '西门停车区',
+            'driver_phone' => '13800000001',
+        ]);
+        self::assertNotFalse($second);
+
+        $updated = CustomerDeliveryVehicleLogic::save([
+            'id' => $second['id'],
+            'version' => $second['version'],
+            'customer_id' => $secondCustomerId,
+            'vehicle_id' => $first['vehicle_id'],
+            'earliest_delivery_time' => '06:10',
+            'plate_number' => '粤B99999',
+            'vehicle_location' => '西门新停车区',
+            'driver_phone' => '13999999999',
+            'is_enabled' => 0,
+        ]);
+        self::assertNotFalse($updated, CustomerDeliveryVehicleLogic::getError());
+        self::assertSame('粤A88888', $updated['plate_number']);
+        self::assertSame('13800000001', $updated['driver_phone']);
+        self::assertSame(0, (int)$updated['is_enabled']);
+        self::assertSame(1, (int)$updated['vehicle_is_enabled']);
+
+        $master = Db::name('delivery_vehicle')->where('id', $first['vehicle_id'])->find();
+        self::assertSame('粤A88888', $master['plate_number']);
+        self::assertSame('13800000001', $master['driver_phone']);
+        self::assertSame(1, (int)$master['is_enabled']);
+        self::assertSame(1, (int)CustomerDeliveryVehicleLogic::lists([
+            'customer_id' => $firstCustomerId,
+        ])[0]['is_enabled']);
+    }
+
+    public function test_migration_keeps_conflicting_legacy_phones_on_bindings_and_records_conflict(): void
+    {
+        $firstCustomerId = $this->createCustomer('迁移客户甲');
+        $secondCustomerId = $this->createCustomer('迁移客户乙');
+        $now = time();
+        foreach ([
+            [$firstCustomerId, '13800000001'],
+            [$secondCustomerId, '13900000002'],
+        ] as [$customerId, $phone]) {
+            Db::name('customer_delivery_vehicle')->insert([
+                'tenant_id' => self::TENANT_ID,
+                'vehicle_id' => 0,
+                'customer_id' => $customerId,
+                'earliest_delivery_time' => '05:30',
+                'plate_number' => '粤Z99999',
+                'vehicle_location' => '历史停车区',
+                'driver_phone' => $phone,
+                'sort' => 0,
+                'is_enabled' => 1,
+                'operator_id' => 0,
+                'version' => 1,
+                'create_time' => $now,
+                'update_time' => $now,
+            ]);
+        }
+
+        $migration = (string)file_get_contents(
+            dirname(__DIR__, 2) . '/database/migrations/20261001_000001_split_delivery_vehicle_binding.sql'
+        );
+        $this->runStatements($this->prepareMigration($migration));
+
+        $master = Db::name('delivery_vehicle')
+            ->where('tenant_id', self::TENANT_ID)
+            ->where('plate_number', '粤Z99999')
+            ->find();
+        self::assertNotEmpty($master);
+        self::assertSame('', $master['driver_phone']);
+        self::assertSame(2, (int)Db::name('customer_delivery_vehicle')
+            ->where('tenant_id', self::TENANT_ID)
+            ->where('vehicle_id', $master['id'])
+            ->count());
+        $conflict = Db::name('delivery_vehicle_migration_conflict')
+            ->where('tenant_id', self::TENANT_ID)
+            ->where('plate_number', '粤Z99999')
+            ->where('conflict_type', 'driver_phone')
+            ->find();
+        self::assertNotEmpty($conflict);
+        self::assertSame('13800000001 | 13900000002', $conflict['values_snapshot']);
+        self::assertSame('13800000001', CustomerDeliveryVehicleLogic::lists([
+            'customer_id' => $firstCustomerId,
+        ])[0]['driver_phone']);
+        self::assertSame('13900000002', CustomerDeliveryVehicleLogic::lists([
+            'customer_id' => $secondCustomerId,
+        ])[0]['driver_phone']);
     }
 
     private function ensureCustomerDeliveryVehicleTable(): void

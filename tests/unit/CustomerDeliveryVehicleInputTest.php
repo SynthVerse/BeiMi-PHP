@@ -53,6 +53,17 @@ final class CustomerDeliveryVehicleInputTest extends TestCase
         self::assertSame('最早送货时间格式应为 HH:MM', CustomerDeliveryVehicleLogic::getError());
     }
 
+    public function test_missing_master_status_is_kept_as_unspecified_for_legacy_clients(): void
+    {
+        $normalized = CustomerDeliveryVehicleLogic::normalizeInput([
+            'customer_id' => 42,
+            'is_enabled' => 0,
+        ]);
+
+        self::assertSame(0, $normalized['is_enabled']);
+        self::assertSame(-1, $normalized['vehicle_is_enabled']);
+    }
+
     /**
      * @dataProvider requiredVehicleFieldProvider
      */
