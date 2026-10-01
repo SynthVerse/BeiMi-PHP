@@ -3136,9 +3136,10 @@ PHPUnit 启动保护只允许本机 3307 的 `beimi_test_*` 数据库，但退�
   - `Matt Pocock / diagnosing-bugs`（自动调用）
   - `Matt Pocock / tdd`（由踩坑防护流程调用）
   - `用户级自定义 / prevent-repeat-pitfalls`（自动调用）
-- 说明：跨客户车辆列表新增租户隔离行为测试后，连续第二轮执行暴露其他租户夹具未清理；本条记录红—绿复现和自动清理防线。
+  - `Matt Pocock / code-review`（自动调用）
+- 说明：跨客户车辆列表新增租户隔离行为测试后，连续第二轮执行暴露其他租户夹具未清理；本条记录红—绿复现、自动清理防线和双轴审查结果。
 
-- 状态：防护中
+- 状态：已防护
 - 首次发生：2026-10-01
 - 最近发生：2026-10-01
 - 复发次数：0
@@ -3168,8 +3169,8 @@ PHPUnit 启动保护只允许本机 3307 的 `beimi_test_*` 数据库，但退�
 
 - 自动化防线：`CustomerDeliveryVehicleTest::cleanCrossTenantVehicleFixtures()` 在 `setUp()` 和 `tearDown()` 中按固定租户、
   车牌和客户名清理本类创建的跨租户数据；前置清理还能恢复被中断或旧版本测试留下的残留。
-- 验证计划：连续两轮执行 `php vendor/bin/phpunit tests/unit/CustomerDeliveryVehicleTest.php --colors=never`，两轮均须保持
-  7 个测试和相同断言数；完成双轴代码审查后再将状态改为“已防护”。
+- 验证结果：连续两轮执行 `php vendor/bin/phpunit tests/unit/CustomerDeliveryVehicleTest.php --colors=never`，均为
+  7 个测试、45 个断言；规格符合性与仓库规范双轴审查均无发现项。
 - 架构防线：不扩大共享清理器到整个其他租户，避免误删相邻测试数据；由拥有夹具标识的测试类负责精确回收。
 
 ### 发生记录
