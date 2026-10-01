@@ -88,6 +88,77 @@ final class CustomerDeliveryVehicleLogic extends BaseLogic
         );
     }
 
+    /**
+     * @return array{data:array<int,array<string,mixed>>,total:int,page:int,pagesize:int}
+     */
+    public static function crossCustomerLists(array $params): array
+    {
+        $tenantId = self::tenantId();
+        $page = max(1, (int)($params['page'] ?? $params['page_no'] ?? 1));
+        $pageSize = min(50, max(1, (int)($params['pagesize'] ?? $params['page_size'] ?? 20)));
+        if ($tenantId <= 0) {
+            return ['data' => [], 'total' => 0, 'page' => $page, 'pagesize' => $pageSize];
+        }
+
+        $keyword = trim((string)($params['keyword'] ?? ''));
+        $status = strtolower(trim((string)($params['status'] ?? 'all')));
+        $query = Db::name('customer_delivery_vehicle')
+            ->alias('vehicle')
+            ->join('customer customer', 'customer.id=vehicle.customer_id AND customer.tenant_id=vehicle.tenant_id')
+            ->where('vehicle.tenant_id', $tenantId)
+            ->whereNull('vehicle.delete_time');
+
+        if ($keyword !== '') {
+            $escapedKeyword = addcslashes($keyword, '%_\\');
+            $query->whereLike(
+                'vehicle.plate_number|vehicle.vehicle_location|vehicle.driver_phone|customer.customer_name',
+                '%' . $escapedKeyword . '%'
+            );
+        }
+        if ($status === 'enabled') {
+            $query->where('vehicle.is_enabled', 1);
+        } elseif ($status === 'disabled') {
+            $query->where('vehicle.is_enabled', 0);
+        }
+
+        $total = (int)(clone $query)->count('vehicle.id');
+        $rows = $query->field([
+                'vehicle.id',
+                'vehicle.customer_id',
+                'customer.customer_name',
+                'vehicle.earliest_delivery_time',
+                'vehicle.plate_number',
+                'vehicle.vehicle_location',
+                'vehicle.driver_phone',
+                'vehicle.sort',
+                'vehicle.is_enabled',
+                'vehicle.version',
+                'vehicle.create_time',
+                'vehicle.update_time',
+            ])
+            ->order([
+                'vehicle.is_enabled' => 'desc',
+                'vehicle.earliest_delivery_time' => 'asc',
+                'customer.customer_name' => 'asc',
+                'vehicle.id' => 'asc',
+            ])
+            ->limit(($page - 1) * $pageSize, $pageSize)
+            ->select()
+            ->toArray();
+
+        return [
+            'data' => array_map(static function (array $row): array {
+                return [
+                    ...self::formatItem($row),
+                    'customer_name' => (string)($row['customer_name'] ?? ''),
+                ];
+            }, $rows),
+            'total' => $total,
+            'page' => $page,
+            'pagesize' => $pageSize,
+        ];
+    }
+
     public static function save(array $params): array|false
     {
         self::clearError();

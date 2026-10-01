@@ -31,6 +31,7 @@ class CustomerValidate extends BaseValidate
         'pay_type' => 'max:50',
         'page' => 'integer|gt:0',
         'pagesize' => 'integer|gt:0',
+        'keyword' => 'max:100',
         'earliest_delivery_time' => 'max:5',
         'plate_number' => 'max:32',
         'vehicle_location' => 'max:255',
@@ -179,6 +180,12 @@ class CustomerValidate extends BaseValidate
     {
         return $this->only(['customer_id', 'enabled_only'])
             ->append('customer_id', 'require');
+    }
+
+    public function sceneDeliveryVehicleIndex()
+    {
+        return $this->only(['page', 'pagesize', 'keyword', 'status'])
+            ->append('status', 'in:all,enabled,disabled');
     }
 
     public function sceneDeliveryVehicleSave()

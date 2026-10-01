@@ -15,13 +15,14 @@ final class CustomerDeliveryVehicleContractTest extends TestCase
         $vehicleLogic = (string)file_get_contents($root . '/app/api/jxc/logic/CustomerDeliveryVehicleLogic.php');
 
         foreach ([
+            "Route::get('customer/deliveryVehicleIndex', 'jxc.Customer/deliveryVehicleIndex');",
             "Route::get('customer/deliveryVehicles', 'jxc.Customer/deliveryVehicles');",
             "Route::post('customer/deliveryVehicleSave', 'jxc.Customer/deliveryVehicleSave');",
             "Route::post('customer/deliveryVehicleDelete', 'jxc.Customer/deliveryVehicleDelete');",
         ] as $route) {
             self::assertStringContainsString($route, $routes);
         }
-        foreach (['deliveryVehicles', 'deliveryVehicleSave', 'deliveryVehicleDelete'] as $method) {
+        foreach (['deliveryVehicleIndex', 'deliveryVehicles', 'deliveryVehicleSave', 'deliveryVehicleDelete'] as $method) {
             self::assertStringContainsString('public function ' . $method . '()', $controller);
         }
         self::assertStringContainsString("'delivery_vehicles' => CustomerDeliveryVehicleLogic::lists", $customerLogic);

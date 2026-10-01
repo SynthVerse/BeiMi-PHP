@@ -21,11 +21,13 @@ final class CustomerDeliveryVehicleTest extends TestCase
         $this->prepareCustomerReportRequestContext();
         $this->ensureCustomerReportTables();
         $this->ensureCustomerDeliveryVehicleTable();
+        $this->cleanCrossTenantVehicleFixtures();
         $this->cleanCustomerReportData();
     }
 
     protected function tearDown(): void
     {
+        $this->cleanCrossTenantVehicleFixtures();
         $this->cleanCustomerReportData();
         parent::tearDown();
     }
@@ -161,11 +163,80 @@ final class CustomerDeliveryVehicleTest extends TestCase
         $this->prepareCustomerReportRequestContext();
     }
 
+    public function test_cross_customer_vehicle_list_is_searchable_paginated_and_tenant_scoped(): void
+    {
+        $eastCustomerId = $this->createCustomer('海鲜城东门店');
+        $westCustomerId = $this->createCustomer('海鲜城西门店');
+        foreach ([
+            [$eastCustomerId, '粤A00001', '05:30', 1],
+            [$westCustomerId, '粤A00002', '04:30', 1],
+            [$eastCustomerId, '粤A00003', '03:30', 0],
+        ] as [$customerId, $plateNumber, $time, $enabled]) {
+            self::assertNotFalse(CustomerDeliveryVehicleLogic::save([
+                'customer_id' => $customerId,
+                'earliest_delivery_time' => $time,
+                'plate_number' => $plateNumber,
+                'vehicle_location' => $customerId === $eastCustomerId ? '东门停车区' : '西门停车区',
+                'is_enabled' => $enabled,
+            ]));
+        }
+
+        $firstPage = CustomerDeliveryVehicleLogic::crossCustomerLists(['page' => 1, 'pagesize' => 2]);
+        self::assertSame(3, $firstPage['total']);
+        self::assertCount(2, $firstPage['data']);
+        self::assertSame(['粤A00002', '粤A00001'], array_column($firstPage['data'], 'plate_number'));
+        self::assertSame(['海鲜城西门店', '海鲜城东门店'], array_column($firstPage['data'], 'customer_name'));
+
+        $secondPage = CustomerDeliveryVehicleLogic::crossCustomerLists(['page' => 2, 'pagesize' => 2]);
+        self::assertSame(['粤A00003'], array_column($secondPage['data'], 'plate_number'));
+        $disabled = CustomerDeliveryVehicleLogic::crossCustomerLists(['status' => 'disabled']);
+        self::assertSame(1, $disabled['total']);
+        self::assertSame('粤A00003', $disabled['data'][0]['plate_number']);
+        $search = CustomerDeliveryVehicleLogic::crossCustomerLists(['keyword' => '西门']);
+        self::assertSame(1, $search['total']);
+        self::assertSame($westCustomerId, (int)$search['data'][0]['customer_id']);
+
+        $this->prepareCustomerReportRequestContext(self::OTHER_TENANT_ID);
+        $otherCustomerId = (int)Db::name('customer')->insertGetId([
+            'tenant_id' => self::OTHER_TENANT_ID,
+            'customer_name' => '外部租户客户',
+            'parent_id' => 0,
+            'phone' => '',
+            'address' => '',
+            'is_disabled' => 0,
+            'create_time' => time(),
+            'update_time' => time(),
+        ]);
+        self::assertNotFalse(CustomerDeliveryVehicleLogic::save([
+            'customer_id' => $otherCustomerId,
+            'earliest_delivery_time' => '06:00',
+            'plate_number' => '粤B00001',
+            'vehicle_location' => '外部停车区',
+        ]));
+        $otherTenantList = CustomerDeliveryVehicleLogic::crossCustomerLists([]);
+        self::assertSame(1, $otherTenantList['total']);
+        self::assertSame(['粤B00001'], array_column($otherTenantList['data'], 'plate_number'));
+        $this->prepareCustomerReportRequestContext();
+    }
+
     private function ensureCustomerDeliveryVehicleTable(): void
     {
         $migration = (string)file_get_contents(
             dirname(__DIR__, 2) . '/database/migrations/20260930_000001_create_customer_delivery_vehicle.sql'
         );
         Db::execute($this->authoritativeCreateTable($migration, 'customer_delivery_vehicle'));
+    }
+
+    private function cleanCrossTenantVehicleFixtures(): void
+    {
+        Db::name('customer_delivery_vehicle')
+            ->where('tenant_id', self::OTHER_TENANT_ID)
+            ->where('plate_number', '粤B00001')
+            ->delete();
+        Db::name('customer')
+            ->where('tenant_id', self::OTHER_TENANT_ID)
+            ->where('customer_name', '外部租户客户')
+            ->delete();
+        $this->prepareCustomerReportRequestContext();
     }
 }
