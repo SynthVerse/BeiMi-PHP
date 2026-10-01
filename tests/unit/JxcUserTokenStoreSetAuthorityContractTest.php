@@ -96,16 +96,21 @@ final class JxcUserTokenStoreSetAuthorityContractTest extends TestCase
     public function test_onboarding_routes_are_an_exact_method_and_path_whitelist(): void
     {
         $routes = self::source('app/api/route/jxc.php');
+        $onboardingStart = strpos($routes, "Route::group('', function () {");
         $onboardingEnd = strpos($routes, "})->middleware(\\app\\api\\http\\middleware\\LoginMiddleware::class, 'enforce-onboarding');");
         $strictStart = strpos($routes, '// 店铺成员操作');
 
         self::assertNotFalse($onboardingEnd);
+        self::assertNotFalse($onboardingStart);
         self::assertNotFalse($strictStart);
-        $onboarding = substr($routes, 0, $onboardingEnd);
+        $onboarding = substr($routes, $onboardingStart, $onboardingEnd - $onboardingStart);
         $strict = substr($routes, $strictStart);
+        self::assertSame(10, preg_match_all('/Route::(?:get|post)\(/', $onboarding));
+        self::assertStringNotContainsString("Route::get('user/info'", $onboarding);
+        self::assertMatchesRegularExpression("/Route::get\('user\/info', 'User\/info'\)\\s*->middleware\(\\\\app\\\\api\\\\http\\\\middleware\\\\LoginMiddleware::class\);/", $routes);
 
         foreach ([
-            "Route::get('user/info', 'jxc.Auth/info');",
+            "Route::get('jxc/auth/info', 'jxc.Auth/info');",
             "Route::post('user/logout', 'jxc.Auth/logout');",
             "Route::get('user/store/status', 'jxc.Store/status');",
             "Route::get('user/store/current', 'jxc.Store/detail');",

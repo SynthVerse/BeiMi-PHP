@@ -15,11 +15,11 @@ final class CustomerSalesHistoryDocumentKindTest extends TestCase
         );
 
         self::assertMatchesRegularExpression(
-            "/'source_type'\\s*=>\\s*\\(string\\)\\(\\$item\\['source_type'\\]/",
+            "/'source_type'\\s*=>\\s*\\(string\\)\\(\\\$item\\['source_type'\\]/",
             $source
         );
         self::assertMatchesRegularExpression(
-            "/'document_kind'\\s*=>\\s*SalesOrderLogic::salesDocumentKind\\(\\$item\\)/",
+            "/'document_kind'\\s*=>\\s*SalesOrderLogic::salesDocumentKind\\(\\\$item\\)/",
             $source
         );
     }

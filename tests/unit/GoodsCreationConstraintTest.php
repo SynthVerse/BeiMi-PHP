@@ -9,10 +9,13 @@ use app\api\jxc\logic\GoodsDimensionLogic;
 use app\api\jxc\logic\GoodsLogic;
 use app\api\jxc\logic\WorkforceLogic;
 use app\common\service\goods\GoodsMaintenancePermissionService;
+use app\common\service\goods\GoodsAliasService;
 use PHPUnit\Framework\TestCase;
 use think\facade\Db;
+use tests\support\GoodsCategoryTestSchema;
 
 require_once __DIR__ . '/CustomerReportTestSupport.php';
+require_once dirname(__DIR__) . '/support/GoodsCategoryTestSchema.php';
 
 final class GoodsCreationConstraintTest extends TestCase
 {
@@ -692,27 +695,17 @@ final class GoodsCreationConstraintTest extends TestCase
             "SELECT COUNT(1) AS aggregate FROM information_schema.STATISTICS "
             . "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'la_goods' "
             . "AND INDEX_NAME = 'idx_tenant_normalized_name'"
-        )[0]['aggregate'] === 1;
+        )[0]['aggregate'] > 0;
     }
 
     private function ensureConstraintTables(): void
     {
+        GoodsCategoryTestSchema::ensure();
         $root = dirname(__DIR__, 2);
         $this->runStatements($this->prepareMigration((string)file_get_contents(
             $root . '/database/migrations/20260521_000001_create_tenant_membership.sql'
         )));
         foreach ([
-            'CREATE TABLE IF NOT EXISTS `la_tenant_goodscat` (
-                `id` int unsigned NOT NULL AUTO_INCREMENT,
-                `tenant_id` int unsigned NOT NULL DEFAULT 0,
-                `name` varchar(200) NOT NULL DEFAULT "",
-                `is_default` tinyint unsigned NULL DEFAULT NULL,
-                `is_show` tinyint unsigned NOT NULL DEFAULT 0,
-                `create_time` int unsigned NOT NULL DEFAULT 0,
-                `update_time` int unsigned NOT NULL DEFAULT 0,
-                `delete_time` int NULL DEFAULT NULL,
-                PRIMARY KEY (`id`)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4',
             'CREATE TABLE IF NOT EXISTS `la_tenant_admin` (
                 `id` int unsigned NOT NULL,
                 `tenant_id` int unsigned NOT NULL DEFAULT 0,
@@ -771,10 +764,6 @@ final class GoodsCreationConstraintTest extends TestCase
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4',
         ] as $statement) {
             Db::execute(str_replace('`', chr(96), $statement));
-        }
-        try {
-            Db::execute('ALTER TABLE `la_tenant_goodscat` ADD COLUMN `delete_time` int NULL DEFAULT NULL');
-        } catch (\Throwable) {
         }
     }
 

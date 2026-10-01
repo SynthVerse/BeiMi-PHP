@@ -142,7 +142,7 @@ final class CustomerDeliveryVehicleLogic extends BaseLogic
             $query->where('vehicle.is_enabled', 0);
         }
 
-        $total = (int)(clone $query)->distinct(true)->count('vehicle.id');
+        $total = (int)(clone $query)->count('DISTINCT vehicle.id');
         $rows = $query->field([
                 'vehicle.id',
                 'vehicle.plate_number',

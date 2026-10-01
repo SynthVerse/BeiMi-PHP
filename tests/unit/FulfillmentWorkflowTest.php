@@ -69,7 +69,7 @@ final class FulfillmentWorkflowTest extends TestCase
 
         $tasks = Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)
             ->where('report_id', (int)$first['id'])->order('id')->select()->toArray();
-        self::assertCount(5, $tasks, '采购、杀鱼、活鱼打包、送货、记账各一项');
+        self::assertCount(4, $tasks, '采购、杀鱼、活鱼打包、送货各一项；新报货不生成记账工票');
         self::assertSame(1, count(array_filter($tasks, static fn(array $task): bool => $task['source_key'] === 'item:' . $first['items'][0]['id'] . ':shortage')));
         self::assertSame(
             2,
@@ -83,7 +83,7 @@ final class FulfillmentWorkflowTest extends TestCase
 
         $again = CustomerReportLogic::submit($payload);
         self::assertNotFalse($again, CustomerReportLogic::getError());
-        self::assertSame(5, Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)->where('report_id', (int)$first['id'])->count());
+        self::assertSame(4, Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)->where('report_id', (int)$first['id'])->count());
     }
 
     public function test_report_batch_enforces_processing_supplement_date_tenant_and_manual_end_boundaries(): void
@@ -497,89 +497,95 @@ final class FulfillmentWorkflowTest extends TestCase
             ->where('module', 'customer_report')->where('action', 'cancel')->where('target_id', (int)$submitted['id'])->count());
     }
 
-    public function test_resolved_exception_uses_stable_process_source_key_after_sync(): void
+    public function test_structured_process_tasks_keep_their_identity_after_sync(): void
     {
-        $customerId = $this->createCustomer('人工确认客户');
-        $goodsId = $this->createCustomerReportGoods('黄花鱼', 'TASK-RESOLVE');
-        $warehouseId = $this->createCustomerReportWarehouse('人工确认仓');
-        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, '1.00'));
-        $report = CustomerReportLogic::submit($this->fulfillmentPayload($customerId, $goodsId, $warehouseId, 'task-resolve-stable', '1', '按客户习惯处理'));
+        $customer = $this->createCustomer('稳定工票客户');
+        $goods = $this->createCustomerReportGoods('稳定工票商品', 'TASK-STABLE');
+        $warehouse = $this->createCustomerReportWarehouse('稳定工票仓');
+        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouse, $goods, '2.00'));
+        $report = CustomerReportLogic::submit($this->fulfillmentPayload($customer, $goods, $warehouse, 'task-stable', '1', '杀好、活鱼打包'));
         self::assertNotFalse($report, CustomerReportLogic::getError());
-        $exception = Db::name('fulfillment_task')->where('report_id', (int)$report['id'])->where('task_type', 'exception')->find();
+        $before = Db::name('fulfillment_task')->where('report_id', $report['id'])->where('report_item_id', $report['items'][0]['id'])
+            ->where('task_type', 'process')->order('id')->field('id,source_key,processing_group_id')->select()->toArray();
+        self::assertCount(2, $before);
+        foreach ($before as $task) {
+            self::assertGreaterThan(0, (int)$task['processing_group_id']);
+            self::assertStringContainsString(':group:' . $task['processing_group_id'] . ':process:', $task['source_key']);
+        }
+        FulfillmentTaskLogic::syncForReport((int)$report['id']);
+        self::assertSame($before, Db::name('fulfillment_task')->where('report_id', $report['id'])->where('report_item_id', $report['items'][0]['id'])
+            ->where('task_type', 'process')->order('id')->field('id,source_key,processing_group_id')->select()->toArray());
+    }
+
+    public function test_legacy_resolved_exception_uses_stable_process_source_key_after_sync(): void
+    {
+        $customerId = $this->createCustomer('历史人工确认客户');
+        $goodsId = $this->createCustomerReportGoods('历史人工确认商品', 'LEGACY-RESOLVE');
+        $warehouseId = $this->createCustomerReportWarehouse('历史人工确认仓');
+        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, '1.00'));
+        $report = CustomerReportLogic::submit($this->fulfillmentPayload($customerId, $goodsId, $warehouseId, 'legacy-resolve', '1', '按客户习惯处理'));
+        self::assertNotFalse($report, CustomerReportLogic::getError());
+        $report = $this->asLegacyPaperReport($report);
+        Db::name('fulfillment_task')->where('report_item_id', $report['items'][0]['id'])->where('task_type', 'process')->delete();
+        FulfillmentTaskLogic::syncForReport((int)$report['id']);
+        $exception = Db::name('fulfillment_task')->where('report_id', $report['id'])->where('task_type', 'exception')->find();
+        self::assertNotEmpty($exception);
         $purchase = Db::name('work_process')->where('tenant_id', self::TENANT_ID)->where('code', 'purchase')->find();
         self::assertFalse(FulfillmentTaskLogic::resolveException(['id' => $exception['id'], 'process_id' => $purchase['id'], 'requirement' => '错误选择采购']));
         $process = Db::name('work_process')->where('tenant_id', self::TENANT_ID)->where('code', 'kill_fish')->find();
         $resolved = FulfillmentTaskLogic::resolveException(['id' => $exception['id'], 'process_id' => $process['id'], 'requirement' => '人工确认杀鱼']);
         self::assertNotFalse($resolved, FulfillmentTaskLogic::getError());
-        self::assertSame('item:' . $exception['report_item_id'] . ':process:kill_fish', $resolved['source_key']);
+        self::assertSame('item:' . $report['items'][0]['id'] . ':process:kill_fish', $resolved['source_key']);
         FulfillmentTaskLogic::syncForReport((int)$report['id']);
-        self::assertSame(1, Db::name('fulfillment_task')->where('report_id', (int)$report['id'])->where('source_key', $resolved['source_key'])->count());
+        self::assertSame(1, Db::name('fulfillment_task')->where('report_id', $report['id'])->where('source_key', $resolved['source_key'])->count());
     }
 
-    public function test_only_the_final_item_process_collects_settlement_values(): void
+    public function test_group_weight_is_independent_of_process_catalog_order(): void
     {
-        $customerId = $this->createCustomer('多工序结算客户');
-        $goodsId = $this->createCustomerReportGoods('石斑鱼', 'TASK-SETTLEMENT-OWNER');
-        $warehouseId = $this->createCustomerReportWarehouse('多工序仓');
-        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, '2.00'));
-        $report = CustomerReportLogic::submit($this->fulfillmentPayload($customerId, $goodsId, $warehouseId, 'task-settlement-owner', '1', '杀好、活鱼打包'));
+        $customer = $this->createCustomer('多工序称重客户');
+        $goods = $this->createCustomerReportGoods('多工序称重商品', 'TASK-GROUP-WEIGHT');
+        $warehouse = $this->createCustomerReportWarehouse('多工序称重仓');
+        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouse, $goods, '2.00'));
+        $report = CustomerReportLogic::submit($this->fulfillmentPayload($customer, $goods, $warehouse, 'group-weight', '1', '杀好、活鱼打包'));
         self::assertNotFalse($report, CustomerReportLogic::getError());
-
-        $tasks = Db::name('fulfillment_task')->alias('t')
-            ->join('work_process p', 'p.id=t.process_id AND p.tenant_id=t.tenant_id')
-            ->where('t.report_id', (int)$report['id'])->where('t.report_item_id', (int)$report['items'][0]['id'])
-            ->where('t.task_type', 'process')->order(['p.sort' => 'asc', 'p.id' => 'asc'])->field('t.*')->select()->toArray();
+        $tasks = Db::name('fulfillment_task')->where('report_id', $report['id'])->where('report_item_id', '>', 0)->where('task_type', 'process')->order('id')->select()->toArray();
         self::assertCount(2, $tasks);
-        self::assertFalse((bool)FulfillmentTaskLogic::detail(['id' => (int)$tasks[0]['id']])['requires_settlement']);
-        self::assertTrue((bool)FulfillmentTaskLogic::detail(['id' => (int)$tasks[1]['id']])['requires_settlement']);
-
-        Db::name('fulfillment_task')->whereIn('id', array_column($tasks, 'id'))->update(['status' => 'printed']);
-        self::assertNotFalse(FulfillmentTaskLogic::recover(['id' => (int)$tasks[0]['id']]));
-        self::assertNotFalse(FulfillmentTaskLogic::recover(['id' => (int)$tasks[1]['id'], 'actual_weight' => '1.00']));
-        $values = FulfillmentTaskLogic::settlementValuesForReport((int)$report['id']);
-        self::assertSame((int)$tasks[1]['id'], $values[(int)$report['items'][0]['id']]['task_id']);
-        self::assertSame('0.00', $values[(int)$report['items'][0]['id']]['actual_price']);
-        $processIds = array_map('intval', array_column(WorkforceLogic::processes([])['lists'], 'id'));
-        self::assertNotFalse(WorkforceLogic::reorderProcesses(['ids' => array_reverse($processIds)]), WorkforceLogic::getError());
-        $valuesAfterReorder = FulfillmentTaskLogic::settlementValuesForReport((int)$report['id']);
-        self::assertSame((int)$tasks[1]['id'], $valuesAfterReorder[(int)$report['items'][0]['id']]['task_id']);
+        foreach ($tasks as $task) {
+            self::assertFalse((bool)FulfillmentTaskLogic::detail(['id' => $task['id']])['requires_settlement']);
+        }
+        $this->finishSingleGroupProcessing($report, '1.00');
+        $before = FulfillmentTaskLogic::settlementValuesForReport((int)$report['id']);
+        self::assertSame('1.00', $before[(int)$report['items'][0]['id']]['final_actual_weight']);
+        self::assertSame(0, $before[(int)$report['items'][0]['id']]['task_id']);
+        $ids = array_map('intval', array_column(WorkforceLogic::processes([])['lists'], 'id'));
+        self::assertNotFalse(WorkforceLogic::reorderProcesses(['ids' => array_reverse($ids)]));
+        self::assertSame($before, FulfillmentTaskLogic::settlementValuesForReport((int)$report['id']));
     }
 
-    public function test_only_final_weighing_updates_item_final_weight_and_process_weight_does_not_require_price(): void
+    public function test_group_tickets_reject_weight_recovery_and_public_group_weighing_sets_final_weight(): void
     {
-        $customerId = $this->createCustomer('最终称重客户');
-        $goodsId = $this->createCustomerReportGoods('最终称重石斑', 'TASK-FINAL-WEIGHT');
-        $warehouseId = $this->createCustomerReportWarehouse('最终称重仓');
-        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, '3.00'));
-        $report = CustomerReportLogic::submit($this->fulfillmentPayload(
-            $customerId, $goodsId, $warehouseId, 'task-final-weight', '2', '杀好、活鱼打包'
-        ));
+        $customer = $this->createCustomer('分组实重客户');
+        $goods = $this->createCustomerReportGoods('分组实重商品', 'TASK-PUBLIC-WEIGHT');
+        $warehouse = $this->createCustomerReportWarehouse('分组实重仓');
+        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouse, $goods, '3.00'));
+        $report = CustomerReportLogic::submit($this->fulfillmentPayload($customer, $goods, $warehouse, 'public-group-weight', '2', '杀好、活鱼打包'));
         self::assertNotFalse($report, CustomerReportLogic::getError());
-        $itemId = (int)$report['items'][0]['id'];
-        $tasks = Db::name('fulfillment_task')->alias('t')
-            ->join('work_process p', 'p.id=t.process_id AND p.tenant_id=t.tenant_id')
-            ->where('t.report_item_id', $itemId)->where('t.task_type', 'process')
-            ->order(['p.sort' => 'asc', 'p.id' => 'asc'])->field('t.*')->select()->toArray();
+        $item = $report['items'][0];
+        $tasks = Db::name('fulfillment_task')->where('report_item_id', $item['id'])->where('task_type', 'process')->select()->toArray();
         self::assertCount(2, $tasks);
         Db::name('fulfillment_task')->whereIn('id', array_column($tasks, 'id'))->update(['status' => 'printed']);
-
-        $process = FulfillmentTaskLogic::recover(['id' => (int)$tasks[0]['id'], 'actual_weight' => '1.80']);
-        self::assertNotFalse($process, FulfillmentTaskLogic::getError());
-        self::assertSame('1.80', (string)$process['process_weight']);
-        self::assertSame('0.00', (string)Db::name('customer_report_item')->where('id', $itemId)->value('final_actual_weight'));
-
-        $final = FulfillmentTaskLogic::recover(['id' => (int)$tasks[1]['id'], 'actual_weight' => '1.65']);
-        self::assertNotFalse($final, FulfillmentTaskLogic::getError());
-        $item = Db::name('customer_report_item')->where('id', $itemId)->find();
-        self::assertSame('1.65', (string)$item['final_actual_weight']);
-        self::assertSame((int)$tasks[1]['id'], (int)$item['final_weight_task_id']);
-        self::assertSame('final_weight_recorded', (string)$item['fulfillment_status']);
+        foreach ($tasks as $task) {
+            self::assertFalse(FulfillmentTaskLogic::recover(['id' => $task['id'], 'actual_weight' => '1.80']));
+            self::assertStringContainsString('按加工组录入', FulfillmentTaskLogic::getError());
+        }
+        self::assertSame('0.00', (string)Db::name('customer_report_item')->where('id', $item['id'])->value('final_actual_weight'));
+        $this->finishSingleGroupProcessing($report, '1.65');
         $values = FulfillmentTaskLogic::settlementValuesForReport((int)$report['id']);
-        self::assertSame('1.65', $values[$itemId]['final_actual_weight']);
-        self::assertArrayNotHasKey((int)$tasks[0]['id'], array_column($values, null, 'task_id'));
+        self::assertSame('1.65', $values[(int)$item['id']]['final_actual_weight']);
+        self::assertSame(0, $values[(int)$item['id']]['task_id']);
     }
 
-    public function test_successful_reprint_keeps_ticket_identity_and_each_paper_copy_is_accounted(): void
+    public function test_legacy_successful_reprint_keeps_ticket_identity_and_each_paper_copy_is_accounted(): void
     {
         $customerId = $this->createCustomer('重打工票客户');
         $goodsId = $this->createCustomerReportGoods('重打海鲈鱼', 'TASK-REPRINT');
@@ -588,6 +594,7 @@ final class FulfillmentWorkflowTest extends TestCase
         $report = CustomerReportLogic::submit($this->fulfillmentPayload(
             $customerId, $goodsId, $warehouseId, 'task-reprint', '1', '杀好'
         ));
+        $report = $this->asLegacyPaperReport($report);
         self::assertNotFalse($report, CustomerReportLogic::getError());
         $task = Db::name('fulfillment_task')->where('report_item_id', (int)$report['items'][0]['id'])
             ->where('task_type', 'process')->find();
@@ -640,7 +647,7 @@ final class FulfillmentWorkflowTest extends TestCase
         ]));
     }
 
-    public function test_printed_content_reduction_creates_void_control_and_notice_before_new_ticket(): void
+    public function test_legacy_printed_content_reduction_creates_void_control_and_notice_before_new_ticket(): void
     {
         $customerId = $this->createCustomer('处理后减量客户');
         $goodsId = $this->createCustomerReportGoods('减量桂花鱼', 'TASK-REDUCE');
@@ -650,6 +657,7 @@ final class FulfillmentWorkflowTest extends TestCase
             $customerId, $goodsId, $warehouseId, 'task-reduce', '5', '杀好'
         ));
         self::assertNotFalse($report, CustomerReportLogic::getError());
+        $report = $this->asLegacyPaperReport($report);
         $itemId = (int)$report['items'][0]['id'];
         $task = Db::name('fulfillment_task')->where('report_item_id', $itemId)->where('task_type', 'process')->find();
         Db::name('fulfillment_task')->where('id', (int)$task['id'])->update(['status' => 'printable']);
@@ -685,6 +693,10 @@ final class FulfillmentWorkflowTest extends TestCase
         ]));
         self::assertSame('仍有未回收或未完成作废控制的纸质工票，不能结算', CustomerReportLogic::getError());
 
+        $bookkeeping = $this->legacyBookkeepingTask((int)$report['id']);
+        self::assertFalse(FulfillmentTaskLogic::bill(['id' => (int)$bookkeeping['id']]));
+        self::assertSame('仍有未回收或未完成作废控制的纸质工票，不能结算', FulfillmentTaskLogic::getError());
+
         $noticeRequired = FulfillmentTaskLogic::paperControl([
             'control_id' => (int)$control['id'], 'resolution' => 'unrecoverable', 'note' => '旧票已随破损包装丢失',
         ]);
@@ -702,7 +714,7 @@ final class FulfillmentWorkflowTest extends TestCase
         self::assertSame('closed', Db::name('fulfillment_ticket_control')->where('id', (int)$control['id'])->value('status'));
     }
 
-    public function test_pending_and_accounted_paper_copies_are_versioned_when_content_changes(): void
+    public function test_legacy_pending_and_accounted_paper_copies_are_versioned_when_content_changes(): void
     {
         $customerId = $this->createCustomer('打印版本控制客户');
         $goodsId = $this->createCustomerReportGoods('打印版本控制鱼', 'TASK-VERSION-CONTROL');
@@ -712,6 +724,7 @@ final class FulfillmentWorkflowTest extends TestCase
         $pendingReport = CustomerReportLogic::submit($this->fulfillmentPayload(
             $customerId, $goodsId, $warehouseId, 'task-pending-version', '3', '杀好'
         ));
+        $pendingReport = $this->asLegacyPaperReport($pendingReport);
         self::assertNotFalse($pendingReport, CustomerReportLogic::getError());
         $pendingItemId = (int)$pendingReport['items'][0]['id'];
         $pendingTask = Db::name('fulfillment_task')->where('report_item_id', $pendingItemId)->where('task_type', 'process')->find();
@@ -738,6 +751,7 @@ final class FulfillmentWorkflowTest extends TestCase
         $recoveredReport = CustomerReportLogic::submit($this->fulfillmentPayload(
             $customerId, $goodsId, $warehouseId, 'task-recovered-version', '3', '杀好'
         ));
+        $recoveredReport = $this->asLegacyPaperReport($recoveredReport);
         self::assertNotFalse($recoveredReport, CustomerReportLogic::getError());
         $recoveredItemId = (int)$recoveredReport['items'][0]['id'];
         $recoveredTask = Db::name('fulfillment_task')->where('report_item_id', $recoveredItemId)->where('task_type', 'process')->find();
@@ -767,6 +781,7 @@ final class FulfillmentWorkflowTest extends TestCase
         $exceptionReport = CustomerReportLogic::submit($this->fulfillmentPayload(
             $customerId, $goodsId, $warehouseId, 'task-exception-version', '3', '杀好'
         ));
+        $exceptionReport = $this->asLegacyPaperReport($exceptionReport);
         self::assertNotFalse($exceptionReport, CustomerReportLogic::getError());
         $exceptionItemId = (int)$exceptionReport['items'][0]['id'];
         $exceptionTask = Db::name('fulfillment_task')->where('report_item_id', $exceptionItemId)->where('task_type', 'process')->find();
@@ -789,7 +804,7 @@ final class FulfillmentWorkflowTest extends TestCase
         self::assertSame('void_required', (string)Db::name('fulfillment_paper_copy')->where('print_log_id', (int)$exceptionPrint['print_log_id'])->value('paper_status'));
     }
 
-    public function test_lost_final_ticket_uses_exception_recovery_with_full_audit(): void
+    public function test_legacy_lost_final_ticket_uses_exception_recovery_with_full_audit(): void
     {
         $customerId = $this->createCustomer('异常补录客户');
         $goodsId = $this->createCustomerReportGoods('异常补录鲈鱼', 'TASK-EXCEPTION-RECOVER');
@@ -798,6 +813,7 @@ final class FulfillmentWorkflowTest extends TestCase
         $report = CustomerReportLogic::submit($this->fulfillmentPayload(
             $customerId, $goodsId, $warehouseId, 'task-exception-recover', '1', '杀好'
         ));
+        $report = $this->asLegacyPaperReport($report);
         self::assertNotFalse($report, CustomerReportLogic::getError());
         $itemId = (int)$report['items'][0]['id'];
         $task = Db::name('fulfillment_task')->where('report_item_id', $itemId)->where('task_type', 'process')->find();
@@ -898,23 +914,14 @@ final class FulfillmentWorkflowTest extends TestCase
             $report['items'], static fn(array $item): bool => (int)$item['goods_id'] === $undeliveredGoodsId
         ));
 
+        $this->finishProcessingGroups($report, [(int)$deliveredItem['id'] => '0.90', (int)$undeliveredItem['id'] => '1.00']);
         self::assertNotFalse(FulfillmentChangeLogic::markUndelivered([
             'report_item_id' => (int)$undeliveredItem['id'], 'reason_code' => 'shortage',
             'reason' => '供应商最终无货', 'idempotency_key' => 'mixed-undelivered-line',
         ]), FulfillmentChangeLogic::getError());
-        $finalTask = Db::name('fulfillment_task')->where('report_item_id', (int)$deliveredItem['id'])
-            ->where('is_settlement_task', 1)->find();
-        Db::name('fulfillment_task')->where('id', (int)$finalTask['id'])->update([
-            'status' => 'recovered', 'actual_weight' => '0.90', 'process_weight' => '0.90',
-            'actual_price' => '30.00', 'recovered_time' => time(),
-        ]);
-        Db::name('customer_report_item')->where('id', (int)$deliveredItem['id'])->update([
-            'final_actual_weight' => '0.90', 'final_weight_task_id' => (int)$finalTask['id'],
-            'fulfillment_status' => 'final_weight_recorded',
-        ]);
-        FulfillmentTaskLogic::refreshGroupForItem((int)$deliveredItem['id']);
+
         $delivery = Db::name('fulfillment_task')->where('report_id', (int)$report['id'])->whereLike('source_key', '%:delivery')->find();
-        $bookkeeping = Db::name('fulfillment_task')->where('report_id', (int)$report['id'])->whereLike('source_key', '%:bookkeeping')->find();
+        $bookkeeping = $this->legacyBookkeepingTask((int)$report['id']);
         $delivered = DeliveryInventoryLogic::confirmSelfDelivery([
             'task_id' => (int)$delivery['id'], 'event_type' => 'customer_handoff',
             'idempotency_key' => 'mixed-delivered-handoff',
@@ -943,8 +950,7 @@ final class FulfillmentWorkflowTest extends TestCase
             'task_id' => $fixture['delivery_task_id'], 'event_type' => 'customer_handoff',
             'idempotency_key' => 'bill-lock-retry-handoff',
         ]), DeliveryInventoryLogic::getError());
-        $bookkeeping = Db::name('fulfillment_task')->where('report_id', $fixture['report_id'])
-            ->whereLike('source_key', '%:bookkeeping')->find();
+        $bookkeeping = $this->legacyBookkeepingTask((int)$fixture['report_id']);
         Db::name('fulfillment_task')->where('id', (int)$bookkeeping['id'])->update(['status' => 'ready_to_bill']);
 
         $readyPath = tempnam(sys_get_temp_dir(), 'fulfillment-bill-lock-ready-');
@@ -1279,17 +1285,9 @@ final class FulfillmentWorkflowTest extends TestCase
         self::assertNotFalse($report, CustomerReportLogic::getError());
         self::assertFalse(CustomerReportLogic::convert(['id' => $report['id'], 'version' => $report['version']]));
 
-        $processTask = Db::name('fulfillment_task')->where('report_id', (int)$report['id'])->where('report_item_id', '>', 0)->where('task_type', 'process')->find();
-        Db::name('fulfillment_task')->where('id', (int)$processTask['id'])->update([
-            'status' => 'recovered', 'actual_weight' => '1.00', 'actual_price' => '28.00', 'recovered_time' => time(),
-        ]);
-        Db::name('customer_report_item')->where('id', (int)$report['items'][0]['id'])->update([
-            'final_actual_weight' => '1.00', 'final_weight_task_id' => (int)$processTask['id'],
-            'fulfillment_status' => 'final_weight_recorded',
-        ]);
-        FulfillmentTaskLogic::refreshGroupForItem((int)$report['items'][0]['id']);
+        $this->finishSingleGroupProcessing($report, '1.00');
         $delivery = Db::name('fulfillment_task')->where('report_id', (int)$report['id'])->whereLike('source_key', '%:delivery')->find();
-        $bookkeeping = Db::name('fulfillment_task')->where('report_id', (int)$report['id'])->whereLike('source_key', '%:bookkeeping')->find();
+        $bookkeeping = $this->legacyBookkeepingTask((int)$report['id']);
         self::assertNotFalse(DeliveryInventoryLogic::confirmSelfDelivery([
             'task_id' => (int)$delivery['id'], 'event_type' => 'customer_handoff',
             'idempotency_key' => 'task-bill-gate-handoff',
@@ -1354,7 +1352,7 @@ final class FulfillmentWorkflowTest extends TestCase
         $edit['items'][0]['client_line_id'] = (int)$report['items'][0]['id'];
         self::assertFalse(CustomerReportLogic::edit($edit));
         self::assertSame('已有工票进入执行或回收，不能再编辑报货内容', CustomerReportLogic::getError());
-        self::assertSame(1, Db::name('fulfillment_task')->where('report_id', (int)$report['id'])->where('is_settlement_task', 1)->where('status', '<>', 'cancelled')->count());
+        self::assertSame(2, Db::name('fulfillment_task')->where('report_id', (int)$report['id'])->where('report_item_id', '>', 0)->where('task_type', 'process')->where('status', '<>', 'cancelled')->count());
     }
 
     public function test_report_edit_is_frozen_while_print_receipt_is_pending(): void
@@ -1380,7 +1378,7 @@ final class FulfillmentWorkflowTest extends TestCase
         self::assertSame('pending', Db::name('fulfillment_print_log')->where('id', (int)$print['print_log_id'])->value('status'));
     }
 
-    public function test_unresolved_exception_blocks_delivery_unlock(): void
+    public function test_unweighed_processing_group_blocks_delivery_confirmation(): void
     {
         $customerId = $this->createCustomer('异常门禁客户');
         $goodsId = $this->createCustomerReportGoods('海鲈鱼', 'TASK-EXCEPTION-GATE-A');
@@ -1397,10 +1395,19 @@ final class FulfillmentWorkflowTest extends TestCase
         ]);
         $report = CustomerReportLogic::submit($payload);
         self::assertNotFalse($report, CustomerReportLogic::getError());
-        $processTask = Db::name('fulfillment_task')->where('report_id', (int)$report['id'])->where('task_type', 'process')->find();
-        Db::name('fulfillment_task')->where('id', (int)$processTask['id'])->update(['status' => 'printed']);
-        self::assertNotFalse(FulfillmentTaskLogic::recover(['id' => (int)$processTask['id'], 'actual_weight' => '1.00', 'actual_price' => '20.00']));
-        self::assertSame('blocked', Db::name('fulfillment_task')->where('report_id', (int)$report['id'])->whereLike('source_key', '%:delivery')->value('status'));
+        $groups = Db::name('customer_report_processing_group')->where('report_id', $report['id'])->order('id')->select()->toArray();
+        self::assertCount(2, $groups);
+        self::assertFalse(CustomerReportLogic::saveProcessingWeights([
+            'id' => $report['id'], 'version' => $report['version'],
+            'groups' => [['id' => $groups[0]['id'], 'final_actual_weight' => '1.00']],
+        ]));
+        self::assertStringContainsString('全部加工组', CustomerReportLogic::getError());
+        self::assertSame('0.00', (string)Db::name('customer_report_item')->where('id', $report['items'][0]['id'])->value('final_actual_weight'));
+        $deliveryId = (int)Db::name('fulfillment_task')->where('report_id', (int)$report['id'])->whereLike('source_key', '%:delivery')->value('id');
+        self::assertFalse(DeliveryInventoryLogic::confirmSelfDelivery([
+            'task_id' => $deliveryId, 'event_type' => 'customer_handoff', 'idempotency_key' => 'unweighed-delivery',
+        ]));
+        self::assertSame(0, Db::name('fulfillment_delivery_event')->where('report_id', $report['id'])->count());
     }
 
     public function test_self_delivery_handoff_uses_final_weight_and_attributes_true_negative_stock_once(): void
@@ -1598,21 +1605,7 @@ final class FulfillmentWorkflowTest extends TestCase
         $report = CustomerReportLogic::submit($payload);
         self::assertNotFalse($report, CustomerReportLogic::getError());
         self::assertCount(2, $report['items']);
-        foreach (array_values($report['items']) as $index => $item) {
-            $weight = $index === 0 ? '1.50' : '0.50';
-            $finalTask = Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)
-                ->where('report_item_id', (int)$item['id'])->where('is_settlement_task', 1)->find();
-            self::assertNotEmpty($finalTask);
-            Db::name('fulfillment_task')->where('id', (int)$finalTask['id'])->update([
-                'status' => 'recovered', 'actual_weight' => $weight, 'process_weight' => $weight,
-                'actual_price' => '20.00', 'recovered_time' => time(), 'update_time' => time(),
-            ]);
-            Db::name('customer_report_item')->where('id', (int)$item['id'])->update([
-                'final_actual_weight' => $weight, 'final_weight_task_id' => (int)$finalTask['id'],
-                'fulfillment_status' => 'final_weight_recorded', 'update_time' => time(),
-            ]);
-            FulfillmentTaskLogic::refreshGroupForItem((int)$item['id']);
-        }
+        $this->finishProcessingGroups($report, [(int)$report['items'][0]['id'] => '1.50', (int)$report['items'][1]['id'] => '0.50']);
         $deliveryTask = Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)
             ->where('report_id', (int)$report['id'])
             ->where('source_key', 'report:' . (int)$report['id'] . ':delivery')->find();
@@ -1782,6 +1775,7 @@ final class FulfillmentWorkflowTest extends TestCase
         $customerId = $this->createCustomer('无余额并发交付客户');
         $goodsId = $this->createCustomerReportGoods('无余额并发交付商品', 'DELIVERY-MISSING-BALANCE');
         $warehouseId = $this->createCustomerReportWarehouse('无余额并发交付仓');
+        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, '2.00'));
         $first = $this->selfDeliveryFixtureForCatalog(
             $customerId, $goodsId, $warehouseId, 'delivery-missing-balance-a', '0.40'
         );
@@ -1789,6 +1783,14 @@ final class FulfillmentWorkflowTest extends TestCase
             $customerId, $goodsId, $warehouseId, 'delivery-missing-balance-b', '0.40'
         );
         self::assertSame($first['sku_id'], $second['sku_id']);
+        // Model historical completed processing with no inventory reservation.
+        // Removing the balance alone would leave impossible positive reservations.
+        $reportIds = [$first['report_id'], $second['report_id']];
+        foreach (['customer_report', 'customer_report_item', 'customer_report_reservation'] as $table) {
+            $column = $table === 'customer_report' ? 'id' : 'report_id';
+            Db::name($table)->where('tenant_id', self::TENANT_ID)->whereIn($column, $reportIds)->update(['reserved_base_qty' => '0.00']);
+        }
+        Db::name('warehouse_sku_balance')->where('tenant_id', self::TENANT_ID)->where('warehouse_id', $warehouseId)->where('sku_id', $first['sku_id'])->delete();
         self::assertSame(0, Db::name('warehouse_sku_balance')->where('tenant_id', self::TENANT_ID)
             ->where('warehouse_id', $warehouseId)->where('sku_id', $first['sku_id'])->count());
 
@@ -2121,51 +2123,84 @@ final class FulfillmentWorkflowTest extends TestCase
         $this->prepareCustomerReportRequestContext();
     }
 
-    public function test_unused_initial_process_can_be_deleted_and_keywords_cover_generated_draft(): void
+    public function test_new_shop_has_no_fixed_process_catalog_and_unused_custom_process_can_be_deleted(): void
     {
-        $processes = WorkforceLogic::processes([])['lists'];
-        $livePack = current(array_filter($processes, static fn(array $process): bool => $process['code'] === 'live_pack'));
-        $abalonePack = current(array_filter($processes, static fn(array $process): bool => $process['code'] === 'abalone_pack'));
-        self::assertContains('活包', $livePack['keywords']);
-        self::assertContains('氧气袋', $livePack['keywords']);
-        self::assertContains('鲍鱼包', $abalonePack['keywords']);
-        self::assertContains('冰袋', $abalonePack['keywords']);
-        self::assertContains('泡沫箱', $abalonePack['keywords']);
-        self::assertFalse(WorkforceLogic::saveProcess(['name' => '不支持的手工工序', 'trigger_type' => 'manual', 'keywords' => [], 'is_enabled' => 1]));
-        self::assertNotFalse(WorkforceLogic::deleteProcess(['id' => (int)$abalonePack['id']]), WorkforceLogic::getError());
-        $purchase = current(array_filter($processes, static fn(array $process): bool => $process['code'] === 'purchase'));
-        self::assertFalse(WorkforceLogic::deleteProcess(['id' => (int)$purchase['id']]));
-        self::assertFalse(WorkforceLogic::statusProcess(['id' => (int)$purchase['id'], 'is_enabled' => 0]));
+        self::assertSame([], WorkforceLogic::processes([])['lists']);
+        $process = WorkforceLogic::saveProcess(['name' => '本店打包', 'trigger_type' => 'report_selection', 'keywords' => ['活包']]);
+        self::assertNotFalse($process, WorkforceLogic::getError());
+        self::assertSame([], $process['keywords']);
+        self::assertFalse(WorkforceLogic::saveProcess(['name' => '不支持的手工工序', 'trigger_type' => 'manual']));
+        self::assertNotFalse(WorkforceLogic::deleteProcess(['id' => $process['id']]));
+        self::assertSame([], WorkforceLogic::processes([])['lists']);
+        self::assertNotFalse(WorkforceLogic::saveProcess(['name' => '本店采购', 'trigger_type' => 'inventory_shortage']));
+        self::assertFalse(WorkforceLogic::saveProcess(['name' => '重复采购', 'trigger_type' => 'inventory_shortage']));
+    }
+
+    /** Explicit persisted pre-group fixture; never used by new report submissions. */
+    private function asLegacyPaperReport(array $report): array
+    {
+        // Historical paper cases had no confirmed per-piece specification.
+        Db::name('customer_report_item')->where('report_id', $report['id'])->update(['piece_weight_confirmed' => 0]);
+        $groupIds = Db::name('customer_report_processing_group')->where('report_id', $report['id'])->column('id');
+        Db::name('customer_report_processing_group_process')->whereIn('processing_group_id', $groupIds)->delete();
+        Db::name('customer_report_processing_group')->where('report_id', $report['id'])->delete();
+        foreach ($report['items'] as $item) {
+            $tasks = Db::name('fulfillment_task')->where('report_item_id', $item['id'])->where('task_type', 'process')->order('id')->select()->toArray();
+            foreach ($tasks as $index => $task) {
+                $code = Db::name('work_process')->where('id', $task['process_id'])->value('code');
+                Db::name('fulfillment_task')->where('id', $task['id'])->update([
+                    'processing_group_id' => 0,
+                    'source_key' => 'item:' . $item['id'] . ':process:' . $code,
+                    'is_settlement_task' => $index === count($tasks) - 1 ? 1 : 0,
+                ]);
+            }
+        }
+        return $report;
+    }
+
+    /** Persisted legacy bookkeeping task used only to exercise its retained completion API. */
+    private function legacyBookkeepingTask(int $reportId): array
+    {
+        $task = Db::name('fulfillment_task')->where('report_id', $reportId)->where('source_key', 'report:' . $reportId . ':delivery')->find();
+        self::assertNotEmpty($task);
+        unset($task['id']);
+        $task['source_key'] = 'report:' . $reportId . ':bookkeeping';
+        $task['ticket_no'] = 'TEST-LEGACY-' . uniqid();
+        $task['process_name_snapshot'] = '历史记账';
+        $task['status'] = 'ready_to_bill';
+        $task['id'] = (int)Db::name('fulfillment_task')->insertGetId($task);
+        return $task;
     }
 
     private function fulfillmentPayload(int $customerId, int $goodsId, int $warehouseId, string $key, string $quantity, string $processing): array
     {
-        return [
-            'main_customer_id' => $customerId,
-            'delivery_date' => '2026-08-10',
-            'is_supplement' => 0,
-            'idempotency_key' => $key,
-            'remark' => '',
-            'items' => [[
-                'goods_id' => $goodsId,
-                'warehouse_id' => $warehouseId,
-                'unit_id' => 0,
-                'unit_name' => '件',
-                'order_qty' => $quantity,
-                'piece_weight_confirmed' => 1,
-                'piece_weight_min' => '1.00',
-                'piece_weight_max' => '1.00',
-                'price_status' => 'unpriced',
-                'processing_requirement' => $processing,
-                'processing' => $processing,
-                'line_remark' => $processing,
-            ]],
-        ];
+        // These are explicit test-shop processes, not a production initial catalog.
+        foreach ([
+            ['purchase', '采购', 'inventory_shortage', 0],
+            ['kill_fish', '杀鱼', 'report_selection', 10],
+            ['live_pack', '活鱼打包', 'report_selection', 20],
+            ['delivery', '送货', 'all_processing_completed', 30],
+        ] as [$code, $name, $trigger, $sort]) {
+            if (!Db::name('work_process')->where('tenant_id', self::TENANT_ID)->where('code', $code)->find()) {
+                Db::name('work_process')->insert([
+                    'tenant_id' => self::TENANT_ID, 'code' => $code, 'name' => $name,
+                    'trigger_type' => $trigger, 'trigger_keywords' => '[]', 'sort' => $sort,
+                    'is_enabled' => 1, 'is_system' => 0, 'create_time' => time(), 'update_time' => time(),
+                ]);
+            }
+        }
+        $payload = $this->supportFulfillmentPayload($customerId, $goodsId, $warehouseId, $key, $quantity, $processing);
+        $codes = str_contains($processing, '活鱼打包') ? ['kill_fish', 'live_pack'] : ['kill_fish'];
+        $payload['items'][0]['processing_groups'][0]['process_ids'] = array_map('intval', Db::name('work_process')
+            ->where('tenant_id', self::TENANT_ID)->whereIn('code', $codes)
+            ->order(['sort' => 'asc', 'id' => 'asc'])->column('id'));
+        $payload['delivery_arrangement'] = ['delivery_method' => 'self_delivery'];
+        return $payload;
     }
 
     public function test_third_party_delivery_requires_an_enabled_registered_driver_and_replays_one_fact(): void
     {
-        $fixture = $this->selfDeliveryFixture('third-party-driver', '2.00', '2.00');
+        $fixture = $this->selfDeliveryFixture('third-party-driver', '2.00', '2.00', 'third_party');
         $payload = [
             'task_id' => $fixture['delivery_task_id'],
             'driver_id' => 999999,
@@ -2210,7 +2245,7 @@ final class FulfillmentWorkflowTest extends TestCase
         self::assertSame(1, Db::name('fulfillment_delivery_event')->where('report_id', $fixture['report_id'])->count());
         self::assertSame('0.0000', WarehouseSkuBalanceService::onHand($fixture['warehouse_id'], $fixture['sku_id']));
 
-        $lossFixture = $this->selfDeliveryFixture('third-party-full-loss', '1.00', '1.00');
+        $lossFixture = $this->selfDeliveryFixture('third-party-full-loss', '1.00', '1.00', 'third_party');
         $lossEvent = DeliveryInventoryLogic::confirmThirdPartyDelivery([
             'task_id' => $lossFixture['delivery_task_id'],
             'driver_id' => (int)$driver['id'],
@@ -2370,20 +2405,8 @@ final class FulfillmentWorkflowTest extends TestCase
         $report = CustomerReportLogic::submit($payload);
         self::assertNotFalse($report, CustomerReportLogic::getError());
 
-        foreach ($report['items'] as $item) {
-            $finalTask = Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)
-                ->where('report_item_id', (int)$item['id'])->where('is_settlement_task', 1)->find();
-            self::assertNotEmpty($finalTask);
-            Db::name('fulfillment_task')->where('id', (int)$finalTask['id'])->update([
-                'status' => 'recovered', 'actual_weight' => '2.0000', 'process_weight' => '2.0000',
-                'actual_price' => '20.00', 'recovered_time' => time(), 'update_time' => time(),
-            ]);
-            Db::name('customer_report_item')->where('id', (int)$item['id'])->update([
-                'final_actual_weight' => '2.0000', 'final_weight_task_id' => (int)$finalTask['id'],
-                'fulfillment_status' => 'final_weight_recorded', 'update_time' => time(),
-            ]);
-            FulfillmentTaskLogic::refreshGroupForItem((int)$item['id']);
-        }
+        $weights = array_fill_keys(array_map('intval', array_column($report['items'], 'id')), '2.00');
+        $this->finishProcessingGroups($report, $weights);
         $deliveryTask = Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)
             ->where('report_id', (int)$report['id'])
             ->where('source_key', 'report:' . (int)$report['id'] . ':delivery')->find();
@@ -2586,29 +2609,18 @@ final class FulfillmentWorkflowTest extends TestCase
     }
 
     /** @return array{report_id:int,report_item_id:int,delivery_task_id:int,warehouse_id:int,goods_id:int,sku_id:int} */
-    private function selfDeliveryFixture(string $key, string $stock, string $finalWeight): array
+    private function selfDeliveryFixture(string $key, string $stock, string $finalWeight, string $deliveryMethod = 'self_delivery'): array
     {
         $customerId = $this->createCustomer('自配送客户-' . $key);
         $goodsId = $this->createCustomerReportGoods('自配送商品-' . $key, 'DELIVERY-' . $key);
         $warehouseId = $this->createCustomerReportWarehouse('自配送仓-' . $key);
         self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, $stock));
-        $report = CustomerReportLogic::submit($this->fulfillmentPayload(
-            $customerId, $goodsId, $warehouseId, $key, '1', '杀好'
-        ));
+        $payload = $this->fulfillmentPayload($customerId, $goodsId, $warehouseId, $key, '1', '杀好');
+        $payload['delivery_arrangement'] = ['delivery_method' => $deliveryMethod];
+        $report = CustomerReportLogic::submit($payload);
         self::assertNotFalse($report, CustomerReportLogic::getError());
         $item = $report['items'][0];
-        $finalTask = Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)
-            ->where('report_item_id', (int)$item['id'])->where('is_settlement_task', 1)->find();
-        self::assertNotEmpty($finalTask);
-        Db::name('fulfillment_task')->where('id', (int)$finalTask['id'])->update([
-            'status' => 'recovered', 'actual_weight' => $finalWeight, 'process_weight' => $finalWeight,
-            'actual_price' => '20.00', 'recovered_time' => time(), 'update_time' => time(),
-        ]);
-        Db::name('customer_report_item')->where('id', (int)$item['id'])->update([
-            'final_actual_weight' => $finalWeight, 'final_weight_task_id' => (int)$finalTask['id'],
-            'fulfillment_status' => 'final_weight_recorded', 'update_time' => time(),
-        ]);
-        FulfillmentTaskLogic::refreshGroupForItem((int)$item['id']);
+        $report = $this->finishSingleGroupProcessing($report, $finalWeight);
         $deliveryTask = Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)
             ->where('report_id', (int)$report['id'])->where('source_key', 'report:' . (int)$report['id'] . ':delivery')->find();
         self::assertNotEmpty($deliveryTask);
@@ -2633,21 +2645,8 @@ final class FulfillmentWorkflowTest extends TestCase
         ));
         self::assertNotFalse($report, CustomerReportLogic::getError());
         $item = $report['items'][0];
-        $finalTask = Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)
-            ->where('report_item_id', (int)$item['id'])->where('is_settlement_task', 1)->find();
-        self::assertNotEmpty($finalTask);
-        Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)
-            ->where('report_item_id', (int)$item['id'])->whereLike('source_key', '%:shortage')
-            ->update(['status' => 'recovered', 'recovered_time' => time(), 'update_time' => time()]);
-        Db::name('fulfillment_task')->where('id', (int)$finalTask['id'])->update([
-            'status' => 'recovered', 'actual_weight' => $finalWeight, 'process_weight' => $finalWeight,
-            'actual_price' => '20.00', 'recovered_time' => time(), 'update_time' => time(),
-        ]);
-        Db::name('customer_report_item')->where('id', (int)$item['id'])->update([
-            'final_actual_weight' => $finalWeight, 'final_weight_task_id' => (int)$finalTask['id'],
-            'fulfillment_status' => 'final_weight_recorded', 'update_time' => time(),
-        ]);
-        FulfillmentTaskLogic::refreshGroupForItem((int)$item['id']);
+        Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)->where('report_item_id', (int)$item['id'])->whereLike('source_key', '%:shortage')->update(['status' => 'recovered', 'recovered_time' => time()]);
+        $report = $this->finishSingleGroupProcessing($report, $finalWeight);
         $deliveryTask = Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)
             ->where('report_id', (int)$report['id'])
             ->where('source_key', 'report:' . (int)$report['id'] . ':delivery')->find();

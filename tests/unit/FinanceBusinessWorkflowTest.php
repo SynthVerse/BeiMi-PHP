@@ -4486,9 +4486,9 @@ final class FinanceBusinessWorkflowTest extends TestCase
             $origin = $cost->events($sku)[0]['snapshot']['origin'];
             Db::transaction(fn() => $cost->recordWithinTransaction(['reference' => 'process-price-' . $disposition, 'type' => 'adjust', 'sku_id' => $sku,
                 'warehouse_id' => $warehouse, 'business_date' => date('Y-m-d'), 'origin' => $origin, 'amount' => '120.00']));
-            $report = \app\api\jxc\logic\CustomerReportLogic::submit(['main_customer_id' => $this->customerId, 'delivery_date' => date('Y-m-d'), 'is_supplement' => 0,
-                'idempotency_key' => 'process-report-' . $disposition, 'items' => [['goods_id' => $goods, 'warehouse_id' => $warehouse, 'unit_id' => 0, 'unit_name' => '件',
-                    'order_qty' => '5', 'piece_weight_confirmed' => 1, 'piece_weight_min' => '1.00', 'piece_weight_max' => '1.00', 'price_status' => 'unpriced', 'processing_requirement' => '杀好']]]);
+            $reportPayload = $this->fulfillmentPayload($this->customerId, $goods, $warehouse, 'process-report-' . $disposition, '5', '杀好');
+            $reportPayload['delivery_date'] = date('Y-m-d');
+            $report = \app\api\jxc\logic\CustomerReportLogic::submit($reportPayload);
             self::assertNotFalse($report, \app\api\jxc\logic\CustomerReportLogic::getError()); $item = (int)$report['items'][0]['id'];
             $reduced = \app\api\jxc\logic\FulfillmentChangeLogic::reduceItem(['report_item_id' => $item, 'new_expected_base_qty' => '3', 'processed_reduction_qty' => '1',
                 'processed_disposition' => $disposition, 'other_inventory_action' => 'consume', 'reason' => '记录已加工部分的真实去向', 'idempotency_key' => 'process-reduce-' . $disposition]);
@@ -5632,8 +5632,9 @@ final class FinanceBusinessWorkflowTest extends TestCase
 
     public function test_statement_keeps_each_partial_delivery_on_its_actual_day(): void
     {
-        $this->activate(); $sale = $this->deliveredSale();
-        $firstDay = date('Y-m-01'); $secondDay = date('Y-m-02');
+        $firstDay = date('Y-m-d', strtotime('first day of last month'));
+        $secondDay = date('Y-m-d', strtotime($firstDay . ' +1 day'));
+        $this->activate('cash', $firstDay); $sale = $this->deliveredSale($firstDay);
         Db::name('sales_order')->where('id', $sale['order_id'])->update(['datetimesingle' => strtotime($firstDay)]);
         Db::name('fulfillment_delivery_event')->where('id', $sale['event_id'])->update(['delivered_time' => strtotime($firstDay)]);
         $delivery = Db::name('fulfillment_delivery_item')->where('delivery_event_id', $sale['event_id'])->find();
@@ -5741,18 +5742,20 @@ final class FinanceBusinessWorkflowTest extends TestCase
 
     public function test_statement_regeneration_projects_corrected_advance_date_without_duplicating_revision_amount(): void
     {
-        $this->activate(); $payload = $this->receipt('100', '0', '100'); $payload['allocations'] = []; $payload['actual_date'] = date('Y-m-02');
+        $firstDay = date('Y-m-d', strtotime('first day of last month'));
+        $secondDay = date('Y-m-d', strtotime($firstDay . ' +1 day'));
+        $this->activate('cash', $firstDay); $payload = $this->receipt('100', '0', '100'); $payload['allocations'] = []; $payload['actual_date'] = $secondDay;
         $receipt = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $payload]); self::assertNotFalse($receipt, FinanceBusinessLogic::getError());
         $advance = $receipt['confirmed_result']['created_sources'][0];
         self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt_return', 'payload' => ['subject_id' => $this->customerId,
             'receipt_id' => $receipt['id'], 'account_id' => $this->accountId, 'actual_date' => date('Y-m-d'), 'amount' => '20', 'allocations' => [['source' => $advance, 'amount' => '20']], 'reason' => '实际退回20']]), FinanceBusinessLogic::getError());
-        $before = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['customer_id' => $this->customerId, 'date_from' => date('Y-m-01'), 'date_to' => date('Y-m-01')]);
+        $before = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['customer_id' => $this->customerId, 'date_from' => $firstDay, 'date_to' => $firstDay]);
         self::assertSame('0.00', $before['snapshot']['balances']['advance']['closing']);
-        $payload['actual_date'] = date('Y-m-01'); $payload['amount'] = '120'; $payload['advance_amount'] = '120';
+        $payload['actual_date'] = $firstDay; $payload['amount'] = '120'; $payload['advance_amount'] = '120';
         self::assertNotFalse(FinanceBusinessLogic::action('correct', $this->command($receipt['version']) + ['id' => $receipt['id'], 'payload' => $payload, 'correction_reason' => '原款实际早一天到账且为120元']), FinanceBusinessLogic::getError());
-        $after = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['customer_id' => $this->customerId, 'date_from' => date('Y-m-01'), 'date_to' => date('Y-m-01'), 'previous_id' => $before['id']]);
+        $after = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['customer_id' => $this->customerId, 'date_from' => $firstDay, 'date_to' => $firstDay, 'previous_id' => $before['id']]);
         self::assertSame('120.00', $after['snapshot']['balances']['advance']['closing']);
-        $current = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['customer_id' => $this->customerId]);
+        $current = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['customer_id' => $this->customerId, 'date_from' => $firstDay, 'date_to' => date('Y-m-d')]);
         self::assertSame('100.00', $current['snapshot']['balances']['advance']['closing']);
         self::assertSame(['120.00', '-20.00'], array_column($current['snapshot']['actual_money'], 'amount'));
         self::assertSame('0.00', \app\api\jxc\logic\FinanceStatements::detail(['id' => $before['id']])['snapshot']['balances']['advance']['closing']);
@@ -5760,8 +5763,8 @@ final class FinanceBusinessWorkflowTest extends TestCase
 
     public function test_overdue_todo_updates_partial_balance_and_closes_without_erasing_observed_history(): void
     {
-        $this->activate();
-        Db::name('finance_opening_source')->where('tenant_id', self::TENANT_ID)->where('category', 'receivable')->update(['source_snapshot' => json_encode(['subject_name' => '收款主客户', 'historical_date' => date('Y-m-01'), 'due_date' => date('Y-m-01')])]);
+        $firstDay = date('Y-m-d', strtotime('first day of last month')); $this->activate('cash', $firstDay);
+        Db::name('finance_opening_source')->where('tenant_id', self::TENANT_ID)->where('category', 'receivable')->update(['source_snapshot' => json_encode(['subject_name' => '收款主客户', 'historical_date' => $firstDay, 'due_date' => $firstDay])]);
         $first = \app\api\jxc\logic\FinanceOverdue::lists(['customer_id' => $this->customerId]);
         self::assertCount(1, $first['lists']); self::assertSame('1000.00', $first['lists'][0]['balance']);
         $originalId = $first['lists'][0]['id'];
@@ -5778,13 +5781,13 @@ final class FinanceBusinessWorkflowTest extends TestCase
 
     public function test_overdue_todo_preserves_late_recording_explanation_and_due_change_closes_current_case(): void
     {
-        $this->activate();
-        Db::name('finance_opening_source')->where('tenant_id', self::TENANT_ID)->where('category', 'receivable')->update(['source_snapshot' => json_encode(['subject_name' => '收款主客户', 'historical_date' => date('Y-m-01'), 'due_date' => date('Y-m-01')])]);
+        $firstDay = date('Y-m-d', strtotime('first day of last month')); $this->activate('cash', $firstDay);
+        Db::name('finance_opening_source')->where('tenant_id', self::TENANT_ID)->where('category', 'receivable')->update(['source_snapshot' => json_encode(['subject_name' => '收款主客户', 'historical_date' => $firstDay, 'due_date' => $firstDay])]);
         \app\api\jxc\logic\FinanceOverdue::lists(['customer_id' => $this->customerId]);
-        $receipt = $this->receipt('200', '200'); $receipt['actual_date'] = date('Y-m-01');
+        $receipt = $this->receipt('200', '200'); $receipt['actual_date'] = $firstDay;
         self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $receipt]));
         $history = \app\api\jxc\logic\FinanceOverdue::history(['source' => $this->receivable]);
-        self::assertSame(date('Y-m-01'), $history['lists'][0]['timing'][0]['effective_date']);
+        self::assertSame($firstDay, $history['lists'][0]['timing'][0]['effective_date']);
         self::assertSame('200.00', $history['lists'][0]['timing'][0]['amount']);
         $due = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receivable_due', 'payload' => ['subject_id' => $this->customerId, 'source' => $this->receivable,
             'new_due_date' => null, 'expected_due_revision' => 0, 'reason' => '双方重新商定，付款日暂未约定']]);
@@ -5799,8 +5802,8 @@ final class FinanceBusinessWorkflowTest extends TestCase
 
     public function test_overdue_preview_failure_and_permission_revocation_do_not_leave_or_expose_observations(): void
     {
-        $this->activate();
-        Db::name('finance_opening_source')->where('tenant_id', self::TENANT_ID)->where('category', 'receivable')->update(['source_snapshot' => json_encode(['subject_name' => '收款主客户', 'historical_date' => date('Y-m-01'), 'due_date' => date('Y-m-01')])]);
+        $firstDay = date('Y-m-d', strtotime('first day of last month')); $this->activate('cash', $firstDay);
+        Db::name('finance_opening_source')->where('tenant_id', self::TENANT_ID)->where('category', 'receivable')->update(['source_snapshot' => json_encode(['subject_name' => '收款主客户', 'historical_date' => $firstDay, 'due_date' => $firstDay])]);
         $preview = \app\api\jxc\logic\FinancePreview::calculate($this->command(0) + ['action' => 'record', 'type' => 'receipt', 'payload' => $this->receipt('100', '100')]);
         self::assertNotEmpty($preview);
         self::assertSame(0, Db::name('finance_overdue_event')->where('tenant_id', self::TENANT_ID)->count());
@@ -5841,8 +5844,8 @@ final class FinanceBusinessWorkflowTest extends TestCase
 
     public function test_overdue_scheduler_isolates_bad_tenant_and_keeps_retryable_failure_visible(): void
     {
-        $this->activate();
-        Db::name('finance_opening_source')->where('tenant_id', self::TENANT_ID)->where('category', 'receivable')->update(['source_snapshot' => json_encode(['subject_name' => '收款主客户', 'historical_date' => date('Y-m-01'), 'due_date' => date('Y-m-01')])]);
+        $firstDay = date('Y-m-d', strtotime('first day of last month')); $this->activate('cash', $firstDay);
+        Db::name('finance_opening_source')->where('tenant_id', self::TENANT_ID)->where('category', 'receivable')->update(['source_snapshot' => json_encode(['subject_name' => '收款主客户', 'historical_date' => $firstDay, 'due_date' => $firstDay])]);
         $badBook = Db::name('finance_opening_book')->where('tenant_id', self::TENANT_ID)->find(); $badBook['tenant_id'] = self::OTHER_TENANT_ID; $badBook['confirmed_snapshot'] = '{invalid';
         Db::name('finance_opening_book')->insert($badBook);
         $command = new \app\common\command\FinanceRefreshOverdue();

@@ -9,6 +9,9 @@ use app\common\model\goods\TenantGoodscat;
 use app\platformapi\logic\goods\TenantGoodscatLogic as PlatformCategoryLogic;
 use PHPUnit\Framework\TestCase;
 use think\facade\Db;
+use tests\support\GoodsCategoryTestSchema;
+
+require_once dirname(__DIR__) . '/support/GoodsCategoryTestSchema.php';
 
 final class PlatformAndTenantGoodsCategoryTest extends TestCase
 {
@@ -18,6 +21,7 @@ final class PlatformAndTenantGoodsCategoryTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+        GoodsCategoryTestSchema::ensure();
         Db::startTrans();
         $this->tenantId = $this->createTenant();
         $this->setRootAdminContext();

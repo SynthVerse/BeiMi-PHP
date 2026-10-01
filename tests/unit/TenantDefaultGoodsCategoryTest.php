@@ -8,6 +8,9 @@ use app\common\service\jxc\DefaultDataInitService;
 use app\tenantapi\logic\goods\TenantGoodscatLogic;
 use PHPUnit\Framework\TestCase;
 use think\facade\Db;
+use tests\support\GoodsCategoryTestSchema;
+
+require_once dirname(__DIR__) . '/support/GoodsCategoryTestSchema.php';
 
 final class TenantDefaultGoodsCategoryTest extends TestCase
 {
@@ -15,6 +18,7 @@ final class TenantDefaultGoodsCategoryTest extends TestCase
 
     protected function setUp(): void
     {
+        GoodsCategoryTestSchema::ensure();
         Db::startTrans();
         $this->tenantId = $this->createTestTenant();
         request()->tenantId = $this->tenantId;

@@ -233,6 +233,36 @@ final class CustomerDeliveryVehicleTest extends TestCase
         $this->prepareCustomerReportRequestContext();
     }
 
+    public function test_shared_vehicle_pagination_counts_vehicles_instead_of_customer_bindings(): void
+    {
+        $firstCustomerId = $this->createCustomer('共享车辆计数甲');
+        $secondCustomerId = $this->createCustomer('共享车辆计数乙');
+        foreach ([
+            [$firstCustomerId, '粤T50001', '05:00'],
+            [$firstCustomerId, '粤T60001', '06:00'],
+            [$secondCustomerId, '粤T50001', '07:00'],
+        ] as [$customerId, $plateNumber, $time]) {
+            self::assertNotFalse(CustomerDeliveryVehicleLogic::save([
+                'customer_id' => $customerId,
+                'plate_number' => $plateNumber,
+                'earliest_delivery_time' => $time,
+                'vehicle_location' => '测试交接点',
+            ]), CustomerDeliveryVehicleLogic::getError());
+        }
+
+        foreach ([1 => ['粤T50001'], 2 => ['粤T60001'], 3 => []] as $page => $plates) {
+            $result = CustomerDeliveryVehicleLogic::crossCustomerLists(['page' => $page, 'pagesize' => 1]);
+            self::assertSame(2, $result['total']);
+            self::assertSame($plates, array_column($result['data'], 'plate_number'));
+        }
+        $shared = CustomerDeliveryVehicleLogic::crossCustomerLists(['keyword' => '粤T50001']);
+        self::assertSame(1, $shared['total']);
+        self::assertCount(1, $shared['data']);
+        self::assertSame(2, $shared['data'][0]['bound_customer_count']);
+        self::assertSame(2, CustomerDeliveryVehicleLogic::crossCustomerLists(['status' => 'enabled'])['total']);
+        self::assertSame(0, CustomerDeliveryVehicleLogic::crossCustomerLists(['keyword' => '不存在'])['total']);
+    }
+
     public function test_binding_edit_cannot_change_shared_vehicle_master_and_legacy_disable_only_changes_binding(): void
     {
         $firstCustomerId = $this->createCustomer('共享车辆客户甲');

@@ -7,6 +7,9 @@ namespace tests\unit;
 use app\common\service\jxc\DefaultDataInitService;
 use PHPUnit\Framework\TestCase;
 use think\facade\Db;
+use tests\support\GoodsCategoryTestSchema;
+
+require_once dirname(__DIR__) . '/support/GoodsCategoryTestSchema.php';
 
 /**
  * DefaultDataInitService 单元测试
@@ -25,6 +28,7 @@ final class DefaultDataInitServiceTest extends TestCase
 
     protected function setUp(): void
     {
+        GoodsCategoryTestSchema::ensure();
         // 开启事务用于测试隔离
         Db::startTrans();
 

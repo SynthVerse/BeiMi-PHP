@@ -5,10 +5,31 @@ declare(strict_types=1);
 namespace tests\unit;
 
 use app\api\jxc\logic\CustomerDeliveryVehicleLogic;
+use app\api\jxc\validate\CustomerValidate;
 use PHPUnit\Framework\TestCase;
 
 final class CustomerDeliveryVehicleInputTest extends TestCase
 {
+    public function test_http_save_accepts_new_binding_without_ids_but_rejects_zero_identity_fields(): void
+    {
+        $payload = [
+            'customer_id' => 42,
+            'earliest_delivery_time' => '05:00',
+            'plate_number' => '粤A12345',
+            'vehicle_location' => '东门停车区',
+            'driver_phone' => '',
+        ];
+        self::assertTrue((new CustomerValidate())->scene('deliveryVehicleSave')->check($payload));
+        self::assertTrue((new CustomerValidate())->scene('deliveryVehicleSave')->check(
+            $payload + ['vehicle_id' => 7, 'vehicle_version' => 2]
+        ));
+        foreach (['id', 'version', 'vehicle_id', 'vehicle_version'] as $field) {
+            self::assertFalse((new CustomerValidate())->scene('deliveryVehicleSave')->check(
+                $payload + [$field => 0]
+            ), $field);
+        }
+    }
+
     public function test_candidate_vehicle_input_is_normalized_at_the_public_logic_boundary(): void
     {
         $normalized = CustomerDeliveryVehicleLogic::normalizeInput([

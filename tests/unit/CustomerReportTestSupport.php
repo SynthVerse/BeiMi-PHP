@@ -321,6 +321,8 @@ SQL;
 
     protected function cleanCustomerReportData(): void
     {
+        // 财务和履约用例共用员工夹具；权限清理不能代替员工主记录的清理。
+        Db::name('employee')->where('tenant_id', self::TENANT_ID)->delete();
         try {
             Db::name('sales_delivery_correction')->where('tenant_id', self::TENANT_ID)->delete();
         } catch (\Throwable) {
@@ -442,30 +444,35 @@ SQL;
     protected function finishSingleGroupProcessing(array $report, string $finalWeight): array
     {
         self::assertCount(1, $report['items'] ?? [], '测试夹具仅支持单明细报货单');
-        $item = $report['items'][0];
+        return $this->finishProcessingGroups($report, [(int)$report['items'][0]['id'] => $finalWeight]);
+    }
+
+    /** @param array<int,string> $itemWeights */
+    protected function finishProcessingGroups(array $report, array $itemWeights): array
+    {
         $now = FulfillmentClock::now();
         Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)
-            ->where('report_item_id', (int)$item['id'])->where('task_type', 'process')->update([
+            ->whereIn('report_item_id', array_keys($itemWeights))->where('task_type', 'process')->update([
                 'status' => 'recovered',
-                'actual_weight' => $finalWeight,
-                'process_weight' => $finalWeight,
-                'actual_price' => '20.00',
                 'recovered_time' => $now,
                 'update_time' => $now,
             ]);
         $groups = Db::name('customer_report_processing_group')->where('tenant_id', self::TENANT_ID)
-            ->where('report_id', (int)$report['id'])->order('id')->select()->toArray();
-        self::assertCount(1, $groups, '测试夹具必须保留一个加工分组');
+            ->where('report_id', (int)$report['id'])->whereIn('report_item_id', array_keys($itemWeights))
+            ->order('id')->select()->toArray();
+        self::assertCount(count($itemWeights), $groups, '测试夹具中每条明细必须保留一个加工分组');
         $weighted = CustomerReportLogic::saveProcessingWeights([
             'id' => (int)$report['id'],
-            'version' => (int)$report['version'],
-            'groups' => [[
-                'id' => (int)$groups[0]['id'],
-                'final_actual_weight' => bcadd($finalWeight, '0', 2),
-            ]],
+            'version' => (int)Db::name('customer_report')->where('tenant_id', self::TENANT_ID)->where('id', (int)$report['id'])->value('version'),
+            'groups' => array_map(static fn(array $group): array => [
+                'id' => (int)$group['id'],
+                'final_actual_weight' => bcadd($itemWeights[(int)$group['report_item_id']], '0', 2),
+            ], $groups),
         ]);
         self::assertNotFalse($weighted, CustomerReportLogic::getError());
-        FulfillmentTaskLogic::refreshGroupForItem((int)$item['id']);
+        foreach (array_keys($itemWeights) as $itemId) {
+            FulfillmentTaskLogic::refreshGroupForItem($itemId);
+        }
         return $weighted;
     }
 

@@ -331,24 +331,26 @@ final class GoodsDimensionLogicTest extends TestCase
         self::assertSame(0, Db::name('goods_spec_value')->where('goods_id', $goodsId)->count());
     }
 
-    public function test_product_requires_at_least_one_active_sku_dimension_with_values(): void
+    public function test_selected_sku_dimension_requires_values_and_preserves_the_base_sku_on_failure(): void
     {
         $description = GoodsDimensionLogic::saveDefinition([
             'name' => '捕捞说明',
             'code' => 'catch_note',
-            'dimension_type' => 'descriptive',
+            'dimension_type' => 'sku',
         ]);
         $goodsId = $this->createCustomerReportGoods('无SKU维度商品', 'NO-SKU');
+        $before = GoodsDimensionLogic::productDimensions(['goods_id' => $goodsId]);
 
         self::assertFalse(GoodsDimensionLogic::saveProductDimensions([
             'goods_id' => $goodsId,
             'dimensions' => [[
                 'dimension_id' => $description['id'],
-                'values' => [['name' => '当日捕捞', 'code' => 'same_day']],
+                'values' => [],
             ]],
         ]));
         self::assertStringContainsString('SKU维度', GoodsDimensionLogic::getError());
         self::assertSame(0, Db::name('goods_spec_value')->where('goods_id', $goodsId)->count());
+        self::assertSame($before, GoodsDimensionLogic::productDimensions(['goods_id' => $goodsId]));
     }
 
     public function test_legacy_quality_and_specification_endpoints_read_generic_dimension_values(): void
@@ -392,12 +394,12 @@ final class GoodsDimensionLogicTest extends TestCase
         self::assertSame(1, Db::name('goods_spec_value')->where('tenant_id', self::TENANT_ID)->where('goods_id', $goodsId)->count());
     }
 
-    public function test_goods_creation_rolls_back_when_only_descriptive_dimensions_are_submitted(): void
+    public function test_goods_creation_with_only_descriptive_dimensions_keeps_one_base_sku(): void
     {
         $description = GoodsDimensionLogic::saveDefinition(['name' => '说明', 'code' => 'note', 'dimension_type' => 'descriptive']);
         $unitId = $this->createCustomerReportUnit('斤');
 
-        self::assertFalse(GoodsLogic::add([
+        $result = GoodsLogic::add([
             'name' => '应回滚商品',
             'category_id' => 0,
             'units' => '斤',
@@ -407,22 +409,35 @@ final class GoodsDimensionLogicTest extends TestCase
                 'values' => [['name' => '仅描述', 'code' => 'description_only']],
             ]],
             'combinations' => [],
-        ]));
-        self::assertSame(0, Db::name('goods')->where('tenant_id', self::TENANT_ID)->where('name', '应回滚商品')->count());
+        ]);
+        self::assertIsArray($result, GoodsLogic::getError());
+        $goodsId = (int)$result['id'];
+        $config = GoodsDimensionLogic::productDimensions(['goods_id' => $goodsId]);
+        self::assertCount(1, $config['skus']);
+        self::assertSame('SKU-' . $goodsId . '-BASE', $config['skus'][0]['sku_code']);
+        self::assertSame('descriptive', $config['dimensions'][0]['dimension_type']);
+        self::assertSame('仅描述', $config['dimensions'][0]['values'][0]['name']);
+        self::assertSame(0, Db::name('goods_sku_spec_value')->where('goods_id', $goodsId)->count());
     }
 
-    public function test_goods_creation_rolls_back_when_dimensions_are_omitted(): void
+    public function test_goods_creation_without_dimensions_creates_the_canonical_base_sku(): void
     {
         $unitId = $this->createCustomerReportUnit('斤');
 
-        self::assertFalse(GoodsLogic::add([
+        $result = GoodsLogic::add([
             'name' => '缺少维度商品',
             'category_id' => 0,
             'units' => '斤',
             'units_id' => $unitId,
-        ]));
-        self::assertStringContainsString('SKU维度', GoodsLogic::getError());
-        self::assertSame(0, Db::name('goods')->where('tenant_id', self::TENANT_ID)->where('name', '缺少维度商品')->count());
+        ]);
+        self::assertIsArray($result, GoodsLogic::getError());
+        $goodsId = (int)$result['id'];
+        $config = GoodsDimensionLogic::productDimensions(['goods_id' => $goodsId]);
+        self::assertSame([], $config['dimensions']);
+        self::assertCount(1, $config['skus']);
+        self::assertSame('SKU-' . $goodsId . '-BASE', $config['skus'][0]['sku_code']);
+        self::assertSame('缺少维度商品', $config['skus'][0]['sku_name']);
+        self::assertSame($unitId, (int)$config['skus'][0]['base_unit_id']);
     }
 
     public function test_reordering_dimensions_keeps_identity_and_preserves_operationally_disabled_sku(): void
@@ -597,6 +612,7 @@ final class GoodsDimensionLogicTest extends TestCase
     public function test_generated_sku_name_limit_returns_a_business_error_and_rolls_back(): void
     {
         $goodsId = $this->createCustomerReportGoods(str_repeat('品', 20), 'LONG-SKU-NAME', '斤');
+        $before = GoodsDimensionLogic::productDimensions(['goods_id' => $goodsId]);
         $dimensions = [];
         for ($index = 1; $index <= GoodsDimensionLogic::MAX_PRODUCT_DIMENSIONS; $index++) {
             $definition = GoodsDimensionLogic::saveDefinition([
@@ -616,7 +632,7 @@ final class GoodsDimensionLogicTest extends TestCase
         ]));
         self::assertStringContainsString('SKU名称不能超过200个字符', GoodsDimensionLogic::getError());
         self::assertSame(0, Db::name('goods_spec_value')->where('tenant_id', self::TENANT_ID)->where('goods_id', $goodsId)->count());
-        self::assertSame(0, Db::name('goods_sku')->where('tenant_id', self::TENANT_ID)->where('goods_id', $goodsId)->count());
+        self::assertSame($before, GoodsDimensionLogic::productDimensions(['goods_id' => $goodsId]));
     }
 
     public function test_order_goods_direct_sku_reference_keeps_removed_generated_sku_disabled(): void
@@ -839,6 +855,7 @@ final class GoodsDimensionLogicTest extends TestCase
         ]);
         $goods = Db::name('goods')->where('id', $goodsId)->find();
         $sku = $config['skus'][0];
+        $groups = $this->fulfillmentPayload($customerId, $goodsId, $warehouseId, 'dimension-snapshot', '1', '测试加工')['items'][0]['processing_groups'];
 
         $rows = CustomerReportLineService::normalizeItems([[
             'goods_id' => $goodsId,
@@ -852,6 +869,7 @@ final class GoodsDimensionLogicTest extends TestCase
             'piece_weight_max' => '1',
             'piece_weight_confirmed' => 1,
             'price_status' => 'unpriced',
+            'processing_groups' => $groups,
         ]], $customerId);
 
         self::assertIsArray($rows, CustomerReportLineService::getError());
@@ -878,6 +896,7 @@ final class GoodsDimensionLogicTest extends TestCase
             'piece_weight_max' => '1',
             'piece_weight_confirmed' => 1,
             'price_status' => 'unpriced',
+            'processing_groups' => $groups,
         ]], $customerId), CustomerReportLineService::getError());
 
         $method = new \ReflectionMethod(SalesOrderLogic::class, 'buildGoodsRows');
@@ -901,7 +920,8 @@ final class GoodsDimensionLogicTest extends TestCase
             'base_quantity' => '1',
             'price' => '10.00',
         ]]);
-        self::assertSame('', $baseGoodsRows[0]['sku_name']);
+        self::assertSame((int)$sku['id'], (int)$baseGoodsRows[0]['sku_id']);
+        self::assertSame((string)$sku['sku_name'], $baseGoodsRows[0]['sku_name']);
 
         Db::name('goods_sku')->where('id', (int)$sku['id'])->update(['sale_status' => 0]);
         self::assertFalse(CustomerReportLineService::normalizeItems([[
@@ -916,6 +936,7 @@ final class GoodsDimensionLogicTest extends TestCase
             'piece_weight_max' => '1',
             'piece_weight_confirmed' => 1,
             'price_status' => 'unpriced',
+            'processing_groups' => $groups,
         ]], $customerId));
         self::assertStringContainsString('不可销售', CustomerReportLineService::getError());
 
@@ -931,8 +952,9 @@ final class GoodsDimensionLogicTest extends TestCase
             'piece_weight_max' => '1',
             'piece_weight_confirmed' => 1,
             'price_status' => 'unpriced',
+            'processing_groups' => $groups,
         ]], $customerId));
-        self::assertStringContainsString('必须选择可销售', CustomerReportLineService::getError());
+        self::assertStringContainsString('商品尚未配置可销售SKU', CustomerReportLineService::getError());
     }
 
     public function test_legacy_sku_save_keeps_quality_values_visible_for_the_same_goods(): void
@@ -967,6 +989,7 @@ final class GoodsDimensionLogicTest extends TestCase
         $saved = GoodsSkuLogic::save([
             'goods_id' => $goodsId,
             'skus' => [[
+                'sku_code' => 'LEGACY-HISTORY-MANUAL',
                 'sku_name' => '旧接口库存历史商品-鲜活',
                 'quality_status' => 'live',
                 'quality_label' => '鲜活',
@@ -974,7 +997,9 @@ final class GoodsDimensionLogicTest extends TestCase
             ]],
         ]);
         self::assertIsArray($saved, GoodsSkuLogic::getError());
-        $skuId = (int)$saved[0]['id'];
+        $manualSku = current(array_filter($saved, static fn(array $row): bool => $row['sku_code'] === 'LEGACY-HISTORY-MANUAL'));
+        self::assertIsArray($manualSku);
+        $skuId = (int)$manualSku['id'];
         Db::name('stock_flow')->insert([
             'tenant_id' => self::TENANT_ID,
             'goods_id' => $goodsId,

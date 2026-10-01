@@ -169,6 +169,8 @@ class GoodsAliasService
         foreach (Goods::where('tenant_id', $tenantId)
             ->whereIn('normalized_name', array_keys($tokens))
             ->field(['id'])
+            // 调用方持有租户写锁；当前读必须看见锁等待期间刚提交的商品。
+            ->lock(true)
             ->select()
             ->toArray() as $goods
         ) {
@@ -179,7 +181,8 @@ class GoodsAliasService
         }
         $aliasQuery = Db::name('goods_alias')
             ->where('tenant_id', $tenantId)
-            ->whereIn('normalized_alias', array_keys($tokens));
+            ->whereIn('normalized_alias', array_keys($tokens))
+            ->lock(true);
         if ($ignoreGoodsId > 0) {
             $aliasQuery->where('goods_id', '<>', $ignoreGoodsId);
         }
@@ -201,6 +204,7 @@ class GoodsAliasService
 
         $goods = Goods::where('tenant_id', $tenantId)
             ->where('id', $ids[0])
+            ->lock(true)
             ->findOrEmpty();
         if ($goods->isEmpty()) {
             return ['status' => 'none', 'goods' => null, 'goods_ids' => []];
