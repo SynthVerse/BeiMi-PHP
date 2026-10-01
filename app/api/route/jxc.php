@@ -155,6 +155,7 @@ Route::group('', function () {
 
     Route::get('customer/detail', 'jxc.Customer/detail');
     Route::get('customer/deliveryVehicleIndex', 'jxc.Customer/deliveryVehicleIndex');
+    Route::get('customer/deliveryVehicleCustomers', 'jxc.Customer/deliveryVehicleCustomers');
     Route::get('customer/deliveryVehicles', 'jxc.Customer/deliveryVehicles');
     Route::post('customer/deliveryVehicleSave', 'jxc.Customer/deliveryVehicleSave');
     Route::post('customer/deliveryVehicleDelete', 'jxc.Customer/deliveryVehicleDelete');

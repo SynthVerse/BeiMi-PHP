@@ -32,6 +32,16 @@ class CustomerController extends BaseJxcController
         return $this->success('', CustomerDeliveryVehicleLogic::crossCustomerLists($params), 1, 0);
     }
 
+    public function deliveryVehicleCustomers()
+    {
+        $params = (new CustomerValidate())->get()->goCheck('deliveryVehicleCustomers');
+        $result = CustomerDeliveryVehicleLogic::vehicleCustomers($params);
+        if ($result === false) {
+            return $this->fail(CustomerDeliveryVehicleLogic::getError());
+        }
+        return $this->data($result);
+    }
+
     public function deliveryVehicleSave()
     {
         $params = (new CustomerValidate())->post()->goCheck('deliveryVehicleSave');

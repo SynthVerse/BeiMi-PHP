@@ -57,7 +57,7 @@ final class CustomerDeliveryVehicleTest extends TestCase
         self::assertSame((int)$vehicle['id'], (int)$detail['delivery_vehicles'][0]['id']);
     }
 
-    public function test_same_plate_can_be_used_by_different_customers_but_not_duplicated_within_one_customer(): void
+    public function test_same_plate_is_one_vehicle_bound_to_multiple_customers(): void
     {
         $firstCustomerId = $this->createCustomer('海鲜城东门店');
         $secondCustomerId = $this->createCustomer('海鲜城西门店');
@@ -67,10 +67,22 @@ final class CustomerDeliveryVehicleTest extends TestCase
             'vehicle_location' => '市场停车区',
         ];
 
-        self::assertNotFalse(CustomerDeliveryVehicleLogic::save($params + ['customer_id' => $firstCustomerId]));
+        $first = CustomerDeliveryVehicleLogic::save($params + ['customer_id' => $firstCustomerId]);
+        self::assertNotFalse($first);
         self::assertFalse(CustomerDeliveryVehicleLogic::save($params + ['customer_id' => $firstCustomerId]));
-        self::assertStringContainsString('相同车牌', CustomerDeliveryVehicleLogic::getError());
-        self::assertNotFalse(CustomerDeliveryVehicleLogic::save($params + ['customer_id' => $secondCustomerId]));
+        self::assertStringContainsString('已绑定', CustomerDeliveryVehicleLogic::getError());
+        $second = CustomerDeliveryVehicleLogic::save($params + ['customer_id' => $secondCustomerId]);
+        self::assertNotFalse($second);
+        self::assertSame((int)$first['vehicle_id'], (int)$second['vehicle_id']);
+
+        $detail = CustomerDeliveryVehicleLogic::vehicleCustomers(['id' => $first['vehicle_id']]);
+        self::assertNotFalse($detail);
+        self::assertSame('粤A12345', $detail['vehicle']['plate_number']);
+        self::assertCount(2, $detail['customers']);
+        self::assertSame(
+            [$firstCustomerId, $secondCustomerId],
+            array_column($detail['customers'], 'customer_id')
+        );
     }
 
     public function test_stale_version_cannot_overwrite_or_delete_a_candidate_vehicle(): void
@@ -225,11 +237,20 @@ final class CustomerDeliveryVehicleTest extends TestCase
             dirname(__DIR__, 2) . '/database/migrations/20260930_000001_create_customer_delivery_vehicle.sql'
         );
         Db::execute($this->authoritativeCreateTable($migration, 'customer_delivery_vehicle'));
+
+        $upgrade = (string)file_get_contents(
+            dirname(__DIR__, 2) . '/database/migrations/20261001_000001_split_delivery_vehicle_binding.sql'
+        );
+        $this->runStatements($this->prepareMigration($upgrade));
     }
 
     private function cleanCrossTenantVehicleFixtures(): void
     {
         Db::name('customer_delivery_vehicle')
+            ->where('tenant_id', self::OTHER_TENANT_ID)
+            ->where('plate_number', '粤B00001')
+            ->delete();
+        Db::name('delivery_vehicle')
             ->where('tenant_id', self::OTHER_TENANT_ID)
             ->where('plate_number', '粤B00001')
             ->delete();

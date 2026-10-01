@@ -36,6 +36,9 @@ class CustomerValidate extends BaseValidate
         'plate_number' => 'max:32',
         'vehicle_location' => 'max:255',
         'driver_phone' => 'max:20',
+        'vehicle_id' => 'integer|gt:0',
+        'vehicle_version' => 'integer|gt:0',
+        'vehicle_is_enabled' => 'integer|in:0,1',
         'sort' => 'integer',
         'enabled_only' => 'integer|in:0,1',
         'version' => 'integer|gt:0',
@@ -188,11 +191,18 @@ class CustomerValidate extends BaseValidate
             ->append('status', 'in:all,enabled,disabled');
     }
 
+    public function sceneDeliveryVehicleCustomers()
+    {
+        return $this->only(['id']);
+    }
+
     public function sceneDeliveryVehicleSave()
     {
         return $this->only([
             'id',
             'version',
+            'vehicle_id',
+            'vehicle_version',
             'customer_id',
             'earliest_delivery_time',
             'plate_number',
@@ -200,6 +210,7 @@ class CustomerValidate extends BaseValidate
             'driver_phone',
             'sort',
             'is_enabled',
+            'vehicle_is_enabled',
         ])->remove('id', 'require')
             ->append('customer_id', 'require')
             ->append('earliest_delivery_time', 'require')

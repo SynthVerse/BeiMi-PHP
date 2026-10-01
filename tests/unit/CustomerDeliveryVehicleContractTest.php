@@ -16,20 +16,21 @@ final class CustomerDeliveryVehicleContractTest extends TestCase
 
         foreach ([
             "Route::get('customer/deliveryVehicleIndex', 'jxc.Customer/deliveryVehicleIndex');",
+            "Route::get('customer/deliveryVehicleCustomers', 'jxc.Customer/deliveryVehicleCustomers');",
             "Route::get('customer/deliveryVehicles', 'jxc.Customer/deliveryVehicles');",
             "Route::post('customer/deliveryVehicleSave', 'jxc.Customer/deliveryVehicleSave');",
             "Route::post('customer/deliveryVehicleDelete', 'jxc.Customer/deliveryVehicleDelete');",
         ] as $route) {
             self::assertStringContainsString($route, $routes);
         }
-        foreach (['deliveryVehicleIndex', 'deliveryVehicles', 'deliveryVehicleSave', 'deliveryVehicleDelete'] as $method) {
+        foreach (['deliveryVehicleIndex', 'deliveryVehicleCustomers', 'deliveryVehicles', 'deliveryVehicleSave', 'deliveryVehicleDelete'] as $method) {
             self::assertStringContainsString('public function ' . $method . '()', $controller);
         }
         self::assertStringContainsString("'delivery_vehicles' => CustomerDeliveryVehicleLogic::lists", $customerLogic);
         self::assertStringContainsString("where('version'", $vehicleLogic);
-        self::assertStringContainsString('客户候选车辆已被修改，请重新加载', $vehicleLogic);
+        self::assertStringContainsString('客户车辆绑定已被修改，请重新加载', $vehicleLogic);
         self::assertStringContainsString(
-            "order(['sort' => 'asc', 'earliest_delivery_time' => 'asc', 'id' => 'asc'])",
+            "'binding.sort' => 'asc'",
             $vehicleLogic
         );
     }
@@ -42,7 +43,9 @@ final class CustomerDeliveryVehicleContractTest extends TestCase
 
         foreach ([
             '{{prefix}}customer_delivery_vehicle',
+            '{{prefix}}delivery_vehicle',
             '`tenant_id`',
+            '`vehicle_id`',
             '`customer_id`',
             '`earliest_delivery_time`',
             '`plate_number`',
@@ -54,5 +57,11 @@ final class CustomerDeliveryVehicleContractTest extends TestCase
         ] as $field) {
             self::assertStringContainsString($field, $sql);
         }
+
+        $upgrade = (string)file_get_contents(
+            dirname(__DIR__, 2) . '/database/migrations/20261001_000001_split_delivery_vehicle_binding.sql'
+        );
+        self::assertStringContainsString('GROUP BY `tenant_id`, UPPER(TRIM(`plate_number`))', $upgrade);
+        self::assertStringContainsString('SET binding.`vehicle_id` = vehicle.`id`', $upgrade);
     }
 }

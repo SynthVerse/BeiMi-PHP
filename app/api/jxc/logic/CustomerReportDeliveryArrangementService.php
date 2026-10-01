@@ -52,14 +52,27 @@ final class CustomerReportDeliveryArrangementService extends BaseLogic
             $sourceVehicleId = (int)($input['source_vehicle_id'] ?? 0);
             if ($sourceVehicleId > 0) {
                 $vehicle = Db::name('customer_delivery_vehicle')
-                    ->where('tenant_id', $tenantId)
-                    ->where('customer_id', $deliveryCustomerId)
-                    ->where('id', $sourceVehicleId)
-                    ->where('is_enabled', 1)
-                    ->whereNull('delete_time')
+                    ->alias('binding')
+                    ->leftJoin(
+                        'delivery_vehicle vehicle',
+                        'vehicle.id=binding.vehicle_id AND vehicle.tenant_id=binding.tenant_id AND vehicle.delete_time IS NULL'
+                    )
+                    ->where('binding.tenant_id', $tenantId)
+                    ->where('binding.customer_id', $deliveryCustomerId)
+                    ->where('binding.id', $sourceVehicleId)
+                    ->where('binding.is_enabled', 1)
+                    ->whereNull('binding.delete_time')
+                    ->field([
+                        'binding.*',
+                        'vehicle.id' => 'master_vehicle_id',
+                        'vehicle.plate_number' => 'master_plate_number',
+                        'vehicle.driver_phone' => 'master_driver_phone',
+                        'vehicle.is_enabled' => 'master_is_enabled',
+                        'vehicle.version' => 'master_vehicle_version',
+                    ])
                     ->lock(true)
                     ->find();
-                if (!$vehicle) {
+                if (!$vehicle || ((int)($vehicle['master_vehicle_id'] ?? 0) > 0 && (int)$vehicle['master_is_enabled'] !== 1)) {
                     self::setError('所选客户候选车辆不属于本次实际收货客户');
                     return false;
                 }
@@ -67,9 +80,9 @@ final class CustomerReportDeliveryArrangementService extends BaseLogic
                     'source_vehicle_id' => (int)$vehicle['id'],
                     'source_vehicle_version' => (int)$vehicle['version'],
                     'earliest_delivery_time' => trim((string)$vehicle['earliest_delivery_time']),
-                    'plate_number' => strtoupper(trim((string)$vehicle['plate_number'])),
+                    'plate_number' => strtoupper(trim((string)(($vehicle['master_plate_number'] ?? '') ?: $vehicle['plate_number']))),
                     'vehicle_location' => trim((string)$vehicle['vehicle_location']),
-                    'driver_phone' => trim((string)$vehicle['driver_phone']),
+                    'driver_phone' => trim((string)(($vehicle['master_driver_phone'] ?? '') ?: $vehicle['driver_phone'])),
                 ]);
             }
             foreach (['earliest_delivery_time', 'plate_number', 'vehicle_location', 'driver_phone'] as $field) {

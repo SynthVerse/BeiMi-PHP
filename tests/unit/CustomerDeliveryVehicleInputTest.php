@@ -13,24 +13,30 @@ final class CustomerDeliveryVehicleInputTest extends TestCase
     {
         $normalized = CustomerDeliveryVehicleLogic::normalizeInput([
             'customer_id' => '42',
+            'vehicle_id' => '7',
             'version' => '3',
+            'vehicle_version' => '5',
             'earliest_delivery_time' => ' 05:30 ',
             'plate_number' => ' 粤a12345 ',
             'vehicle_location' => ' 海鲜市场东门停车区 ',
             'driver_phone' => ' 138 0000 0001 ',
             'sort' => '8',
             'is_enabled' => '1',
+            'vehicle_is_enabled' => '1',
         ]);
 
         self::assertSame([
             'customer_id' => 42,
+            'vehicle_id' => 7,
             'version' => 3,
+            'vehicle_version' => 5,
             'earliest_delivery_time' => '05:30',
             'plate_number' => '粤A12345',
             'vehicle_location' => '海鲜市场东门停车区',
             'driver_phone' => '138 0000 0001',
             'sort' => 8,
             'is_enabled' => 1,
+            'vehicle_is_enabled' => 1,
         ], $normalized);
     }
 
