@@ -142,16 +142,6 @@ final class TenantClosureContractTest extends TestCase
         self::assertStringNotContainsString("return \$error === '' ||", $service);
     }
 
-    public function test_preview_fingerprint_tracks_row_updates_without_count_changes(): void
-    {
-        $service = self::source('app/common/service/jxc/TenantClosureService.php');
-
-        self::assertStringContainsString('tenantDataVersion', $service);
-        self::assertStringContainsString('MAX(`update_time`)', $service);
-        self::assertStringContainsString('MAX(`create_time`)', $service);
-        self::assertStringContainsString('MAX(`id`)', $service);
-    }
-
     private static function source(string $path): string
     {
         $source = file_get_contents($path);

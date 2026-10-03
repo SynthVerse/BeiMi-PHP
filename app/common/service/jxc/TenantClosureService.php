@@ -53,18 +53,28 @@ class TenantClosureService
         if ($idempotencyKey === '') {
             throw new \RuntimeException('缺少幂等键');
         }
-        if ($userId <= 0 || $tenantId <= 0) {
+        if ($userId <= 0) {
             throw new \RuntimeException('请先登录并选择店铺');
         }
+        // Accepted requests belong to their signed target, even after current-store reassignment.
+        $preview = self::previewPayload((string)($params['preview_token'] ?? ''), $userId);
+        $currentTenantId = $tenantId;
+        $tenantId = (int)$preview['t'];
         $hash = hash('sha256', $tenantId . ':' . $userId . ':' . $idempotencyKey);
         $existing = Db::name('tenant_closure_receipt')
             ->where('tenant_id', $tenantId)
             ->where('operator_user_id', $userId)
             ->find();
         if ($existing) {
+            if (!hash_equals((string)$existing['idempotency_key_hash'], $hash)) {
+                throw new \RuntimeException('注销请求标识不一致，请使用原请求重试');
+            }
             return self::formatReceipt((array)$existing);
         }
 
+        if ($currentTenantId !== $tenantId) {
+            throw new \RuntimeException('当前店铺已变化，请重新预览后再确认');
+        }
         self::assertOwner($userId, $tenantId);
         $tenant = self::tenant($tenantId);
         $confirmedName = (string)($params['store_name'] ?? $params['tenant_name'] ?? '');
@@ -99,6 +109,9 @@ class TenantClosureService
             if ($existing) {
                 if ((int)$existing['operator_user_id'] !== $userId) {
                     throw new \RuntimeException('该店铺已进入永久注销流程');
+                }
+                if (!hash_equals((string)$existing['idempotency_key_hash'], $hash)) {
+                    throw new \RuntimeException('注销请求标识不一致，请使用原请求重试');
                 }
                 return (int)$existing['id'];
             }
@@ -285,10 +298,7 @@ class TenantClosureService
     private static function tenantDataVersion(int $tenantId, array $tenant): array
     {
         $versions = [];
-        foreach (self::tenantScopedTables() as $table) {
-            if ($table === self::table('tenant_closure_receipt')) {
-                continue;
-            }
+        foreach (self::deletableTenantTables() as $table) {
             $versions[$table] = self::tableVersion($table, '`tenant_id` = ?', [$tenantId]);
         }
         if ((int)($tenant['tactics'] ?? 0) === 1) {
@@ -302,45 +312,30 @@ class TenantClosureService
 
     private static function tableVersion(string $table, string $where = '', array $bindings = []): array
     {
-        $selects = ['COUNT(*) AS row_count'];
-        $selects[] = self::columnExists($table, 'id')
-            ? 'MAX(`id`) AS max_id'
-            : 'NULL AS max_id';
-        $selects[] = self::columnExists($table, 'update_time')
-            ? 'MAX(`update_time`) AS max_update_time'
-            : 'NULL AS max_update_time';
-        $selects[] = self::columnExists($table, 'create_time')
-            ? 'MAX(`create_time`) AS max_create_time'
-            : 'NULL AS max_create_time';
-        $sql = 'SELECT ' . implode(', ', $selects) . ' FROM `' . $table . '`';
+        $columns = array_column(Db::query('SHOW COLUMNS FROM `' . $table . '`'), 'Field');
+        // HEX preserves binary/string values; JSON separates columns and distinguishes NULL from empty.
+        $values = array_map(static fn (string $column): string =>
+            'HEX(`' . str_replace('`', '``', $column) . '`)', $columns);
+        $query = Db::table($table)->fieldRaw(
+            'SHA2(CAST(JSON_ARRAY(' . implode(',', $values) . ') AS CHAR), 256) AS row_hash'
+        )->order('row_hash');
         if ($where !== '') {
-            $sql .= ' WHERE ' . $where;
+            $query->whereRaw($where, $bindings);
         }
-        $row = (array)(Db::query($sql, $bindings)[0] ?? []);
-        return [
-            'row_count' => (int)($row['row_count'] ?? 0),
-            'max_id' => $row['max_id'] ?? null,
-            'max_update_time' => $row['max_update_time'] ?? null,
-            'max_create_time' => $row['max_create_time'] ?? null,
-        ];
+        $digest = hash_init('sha256');
+        $count = 0;
+        foreach ($query->cursor() as $row) {
+            hash_update($digest, (string)$row['row_hash']);
+            $count++;
+        }
+        return ['row_count' => $count, 'content_hash' => hash_final($digest)];
     }
 
     private static function tenantDataSummary(int $tenantId): array
     {
-        $prefix = (string)config('database.connections.mysql.prefix', 'la_');
-        $columns = Db::query(
-            'SELECT TABLE_NAME FROM information_schema.COLUMNS '
-            . 'WHERE TABLE_SCHEMA = DATABASE() AND COLUMN_NAME = ? AND TABLE_NAME LIKE ? ORDER BY TABLE_NAME',
-            ['tenant_id', $prefix . '%']
-        );
         $tables = 0;
         $records = 0;
-        foreach ($columns as $column) {
-            $table = (string)($column['TABLE_NAME'] ?? $column['table_name'] ?? '');
-            if ($table === '' || !preg_match('/^[A-Za-z0-9_]+$/', $table)
-                || $table === $prefix . 'tenant_closure_receipt') {
-                continue;
-            }
+        foreach (self::deletableTenantTables() as $table) {
             $count = (int)(Db::query(
                 'SELECT COUNT(*) AS aggregate FROM `' . $table . '` WHERE `tenant_id` = ?',
                 [$tenantId]
@@ -595,26 +590,23 @@ class TenantClosureService
 
     private static function deleteOnlineTenantData(int $tenantId, int $receiptId): void
     {
-        $prefix = self::prefix();
         $tenant = Db::name('tenant')->where('id', $tenantId)->find();
         Db::execute('SET FOREIGN_KEY_CHECKS=0');
         try {
             if ($tenant && (int)($tenant['tactics'] ?? 0) === 1) {
                 self::dropIsolatedTenantTables((string)$tenant['sn']);
             }
-            Db::transaction(function () use ($tenantId, $prefix) {
+            Db::transaction(function () use ($tenantId) {
+                $roleIds = self::deleteTenantRoleLinks($tenantId);
                 self::deleteTenantAdminLinks($tenantId);
                 self::deleteTenantRelations($tenantId);
 
-                foreach (self::tenantScopedTables() as $table) {
-                    $logicalName = str_starts_with($table, $prefix) ? substr($table, strlen($prefix)) : $table;
-                    if (in_array($logicalName, self::PRESERVED_TENANT_TABLES, true)) {
-                        continue;
-                    }
+                foreach (self::deletableTenantTables() as $table) {
                     Db::table($table)->where('tenant_id', $tenantId)->delete();
                 }
 
                 Db::name('tenant')->where('id', $tenantId)->delete();
+                self::verifyNoTenantDataRemains($tenantId, $roleIds);
             });
             self::verifyNoTenantDataRemains($tenantId);
             $time = time();
@@ -631,15 +623,15 @@ class TenantClosureService
         }
     }
 
-    private static function verifyNoTenantDataRemains(int $tenantId): void
+    private static function verifyNoTenantDataRemains(int $tenantId, array $roleIds = []): void
     {
-        $prefix = self::prefix();
         $remaining = 0;
-        foreach (self::tenantScopedTables() as $table) {
-            $logicalName = str_starts_with($table, $prefix) ? substr($table, strlen($prefix)) : $table;
-            if (in_array($logicalName, self::PRESERVED_TENANT_TABLES, true)) {
-                continue;
+        foreach (['tenant_system_role_menu', 'tenant_admin_role'] as $name) {
+            if ($roleIds !== [] && self::tableExists(self::table($name))) {
+                $remaining += (int)Db::name($name)->whereIn('role_id', $roleIds)->count();
             }
+        }
+        foreach (self::deletableTenantTables() as $table) {
             $remaining += (int)Db::table($table)->where('tenant_id', $tenantId)->count();
         }
         $relation = self::table('tenant_relation');
@@ -654,6 +646,22 @@ class TenantClosureService
         if ($remaining > 0) {
             throw new \RuntimeException('检测到新的租户数据写入，在线清理将自动重试');
         }
+    }
+
+    /** @return list<int> Role IDs must be retained until the transaction's residual check. */
+    private static function deleteTenantRoleLinks(int $tenantId): array
+    {
+        if (!self::tableExists(self::table('tenant_system_role'))) {
+            return [];
+        }
+        $roleIds = array_map('intval', Db::name('tenant_system_role')
+            ->where('tenant_id', $tenantId)->lock(true)->column('id'));
+        foreach (['tenant_system_role_menu', 'tenant_admin_role'] as $name) {
+            if ($roleIds !== [] && self::tableExists(self::table($name))) {
+                Db::name($name)->whereIn('role_id', $roleIds)->delete();
+            }
+        }
+        return $roleIds;
     }
 
     private static function deleteTenantAdminLinks(int $tenantId): void
@@ -687,6 +695,13 @@ class TenantClosureService
         if (self::tableExists($invite) && self::columnExists($invite, 'target_tenant_id')) {
             Db::table($invite)->where('target_tenant_id', $tenantId)->delete();
         }
+    }
+
+    /** @return list<string> */
+    private static function deletableTenantTables(): array
+    {
+        $preserved = array_map([self::class, 'table'], self::PRESERVED_TENANT_TABLES);
+        return array_values(array_diff(self::tenantScopedTables(), $preserved));
     }
 
     /** @return list<string> */
@@ -828,6 +843,17 @@ class TenantClosureService
         int $tenantId,
         string $fingerprint
     ): void {
+        $decoded = self::previewPayload($token, $userId);
+        if ((int)$decoded['t'] !== $tenantId
+            || (int)($decoded['e'] ?? 0) < time()
+            || !hash_equals((string)($decoded['f'] ?? ''), $fingerprint)) {
+            throw new \RuntimeException('店铺数据已变化，请重新预览后再确认');
+        }
+    }
+
+    /** Validate identity and signature separately: accepted replays may outlive the preview TTL. */
+    private static function previewPayload(string $token, int $userId): array
+    {
         [$payload, $signature] = array_pad(explode('.', $token, 2), 2, '');
         if ($payload === '' || !hash_equals(hash_hmac('sha256', $payload, self::signingSecret()), $signature)) {
             throw new \RuntimeException('注销预览已失效，请重新获取');
@@ -835,11 +861,10 @@ class TenantClosureService
         $decoded = json_decode(self::base64UrlDecode($payload), true);
         if (!is_array($decoded)
             || (int)($decoded['u'] ?? 0) !== $userId
-            || (int)($decoded['t'] ?? 0) !== $tenantId
-            || (int)($decoded['e'] ?? 0) < time()
-            || !hash_equals((string)($decoded['f'] ?? ''), $fingerprint)) {
-            throw new \RuntimeException('店铺数据已变化，请重新预览后再确认');
+            || (int)($decoded['t'] ?? 0) <= 0) {
+            throw new \RuntimeException('注销预览已失效，请重新获取');
         }
+        return $decoded;
     }
 
     private static function signingSecret(): string

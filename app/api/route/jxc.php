@@ -15,6 +15,8 @@ Route::group('', function () {
     Route::get('user/store/status', 'jxc.Store/status');
     Route::get('user/store/closure/status', 'jxc.Store/closureStatus');
     Route::post('user/store/closure/retry', 'jxc.Store/retryClosure');
+    // 已受理请求可在最后一个店铺注销后重放；首次受理由服务核验当前店铺和老板身份。
+    Route::post('user/store/closure', 'jxc.Store/confirmTenantPermanentClosure');
     Route::get('user/store/current', 'jxc.Store/detail');
     Route::get('user/stores',    'jxc.Store/lists');
     Route::post('user/open',     'jxc.Store/createStore');
@@ -27,7 +29,6 @@ Route::group('', function () {
 // 店铺成员操作：继续要求当前店铺成员身份。
 Route::group('', function () {
     Route::get('user/store/closure/preview', 'jxc.Store/closurePreview');
-    Route::post('user/store/closure', 'jxc.Store/confirmTenantPermanentClosure');
     Route::get('user/store/member-invite', 'jxc.Store/memberInvite');
     Route::post('user/store/switch', 'jxc.Store/switchStore');
     Route::get('user/store',     'jxc.Store/detail');
