@@ -667,6 +667,13 @@ final class FulfillmentWorkflowTest extends TestCase
             'id' => (int)$task['id'], 'print_log_id' => (int)$oldPrint['print_log_id'], 'success' => 1,
         ]), FulfillmentTaskLogic::getError());
 
+        $beforeChange = FulfillmentTaskLogic::lists([]);
+        self::assertNotFalse($beforeChange, FulfillmentTaskLogic::getError());
+        $itemTasks = array_values(array_filter($beforeChange['lists'], static fn(array $row): bool => (int)$row['report_item_id'] === $itemId));
+        $allowedChanges = array_values(array_filter($itemTasks, static fn(array $row): bool => (bool)($row['actions']['reduce_item']['allowed'] ?? false)));
+        self::assertCount(1, $allowedChanges, '服务端应只在该明细的主处理任务开放履约变更');
+        self::assertTrue((bool)$allowedChanges[0]['actions']['mark_undelivered']['allowed']);
+
         $changed = FulfillmentChangeLogic::reduceItem([
             'report_item_id' => $itemId,
             'new_expected_base_qty' => '3.00',
@@ -686,6 +693,30 @@ final class FulfillmentWorkflowTest extends TestCase
         self::assertSame('void_required', Db::name('fulfillment_paper_copy')->where('print_log_id', (int)$oldPrint['print_log_id'])->value('paper_status'));
         $control = Db::name('fulfillment_ticket_control')->where('print_log_id', (int)$oldPrint['print_log_id'])->find();
         self::assertSame('pending_recovery', $control['status']);
+        $afterChange = FulfillmentTaskLogic::lists([]);
+        self::assertNotFalse($afterChange, FulfillmentTaskLogic::getError());
+        $changedTasks = array_values(array_filter($afterChange['lists'], static fn(array $row): bool => (int)$row['report_item_id'] === $itemId));
+        foreach ($changedTasks as $changedTask) {
+            self::assertFalse((bool)($changedTask['actions']['reduce_item']['allowed'] ?? true));
+        }
+        self::assertStringContainsString('纸票', (string)($changedTasks[0]['actions']['reduce_item']['blocked_reason'] ?? ''));
+        self::assertFalse(FulfillmentChangeLogic::reduceItem([
+            'report_item_id' => $itemId,
+            'new_expected_base_qty' => '2.00',
+            'processed_reduction_qty' => '0.00',
+            'processed_disposition' => '',
+            'reason' => '旧客户端直接请求也必须服从纸票控制',
+            'idempotency_key' => 'reduce-during-paper-control-1',
+        ]));
+        self::assertSame('请先完成现有纸票回收或作废控制', FulfillmentChangeLogic::getError());
+        self::assertFalse(FulfillmentChangeLogic::markUndelivered([
+            'report_item_id' => $itemId,
+            'reason_code' => 'customer_cancel',
+            'reason' => '旧客户端尝试绕过纸票控制',
+            'idempotency_key' => 'undelivered-during-paper-control-1',
+        ]));
+        self::assertSame('请先完成现有纸票回收或作废控制', FulfillmentChangeLogic::getError());
+        self::assertSame(1, Db::name('fulfillment_item_change')->where('report_item_id', $itemId)->count());
         self::assertTrue(FulfillmentTaskLogic::hasUnaccountedPaperForReport((int)$report['id']));
         self::assertFalse(CustomerReportLogic::convert([
             'id' => (int)$report['id'],

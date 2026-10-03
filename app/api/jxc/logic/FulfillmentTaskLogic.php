@@ -1754,7 +1754,8 @@ final class FulfillmentTaskLogic extends BaseLogic
         $items = $itemIds === [] ? [] : Db::name('customer_report_item')->where('tenant_id', self::tenantId())
             ->whereIn('id', $itemIds)->column(
                 'piece_weight_confirmed,piece_weight_min,piece_weight_max,acceptable_base_qty_min,acceptable_base_qty_max,'
-                . 'specification_verification_status,specification_verification_note,warehouse_id,goods_id,sku_id,sku_name,shortage_base_qty,base_unit_name',
+                . 'specification_verification_status,specification_verification_note,warehouse_id,goods_id,sku_id,sku_name,shortage_base_qty,base_unit_name,'
+                . 'expected_base_qty,fulfillment_status,status',
                 'id'
             );
         $reportIds = array_values(array_unique(array_filter(array_map(static fn(array $task): int => (int)$task['report_id'], $tasks))));
@@ -1774,6 +1775,14 @@ final class FulfillmentTaskLogic extends BaseLogic
             }
         }
         $settlementTaskIds = self::settlementTaskIdsForItems($itemIds);
+        $reservationItemIds = $itemIds === [] ? [] : array_map('intval', Db::name('customer_report_reservation')
+            ->where('tenant_id', self::tenantId())->whereIn('report_item_id', $itemIds)->column('report_item_id'));
+        $reservationItems = array_fill_keys($reservationItemIds, true);
+        $controlledItemIds = $itemIds === [] ? [] : array_map('intval', Db::name('fulfillment_ticket_control')
+            ->where('tenant_id', self::tenantId())->whereIn('report_item_id', $itemIds)->where('status', '<>', 'closed')
+            ->column('report_item_id'));
+        $controlledItems = array_fill_keys($controlledItemIds, true);
+        $hasControlPermission = WorkforceLogic::hasPermission('task.control');
         foreach ($tasks as &$task) {
             if (trim((string)($task['process_name_snapshot'] ?? '')) === '' && (int)$task['process_id'] > 0) {
                 $task['process_name_snapshot'] = (string)($processes[$task['process_id']] ?? '');
@@ -1864,6 +1873,15 @@ final class FulfillmentTaskLogic extends BaseLogic
                 unset($paperControl['before_snapshot'], $paperControl['after_snapshot']);
             }
             unset($paperControl);
+            $itemId = (int)($task['report_item_id'] ?? 0);
+            $task['actions'] = FulfillmentChangeLogic::actionsForItem(
+                $report,
+                $requirementItem,
+                isset($reservationItems[$itemId]),
+                (bool)$task['requires_settlement'],
+                isset($controlledItems[$itemId]),
+                $hasControlPermission
+            );
             $accounted = Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
                 ->where('task_id', (int)$task['id'])->where('accounted_time', '>', 0)->order('accounted_time desc,id desc')->find();
             $task['recovery_mode'] = $accounted && in_array((string)$accounted['account_reason'], ['lost', 'damaged', 'illegible'], true)

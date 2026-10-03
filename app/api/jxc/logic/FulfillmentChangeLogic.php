@@ -14,6 +14,23 @@ final class FulfillmentChangeLogic extends BaseLogic
     private const UNDELIVERED_REASONS = ['shortage', 'damage', 'customer_cancel'];
     private const DISPOSITIONS = ['return_to_stock', 'internal_loss', 'other'];
 
+    /** 服务端统一裁决任务页可见的履约变更动作。 @return array<string,array<string,mixed>> */
+    public static function actionsForItem(array $report, array $item, bool $hasReservation, bool $isPrimaryTask, bool $hasOpenPaperControl, bool $hasControlPermission): array
+    {
+        $blockedReason = !$isPrimaryTask
+            ? '请从该商品的主处理任务操作'
+            : (!$hasControlPermission
+                ? '没有执行该操作的电子权限'
+                : self::itemChangeBlockedReason($report, $item, $hasReservation, $hasOpenPaperControl));
+
+        $allowed = $blockedReason === '';
+        $base = ['allowed' => $allowed, 'blocked_reason' => $blockedReason];
+        return [
+            'reduce_item' => $base + ['current_expected_base_qty' => self::decimal((string)($item['expected_base_qty'] ?? '0'))],
+            'mark_undelivered' => $base,
+        ];
+    }
+
     /** @return array<string,mixed>|false */
     public static function reduceItem(array $params): array|false
     {
@@ -247,11 +264,40 @@ final class FulfillmentChangeLogic extends BaseLogic
         $item = Db::name('customer_report_item')->where('tenant_id', self::tenantId())->where('id', $itemId)->lock(true)->find();
         $reservation = Db::name('customer_report_reservation')->where('tenant_id', self::tenantId())
             ->where('report_item_id', $itemId)->lock(true)->find();
-        if (!$report || !$item || !$reservation || in_array((string)$report['status'], ['cancelled', 'completed'], true)) {
-            self::setError('报货单或库存预留当前不可变更');
+        $hasOpenPaperControl = $item && Db::name('fulfillment_ticket_control')->where('tenant_id', self::tenantId())
+            ->where('report_item_id', $itemId)->where('status', '<>', 'closed')->lock(true)->find();
+        $blockedReason = self::itemChangeBlockedReason(
+            $report ?: [],
+            $item ?: [],
+            (bool)$reservation,
+            (bool)$hasOpenPaperControl
+        );
+        if ($blockedReason !== '') {
+            self::setError($blockedReason);
             return [false, [], []];
         }
         return [$report, $item, $reservation];
+    }
+
+    /** 投影与事务写入口共用的商品履约变更资格规则。 */
+    private static function itemChangeBlockedReason(array $report, array $item, bool $hasReservation, bool $hasOpenPaperControl): string
+    {
+        if (!$report || !$item || !$hasReservation) {
+            return '报货明细或库存预留不可用';
+        }
+        if (in_array((string)($report['status'] ?? ''), ['cancelled', 'completed'], true)) {
+            return '报货单当前不可变更';
+        }
+        if ((string)($item['fulfillment_status'] ?? 'pending') === 'undelivered') {
+            return '该明细已经记录为未交货';
+        }
+        if (bccomp((string)($item['expected_base_qty'] ?? '0'), '0.00', self::SCALE) <= 0) {
+            return '当前应交数量不可变更';
+        }
+        if ($hasOpenPaperControl) {
+            return '请先完成现有纸票回收或作废控制';
+        }
+        return '';
     }
 
     /** @param array<string,mixed> $item @param array<string,mixed> $reservation */
