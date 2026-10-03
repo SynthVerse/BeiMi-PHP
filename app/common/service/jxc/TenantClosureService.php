@@ -313,9 +313,10 @@ class TenantClosureService
     private static function tableVersion(string $table, string $where = '', array $bindings = []): array
     {
         $columns = array_column(Db::query('SHOW COLUMNS FROM `' . $table . '`'), 'Field');
-        // HEX preserves binary/string values; JSON separates columns and distinguishes NULL from empty.
+        // Cast numbers to bytes before HEX: HEX(decimal) alone rounds away fractional differences.
+        // JSON separates columns and distinguishes NULL from empty without retaining business data.
         $values = array_map(static fn (string $column): string =>
-            'HEX(`' . str_replace('`', '``', $column) . '`)', $columns);
+            'HEX(CAST(`' . str_replace('`', '``', $column) . '` AS BINARY))', $columns);
         $query = Db::table($table)->fieldRaw(
             'SHA2(CAST(JSON_ARRAY(' . implode(',', $values) . ') AS CHAR), 256) AS row_hash'
         )->order('row_hash');

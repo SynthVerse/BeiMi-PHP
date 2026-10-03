@@ -206,22 +206,33 @@ final class TenantClosureWorkflowTest extends TestCase
         }
     }
 
-    public function test_report_edit_with_unchanged_timestamp_invalidates_preview(): void
+    /** @dataProvider reportChangeProvider */
+    public function test_report_edit_with_unchanged_timestamp_invalidates_preview(array $before, array $after): void
     {
         [$tenant, $user] = $this->fixture();
-        $report = (int)Db::name('customer_report')->insertGetId([
+        $report = (int)Db::name('customer_report')->insertGetId(array_merge([
             'tenant_id' => $tenant,
             'remark' => '原始要求', 'version' => 1, 'create_time' => 100, 'update_time' => 100,
-        ]);
+        ], $before));
         $params = $this->params($tenant, $user);
-        Db::name('customer_report')->where('id', $report)->update(['remark' => '修改后的要求', 'version' => 2]);
+        Db::name('customer_report')->where('id', $report)->update($after);
         self::assertSame(100, (int)Db::name('customer_report')->where('id', $report)->value('update_time'));
 
         self::assertFalse(StoreLogic::confirmTenantPermanentClosure($params));
         self::assertSame('店铺数据已变化，请重新预览后再确认', StoreLogic::getError());
         self::assertSame(0, (int)Db::name('tenant')->where('id', $tenant)->value('disable'));
         self::assertSame(0, Db::name('tenant_closure_receipt')->where('tenant_id', $tenant)->count());
-        self::assertSame('修改后的要求', Db::name('customer_report')->where('id', $report)->value('remark'));
+        foreach ($after as $field => $value) {
+            self::assertSame((string)$value, (string)Db::name('customer_report')->where('id', $report)->value($field));
+        }
+    }
+
+    public static function reportChangeProvider(): array
+    {
+        return [
+            'remark and version' => [[], ['remark' => '修改后的要求', 'version' => 2]],
+            'fractional quantity' => [['total_base_qty' => '10.01'], ['total_base_qty' => '10.02']],
+        ];
     }
 
     public function test_switching_before_first_submission_does_not_close_either_store(): void
