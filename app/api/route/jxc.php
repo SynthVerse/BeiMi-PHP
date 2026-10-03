@@ -13,6 +13,8 @@ Route::group('', function () {
     Route::get('jxc/auth/info', 'jxc.Auth/info');
     Route::post('user/logout', 'jxc.Auth/logout');
     Route::get('user/store/status', 'jxc.Store/status');
+    Route::get('user/store/closure/status', 'jxc.Store/closureStatus');
+    Route::post('user/store/closure/retry', 'jxc.Store/retryClosure');
     Route::get('user/store/current', 'jxc.Store/detail');
     Route::get('user/stores',    'jxc.Store/lists');
     Route::post('user/open',     'jxc.Store/createStore');
@@ -24,10 +26,12 @@ Route::group('', function () {
 
 // 店铺成员操作：继续要求当前店铺成员身份。
 Route::group('', function () {
+    Route::get('user/store/closure/preview', 'jxc.Store/closurePreview');
+    Route::post('user/store/closure', 'jxc.Store/confirmTenantPermanentClosure');
+    Route::get('user/store/member-invite', 'jxc.Store/memberInvite');
+    Route::post('user/store/switch', 'jxc.Store/switchStore');
     Route::get('user/store',     'jxc.Store/detail');
     Route::post('user/storeset', 'jxc.Store/setStore');
-    Route::post('user/store/switch', 'jxc.Store/switchStore');
-    Route::get('user/store/member-invite', 'jxc.Store/memberInvite');
 })->middleware(\app\api\http\middleware\LoginMiddleware::class, 'enforce');
 
 // JXC 业务接口 —— 使用 JxcLoginMiddleware（双 Token 查询）

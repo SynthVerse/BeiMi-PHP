@@ -17,6 +17,42 @@ class StoreController extends BaseJxcController
         return $this->data(StoreLogic::status());
     }
 
+    public function closurePreview()
+    {
+        $result = StoreLogic::closurePreview();
+        if ($result === false) {
+            return $this->fail(StoreLogic::getError());
+        }
+        return $this->data($result);
+    }
+
+    public function confirmTenantPermanentClosure()
+    {
+        $result = StoreLogic::confirmTenantPermanentClosure($this->request->post());
+        if ($result === false) {
+            return $this->fail(StoreLogic::getError());
+        }
+        return $this->success('店铺注销请求已生效', $result, 1, 1);
+    }
+
+    public function closureStatus()
+    {
+        $result = StoreLogic::closureStatus($this->request->get());
+        if ($result === false) {
+            return $this->fail(StoreLogic::getError());
+        }
+        return $this->data($result);
+    }
+
+    public function retryClosure()
+    {
+        $result = StoreLogic::retryClosure($this->request->post());
+        if ($result === false) {
+            return $this->fail(StoreLogic::getError());
+        }
+        return $this->success('已重新发起在线清理', $result, 1, 1);
+    }
+
     public function setStore()
     {
         $params = $this->request->post();

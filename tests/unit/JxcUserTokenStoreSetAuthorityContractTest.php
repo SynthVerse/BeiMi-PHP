@@ -105,7 +105,7 @@ final class JxcUserTokenStoreSetAuthorityContractTest extends TestCase
         self::assertNotFalse($strictStart);
         $onboarding = substr($routes, $onboardingStart, $onboardingEnd - $onboardingStart);
         $strict = substr($routes, $strictStart);
-        self::assertSame(10, preg_match_all('/Route::(?:get|post)\(/', $onboarding));
+        self::assertSame(12, preg_match_all('/Route::(?:get|post)\(/', $onboarding));
         self::assertStringNotContainsString("Route::get('user/info'", $onboarding);
         self::assertMatchesRegularExpression("/Route::get\('user\/info', 'User\/info'\)\\s*->middleware\(\\\\app\\\\api\\\\http\\\\middleware\\\\LoginMiddleware::class\);/", $routes);
 
@@ -113,6 +113,8 @@ final class JxcUserTokenStoreSetAuthorityContractTest extends TestCase
             "Route::get('jxc/auth/info', 'jxc.Auth/info');",
             "Route::post('user/logout', 'jxc.Auth/logout');",
             "Route::get('user/store/status', 'jxc.Store/status');",
+            "Route::get('user/store/closure/status', 'jxc.Store/closureStatus');",
+            "Route::post('user/store/closure/retry', 'jxc.Store/retryClosure');",
             "Route::get('user/store/current', 'jxc.Store/detail');",
             "Route::get('user/stores',    'jxc.Store/lists');",
             "Route::post('user/open',     'jxc.Store/createStore');",

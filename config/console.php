@@ -12,5 +12,6 @@ return [
         // JXC 默认基础数据补建
         'jxc:init-defaults' => 'app\common\command\JxcInitDefaults',
         'finance:refresh-overdue' => 'app\common\command\FinanceRefreshOverdue',
+        'tenant-closure:process' => 'app\common\command\TenantClosureProcess',
     ],
 ];

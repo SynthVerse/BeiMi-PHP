@@ -17,6 +17,68 @@ use think\facade\Db;
  */
 class TenantLogic extends BaseLogic
 {
+    public static function confirmClosureBackupPurged(
+        string $publicId,
+        int $adminId,
+        bool $confirmed
+    ): array|false {
+        try {
+            if (!$confirmed) {
+                throw new Exception('请先确认外部备份已实际清理');
+            }
+            if (trim($publicId) === '' || $adminId <= 0) {
+                throw new Exception('注销凭据或平台管理员身份无效');
+            }
+            return Db::transaction(function () use ($publicId, $adminId) {
+                $receipt = Db::name('tenant_closure_receipt')
+                    ->where('public_id', trim($publicId))
+                    ->lock(true)
+                    ->find();
+                if (!$receipt) {
+                    throw new Exception('注销凭据不存在');
+                }
+                if (!empty($receipt['backup_deleted_at'])) {
+                    return self::formatClosureReceipt((array)$receipt);
+                }
+                if (empty($receipt['online_deleted_at']) || empty($receipt['attachments_deleted_at'])) {
+                    throw new Exception('在线数据或专属附件尚未清理完成');
+                }
+
+                $time = time();
+                Db::name('tenant_closure_receipt')->where('id', (int)$receipt['id'])->update([
+                    'status' => 'completed',
+                    'phase' => 'completed',
+                    'backup_deleted_at' => $time,
+                    'backup_purged_by_admin_id' => $adminId,
+                    'last_error_code' => '',
+                    'last_error_message' => '',
+                    'update_time' => $time,
+                ]);
+                $receipt = Db::name('tenant_closure_receipt')->where('id', (int)$receipt['id'])->find();
+                return self::formatClosureReceipt((array)$receipt);
+            });
+        } catch (\Throwable $e) {
+            self::setError($e->getMessage());
+            return false;
+        }
+    }
+
+    private static function formatClosureReceipt(array $receipt): array
+    {
+        return [
+            'public_id' => (string)$receipt['public_id'],
+            'tenant_id' => (int)$receipt['tenant_id'],
+            'status' => (string)$receipt['status'],
+            'phase' => (string)$receipt['phase'],
+            'effective_at' => (int)$receipt['effective_at'],
+            'online_deleted_at' => $receipt['online_deleted_at'] === null ? null : (int)$receipt['online_deleted_at'],
+            'attachments_deleted_at' => $receipt['attachments_deleted_at'] === null ? null : (int)$receipt['attachments_deleted_at'],
+            'backup_purge_due_at' => (int)$receipt['backup_purge_due_at'],
+            'backup_deleted_at' => $receipt['backup_deleted_at'] === null ? null : (int)$receipt['backup_deleted_at'],
+            'backup_purged_by_admin_id' => (int)$receipt['backup_purged_by_admin_id'],
+        ];
+    }
+
     /**
      * @notes 新增租户
      * @param array $params
@@ -208,6 +270,12 @@ class TenantLogic extends BaseLogic
             $adminIds = [];
             Db::transaction(function () use ($params, &$tokens, &$adminIds) {
                 $tenantId = (int)$params['id'];
+                $permanentClosure = Db::name('tenant_closure_receipt')
+                    ->where('tenant_id', $tenantId)
+                    ->count();
+                if ($permanentClosure > 0) {
+                    throw new Exception('店铺已永久注销，不能恢复');
+                }
                 $tenant = Tenant::onlyTrashed()->where('id', $tenantId)->findOrEmpty();
                 if ($tenant->isEmpty()) {
                     throw new Exception('回收站店铺不存在');

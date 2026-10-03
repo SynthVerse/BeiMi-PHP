@@ -5,6 +5,7 @@ namespace app\api\jxc\logic;
 use app\common\logic\BaseLogic;
 use app\common\model\jxc\Customer;
 use app\common\service\jxc\StoreMembershipService;
+use app\common\service\jxc\TenantClosureService;
 use app\common\service\jxc\TenantRelationService;
 use think\facade\Db;
 
@@ -270,6 +271,56 @@ class StoreLogic extends BaseLogic
                 'switch' => $needsStoreSwitch || $storeCount > 1,
             ],
         ]);
+    }
+
+    public static function closurePreview(): array|false
+    {
+        try {
+            return TenantClosureService::preview(self::currentUserId(), self::currentTenantId());
+        } catch (\Throwable $e) {
+            self::setError($e->getMessage());
+            return false;
+        }
+    }
+
+    public static function confirmTenantPermanentClosure(array $params): array|false
+    {
+        try {
+            return TenantClosureService::close(
+                self::currentUserId(),
+                self::currentTenantId(),
+                $params
+            );
+        } catch (\Throwable $e) {
+            self::setError($e->getMessage());
+            return false;
+        }
+    }
+
+    public static function closureStatus(array $params): array|false
+    {
+        try {
+            return TenantClosureService::status(
+                self::currentUserId(),
+                (string)($params['receipt_id'] ?? $params['public_id'] ?? '')
+            );
+        } catch (\Throwable $e) {
+            self::setError($e->getMessage());
+            return false;
+        }
+    }
+
+    public static function retryClosure(array $params): array|false
+    {
+        try {
+            return TenantClosureService::retry(
+                self::currentUserId(),
+                (string)($params['receipt_id'] ?? $params['public_id'] ?? '')
+            );
+        } catch (\Throwable $e) {
+            self::setError($e->getMessage());
+            return false;
+        }
     }
 
     public static function switchStore(array $params): array|false

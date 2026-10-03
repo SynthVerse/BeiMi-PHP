@@ -160,4 +160,32 @@ class UserTokenCache extends BaseCache
             $cache->deleteUserInfo((string)$token);
         }
     }
+
+    /**
+     * Refresh active session caches after the user's current tenant changes.
+     * The sessions remain valid because permanent tenant closure only removes
+     * the current tenant membership, not the user's login identity.
+     *
+     * @param int|list<int> $userIds
+     */
+    public static function refreshUserSessions(int|array $userIds): void
+    {
+        $ids = array_values(array_filter(array_unique(array_map(
+            'intval',
+            is_array($userIds) ? $userIds : [$userIds]
+        ))));
+        if ($ids === []) {
+            return;
+        }
+
+        $tokens = Db::table('la_user_session')
+            ->whereIn('user_id', $ids)
+            ->where('expire_time', '>', time())
+            ->column('token');
+        $cache = new self();
+        foreach ($tokens as $token) {
+            $cache->deleteUserInfo((string)$token);
+            $cache->setUserInfo((string)$token);
+        }
+    }
 }

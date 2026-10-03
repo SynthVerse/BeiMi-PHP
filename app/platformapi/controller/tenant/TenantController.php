@@ -1,11 +1,13 @@
 <?php
 namespace app\platformapi\controller\tenant;
 
+use app\common\cache\AdminAuthCache;
 use app\common\model\dept\TenantDept;
 use app\common\model\user\UserGroup;
 use app\common\service\jxc\DefaultDataInitService;
 use app\platformapi\controller\BaseAdminController;
 use app\platformapi\lists\tenant\TenantLists;
+use app\platformapi\lists\tenant\TenantClosureReceiptLists;
 use app\platformapi\lists\tenant\TenantRecycleLists;
 use app\platformapi\logic\setting\pay\PayConfigLogic;
 use app\platformapi\logic\setting\pay\PayWayLogic;
@@ -19,6 +21,7 @@ use app\tenantapi\logic\decorate\DecorateDataLogic;
 use app\tenantapi\logic\notice\NoticeLogic;
 use app\tenantapi\logic\user\UserGroupLogic;
 use think\facade\Db;
+use think\helper\Str;
 
 /**
  * 用户控制器
@@ -46,6 +49,45 @@ class TenantController extends BaseAdminController
     public function recycleLists()
     {
         return $this->dataLists(new TenantRecycleLists());
+    }
+
+    public function closureReceipts()
+    {
+        if (!$this->assertPlatformPermission('tenant.tenant/lists')) {
+            return $this->fail('权限不足，无法查询注销凭据');
+        }
+        return $this->dataLists(new TenantClosureReceiptLists());
+    }
+
+    public function confirmClosureBackupPurged()
+    {
+        if (!$this->assertPlatformPermission('tenant.tenant/edit')) {
+            return $this->fail('权限不足，无法登记备份清理状态');
+        }
+        $params = $this->request->post();
+        $result = TenantLogic::confirmClosureBackupPurged(
+            (string)($params['public_id'] ?? $params['receipt_id'] ?? ''),
+            $this->adminId,
+            (bool)($params['confirmed'] ?? false)
+        );
+        if ($result === false) {
+            return $this->fail(TenantLogic::getError());
+        }
+        return $this->success('备份清理状态已登记', $result, 1, 1);
+    }
+
+    private function assertPlatformPermission(string $uri): bool
+    {
+        if ((int)($this->adminInfo['root'] ?? 0) === 1) {
+            return true;
+        }
+        $target = strtolower(Str::camel($uri));
+        $permissions = (new AdminAuthCache($this->adminId))->getAdminUri() ?? [];
+        $permissions = array_map(
+            static fn ($permission): string => strtolower(Str::camel((string)$permission)),
+            $permissions
+        );
+        return in_array($target, $permissions, true);
     }
 
 
