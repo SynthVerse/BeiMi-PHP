@@ -52,6 +52,16 @@ class CustomerController extends BaseJxcController
         return $this->success('保存成功', $result, 1, 1);
     }
 
+    public function deliveryVehicleCreate()
+    {
+        $params = (new CustomerValidate())->post()->goCheck('deliveryVehicleCreate');
+        $result = CustomerDeliveryVehicleLogic::createVehicle($params);
+        if ($result === false) {
+            return $this->fail(CustomerDeliveryVehicleLogic::getError());
+        }
+        return $this->success('新增成功', $result, 1, 1);
+    }
+
     public function deliveryVehicleDelete()
     {
         $params = (new CustomerValidate())->post()->goCheck('deliveryVehicleDelete');

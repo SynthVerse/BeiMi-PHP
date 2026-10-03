@@ -163,6 +163,7 @@ Route::group('', function () {
     Route::get('customer/deliveryVehicleCustomers', 'jxc.Customer/deliveryVehicleCustomers');
     Route::get('customer/deliveryVehicles', 'jxc.Customer/deliveryVehicles');
     Route::post('customer/deliveryVehicleSave', 'jxc.Customer/deliveryVehicleSave');
+    Route::post('customer/deliveryVehicleCreate', 'jxc.Customer/deliveryVehicleCreate');
     Route::post('customer/deliveryVehicleDelete', 'jxc.Customer/deliveryVehicleDelete');
     Route::get('customer/children', 'jxc.Customer/children');
     Route::get('customer/summary', 'jxc.Customer/summary');

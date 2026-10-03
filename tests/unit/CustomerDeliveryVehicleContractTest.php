@@ -19,11 +19,12 @@ final class CustomerDeliveryVehicleContractTest extends TestCase
             "Route::get('customer/deliveryVehicleCustomers', 'jxc.Customer/deliveryVehicleCustomers');",
             "Route::get('customer/deliveryVehicles', 'jxc.Customer/deliveryVehicles');",
             "Route::post('customer/deliveryVehicleSave', 'jxc.Customer/deliveryVehicleSave');",
+            "Route::post('customer/deliveryVehicleCreate', 'jxc.Customer/deliveryVehicleCreate');",
             "Route::post('customer/deliveryVehicleDelete', 'jxc.Customer/deliveryVehicleDelete');",
         ] as $route) {
             self::assertStringContainsString($route, $routes);
         }
-        foreach (['deliveryVehicleIndex', 'deliveryVehicleCustomers', 'deliveryVehicles', 'deliveryVehicleSave', 'deliveryVehicleDelete'] as $method) {
+        foreach (['deliveryVehicleIndex', 'deliveryVehicleCustomers', 'deliveryVehicles', 'deliveryVehicleSave', 'deliveryVehicleCreate', 'deliveryVehicleDelete'] as $method) {
             self::assertStringContainsString('public function ' . $method . '()', $controller);
         }
         self::assertStringContainsString("'delivery_vehicles' => CustomerDeliveryVehicleLogic::lists", $customerLogic);

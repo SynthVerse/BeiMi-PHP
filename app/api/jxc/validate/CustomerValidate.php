@@ -218,6 +218,12 @@ class CustomerValidate extends BaseValidate
             ->append('vehicle_location', 'require');
     }
 
+    public function sceneDeliveryVehicleCreate()
+    {
+        return $this->only(['plate_number', 'driver_phone'])
+            ->append('plate_number', 'require');
+    }
+
     public function sceneDeliveryVehicleDelete()
     {
         return $this->only(['id', 'version'])

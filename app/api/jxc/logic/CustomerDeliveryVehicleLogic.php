@@ -118,11 +118,11 @@ final class CustomerDeliveryVehicleLogic extends BaseLogic
         $status = strtolower(trim((string)($params['status'] ?? 'all')));
         $query = Db::name('delivery_vehicle')
             ->alias('vehicle')
-            ->join(
+            ->leftJoin(
                 'customer_delivery_vehicle binding',
                 'binding.vehicle_id=vehicle.id AND binding.tenant_id=vehicle.tenant_id AND binding.delete_time IS NULL'
             )
-            ->join(
+            ->leftJoin(
                 'customer customer',
                 'customer.id=binding.customer_id AND customer.tenant_id=binding.tenant_id'
             )
@@ -151,7 +151,7 @@ final class CustomerDeliveryVehicleLogic extends BaseLogic
                 'vehicle.version',
                 'vehicle.create_time',
                 'vehicle.update_time',
-                'COUNT(DISTINCT binding.customer_id)' => 'bound_customer_count',
+                'COUNT(DISTINCT customer.id)' => 'bound_customer_count',
                 'MIN(binding.earliest_delivery_time)' => 'earliest_delivery_time',
             ])
             ->group('vehicle.id')
@@ -253,6 +253,59 @@ final class CustomerDeliveryVehicleLogic extends BaseLogic
                 ];
             }, $rows),
         ];
+    }
+
+    public static function createVehicle(array $params): array|false
+    {
+        self::clearError();
+        $plate = strtoupper(trim((string)($params['plate_number'] ?? '')));
+        $phone = trim((string)($params['driver_phone'] ?? ''));
+        if ($plate === '' || mb_strlen($plate) > 32) {
+            self::setError($plate === '' ? '请输入车辆车牌号' : '车辆车牌号最多 32 字');
+            return false;
+        }
+        if ($phone !== '' && !preg_match('/^[0-9+\-\s]{6,20}$/', $phone)) {
+            self::setError('请输入正确的司机电话');
+            return false;
+        }
+        $tenantId = self::tenantId();
+        if ($tenantId <= 0) {
+            self::setError('租户无效');
+            return false;
+        }
+        try {
+            return Db::transaction(static function () use ($plate, $phone, $tenantId) {
+                // 唯一键覆盖并发创建；已有主档不因再次新增而被改写。
+                if (Db::name('delivery_vehicle')->where('tenant_id', $tenantId)->where('plate_number', $plate)->find()) {
+                    self::setError('该车牌已存在，请在车辆列表中查看');
+                    return false;
+                }
+                $now = time();
+                $id = (int)Db::name('delivery_vehicle')->insertGetId([
+                    'tenant_id' => $tenantId,
+                    'plate_number' => $plate,
+                    'driver_phone' => $phone,
+                    'is_enabled' => 1,
+                    'operator_id' => self::operatorId(),
+                    'version' => 1,
+                    'create_time' => $now,
+                    'update_time' => $now,
+                ]);
+                $vehicle = self::findVehicle($id, $tenantId);
+                if (!$vehicle) {
+                    throw new \RuntimeException('delivery_vehicle_insert_failed');
+                }
+                AuditService::logWithinTransaction(
+                    'delivery_vehicle', 'create', $id, 'delivery-vehicle:' . $id . ':v1',
+                    null, $vehicle, '新增车辆档案'
+                );
+                return self::formatVehicle($vehicle);
+            });
+        } catch (\Throwable $e) {
+            Log::error('车辆档案新增失败: ' . $e->getMessage());
+            self::setError('新增车辆失败，请稍后重试');
+            return false;
+        }
     }
 
     public static function save(array $params): array|false

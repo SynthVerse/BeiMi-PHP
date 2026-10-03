@@ -57,6 +57,54 @@ final class CustomerDeliveryVehicleTest extends TestCase
         self::assertSame((int)$vehicle['id'], (int)$detail['delivery_vehicles'][0]['id']);
     }
 
+    public function test_vehicle_can_be_created_without_customer_and_bound_later(): void
+    {
+        $vehicle = CustomerDeliveryVehicleLogic::createVehicle(['plate_number' => ' 粤a12345 ']);
+        self::assertNotFalse($vehicle, CustomerDeliveryVehicleLogic::getError());
+        self::assertSame('粤A12345', $vehicle['plate_number']);
+        self::assertSame('', $vehicle['driver_phone']);
+        $list = CustomerDeliveryVehicleLogic::crossCustomerLists(['status' => 'enabled']);
+        self::assertSame(1, $list['total']);
+        self::assertSame((int)$vehicle['id'], (int)$list['data'][0]['id']);
+        self::assertSame(0, $list['data'][0]['bound_customer_count']);
+        self::assertSame([], CustomerDeliveryVehicleLogic::vehicleCustomers(['id' => $vehicle['id']])['customers']);
+
+        self::assertFalse(CustomerDeliveryVehicleLogic::createVehicle([
+            'plate_number' => '粤a12345', 'driver_phone' => '13800000001',
+        ]));
+        self::assertSame('该车牌已存在，请在车辆列表中查看', CustomerDeliveryVehicleLogic::getError());
+        self::assertSame('', CustomerDeliveryVehicleLogic::vehicleCustomers(['id' => $vehicle['id']])['vehicle']['driver_phone']);
+
+        $customerId = $this->createCustomer('独立建档后绑定');
+        $binding = CustomerDeliveryVehicleLogic::save([
+            'customer_id' => $customerId, 'vehicle_id' => $vehicle['id'],
+            'plate_number' => '粤A12345', 'earliest_delivery_time' => '05:30', 'vehicle_location' => '东门',
+        ]);
+        self::assertNotFalse($binding, CustomerDeliveryVehicleLogic::getError());
+        self::assertSame((int)$vehicle['id'], (int)$binding['vehicle_id']);
+        self::assertSame(1, CustomerDeliveryVehicleLogic::crossCustomerLists([])['total']);
+    }
+
+    public function test_unbound_vehicle_creation_and_search_are_tenant_scoped(): void
+    {
+        $first = CustomerDeliveryVehicleLogic::createVehicle([
+            'plate_number' => '粤A10001', 'driver_phone' => '13800000001',
+            'tenant_id' => self::OTHER_TENANT_ID,
+        ]);
+        self::assertNotFalse($first, CustomerDeliveryVehicleLogic::getError());
+        self::assertSame(1, CustomerDeliveryVehicleLogic::crossCustomerLists(['keyword' => '13800000001'])['total']);
+        self::assertSame(0, CustomerDeliveryVehicleLogic::crossCustomerLists(['status' => 'disabled'])['total']);
+        $this->prepareCustomerReportRequestContext(self::OTHER_TENANT_ID);
+        self::assertSame(0, CustomerDeliveryVehicleLogic::crossCustomerLists([])['total']);
+        self::assertFalse(CustomerDeliveryVehicleLogic::vehicleCustomers(['id' => $first['id']]));
+        $second = CustomerDeliveryVehicleLogic::createVehicle(['plate_number' => '粤A10001']);
+        self::assertNotFalse($second, CustomerDeliveryVehicleLogic::getError());
+        self::assertNotSame((int)$first['id'], (int)$second['id']);
+        self::assertSame(1, CustomerDeliveryVehicleLogic::crossCustomerLists(['keyword' => '粤A10001'])['total']);
+        $this->prepareCustomerReportRequestContext();
+        self::assertSame((int)$first['id'], (int)CustomerDeliveryVehicleLogic::crossCustomerLists([])['data'][0]['id']);
+    }
+
     public function test_same_plate_is_one_vehicle_bound_to_multiple_customers(): void
     {
         $firstCustomerId = $this->createCustomer('海鲜城东门店');
@@ -388,7 +436,7 @@ final class CustomerDeliveryVehicleTest extends TestCase
             ->delete();
         Db::name('delivery_vehicle')
             ->where('tenant_id', self::OTHER_TENANT_ID)
-            ->where('plate_number', '粤B00001')
+            ->whereIn('plate_number', ['粤B00001', '粤A10001'])
             ->delete();
         Db::name('customer')
             ->where('tenant_id', self::OTHER_TENANT_ID)

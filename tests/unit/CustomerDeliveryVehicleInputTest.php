@@ -10,6 +10,16 @@ use PHPUnit\Framework\TestCase;
 
 final class CustomerDeliveryVehicleInputTest extends TestCase
 {
+    public function test_independent_vehicle_create_requires_only_plate_and_valid_optional_phone(): void
+    {
+        self::assertTrue((new CustomerValidate())->scene('deliveryVehicleCreate')->check(['plate_number' => '粤A12345']));
+        self::assertFalse((new CustomerValidate())->scene('deliveryVehicleCreate')->check([]));
+        self::assertFalse(CustomerDeliveryVehicleLogic::createVehicle(['plate_number' => ' ']));
+        self::assertSame('请输入车辆车牌号', CustomerDeliveryVehicleLogic::getError());
+        self::assertFalse(CustomerDeliveryVehicleLogic::createVehicle(['plate_number' => '粤A12345', 'driver_phone' => '123']));
+        self::assertSame('请输入正确的司机电话', CustomerDeliveryVehicleLogic::getError());
+    }
+
     public function test_http_save_accepts_new_binding_without_ids_but_rejects_zero_identity_fields(): void
     {
         $payload = [
