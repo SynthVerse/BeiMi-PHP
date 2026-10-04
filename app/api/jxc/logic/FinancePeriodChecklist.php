@@ -56,6 +56,15 @@ final class FinancePeriodChecklist
                     $delivery + ['customer_id' => (int)$customer, 'route' => '/sub-finance/sales/edit?type=sales_batch&subject_id=' . (int)$customer]);
             }
         }
+        $replacedReturns = Db::name('finance_correction')->where('tenant_id', $tenant)->field('original_document_id')->buildSql();
+        foreach (Db::name('finance_customer_return')->where('tenant_id', $tenant)->where('business_date', '<=', $cutoff)
+            ->whereRaw('document_id NOT IN ' . $replacedReturns)->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(snapshot,'$.disposition_status'))='pending'")->select()->toArray() as $return) {
+            $fact = FinanceValue::decode($return['snapshot']);
+            if (!empty($fact['loss_incident_document_id'])) { continue; } // 已进入同一清单的损耗待核/成本待核链，不重复列示。
+            $items[] = self::item('customer_return_disposition', (string)$return['document_id'], '退回实物已隔离，实际去向与原销售成本尚待核清', 'blocking',
+                ['document_id' => (int)$return['document_id'], 'quantity' => $return['quantity'], 'disposition' => $fact['disposition'],
+                    'route' => '/sub-finance/sales/return?type=customer_return_actual&id=' . $return['document_id']]);
+        }
         self::costItems($items, $cutoff);
         foreach (FinanceInventoryCounts::unresolved($cutoff) as $count) {
             $items[] = self::item('inventory_count', (string)$count['document_id'], '盘点差异原因或截止成本仍待核实', 'blocking',

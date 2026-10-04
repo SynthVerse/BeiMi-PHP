@@ -128,7 +128,7 @@ final class CustomerReportProcessingGroupTest extends TestCase
         ]));
         self::assertSame('提交的加工组与当前报货单不一致，请刷新后重试', CustomerReportLogic::getError());
         self::assertSame(
-            ['0.00', '0.00'],
+            ['0.0000', '0.0000'],
             Db::name('customer_report_processing_group')->where('report_id', (int)$report['id'])
                 ->order('sort')->column('final_actual_weight')
         );
@@ -142,8 +142,8 @@ final class CustomerReportProcessingGroupTest extends TestCase
         ]);
 
         self::assertNotFalse($weighted, CustomerReportLogic::getError());
-        self::assertSame('9.90', $weighted['items'][0]['final_actual_weight']);
+        self::assertSame('9.9000', $weighted['items'][0]['final_actual_weight']);
         self::assertSame('final_weight_recorded', $weighted['items'][0]['fulfillment_status']);
-        self::assertSame(['6.80', '3.10'], array_column($weighted['items'][0]['processing_groups'], 'final_actual_weight'));
+        self::assertSame(['6.8000', '3.1000'], array_column($weighted['items'][0]['processing_groups'], 'final_actual_weight'));
     }
 }

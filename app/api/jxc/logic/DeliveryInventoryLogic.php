@@ -12,9 +12,17 @@ final class DeliveryInventoryLogic extends BaseLogic
 {
     private const SCALE = 4;
 
+    public static function confirmCounterPickup(array $params): array|false
+    {
+        $params['event_type'] = 'counter_customer_handoff';
+        return self::confirmVariant($params, 'counter_pickup', 'counter_customer_handoff');
+    }
+
     /** @return array<string,mixed>|false */
     public static function confirmSelfDelivery(array $params): array|false
     {
+        try { $params = DeliveryQuantityFacts::prepare($params); }
+        catch (\DomainException $e) { self::setError($e->getMessage()); return false; }
         if (array_key_exists('items', $params)) {
             $params['event_type'] = (string)($params['event_type'] ?? 'customer_handoff');
             return self::confirmVariant($params, 'self_delivery', 'customer_handoff');
@@ -25,6 +33,8 @@ final class DeliveryInventoryLogic extends BaseLogic
     /** @return array<string,mixed>|false */
     public static function confirmFixedLineHandoff(array $params): array|false
     {
+        try { $params = DeliveryQuantityFacts::prepare($params); }
+        catch (\DomainException $e) { self::setError($e->getMessage()); return false; }
         $params['event_type'] = 'line_vehicle_handoff';
         if (array_key_exists('items', $params)) {
             return self::confirmVariant($params, 'fixed_line_vehicle', 'line_vehicle_handoff');
@@ -617,6 +627,7 @@ final class DeliveryInventoryLogic extends BaseLogic
             $item['sales_order_id'] = (int)$item['sales_order_id'];
             $item['report_item_id'] = (int)$item['report_item_id'];
             foreach (['actual_delivery_weight', 'loss_weight', 'undelivered_weight', 'reservation_consumed_qty', 'reservation_released_qty', 'negative_qty'] as $field) {
+                if ($field === 'actual_delivery_weight' && (int)($item['fact_version'] ?? 1) === 2 && $item[$field] === null) { continue; }
                 $item[$field] = self::decimal((string)($item[$field] ?? '0'));
             }
         }

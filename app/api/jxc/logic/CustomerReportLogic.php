@@ -14,8 +14,8 @@ use think\facade\Db;
 /** 独立客户报货状态机：提交、补预留、版本编辑、取消和实际履约。 */
 class CustomerReportLogic extends BaseLogic
 {
-    private const SCALE = 2;
-    private const SUBMITTED = ['submitted_ready', 'submitted_shortage'];
+    private const SCALE = 4;
+    private const SUBMITTED = ['submitted_ready', 'submitted_shortage', 'submitted_pending_measurement'];
     private const GROUPED_SUBMIT_ROLLBACK_CODE = 40901;
 
     /** @return array<string,mixed>|false */
@@ -459,6 +459,9 @@ class CustomerReportLogic extends BaseLogic
                 if ((int)$report->version !== $version || (string)$report->status === 'completed') {
                     self::setError('报货单不存在、版本冲突或不可取消'); return false;
                 }
+                if (Db::name('customer_report_processing_group')->where('tenant_id', self::tenantId())->where('report_id', $reportId)->where('processing_loss_flow_id', '>', 0)->count() > 0) {
+                    self::setError('该报货已经实际加工，请先核清未交实物去向，不能取消后恢复可售'); return false;
+                }
                 Db::name('fulfillment_task_group')->where('tenant_id', self::tenantId())
                     ->where('report_id', $reportId)->lock(true)->find();
                 $tasks = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())
@@ -513,6 +516,16 @@ class CustomerReportLogic extends BaseLogic
         self::clearError();
         if (!WorkforceLogic::requirePermission('settlement.weight')) {
             return false;
+        }
+        if (Db::name('customer_report_item')->where('tenant_id', self::tenantId())->where('report_id', (int)($params['id'] ?? 0))
+            ->where('quantity_contract_version', 2)->whereNull('delete_time')->count() > 0) {
+            try {
+                CustomerReportQuantityService::save($params);
+                return self::detailById((int)$params['id']);
+            } catch (\Throwable $e) {
+                self::setError($e instanceof \DomainException ? $e->getMessage() : '数量事实保存失败，请核实原报货状态后重试');
+                return false;
+            }
         }
         $reportId = (int)($params['id'] ?? 0);
         $version = (int)($params['version'] ?? 0);
@@ -622,9 +635,10 @@ class CustomerReportLogic extends BaseLogic
     /** @param array<string,mixed> $line @return array<string,mixed> */
     private static function createItem(int $reportId, array $line, int $now): array
     {
-        $reserved=WarehouseSkuBalanceService::reserveUpToWithinTransaction((int)$line['warehouse_id'],(int)$line['sku_id'],(string)$line['expected_base_qty']);
+        $reserved=($line['estimate_status'] ?? '') === 'unknown' ? '0.0000' : WarehouseSkuBalanceService::reserveUpToWithinTransaction((int)$line['warehouse_id'],(int)$line['sku_id'],(string)$line['expected_base_qty']);
         if ($reserved===false) { throw new \RuntimeException('reserve_failed'); }
         $shortage=bcsub((string)$line['expected_base_qty'],$reserved,self::SCALE); $status=bccomp($shortage,'0.00',self::SCALE)===0?'submitted_ready':'submitted_shortage';
+        if (($line['estimate_status'] ?? '') === 'unknown') { $status = 'submitted_pending_measurement'; }
         $groups = (array)($line['processing_groups'] ?? []);
         $data=$line; unset($data['client_line_id'], $data['processing_groups']);
         $itemId = (int)Db::name('customer_report_item')->insertGetId($data+['tenant_id'=>self::tenantId(),'report_id'=>$reportId,'reserved_base_qty'=>$reserved,'shortage_base_qty'=>$shortage,'fulfilled_base_qty'=>'0.00','status'=>$status,'create_time'=>$now,'update_time'=>$now]);
@@ -636,6 +650,7 @@ class CustomerReportLogic extends BaseLogic
     /** @param array<string,mixed> $old @param array<string,mixed> $line @return array<string,mixed> */
     private static function updateItem(int $itemId, array $old, array $line, int $now): array
     {
+        if (TradeQuantityService::snapshot($old)) { throw new \DomainException('已核实实物数量不能通过报货编辑覆盖，请走关联更正'); }
         $oldReserved=self::decimal((string)$old['reserved_base_qty']); $target=(string)$line['expected_base_qty'];
         if ((int)$old['warehouse_id']===(int)$line['warehouse_id'] && (int)$old['sku_id']===(int)$line['sku_id']) {
             $delta=bcsub($target,$oldReserved,self::SCALE);
@@ -645,6 +660,7 @@ class CustomerReportLogic extends BaseLogic
             self::releaseLine($old); $reserved=WarehouseSkuBalanceService::reserveUpToWithinTransaction((int)$line['warehouse_id'],(int)$line['sku_id'],$target); if ($reserved===false) { throw new \RuntimeException('reserve_failed'); }
         }
         $shortage=bcsub($target,$reserved,self::SCALE); $status=bccomp($shortage,'0.00',self::SCALE)===0?'submitted_ready':'submitted_shortage';
+        if (($line['estimate_status'] ?? '') === 'unknown') { $status = 'submitted_pending_measurement'; }
         $groups = (array)($line['processing_groups'] ?? []);
         $data=$line; unset($data['client_line_id'], $data['processing_groups']);
         CustomerReportItem::where('tenant_id',self::tenantId())->where('id',$itemId)->update($data+['reserved_base_qty'=>$reserved,'shortage_base_qty'=>$shortage,'status'=>$status,'update_time'=>$now]);
@@ -664,7 +680,8 @@ class CustomerReportLogic extends BaseLogic
     {
         $total='0.00';$reserved='0.00';$shortage='0.00';
         foreach($rows as $row){$total=bcadd($total,self::decimal((string)$row['expected_base_qty']),self::SCALE);$reserved=bcadd($reserved,self::decimal((string)$row['reserved_base_qty']),self::SCALE);$shortage=bcadd($shortage,self::decimal((string)$row['shortage_base_qty']),self::SCALE);}
-        return ['total_base_qty'=>$total,'reserved_base_qty'=>$reserved,'shortage_base_qty'=>$shortage,'status'=>bccomp($shortage,'0.00',self::SCALE)===0?'submitted_ready':'submitted_shortage'];
+        $unknown = count(array_filter($rows, static fn(array $row): bool => ($row['estimate_status'] ?? '') === 'unknown')) > 0;
+        return ['total_base_qty'=>$total,'reserved_base_qty'=>$reserved,'shortage_base_qty'=>$shortage,'status'=>$unknown?'submitted_pending_measurement':(bccomp($shortage,'0.00',self::SCALE)===0?'submitted_ready':'submitted_shortage')];
     }
     /** @param array<int,array<string,mixed>> $items @return array<int,array<string,mixed>> */
     private static function orderedForBalanceLocks(array $items): array
@@ -803,10 +820,18 @@ class CustomerReportLogic extends BaseLogic
         $report=CustomerReport::where('tenant_id',self::tenantId())->where('id',$id)->find();
         if (!$report) { self::setError('客户报货单不存在'); return false; }
         $data=$report->toArray();
+        $data['capabilities'] = ['quantity_contract_version' => 2, 'independent_quantity_facts' => true, 'atomic_delivery_groups' => true,
+            'complex_processing' => false, 'batch_expiry_control' => false];
         $data['delivery_arrangement'] = CustomerReportDeliveryArrangementService::fromRow($data);
         $data['items']=CustomerReportItem::where('tenant_id',self::tenantId())->where('report_id',$id)->whereNull('delete_time')->order('sort asc,id asc')->select()->toArray();
         foreach ($data['items'] as &$item) {
             $item['processing_groups'] = self::processingGroupsForItem((int)$item['id']);
+            $facts = TradeQuantityService::snapshot($item);
+            if ($facts) { $item += $facts; $item['actual_delivery_weight'] = $facts['actual_delivery_weight']; }
+            if (($item['estimate_status'] ?? '') === 'unknown') {
+                $item['expected_base_qty'] = null; $item['shortage_base_qty'] = null;
+                $item['reservation_status'] = 'pending_measurement';
+            }
         }
         unset($item);
         $data['sales_orders'] = self::salesOrdersByReport($id);
@@ -848,6 +873,12 @@ class CustomerReportLogic extends BaseLogic
         $groups = Db::name('customer_report_processing_group')->where('tenant_id', self::tenantId())
             ->where('report_item_id', $itemId)->order(['sort' => 'asc', 'id' => 'asc'])->select()->toArray();
         foreach ($groups as &$group) {
+            $facts = TradeQuantityService::snapshot($group);
+            if ($facts) {
+                $group += $facts;
+                $group['delivered'] = Db::name('fulfillment_delivery_item')->where('tenant_id', self::tenantId())
+                    ->where('delivery_group_key', $facts['delivery_group_key'])->count() > 0;
+            }
             $group['processes'] = Db::name('customer_report_processing_group_process')->where('tenant_id', self::tenantId())
                 ->where('processing_group_id', (int)$group['id'])->order(['step_no' => 'asc', 'id' => 'asc'])->select()->toArray();
         }
@@ -861,6 +892,7 @@ class CustomerReportLogic extends BaseLogic
         $canEditReport = WorkforceLogic::hasPermission('report.edit');
         $canBill = WorkforceLogic::hasPermission('settlement.bill');
         $canRecordWeight = WorkforceLogic::hasPermission('settlement.weight');
+        $usesQuantityFacts = $items !== [] && count(array_filter($items, static fn(array $item): bool => (int)($item['quantity_contract_version'] ?? 1) === 2)) === count($items);
         $hasActivePurchasePlanSource = self::hasActivePurchasePlanSource($reportId);
         $conversion = $canBill
             ? self::conversionReadiness($reportId, $report, $items)
@@ -886,11 +918,11 @@ class CustomerReportLogic extends BaseLogic
             ],
             'record_processing_weights' => [
                 'allowed' => $canRecordWeight
-                    && in_array((string)($report['status'] ?? ''), self::SUBMITTED, true)
-                    && bccomp((string)($report['shortage_base_qty'] ?? '0'), '0', self::SCALE) === 0
+                    && (in_array((string)($report['status'] ?? ''), self::SUBMITTED, true) || ($usesQuantityFacts && ($report['status'] ?? '') === 'partially_delivered_pending'))
+                    && ($usesQuantityFacts || bccomp((string)($report['shortage_base_qty'] ?? '0'), '0', self::SCALE) === 0)
                     && $items !== []
                     && count(array_filter($items, static fn(array $item): bool => (array)($item['processing_groups'] ?? []) !== [])) === count($items)
-                    && !DeliveryInventoryLogic::hasCompletedDelivery($reportId),
+                    && ($usesQuantityFacts || !DeliveryInventoryLogic::hasCompletedDelivery($reportId)),
                 'blocked_reason' => !$canRecordWeight
                     ? '没有录入最终实重的电子权限'
                     : (bccomp((string)($report['shortage_base_qty'] ?? '0'), '0', self::SCALE) !== 0
@@ -1091,7 +1123,11 @@ class CustomerReportLogic extends BaseLogic
         $isSupplement = (int)($params['is_supplement'] ?? 0) === 1;
         $batchId = (int)($params['batch_id'] ?? 0);
         $supplementForReportId = (int)($params['supplement_for_report_id'] ?? 0);
-        $items = CustomerReportLineService::normalizeItems((array)($params['items'] ?? []), (int)($params['main_customer_id'] ?? 0));
+        $inputItems = (array)($params['items'] ?? []);
+        if ((int)($params['quantity_contract_version'] ?? 1) === 2) {
+            $inputItems = array_map(static fn(array $item): array => $item + ['quantity_contract_version' => 2], $inputItems);
+        }
+        $items = CustomerReportLineService::normalizeItems($inputItems, (int)($params['main_customer_id'] ?? 0));
         if ($items === false) {
             self::setError(CustomerReportLineService::getError());
             return false;

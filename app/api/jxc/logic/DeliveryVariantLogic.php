@@ -20,6 +20,8 @@ final class DeliveryVariantLogic extends BaseLogic
             self::setError(WorkforceLogic::getError());
             return false;
         }
+        try { $params = DeliveryQuantityFacts::prepare($params); }
+        catch (\DomainException $e) { self::setError($e->getMessage()); return false; }
         $items = self::normalizeRequestedItems($params['items'] ?? null);
         if ($items === false) {
             return false;
@@ -179,6 +181,7 @@ final class DeliveryVariantLogic extends BaseLogic
                     if ($deliveryMethod !== 'fixed_line_vehicle'
                         && (string)$arrangement['delivery_method'] !== $deliveryMethod) {
                         $methodLabel = match ($deliveryMethod) {
+                            'counter_pickup' => '当场提货',
                             'customer_vehicle' => '客户车辆交付',
                             'third_party' => '第三方即时配送',
                             default => '自配送',
@@ -380,7 +383,8 @@ final class DeliveryVariantLogic extends BaseLogic
                             (string)($afterAvailable ?? $beforeAvailable ?? '0.0000')
                         );
 
-                        $deliveryItemId = (int)Db::name('fulfillment_delivery_item')->insertGetId([
+                        GoodsPackagingSourceService::consume((array)($row['delivery_groups'] ?? []), $item);
+                        $deliveryItemId = DeliveryQuantityFacts::insert([
                             'tenant_id' => self::tenantId(), 'delivery_event_id' => $eventId,
                             'sales_order_id' => $order ? (int)$order['id'] : 0,
                             'report_id' => (int)$report['id'],
@@ -391,7 +395,7 @@ final class DeliveryVariantLogic extends BaseLogic
                             'remaining_action' => (string)$row['remaining_action'],
                             'reservation_consumed_qty' => $consumed, 'reservation_released_qty' => $released,
                             'negative_qty' => $negativeQty, 'create_time' => $now,
-                        ]);
+                        ], (array)($row['delivery_groups'] ?? []));
                         if ($deliveryItemId <= 0) {
                             throw new \RuntimeException('delivery_variant_item_insert_failed');
                         }
@@ -443,7 +447,12 @@ final class DeliveryVariantLogic extends BaseLogic
                             || $hasLoss
                             || bccomp($undelivered, '0.0000', self::SCALE) > 0
                             || bccomp((string)$item['fulfilled_base_qty'], '0.0000', self::SCALE) > 0;
-                        if (bccomp($remainingAfter, '0.0000', self::SCALE) > 0) {
+                        $quantitySnapshot = TradeQuantityService::snapshot($item);
+                        $pendingDemand = $quantitySnapshot && (!empty($quantitySnapshot['has_unmeasured_groups'])
+                            || (($quantitySnapshot['remaining_order_quantity'] ?? null) !== null
+                                && bccomp($quantitySnapshot['remaining_order_quantity'], '0', 4) > 0));
+                        $partial = $partial || $pendingDemand;
+                        if ($pendingDemand || bccomp($remainingAfter, '0.0000', self::SCALE) > 0) {
                             $itemStatus = 'partially_delivered_pending';
                         } elseif (bccomp($nextDelivered, '0.0000', self::SCALE) <= 0 && $hasLoss) {
                             $itemStatus = 'delivery_exception_completed';
@@ -484,10 +493,14 @@ final class DeliveryVariantLogic extends BaseLogic
                     $totalDelivered = '0.0000';
                     $totalLoss = '0.0000';
                     foreach ($freshItems as $fresh) {
+                        $quantitySnapshot = TradeQuantityService::snapshot($fresh);
+                        if ($quantitySnapshot && (!empty($quantitySnapshot['has_unmeasured_groups'])
+                            || (($quantitySnapshot['remaining_order_quantity'] ?? null) !== null
+                                && bccomp($quantitySnapshot['remaining_order_quantity'], '0', 4) > 0))) { $unresolved = true; }
                         $totalDelivered = bcadd($totalDelivered, (string)$fresh['fulfilled_base_qty'], self::SCALE);
                         $totalLoss = bcadd($totalLoss, (string)($fresh['delivery_loss_total_qty'] ?? '0'), self::SCALE);
                         $remaining = bcsub(
-                            (string)$fresh['final_actual_weight'],
+                            DeliveryQuantityFacts::baseQuantity($fresh),
                             bcadd((string)$fresh['fulfilled_base_qty'], bcadd(
                                 (string)($fresh['delivery_loss_total_qty'] ?? '0'),
                                 (string)($fresh['undelivered_total_qty'] ?? '0'), self::SCALE
@@ -638,6 +651,9 @@ final class DeliveryVariantLogic extends BaseLogic
             }
             $seen[$itemId] = true;
             $normalized[] = [
+                'fact_version' => (int)($row['fact_version'] ?? 1),
+                'delivery_group_ids' => (array)($row['delivery_group_ids'] ?? []),
+                'facts_version' => (int)($row['facts_version'] ?? 0),
                 'report_item_id' => $itemId, 'actual_delivery_weight' => $actual,
                 'loss_weight' => $loss, 'loss_package_count' => $lossPackages,
                 'loss_reason' => $lossReason, 'remaining_action' => $action,
@@ -672,8 +688,21 @@ final class DeliveryVariantLogic extends BaseLogic
                 self::setError('每条交付明细必须先完成最终称重');
                 return false;
             }
+            if ((int)($item['quantity_contract_version'] ?? 1) === 2) {
+                try {
+                    if ((int)($requestItem['fact_version'] ?? 1) !== 2) { throw new \DomainException('请升级客户端后确认独立数量交付'); }
+                    $groups = DeliveryQuantityFacts::selectedGroups($item, $requestItem['delivery_group_ids']);
+                    $total = '0.0000';
+                    foreach ($groups as $group) {
+                        if ((int)$group['version'] !== (int)$requestItem['facts_version']) { throw new \DomainException('称重事实已更新，请核对最新版本后交付'); }
+                        $total = bcadd($total, $group['inventory_base_quantity'], 4);
+                    }
+                    if (bccomp($total, $requestItem['actual_delivery_weight'], 4) !== 0) { throw new \DomainException('交付数量与已核实子组不一致'); }
+                    $requestItem['delivery_groups'] = $groups;
+                } catch (\DomainException $e) { self::setError($e->getMessage()); return false; }
+            }
             $remaining = bcsub(
-                self::decimal((string)$item['final_actual_weight']),
+                self::decimal(DeliveryQuantityFacts::baseQuantity($item)),
                 bcadd(self::decimal((string)$item['fulfilled_base_qty']), bcadd(
                     self::decimal((string)($item['delivery_loss_total_qty'] ?? '0')),
                     self::decimal((string)($item['undelivered_total_qty'] ?? '0')), self::SCALE
@@ -990,6 +1019,7 @@ final class DeliveryVariantLogic extends BaseLogic
             }
             foreach (['actual_delivery_weight', 'loss_weight', 'undelivered_weight',
                 'reservation_consumed_qty', 'reservation_released_qty', 'negative_qty'] as $field) {
+                if ($field === 'actual_delivery_weight' && (int)($item['fact_version'] ?? 1) === 2 && $item[$field] === null) { continue; }
                 $item[$field] = self::decimal((string)($item[$field] ?? '0'));
             }
         }

@@ -21,7 +21,8 @@ final class FinanceStockCosts
             $date = date('Y-m-d', $occurred);
         }
         $event = ['reference' => $reference, 'sku_id' => (int)$flow['sku_id'], 'warehouse_id' => (int)$flow['warehouse_id'],
-            'business_date' => $date, 'quantity' => (string)$flow['quantity'], 'snapshot' => ['stock_flow_id' => $id, 'order_type' => $flow['order_type'], 'order_id' => (int)$flow['order_id']]];
+            'business_date' => $date, 'quantity' => (string)$flow['quantity'], 'snapshot' => ['stock_flow_id' => $id, 'order_type' => $flow['order_type'], 'order_id' => (int)$flow['order_id'],
+                'occurred_at' => $occurred ?? (int)$flow['create_time'], 'delivery_event_id' => (int)($context['delivery_event_id'] ?? 0)]];
         if (in_array($flow['order_type'], ['finance_inventory_loss', 'finance_purchase_arrival', 'finance_purchase_return', 'finance_purchase_return_back'], true)) {
             $event['business_date'] = FinanceValue::date($context['business_date'] ?? null);
             $event['document_id'] = FinanceValue::id($context['document_id'] ?? null);

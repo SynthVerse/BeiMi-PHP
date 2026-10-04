@@ -24,7 +24,14 @@ final class FinanceCustomerReturnCorrections
         $refund = Db::name('finance_document')->where('tenant_id', $tenant)->where('type', 'customer_refund')->where('status', 'confirmed')
             ->whereRaw('id NOT IN ' . $replaced)->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(confirmed_result,'$.return_context.document_id'))=?", [(string)$original['id']])->find();
         if ($refund) { throw new \DomainException('原验收仍关联有效退款，请先核对并更正退款的实物关联，不能自动改变真实退款'); }
-        $used = (string)Db::name('finance_inventory_count_correction')->where('tenant_id', $tenant)->where('stock_flow_id', $fact['stock_flow_id'])->sum('quantity');
+        foreach (Db::name('finance_document')->where('tenant_id', $tenant)->where('type', 'sales_batch')->where('status', 'confirmed')->whereRaw('id NOT IN ' . $replaced)->select()->toArray() as $sale) {
+            foreach (FinanceValue::decode($sale['confirmed_result'])['lines'] ?? [] as $line) {
+                foreach ($line['return_adjustments'] ?? [] as $adjustment) {
+                    if ((int)$adjustment['return_document_id'] === (int)$original['id']) { throw new \DomainException('原退货已关联有效金额冲减，请先更正该销售金额的退货关联'); }
+                }
+            }
+        }
+        $used = empty($fact['stock_flow_id']) ? '0' : (string)Db::name('finance_inventory_count_correction')->where('tenant_id', $tenant)->where('stock_flow_id', $fact['stock_flow_id'])->sum('quantity');
         if (bccomp($used, '0', 4) > 0) { throw new \DomainException('原验收已关联盘点反向，请先撤回盘点关联后更正实物'); }
         $input = FinanceValue::decode($replacement['payload']);
         if (!$reverseOnly) {
@@ -33,7 +40,8 @@ final class FinanceCustomerReturnCorrections
                 if (FinanceValue::id($input[$key] ?? null, true) !== $source[$key]) { throw new \DomainException('替代验收依据已有变化，请重新读取原销售及成本'); }
             }
         }
-        $flow = StockService::voidFinanceCustomerReturnWithinTransaction($fact, (int)$replacement['id']);
+        FinanceCustomerReturnLoss::reverse($fact, (int)$replacement['id'], (int)$original['id']);
+        $flow = empty($fact['stock_flow_id']) ? 0 : StockService::voidFinanceCustomerReturnWithinTransaction($fact, (int)$replacement['id']);
         Db::name('finance_correction')->insert(['tenant_id' => $tenant, 'original_document_id' => $original['id'], 'replacement_document_id' => $replacement['id'],
             'reason' => $reason, 'actor' => FinanceValue::json(FinanceAccess::actor()), 'create_time' => time()]);
         if ($reverseOnly) {

@@ -9,6 +9,12 @@ use app\api\jxc\validate\DeliveryInventoryValidate;
 
 class DeliveryInventoryController extends BaseJxcController
 {
+    public function confirmCounterPickup()
+    {
+        $params = (new DeliveryInventoryValidate())->post()->goCheck('confirmCounterPickup');
+        $result = DeliveryInventoryLogic::confirmCounterPickup($params);
+        return $result === false ? $this->fail(DeliveryInventoryLogic::getError()) : $this->success('当场交付确认成功', $result, 1, 1);
+    }
     public function confirmSelf()
     {
         $params = (new DeliveryInventoryValidate())->post()->goCheck('confirmSelf');

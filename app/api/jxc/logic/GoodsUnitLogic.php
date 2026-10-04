@@ -21,7 +21,7 @@ class GoodsUnitLogic extends BaseLogic
 
         Db::startTrans();
         try {
-            GoodsUnit::create([
+            GoodsUnit::create(self::measurementFields($params) + [
                 'tenant_id' => self::tenantId(),
                 'name' => trim($params['name']),
                 'sort' => (int)($params['sort'] ?? 0),
@@ -47,7 +47,16 @@ class GoodsUnitLogic extends BaseLogic
         }
 
         $saveData = [];
+        try { $saveData += self::measurementFields($params); }
+        catch (\DomainException $e) { self::setError($e->getMessage()); return false; }
+        if ($saveData !== [] && self::referenced((int)$params['id'])) {
+            self::setError('单位已被商品引用，不能原地修改计量类型或精度'); return false;
+        }
         if (array_key_exists('name', $params) && trim((string)$params['name']) !== '') {
+            if (trim((string)$params['name']) !== (string)$model->name
+                && self::referenced((int)$model->id)) {
+                self::setError('单位已被商品引用，不能通过改名重新定义其含义，请创建新单位'); return false;
+            }
             $duplicate = GoodsUnit::where('name', trim($params['name']))
                 ->where('tenant_id', self::tenantId())
                 ->where('id', '<>', (int)$params['id'])
@@ -97,7 +106,7 @@ class GoodsUnitLogic extends BaseLogic
         $goodsCount = Goods::where('unit_id', (int)$model->id)
             ->where('tenant_id', self::tenantId())
             ->count();
-        if ($goodsCount > 0) {
+        if ($goodsCount > 0 || self::referenced((int)$model->id)) {
             self::setError('该单位已被商品使用，请先更换商品单位后再删除');
             return false;
         }
@@ -121,7 +130,22 @@ class GoodsUnitLogic extends BaseLogic
     {
         $item['status'] = (int)($item['status'] ?? 1);
         $item['sort'] = (int)($item['sort'] ?? 0);
-        return $item;
+        return (TradeQuantityService::unit((int)$item['id']) ?? []) + $item;
+    }
+
+    private static function measurementFields(array $params): array
+    {
+        if (!isset($params['measure_type']) && !isset($params['quantity_precision'])) { return []; }
+        $type = (string)($params['measure_type'] ?? 'count'); $precision = (int)($params['quantity_precision'] ?? ($type === 'weight' ? 4 : 0));
+        if (!in_array($type, ['weight', 'count', 'other'], true) || $precision < 0 || $precision > 4) { throw new \DomainException('单位类型或精度无效'); }
+        return ['measure_type' => $type, 'quantity_precision' => $precision];
+    }
+
+    private static function referenced(int $unitId): bool
+    {
+        return Db::name('goods_units_binding')->where('tenant_id', self::tenantId())->where('unit_id', $unitId)->count() > 0
+            || Db::name('goods')->where('tenant_id', self::tenantId())->where('unit_id', $unitId)->count() > 0
+            || Db::name('goods_sku')->where('tenant_id', self::tenantId())->where('base_unit_id', $unitId)->count() > 0;
     }
 
     protected static function tenantId(): int

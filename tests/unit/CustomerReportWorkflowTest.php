@@ -45,9 +45,9 @@ final class CustomerReportWorkflowTest extends TestCase
         $first = CustomerReportLogic::submit($payload);
         self::assertNotFalse($first, CustomerReportLogic::getError());
         self::assertSame('submitted_shortage', $first['status']);
-        self::assertSame('3.00', (string)$first['total_base_qty']);
-        self::assertSame('2.00', (string)$first['reserved_base_qty']);
-        self::assertSame('1.00', (string)$first['shortage_base_qty']);
+        self::assertSame('3.0000', (string)$first['total_base_qty']);
+        self::assertSame('2.0000', (string)$first['reserved_base_qty']);
+        self::assertSame('1.0000', (string)$first['shortage_base_qty']);
         self::assertNotEmpty($first['task_group']['tasks']);
         self::assertSame((int)$first['id'], (int)$first['task_group']['tasks'][0]['report_id']);
         self::assertArrayHasKey('status', $first['task_group']['tasks'][0]);
@@ -399,7 +399,7 @@ final class CustomerReportWorkflowTest extends TestCase
         $payload['items'][0]['piece_weight_confirmed'] = 0;
         $report = CustomerReportLogic::submit($payload);
         self::assertNotFalse($report, CustomerReportLogic::getError());
-        self::assertSame('2.00', (string)$report['total_base_qty']);
+        self::assertSame('2.0000', (string)$report['total_base_qty']);
 
         $invalid = $payload; $invalid['idempotency_key'] = 'direct-priced'; $invalid['items'][0]['price_status'] = 'priced'; $invalid['items'][0]['price'] = '12.00';
         self::assertFalse(CustomerReportLogic::submit($invalid));
@@ -691,7 +691,7 @@ final class CustomerReportWorkflowTest extends TestCase
         self::assertSame('1.0000', WarehouseGoodsBalanceService::reserved($warehouseB, $goodsA));
     }
 
-    public function test_fresh_customer_report_migration_uses_two_decimal_business_fields(): void
+    public function test_quantity_migration_preserves_four_decimal_stock_facts_and_two_decimal_prices(): void
     {
         $expected = [
             'la_customer_report' => ['total_base_qty', 'reserved_base_qty', 'shortage_base_qty'],
@@ -701,7 +701,8 @@ final class CustomerReportWorkflowTest extends TestCase
         foreach ($expected as $table => $fields) {
             $types = array_column(Db::query("SHOW COLUMNS FROM `{$table}`"), 'Type', 'Field');
             foreach ($fields as $field) {
-                self::assertSame('decimal(18,2)', strtolower((string)$types[$field]), $table . '.' . $field);
+                $scale = in_array($field, ['piece_weight_min', 'piece_weight_max', 'price'], true) ? 2 : 4;
+                self::assertSame('decimal(18,' . $scale . ')', strtolower((string)$types[$field]), $table . '.' . $field);
             }
         }
     }

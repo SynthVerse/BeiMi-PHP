@@ -73,7 +73,13 @@ class CustomerReportLineService extends BaseLogic
         if ($delivery === false) {
             return false;
         }
-        $orderQuantity = self::positive($item['order_qty'] ?? $item['quantity'] ?? $item['num'] ?? null, 2);
+        $version = (int)($item['quantity_contract_version'] ?? 1);
+        if (!in_array($version, [1, 2], true)) { self::setError('数量契约版本不受支持，请刷新客户端后重试'); return false; }
+        try {
+            $orderQuantity = $version === 2
+                ? TradeQuantityFacts::decimal($item['order_qty'] ?? $item['quantity'] ?? $item['num'] ?? null)
+                : self::positive($item['order_qty'] ?? $item['quantity'] ?? $item['num'] ?? null, 2);
+        } catch (\DomainException $e) { self::setError($e->getMessage()); return false; }
         if ($orderQuantity === false) {
             self::setError('报货数量必须为最多两位小数的正数');
             return false;
@@ -82,7 +88,11 @@ class CustomerReportLineService extends BaseLogic
         if ($unit === false) {
             return false;
         }
-        $expected = self::expectedQuantity($orderQuantity, (string)$unit['name'], $item);
+        $attributes = self::attributes($goods, $item);
+        if ($attributes === false) { return false; }
+        $expected = $version === 2
+            ? self::expectedQuantityV2($orderQuantity, $unit, $attributes, array_merge($item, ['main_customer_id' => $main['id']]))
+            : self::expectedQuantity($orderQuantity, (string)$unit['name'], $item);
         if ($expected === false) {
             return false;
         }
@@ -90,20 +100,20 @@ class CustomerReportLineService extends BaseLogic
         if ($price === false) {
             return false;
         }
-        $attributes = self::attributes($goods, $item);
-        if ($attributes === false) {
-            return false;
-        }
         $processingGroupsInput = (array)($item['processing_groups'] ?? []);
+        if ($processingGroupsInput === [] && $version === 2) {
+            $processingGroupsInput = [['group_key' => 'direct', 'name' => '直接配货', 'planned_qty' => $orderQuantity, 'process_ids' => []]];
+        }
         if ($processingGroupsInput === []) {
             self::setError('每条报货明细必须至少添加一个加工分组');
             return false;
         }
-        $processingGroups = self::normalizeProcessingGroups($processingGroupsInput, $orderQuantity);
+        $processingGroups = self::normalizeProcessingGroups($processingGroupsInput, $orderQuantity, $version === 2);
         if ($processingGroups === false) {
             return false;
         }
-        return [
+        return ($version === 2 ? ['quantity_contract_version' => 2, 'size_check_stage' => $expected['size_check_stage'], 'estimate_status' => $expected['estimate_status'],
+            'estimate_source' => $expected['estimate_source'], 'estimate_reference_snapshot' => json_encode($expected['reference'] ?? null, JSON_UNESCAPED_UNICODE)] : []) + [
             'client_line_id' => (int)($item['id'] ?? 0),
             'warehouse_id' => $warehouseId,
             'goods_id' => (int)$goods->id,
@@ -274,7 +284,83 @@ class CustomerReportLineService extends BaseLogic
     }
 
     /** @return array<int,array<string,mixed>>|false */
-    private static function normalizeProcessingGroups(array $groups, string $orderQuantity): array|false
+    private static function expectedQuantityV2(string $quantity, array $unit, array $attributes, array $item): array|false
+    {
+        try {
+            $metadata = TradeQuantityService::unit((int)$unit['id']);
+            $base = TradeQuantityService::unit((int)$attributes['base_unit_id']);
+            if (!$metadata || !$base) { throw new \DomainException('商品单位配置缺失'); }
+            if (!in_array($metadata['measure_type'], ['weight', 'count'], true) || !in_array($base['measure_type'], ['weight', 'count'], true)
+                || ($base['measure_type'] === 'weight' && empty($base['jin_factor']))) { throw new \DomainException('单位类型或重量关系尚未核实，请先维护真实计量配置'); }
+            TradeQuantityFacts::decimal($quantity, (int)$metadata['quantity_precision']);
+            $range = self::pieceWeightRange($item, false);
+            if ($range === false) { return false; }
+            $stage = (string)($item['size_check_stage'] ?? 'delivery');
+            if (!in_array($stage, ['before_processing', 'delivery'], true)) { throw new \DomainException('客户大小核验阶段无效'); }
+            $expected = '0.0000'; $source = 'unknown'; $reference = null;
+            if ((int)$unit['id'] === (int)$attributes['base_unit_id']) {
+                $expected = bcadd($quantity, '0', 4); $source = 'demand_base_unit';
+            } elseif ($metadata['measure_type'] === 'weight' && $base['measure_type'] === 'weight') {
+                $expected = TradeQuantityFacts::exactDivide(TradeQuantityFacts::weightToJin($quantity, $metadata['unit_name']), $base['jin_factor'], (int)$base['quantity_precision']);
+                $source = 'weight_conversion';
+            } elseif ($metadata['measure_type'] === 'count' && $base['measure_type'] === 'weight' && $range['confirmed'] === 1) {
+                $mean = bcdiv(bcadd($range['min'], $range['max'], 4), '2', 4);
+                $expected = bcdiv(bcmul($quantity, $mean, 4), $base['jin_factor'], 4); $source = 'customer_size_range';
+            } elseif ($metadata['measure_type'] === 'count' && $base['measure_type'] === 'weight') {
+                $reference = self::historicalWeightReference((int)$item['goods_id'], (int)$attributes['sku_id'], (int)$unit['id'], (int)$item['main_customer_id']);
+                if ($reference) {
+                    // An estimate may be rounded; it never creates an actual count, weight, or conversion rule.
+                    $expected = bcdiv(bcmul($quantity, $reference['weight_jin'], 8), bcmul($reference['count'], $base['jin_factor'], 8), 4);
+                    $source = 'completed_delivery_reference';
+                }
+            }
+            // Explicit total constraints are distinct from an estimate. Absent bounds remain 0/unset.
+            $min = trim((string)($item['acceptable_base_qty_min'] ?? ''));
+            $max = trim((string)($item['acceptable_base_qty_max'] ?? ''));
+            if ($min !== '' && is_numeric($min) && bccomp($min, '0', 4) === 0) { $min = ''; }
+            if ($max !== '' && is_numeric($max) && bccomp($max, '0', 4) === 0) { $max = ''; }
+            if ($min !== '' || $max !== '') {
+                $min = TradeQuantityFacts::decimal($min); $max = TradeQuantityFacts::decimal($max);
+                if (bccomp($min, $max, 4) > 0) { throw new \DomainException('客户总重范围无效'); }
+                if ($range['confirmed'] === 1 && $metadata['measure_type'] === 'count') {
+                    $physicalMin = bcmul($quantity, $range['min'], 4); $physicalMax = bcmul($quantity, $range['max'], 4);
+                    if (bccomp($max, $physicalMin, 4) < 0 || bccomp($min, $physicalMax, 4) > 0) {
+                        throw new \DomainException('数量与每件大小无法满足客户总重范围');
+                    }
+                    if (bccomp($expected, $min, 4) < 0) { $expected = $min; }
+                    if (bccomp($expected, $max, 4) > 0) { $expected = $max; }
+                }
+            }
+            return ['base_qty' => $expected, 'acceptable_min' => $min === '' ? '0.0000' : $min,
+                'acceptable_max' => $max === '' ? '0.0000' : $max, 'min' => $range['min'], 'max' => $range['max'],
+                'confirmed' => $range['confirmed'], 'size_check_stage' => $stage, 'estimate_status' => $source === 'unknown' ? 'unknown' : 'known', 'estimate_source' => $source, 'reference' => $reference];
+        } catch (\DomainException $e) { self::setError($e->getMessage()); return false; }
+    }
+
+    private static function historicalWeightReference(int $goods, int $sku, int $unit, int $customer): ?array
+    {
+        $rows = Db::name('fulfillment_delivery_item')->alias('d')
+            ->join('fulfillment_delivery_event e', "e.tenant_id=d.tenant_id AND e.id=d.delivery_event_id AND e.status='completed'")
+            ->join('customer_report_item i', 'i.tenant_id=d.tenant_id AND i.id=d.report_item_id')
+            ->leftJoin('sales_delivery_correction c', 'c.tenant_id=d.tenant_id AND c.order_id=d.sales_order_id')
+            ->where('d.tenant_id', self::tenantId())->where('d.goods_id', $goods)->where('d.sku_id', $sku)
+            ->where('i.main_customer_id', $customer)->where('d.fact_version', 2)->whereNull('c.id')
+            ->field('d.id,d.delivery_event_id,d.quantity_facts_snapshot,e.delivered_time')->order('e.delivered_time desc,d.id desc')->limit(20)->select()->toArray();
+        foreach ($rows as $row) {
+            $facts = TradeQuantityService::snapshot($row);
+            if (!$facts || ($facts['weight_source'] ?? '') !== 'measured' || !empty($facts['processing']) || bccomp((string)($facts['actual_delivery_weight'] ?? '0'), '0', 4) <= 0) { continue; }
+            foreach ($facts['quantity_facts'] as $count) {
+                if ((int)$count['unit_id'] === $unit && ($count['source'] ?? '') === 'counted' && bccomp($count['quantity'], '0', 4) > 0) {
+                    return ['strategy_version' => 'same_customer_sku_direct_measurement_v1', 'source_delivery_item_id' => (int)$row['id'], 'source_event_id' => (int)$row['delivery_event_id'],
+                        'source_version' => (int)$facts['version'], 'recorded_at' => (int)$row['delivered_time'],
+                        'unit_id' => $unit, 'count' => $count['quantity'], 'weight_jin' => $facts['actual_delivery_weight']];
+                }
+            }
+        }
+        return null;
+    }
+
+    private static function normalizeProcessingGroups(array $groups, string $orderQuantity, bool $allowDirect = false): array|false
     {
         if ($groups === []) {
             self::setError('每条报货明细必须至少添加一个加工分组');
@@ -294,17 +380,18 @@ class CustomerReportLineService extends BaseLogic
                 return false;
             }
             $keys[$key] = true;
-            $quantity = self::positive($group['planned_qty'] ?? null, 2);
+            try { $quantity = $allowDirect ? TradeQuantityFacts::decimal($group['planned_qty'] ?? null) : self::positive($group['planned_qty'] ?? null, 2); }
+            catch (\DomainException $e) { self::setError($e->getMessage()); return false; }
             if ($quantity === false) {
                 self::setError('加工分组计划数量必须为最多两位小数的正数');
                 return false;
             }
             $processIds = array_values(array_unique(array_filter(array_map('intval', (array)($group['process_ids'] ?? [])), static fn(int $id): bool => $id > 0)));
-            if ($processIds === []) {
+            if ($processIds === [] && !$allowDirect) {
                 self::setError('每个加工分组必须选择至少一个执行工序');
                 return false;
             }
-            $processes = Db::name('work_process')->where('tenant_id', self::tenantId())->whereIn('id', $processIds)
+            $processes = $processIds === [] ? [] : Db::name('work_process')->where('tenant_id', self::tenantId())->whereIn('id', $processIds)
                 ->where('trigger_type', 'report_selection')->where('is_enabled', 1)->whereNull('delete_time')
                 ->field('id,name,sort')->select()->toArray();
             if (count($processes) !== count($processIds)) {
@@ -319,9 +406,9 @@ class CustomerReportLineService extends BaseLogic
                 'processes' => array_values($processes),
                 'sort' => $index,
             ];
-            $total = bcadd($total, $quantity, self::SCALE);
+            $total = bcadd($total, $quantity, $allowDirect ? 4 : self::SCALE);
         }
-        if (bccomp($total, $orderQuantity, self::SCALE) !== 0) {
+        if (bccomp($total, $orderQuantity, $allowDirect ? 4 : self::SCALE) !== 0) {
             self::setError('加工分组计划数量之和必须等于报货数量');
             return false;
         }
@@ -387,6 +474,15 @@ class CustomerReportLineService extends BaseLogic
     {
         $status = (string)($item['price_status'] ?? 'unpriced');
         if ($status === '' || $status === 'unpriced') {
+            if ((int)($item['quantity_contract_version'] ?? 1) === 2) {
+                $id = (int)($item['pricing_unit_id'] ?? $goods->default_pricing_unit_id ?? $goods->unit_id ?? 0);
+                $metadata = $id > 0 ? TradeQuantityService::unit($id) : null;
+                if ($metadata) {
+                    $pricing = self::orderUnit($goods, ['unit_id' => $id, 'unit_name' => $metadata['unit_name']]);
+                    if ($pricing === false) { return false; }
+                    return ['status' => 'unpriced', 'price' => '0.00', 'unit_id' => $pricing['id'], 'unit_name' => $pricing['name']];
+                }
+            }
             return ['status' => 'unpriced', 'price' => '0.00', 'unit_id' => 0, 'unit_name' => ''];
         }
         if ($status !== 'priced') {

@@ -70,7 +70,9 @@ final class FinanceCostAllocation
     public static function reclassify(array $state, int $warehouse, int $sku, string $quantity, string $fromBucket, string $fromReference, string $toBucket, string $toReference): array
     {
         self::dimension($warehouse, $sku); $quantity = self::quantity($quantity);
-        if (!in_array($fromBucket, ['return', 'pending'], true) || $toBucket !== 'loss') { throw new \DomainException('本次仅支持将退货争议或待核实实物减少确认为门店损失'); }
+        $customerReturn = $fromBucket === 'sale' && $toBucket === 'pending' && preg_match('/^sales_order:[1-9][0-9]*$/D', $fromReference) && preg_match('/^inventory-loss:[1-9][0-9]*$/D', $toReference);
+        $returnCorrection = $fromBucket === 'pending' && $toBucket === 'sale' && preg_match('/^inventory-loss:[1-9][0-9]*$/D', $fromReference) && preg_match('/^sales_order:[1-9][0-9]*$/D', $toReference);
+        if (!$customerReturn && !$returnCorrection && (!in_array($fromBucket, ['return', 'pending'], true) || $toBucket !== 'loss')) { throw new \DomainException('成本去向只允许原销售退货待核、关联更正或已核实门店损失'); }
         FinanceValue::text($fromReference, 160); FinanceValue::text($toReference, 160);
         $weights = []; $total = '0.000000000000';
         foreach ($state['positions'] as $key => $row) {

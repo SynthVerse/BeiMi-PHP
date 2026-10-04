@@ -52,7 +52,8 @@ final class FinanceWorkbench
             $deliveries = $active ? FinanceDeliveries::pendingAll() : [];
             foreach ($deliveries as $row) {
                 $todos[] = ['kind' => 'sales_pending', 'id' => (int)$row['delivery_item_id'], 'title' => ($row['delivery_customer_name'] ?: '客户') . '有交付待结算',
-                    'description' => $row['goods_name'] . ' · 待确认 ' . $row['pending_weight'], 'business_date' => $row['date'],
+                    'description' => $row['goods_name'] . ' · 待确认 ' . (($row['fact_version'] ?? 1) >= 2
+                        ? $row['inventory_base_quantity'] . $row['inventory_base_unit_name'] : $row['pending_weight'] . '斤'), 'business_date' => $row['date'],
                     'target' => ['customer_id' => (int)$row['customer_id'], 'delivery_item_id' => (int)$row['delivery_item_id'], 'date' => $row['date']]];
             }
             $overview['sales_settlement'] = ['can_view' => true, 'pending_delivery_count' => count($deliveries)];

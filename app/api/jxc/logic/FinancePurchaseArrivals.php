@@ -24,6 +24,17 @@ final class FinancePurchaseArrivals
         $more = count($rows) > 20; $rows = array_slice($rows, 0, 20);
         foreach ($rows as &$row) {
             $row['sku_id'] = (int)$row['sku_id']; $row['goods_id'] = (int)$row['goods_id'];
+            $row['unit_metadata'] = TradeQuantityService::unit((int)$row['base_unit_id']);
+            $rules = Db::name('goods_unit_conversion_rule')->where('tenant_id', $tenant)->where('status', 1)
+                ->where('to_unit_id', (int)$row['base_unit_id'])->whereIn('goods_id', [0, $row['goods_id']])
+                ->whereIn('sku_id', [0, $row['sku_id']])->whereIn('supplier_id', [0, $vendorId])->order('id')->select()->toArray();
+            $row['packaging_rules'] = [];
+            foreach ($rules as $rule) {
+                if (!\app\common\service\goods\GoodsMaintenancePermissionService::canMaintain()) { break; }
+                $packageUnit = TradeQuantityService::unit((int)$rule['from_unit_id']);
+                if (!$packageUnit || $packageUnit['measure_type'] !== 'count' || (!empty($rule['effective_date']) && $date < $rule['effective_date']) || (!empty($rule['expire_date']) && $date > $rule['expire_date'])) { continue; }
+                $row['packaging_rules'][] = ['id' => (int)$rule['id'], 'unit_id' => (int)$rule['from_unit_id'], 'label' => '1' . $packageUnit['unit_name'] . ' = ' . $rule['ratio'] . $row['base_unit_name']];
+            }
             $last = Db::name('finance_purchase_price')->where('tenant_id', $tenant)->where('vendor_id', $vendorId)->where('sku_id', $row['sku_id'])
                 ->where('business_date', '<=', $date)->order('id', 'desc')->find();
             $row['last_formal_price'] = $last ? ['price' => (string)$last['price'], 'reference' => 'purchase-settlement:' . $last['document_id']] : null;
@@ -63,19 +74,31 @@ final class FinancePurchaseArrivals
             $sku = Db::name('goods_sku')->where('tenant_id', $tenant)->where('id', $skuId)->lock(true)->find();
             $goods = $sku ? Db::name('goods')->where('tenant_id', $tenant)->where('id', $sku['goods_id'])->lock(true)->find() : null;
             if (!$sku || !$goods) { throw new \DomainException('到货商品规格不属于当前门店'); }
+            if (isset($item['measurement'])) {
+                $unit = TradeQuantityService::unit((int)$sku['base_unit_id']);
+                if (!$unit) { throw new \DomainException('库存基础单位已停用，请核实商品'); }
+                $item = PurchaseQuantityFacts::normalize($item, $unit);
+            }
             $last = Db::name('finance_purchase_price')->where('tenant_id', $tenant)->where('vendor_id', $vendorId)->where('sku_id', $skuId)
                 ->where('business_date', '<=', $date)->order('id', 'desc')->lock(true)->find();
             $estimate = FinancePurchaseEstimate::line($item, $last ? ['price' => (string)$last['price'], 'reference' => 'purchase-settlement:' . $last['document_id']] : null);
             $snapshot = $estimate + ['sku_id' => $skuId, 'goods_id' => (int)$sku['goods_id'], 'goods_name' => $goods['name'], 'category_id' => (int)$goods['category_id'],
                 'difference_rule' => FinancePurchaseRuleBook::threshold($vendorId, $skuId, (int)$goods['category_id']),
                 'sku_name' => $sku['sku_name'], 'base_unit_name' => $sku['base_unit_name'],
-                'base_unit_id' => (int)$sku['base_unit_id'], 'source_reference' => $source];
+                'base_unit_id' => (int)$sku['base_unit_id'], 'source_reference' => $source,
+                'measurement_snapshot' => $item['measurement_snapshot'] ?? null];
             $id = (int)Db::name('finance_purchase_arrival_line')->insertGetId(['tenant_id' => $tenant, 'document_id' => $document['id'],
                 'line_number' => $index + 1, 'vendor_id' => $vendorId, 'warehouse_id' => $warehouseId, 'sku_id' => $skuId,
                 'business_date' => $date, 'actual_quantity' => $estimate['actual_quantity'], 'estimated_amount' => $estimate['estimated_amount'],
                 'snapshot' => FinanceValue::json($snapshot), 'create_time' => time()]);
-            StockService::inboundFinancePurchaseWithinTransaction($warehouseId, (int)$sku['goods_id'], $skuId, $estimate['actual_quantity'],
+            $flowId = StockService::inboundFinancePurchaseWithinTransaction($warehouseId, (int)$sku['goods_id'], $skuId, $estimate['actual_quantity'],
                 (int)$document['id'], $id, $date, $estimate['estimated_amount'], $snapshot);
+            if (!empty($item['packaging'])) {
+                $package = $item['packaging'];
+                $snapshot['packaging_source_id'] = GoodsPackagingSourceService::recordInbound($flowId, FinanceValue::id($package['rule_id'] ?? null),
+                    (string)($package['quantity'] ?? ''), FinanceValue::id($package['unit_id'] ?? null), ($package['reliable_confirmed'] ?? false) === true, $vendorId, $date);
+                Db::name('finance_purchase_arrival_line')->where('tenant_id', $tenant)->where('id', $id)->update(['snapshot' => FinanceValue::json($snapshot)]);
+            }
             $lines[] = $snapshot + ['arrival_line_id' => $id, 'origin' => 'purchase-arrival:' . $id, 'pending_quantity' => $estimate['actual_quantity']];
             if ($estimate['estimated_amount'] === null) { $pending = true; }
             else { $total = bcadd($total, $estimate['estimated_amount'], 2); }

@@ -332,6 +332,19 @@ class GoodsLogic extends BaseLogic
         $item['sku_count'] = count($item['skus']);
         $item['supplier_matrix'] = GoodsSupplierMatrixLogic::lists(['goods_id' => (int)$item['id']]);
         $item['bound_units'] = self::boundUnitsForGoods((int)$item['id'], $item);
+        $item['quantity_contract_version'] = 2;
+        $requestedSku = (int)($params['sku_id'] ?? 0);
+        $customerId = (int)($params['main_customer_id'] ?? 0);
+        if ($requestedSku > 0 && $customerId > 0 && in_array($requestedSku, array_map('intval', array_column($item['skus'], 'id')), true)) {
+            $customer = Db::name('customer')->where('tenant_id', self::tenantId())->where('id', $customerId)->find();
+            if ($customer && FinanceIntegration::active()) {
+                $item['pricing_preference'] = FinanceSalesPricingPreference::latest((int)($customer['parent_id'] ?: $customer['id']), (int)$item['id'], $requestedSku);
+            }
+        }
+        if ((int)($params['warehouse_id'] ?? 0) > 0 && (int)($params['sku_id'] ?? 0) > 0
+            && in_array((int)$params['sku_id'], array_map('intval', array_column($item['skus'], 'id')), true)) {
+            $item['packaging_sources'] = GoodsPackagingSourceService::sources((int)$params['warehouse_id'], (int)$params['sku_id']);
+        }
         $item['recent_supply_orders'] = self::recentSupplyOrders((int)$item['id']);
         $item['stats'] = self::purchaseStats((int)$item['id'], (int)$item['supplier_count']);
         return $item;
@@ -587,7 +600,11 @@ class GoodsLogic extends BaseLogic
             $isDisabled = self::normalizeDisabledStatus($params['status']);
         }
 
-        return [
+        $defaults = [];
+        foreach (['default_order_unit_id', 'default_pricing_unit_id'] as $field) {
+            if (array_key_exists($field, $params)) { $defaults[$field] = (int)$params[$field]; }
+        }
+        return $defaults + [
             'tenant_id' => $tenantId,
             'name' => $name,
             'normalized_name' => GoodsAliasService::normalize($name),
@@ -701,6 +718,8 @@ class GoodsLogic extends BaseLogic
             return false;
         }
         $tenantId = self::tenantId();
+        if (Db::name('customer_report_item')->where('tenant_id', $tenantId)->where('goods_id', $goodsId)->count() > 0
+            || Db::name('order_goods')->where('tenant_id', $tenantId)->where('goods_id', $goodsId)->count() > 0) { return true; }
         return Db::name('warehouse_sku_balance')
                 ->where('tenant_id', $tenantId)
                 ->where('goods_id', $goodsId)
@@ -826,6 +845,12 @@ class GoodsLogic extends BaseLogic
 
     protected static function applyBaseUnitToSaveData(array &$saveData, ?array $boundUnits): void
     {
+        foreach (['default_order_unit_id', 'default_pricing_unit_id'] as $field) {
+            if (isset($saveData[$field]) && $saveData[$field] > 0
+                && !in_array($saveData[$field], array_map('intval', array_column($boundUnits ?? [], 'unit_id')), true)) {
+                throw new \DomainException('常用报货和收费单位必须从该商品已绑定单位选择');
+            }
+        }
         if (!$boundUnits) {
             return;
         }
@@ -878,7 +903,7 @@ class GoodsLogic extends BaseLogic
     {
         $rows = self::boundUnitRows($goodsId);
         if ($rows === [] && (int)($fallbackItem['unit_id'] ?? $fallbackItem['units_id'] ?? 0) > 0) {
-            return [[
+            return [(TradeQuantityService::unit((int)($fallbackItem['unit_id'] ?? $fallbackItem['units_id'] ?? 0)) ?? []) + [
                 'id' => 0,
                 'goods_id' => $goodsId,
                 'unit_id' => (int)($fallbackItem['unit_id'] ?? $fallbackItem['units_id'] ?? 0),
@@ -891,7 +916,7 @@ class GoodsLogic extends BaseLogic
             ]];
         }
 
-        return array_map(static fn($row) => [
+        return array_map(static fn($row) => (TradeQuantityService::unit((int)($row['unit_id'] ?? 0)) ?? []) + [
             'id' => (int)($row['id'] ?? 0),
             'goods_id' => (int)($row['goods_id'] ?? 0),
             'unit_id' => (int)($row['unit_id'] ?? 0),

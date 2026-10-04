@@ -16,6 +16,8 @@ final class FinanceInventoryLosses
             ->field('incident_document_id,SUM(quantity) AS quantity,MAX(id) AS latest_id')->group('incident_document_id')->buildSql();
         $query = Db::name('finance_inventory_loss')->alias('i')->leftJoin([$resolved => 'r'], 'r.incident_document_id=i.document_id')
             ->where('i.tenant_id', $tenant)->whereRaw('i.quantity>COALESCE(r.quantity,0)');
+        $replaced = Db::name('finance_correction')->where('tenant_id', $tenant)->field('original_document_id')->buildSql();
+        $query->whereRaw('i.document_id NOT IN ' . $replaced);
         if (!empty($params['warehouse_id'])) { $query->where('i.warehouse_id', FinanceValue::id($params['warehouse_id'])); }
         if (!empty($params['incident_document_id'])) { $query->where('i.document_id', FinanceValue::id($params['incident_document_id'])); }
         $rows = $query->field('i.*,i.quantity-COALESCE(r.quantity,0) AS remaining_quantity,COALESCE(r.latest_id,0) AS expected_resolution_id')
@@ -63,6 +65,7 @@ final class FinanceInventoryLosses
         FinanceAccess::require('', true); $tenant = FinanceAccess::tenant(); $source = FinanceValue::id($data['incident_document_id'] ?? null);
         $incident = Db::name('finance_inventory_loss')->where('tenant_id', $tenant)->where('document_id', $source)->lock(true)->find();
         if (!$incident) { throw new \DomainException('原库内实物损耗不存在或不属于当前门店'); }
+        if (Db::name('finance_correction')->where('tenant_id', $tenant)->where('original_document_id', $source)->count()) { throw new \DomainException('原实物待核事件已被更正，请读取当前来源'); }
         $rows = Db::name('finance_inventory_loss_resolution')->where('tenant_id', $tenant)->where('incident_document_id', $source)->order('id')->lock(true)->select()->toArray();
         $remaining = $incident['quantity']; $latest = 0;
         foreach ($rows as $row) { $remaining = bcsub($remaining, $row['quantity'], 4); $latest = (int)$row['id']; }

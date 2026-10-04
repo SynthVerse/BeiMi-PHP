@@ -316,11 +316,13 @@ SQL;
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260930_000004_purchase_plan_delivery_priority.sql')));
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260930_000005_delivery_arrangement_change.sql')));
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260930_000006_customer_vehicle_delivery.sql')));
+        $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20261004_000001_trade_quantity_facts.sql')));
         self::$customerReportSchemaReady = true;
     }
 
     protected function cleanCustomerReportData(): void
     {
+        Db::name('goods_packaging_source')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         // 财务和履约用例共用员工夹具；权限清理不能代替员工主记录的清理。
         Db::name('employee')->where('tenant_id', self::TENANT_ID)->delete();
         try {

@@ -321,7 +321,7 @@ final class PurchasePlanTest extends TestCase
         ]);
         self::assertNotFalse($completeReplay, PurchasePlanLogic::getError());
         self::assertSame('complete', $completeReplay['status']);
-        self::assertSame('0.00', (string)Db::name('customer_report_item')
+        self::assertSame('0.0000', (string)Db::name('customer_report_item')
             ->where('tenant_id', self::TENANT_ID)->where('id', (int)$report['items'][0]['id'])->value('shortage_base_qty'));
     }
 

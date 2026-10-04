@@ -24,7 +24,8 @@ final class FinanceCustomerReturnRefunds
         $fact = FinanceValue::decode($row['snapshot']);
         return ['document_id' => $document, 'subject_id' => $customer, 'subject_name' => $fact['subject_name'], 'original_sales_order_id' => (int)$row['sales_order_id'],
             'order_sn' => $fact['order_sn'], 'sku_id' => (int)$row['sku_id'], 'goods_name' => $fact['goods_name'], 'sku_name' => $fact['sku_name'],
-            'actual_date' => $row['business_date'], 'quantity' => $row['quantity'], 'base_unit_name' => $fact['base_unit_name']];
+            'actual_date' => $row['business_date'], 'quantity' => $row['quantity'], 'base_unit_name' => $fact['base_unit_name'],
+            'delivery_item_id' => $fact['delivery_item_id'] ?? null, 'quantity_facts' => $fact['quantity_facts'] ?? [], 'original_pricing' => $fact['original_pricing'] ?? null];
     }
 
     public static function assertCredit(array $credit, array $return): void
@@ -38,6 +39,10 @@ final class FinanceCustomerReturnRefunds
         if ($type === 'sales_batch') {
             $matches = $matches && Db::name('order_goods')->where('tenant_id', FinanceAccess::tenant())->where('id', (int)($fact['line_id'] ?? 0))
                 ->where('order_type', 'sales')->where('order_id', $return['original_sales_order_id'])->where('sku_id', $return['sku_id'])->count() > 0;
+            if (!empty($return['delivery_item_id'])) {
+                $matches = $matches && (int)($fact['delivery_item_id'] ?? 0) === (int)$return['delivery_item_id']
+                    && in_array((int)$return['document_id'], array_map('intval', array_column($fact['return_adjustments'] ?? [], 'return_document_id')), true);
+            }
         }
         if (!$matches) { throw new \DomainException('本次关联退款只能使用该客户原销售对应的已确认贷项'); }
     }
@@ -55,7 +60,13 @@ final class FinanceCustomerReturnRefunds
             ->whereRaw("(d.type<>'sales_batch' OR CAST(JSON_UNQUOTE(JSON_EXTRACT(s.snapshot,'$.line_id')) AS UNSIGNED) IN " . $matchingLines . ')')
             ->field('s.id,d.type AS document_type')->order('s.id desc')->limit(($page - 1) * 20, 21)->select()->toArray();
         $credits = [];
-        foreach (array_slice($rows, 0, 20) as $row) { $credits[] = $ledger->source('n:' . $row['id']) + ['document_type' => $row['document_type']]; }
+        foreach (array_slice($rows, 0, 20) as $row) {
+            $credit = $ledger->source('n:' . $row['id']);
+            if (!empty($return['delivery_item_id'])) {
+                try { self::assertCredit($credit, $return); } catch (\DomainException) { continue; }
+            }
+            $credits[] = $credit + ['document_type' => $row['document_type']];
+        }
         $refunds = Db::name('finance_document')->where('tenant_id', FinanceAccess::tenant())->where('type', 'customer_refund')->where('status', 'confirmed')
             ->whereRaw("CAST(JSON_UNQUOTE(JSON_EXTRACT(confirmed_result,'$.return_context.document_id')) AS UNSIGNED)=?", [$document])
             ->order('id desc')->limit(($refundPage - 1) * 20, 21)->select()->toArray();

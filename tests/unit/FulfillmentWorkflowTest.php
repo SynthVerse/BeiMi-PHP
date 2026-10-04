@@ -578,7 +578,7 @@ final class FulfillmentWorkflowTest extends TestCase
             self::assertFalse(FulfillmentTaskLogic::recover(['id' => $task['id'], 'actual_weight' => '1.80']));
             self::assertStringContainsString('按加工组录入', FulfillmentTaskLogic::getError());
         }
-        self::assertSame('0.00', (string)Db::name('customer_report_item')->where('id', $item['id'])->value('final_actual_weight'));
+        self::assertNull(Db::name('customer_report_item')->where('id', $item['id'])->value('final_actual_weight'));
         $this->finishSingleGroupProcessing($report, '1.65');
         $values = FulfillmentTaskLogic::settlementValuesForReport((int)$report['id']);
         self::assertSame('1.65', $values[(int)$item['id']]['final_actual_weight']);
@@ -683,7 +683,7 @@ final class FulfillmentWorkflowTest extends TestCase
             'idempotency_key' => 'reduce-after-print-1',
         ]);
         self::assertNotFalse($changed, FulfillmentChangeLogic::getError());
-        self::assertSame('3.00', (string)$changed['item']['expected_base_qty']);
+        self::assertSame('3.0000', (string)$changed['item']['expected_base_qty']);
         self::assertSame('3.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
         self::assertSame('5.0000', WarehouseGoodsBalanceService::onHand($warehouseId, $goodsId));
         $updatedTask = Db::name('fulfillment_task')->where('id', (int)$task['id'])->find();
@@ -805,7 +805,7 @@ final class FulfillmentWorkflowTest extends TestCase
         self::assertSame(2, (int)$updatedRecoveredTask['content_version']);
         self::assertSame('printable', (string)$updatedRecoveredTask['status']);
         self::assertSame('0.00', (string)$updatedRecoveredTask['process_weight']);
-        self::assertSame('0.00', (string)Db::name('customer_report_item')->where('id', $recoveredItemId)->value('final_actual_weight'));
+        self::assertSame('0.0000', (string)Db::name('customer_report_item')->where('id', $recoveredItemId)->value('final_actual_weight'));
         self::assertSame('closed', (string)Db::name('fulfillment_ticket_control')->where('report_item_id', $recoveredItemId)->value('status'));
         self::assertSame('void_recovered', (string)Db::name('fulfillment_paper_copy')->where('print_log_id', (int)$recoveredPrint['print_log_id'])->value('paper_status'));
 
@@ -866,7 +866,7 @@ final class FulfillmentWorkflowTest extends TestCase
         self::assertNotFalse($recovered, FulfillmentTaskLogic::getError());
         self::assertSame('exception', $recovered['recovery_mode']);
         self::assertSame('lost', $recovered['recovery_exception_reason']);
-        self::assertSame('0.88', (string)Db::name('customer_report_item')->where('id', $itemId)->value('final_actual_weight'));
+        self::assertSame('0.8800', (string)Db::name('customer_report_item')->where('id', $itemId)->value('final_actual_weight'));
         $paper = Db::name('fulfillment_paper_copy')->where('print_log_id', (int)$printed['print_log_id'])->find();
         self::assertSame('lost', $paper['paper_status']);
         self::assertSame(self::ADMIN_ID, (int)$paper['accounted_by']);
@@ -901,7 +901,7 @@ final class FulfillmentWorkflowTest extends TestCase
         $undelivered = FulfillmentChangeLogic::markUndelivered($request);
         self::assertNotFalse($undelivered, FulfillmentChangeLogic::getError());
         self::assertSame('undelivered', $undelivered['item']['fulfillment_status']);
-        self::assertSame('0.00', (string)$undelivered['item']['final_actual_weight']);
+        self::assertSame('0.0000', (string)$undelivered['item']['final_actual_weight']);
         self::assertSame('0.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
         self::assertSame(0, Db::name('fulfillment_task')->where('report_item_id', $itemId)->where('status', '<>', 'cancelled')->count());
         $groupId = (int)Db::name('fulfillment_task')->where('report_item_id', $itemId)->order('id')->value('group_id');
@@ -1219,7 +1219,7 @@ final class FulfillmentWorkflowTest extends TestCase
                 $diagnostic
             );
             self::assertSame(1, Db::name('fulfillment_item_change')->where('idempotency_key', 'concurrent-reduce-one-key')->count());
-            self::assertSame('2.00', (string)Db::name('customer_report_item')->where('id', $itemId)->value('expected_base_qty'));
+            self::assertSame('2.0000', (string)Db::name('customer_report_item')->where('id', $itemId)->value('expected_base_qty'));
             self::assertSame('2.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
         } finally {
             if (is_file($startPath)) { unlink($startPath); }
@@ -1248,7 +1248,7 @@ final class FulfillmentWorkflowTest extends TestCase
         } finally {
             Db::execute('RENAME TABLE `la_audit_log_forced_failure` TO `la_audit_log`');
         }
-        self::assertSame('3.00', (string)Db::name('customer_report_item')->where('id', $itemId)->value('expected_base_qty'));
+        self::assertSame('3.0000', (string)Db::name('customer_report_item')->where('id', $itemId)->value('expected_base_qty'));
         self::assertSame('3.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
         self::assertSame(0, Db::name('fulfillment_item_change')->where('report_item_id', $itemId)->count());
         self::assertSame(0, Db::name('fulfillment_ticket_control')->where('report_item_id', $itemId)->count());
@@ -1433,7 +1433,7 @@ final class FulfillmentWorkflowTest extends TestCase
             'groups' => [['id' => $groups[0]['id'], 'final_actual_weight' => '1.00']],
         ]));
         self::assertStringContainsString('全部加工组', CustomerReportLogic::getError());
-        self::assertSame('0.00', (string)Db::name('customer_report_item')->where('id', $report['items'][0]['id'])->value('final_actual_weight'));
+        self::assertNull(Db::name('customer_report_item')->where('id', $report['items'][0]['id'])->value('final_actual_weight'));
         $deliveryId = (int)Db::name('fulfillment_task')->where('report_id', (int)$report['id'])->whereLike('source_key', '%:delivery')->value('id');
         self::assertFalse(DeliveryInventoryLogic::confirmSelfDelivery([
             'task_id' => $deliveryId, 'event_type' => 'customer_handoff', 'idempotency_key' => 'unweighed-delivery',
@@ -1544,8 +1544,8 @@ final class FulfillmentWorkflowTest extends TestCase
         self::assertSame(0, Db::name('negative_inventory_attribution')->where('tenant_id', self::TENANT_ID)->count());
         self::assertSame(0, Db::name('negative_inventory_todo')->where('tenant_id', self::TENANT_ID)->count());
         $reservation = Db::name('customer_report_reservation')->where('report_item_id', $fixture['report_item_id'])->find();
-        self::assertSame('0.60', (string)$reservation['consumed_base_qty']);
-        self::assertSame('0.40', (string)$reservation['released_base_qty']);
+        self::assertSame('0.6000', (string)$reservation['consumed_base_qty']);
+        self::assertSame('0.4000', (string)$reservation['released_base_qty']);
     }
 
     public function test_self_delivery_attributes_negative_available_stock_reserved_by_another_order(): void
@@ -2635,7 +2635,7 @@ final class FulfillmentWorkflowTest extends TestCase
         self::assertSame(0, Db::name('fulfillment_delivery_event')->where('report_id', $fixture['report_id'])->count());
         self::assertSame(0, Db::name('sales_order')->where('source_id', $fixture['report_id'])->count());
         self::assertSame('2.0000', WarehouseSkuBalanceService::onHand($fixture['warehouse_id'], $fixture['sku_id']));
-        self::assertSame('0.00', (string)Db::name('customer_report_item')->where('id', $fixture['report_item_id'])->value('fulfilled_base_qty'));
+        self::assertSame('0.0000', (string)Db::name('customer_report_item')->where('id', $fixture['report_item_id'])->value('fulfilled_base_qty'));
         self::assertSame('final_weight_recorded', (string)Db::name('customer_report_item')->where('id', $fixture['report_item_id'])->value('fulfillment_status'));
     }
 

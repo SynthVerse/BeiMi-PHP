@@ -106,6 +106,23 @@ final class FinanceCostAllocationTest extends TestCase
         FinanceCostAllocation::reclassify($loss['state'], 10, 20, '9', 'return', 'returned', 'loss', 'excess');
     }
 
+    public function test_bad_customer_return_moves_original_sale_cost_to_pending_then_loss_without_stock(): void
+    {
+        $state = FinanceCostAllocation::receive(FinanceCostAllocation::empty(), 'original', 10, 20, '10', '50.00')['state'];
+        $state = FinanceCostAllocation::issue($state, 10, 20, '8.7', 'sale', 'sales_order:1')['state'];
+        $balance = FinanceCostAllocation::balance($state, 10, 20);
+        $pending = FinanceCostAllocation::reclassify($state, 10, 20, '1.6', 'sale', 'sales_order:1', 'pending', 'inventory-loss:2');
+        self::assertSame('8.000000', $pending['cost']); self::assertSame($balance, FinanceCostAllocation::balance($pending['state'], 10, 20));
+        $reversed = FinanceCostAllocation::reclassify($pending['state'], 10, 20, '1.6', 'pending', 'inventory-loss:2', 'sale', 'sales_order:1');
+        self::assertSame($balance, FinanceCostAllocation::balance($reversed['state'], 10, 20));
+        $loss = FinanceCostAllocation::reclassify($pending['state'], 10, 20, '1.6', 'pending', 'inventory-loss:2', 'loss', 'loss-resolution:3');
+        self::assertSame('8.000000', $loss['cost']); self::assertSame($balance, FinanceCostAllocation::balance($loss['state'], 10, 20));
+        $adjusted = FinanceCostAllocation::adjust($loss['state'], 'original', '60.00');
+        self::assertSame('1.600000', $adjusted['changes']['loss']);
+        $this->expectException(\DomainException::class);
+        FinanceCostAllocation::reclassify($state, 10, 20, '1', 'sale', 'unlinked', 'pending', 'arbitrary');
+    }
+
     public function test_partial_supplier_cost_keeps_unpriced_remainder_pending_and_final_cost_follows_existing_sale(): void
     {
         $state = \app\api\jxc\logic\FinanceCostAllocation::receive(\app\api\jxc\logic\FinanceCostAllocation::empty(), 'arrival-partial', 10, 20, '100', null)['state'];

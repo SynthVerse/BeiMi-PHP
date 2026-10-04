@@ -6,13 +6,14 @@ namespace app\api\jxc\logic;
 
 use think\facade\Db;
 
-/** 真实退回只恢复实物和原销售成本；贷项及退款分别保存业务事实。 */
+/** 验收与可售回库分开；坏货仅记录隔离/待损失，贷项及退款独立。 */
 final class FinanceCustomerReturns
 {
     public static function input(string $type, array $input): array
     {
         return $type === 'customer_return_actual' ? array_intersect_key($input, array_flip(['subject_id', 'original_sales_order_id', 'sku_id', 'warehouse_id', 'actual_date', 'quantity',
-            'expected_return_id', 'expected_sales_version', 'expected_cost_event_id', 'received_verified', 'source_reference', 'reason', 'delivery_period'])) : $input;
+            'expected_return_id', 'expected_sales_version', 'expected_cost_event_id', 'received_verified', 'source_reference', 'reason', 'delivery_period', 'disposition', 'resalable_verified',
+            'delivery_item_id', 'quantity_facts', 'actual_return_weight'])) : $input;
     }
 
     public static function present(array $document): array
@@ -95,6 +96,7 @@ final class FinanceCustomerReturns
             'activation_date' => $activation, 'delivery_periods' => $periods, 'unassigned_legacy_return' => $mixed ? $legacy['unknown'] : '0.0000',
             'total_actual_quantity' => bcadd($actual, '0', 4), 'total_returned_quantity' => bcadd($returned, '0', 4), 'total_returnable_quantity' => bcsub($actual, $returned, 4),
             'sku_id' => $sku, 'goods_id' => (int)$goods[0]['goods_id'], 'goods_name' => $goods[0]['name'], 'sku_name' => $goods[0]['sku_name'], 'base_unit_name' => $unit ?: $goods[0]['units'],
+            'delivery_groups' => FinanceCustomerReturnPricing::groups($orderId, $sku, $customer),
             'original_warehouse_id' => (int)$order['warehouse_id'], 'original_warehouse_name' => Db::name('warehouse')->where('tenant_id', $tenant)->where('id', $order['warehouse_id'])->value('name'),
             'sales_date' => date('Y-m-d', (int)$order['datetimesingle']), 'as_of' => $asOf, 'actual_quantity' => bcadd($actual, '0', 4), 'returned_quantity' => bcadd($returned, '0', 4), 'returnable_quantity' => bcsub($actual, $returned, 4),
             'expected_return_id' => $latest, 'expected_sales_version' => (int)$order['settlement_version'],
@@ -155,6 +157,7 @@ final class FinanceCustomerReturns
     public static function confirm(FinanceLedger $ledger, array $document, array $input): array
     {
         $date = FinanceValue::date($input['actual_date'] ?? null);
+        if ($date > date('Y-m-d')) { throw new \DomainException('实际退货验收日期不能晚于今天'); }
         $source = self::source(FinanceValue::id($input['original_sales_order_id'] ?? null), FinanceValue::id($input['sku_id'] ?? null), FinanceValue::id($input['subject_id'] ?? null), $date, $input['delivery_period'] ?? '');
         if ($source['selection_error'] !== '') { throw new \DomainException($source['selection_error']); }
         foreach (['expected_return_id', 'expected_sales_version', 'expected_cost_event_id'] as $key) {
@@ -170,11 +173,23 @@ final class FinanceCustomerReturns
         if ($warehouseName === null) { throw new \DomainException('请选择本门店实际验收仓库'); }
         $reason = FinanceValue::text($input['reason'] ?? null, 1000); $reference = FinanceValue::text($input['source_reference'] ?? null, 160);
         $cost = new FinanceCostLedger(FinanceAccess::tenant());
-        $flow = StockService::inboundFinanceCustomerReturnWithinTransaction($warehouse, $source, $quantity, (int)$document['id'], $date);
-        $result = FinanceValue::decode(Db::name('finance_cost_event')->where('tenant_id', FinanceAccess::tenant())->where('reference', 'stock:' . $flow)->value('result'));
-        $valuation = $source['cost_basis'] === 'pre_cutoff' ? ['pending' => true, 'known_cost' => '0.000000', 'allocations' => []] : self::returnedCost($result, $source['sku_id']);
+        $disposition = self::disposition($input);
+        $quantityFacts = FinanceCustomerReturnPricing::facts($source, $input, $quantity);
+        unset($source['delivery_groups']);
+        $flow = 0;
+        $valuation = ['pending' => true, 'known_cost' => '0.000000', 'allocations' => []];
+        if ($disposition === 'resalable') {
+            $flow = StockService::inboundFinanceCustomerReturnWithinTransaction($warehouse, $source, $quantity, (int)$document['id'], $date);
+            $result = FinanceValue::decode(Db::name('finance_cost_event')->where('tenant_id', FinanceAccess::tenant())->where('reference', 'stock:' . $flow)->value('result'));
+            if ($source['cost_basis'] !== 'pre_cutoff') { $valuation = self::returnedCost($result, $source['sku_id']); }
+        } else {
+            $quantityFacts = array_merge($quantityFacts, FinanceCustomerReturnLoss::register($source, (int)$document['id'], $quantity, $date, $reason, $disposition));
+        }
         $pending = $valuation['pending']; $known = $valuation['known_cost'];
-        $snapshot = array_replace($source, ['type' => 'customer_return_actual', 'warehouse_id' => $warehouse, 'warehouse_name' => $warehouseName, 'actual_date' => $date,
+        $snapshot = array_replace($source, $quantityFacts, ['type' => 'customer_return_actual', 'warehouse_id' => $warehouse, 'warehouse_name' => $warehouseName, 'actual_date' => $date,
+            'disposition' => $disposition, 'resalable_verified' => $disposition === 'resalable', 'saleable_stock_increase' => $disposition === 'resalable' ? $quantity : '0.0000',
+            'disposition_status' => $disposition === 'resalable' ? 'completed' : 'pending',
+            'disposition_notice' => $disposition === 'resalable' ? '' : '已验收，未加入可售库存；隔离实物和原销售成本继续待核，不代表已完成损失认定',
             'quantity' => $quantity, 'returnable_quantity' => bcsub($source['returnable_quantity'], $quantity, 4), 'total_returnable_quantity' => bcsub($source['total_returnable_quantity'], $quantity, 4), 'stock_flow_id' => $flow, 'return_cost' => $pending ? null : $known,
             'known_return_cost' => $known, 'cost_pending' => $pending, 'cost_allocations' => $valuation['allocations'], 'cost_impacts' => $cost->documentImpacts((int)$document['id'], $pending ? [$source['sku_id'] => true] : []),
             'posting_month' => $month, 'reason' => $reason, 'source_reference' => $reference, 'received_verified' => true, 'confirmed_by' => FinanceAccess::actor(), 'confirmed_at' => time(), 'created_sources' => []]);
@@ -182,6 +197,14 @@ final class FinanceCustomerReturns
             'customer_id' => $source['subject_id'], 'sku_id' => $source['sku_id'], 'original_warehouse_id' => $source['original_warehouse_id'], 'warehouse_id' => $warehouse,
             'business_date' => $date, 'quantity' => $quantity, 'snapshot' => FinanceValue::json($snapshot), 'create_time' => time()]);
         return $snapshot + ['return_id' => $id];
+    }
+
+    public static function disposition(array $input): string
+    {
+        $disposition = $input['disposition'] ?? '';
+        if (!in_array($disposition, ['resalable', 'quarantine', 'loss'], true)) { throw new \DomainException('请选择退回实物的可售、隔离或损失待核去向'); }
+        if ($disposition === 'resalable' && ($input['resalable_verified'] ?? null) !== 1) { throw new \DomainException('只有明确验收可再次销售的实物才能恢复可售库存'); }
+        return $disposition;
     }
 
     /** 本次退回份额按重放后的来源价值核算；不混入同销售后续交付的重估差额。 */

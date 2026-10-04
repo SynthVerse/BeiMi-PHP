@@ -16,7 +16,7 @@ final class FinanceSalesBatches
         $rows = $customer ? FinanceDeliveries::rows($customer, $from, $to) : [];
         $rule = FinanceSalesRules::terms($customer, $from);
         foreach ($rows as &$row) { $row['subject_id'] = $customer; $row['terms'] = self::datedTerms($rule, $row['date']); } unset($row);
-        return ['tenant_id' => FinanceAccess::tenant(), 'deliveries' => $rows, 'precision_rules' => FinanceSalesPrecision::rules($customer),
+        return ['tenant_id' => FinanceAccess::tenant(), 'deliveries' => $rows, 'return_choices' => $customer ? FinanceCustomerReturnPricing::choices($customer) : [], 'precision_rules' => FinanceSalesPrecision::rules($customer),
             'can_override_precision' => FinanceAccess::has('finance.sales.precision_override'), 'can_round_sales' => FinanceAccess::has('finance.sales.rounding'),
             'can_override_due' => FinanceAccess::has('finance.sales.due_override'), 'can_confirm_difference' => FinanceAccess::owner(),
             'default_show_cumulative_debt' => (int)Db::name('customer_sales_preference')->where('tenant_id', FinanceAccess::tenant())->where('customer_id', $customer)->value('show_cumulative_debt'),
@@ -54,7 +54,7 @@ final class FinanceSalesBatches
         $overdue = FinanceCustomers::overdue($customer);
         if (bccomp($overdue['amount'], '0', 2) > 0 && empty($data['overdue_acknowledged'])) { throw new \DomainException('客户存在逾期余额，请明确知晓后继续确认'); }
         $input = $data['lines'] ?? null;
-        if (!is_array($input) || !array_is_list($input) || !$input || count($input) > 200) { throw new \DomainException('请选择1至200条真实交付来源'); }
+        if (!is_array($input) || !array_is_list($input) || (!$input && !$original) || count($input) > 200) { throw new \DomainException('请选择1至200条真实交付来源'); }
         $available = array_column(FinanceDeliveries::rows($customer, '1900-01-01', date('Y-m-d'), true), null, 'delivery_item_id');
         $currentTerms = FinanceSalesRules::terms($customer, date('Y-m-d'));
         $before = array_column($previous['lines'] ?? [], null, 'delivery_item_id'); $lines = []; $seen = []; $goods = '0.00'; $automatic = '0.000000';
@@ -62,14 +62,42 @@ final class FinanceSalesBatches
             if (!is_array($item)) { throw new \DomainException('交付组成格式无效'); }
             $delivery = FinanceValue::id($item['delivery_item_id'] ?? 0);
             if (!isset($available[$delivery]) || isset($seen[$delivery])) { throw new \DomainException('交付来源不属于本客户或重复选择'); } $seen[$delivery] = true;
-            $source = $available[$delivery]; $covered = self::weight($item['covered_weight'] ?? null); $weight = self::weight($item['settlement_weight'] ?? null, true);
-            if (bccomp($covered, bcadd($source['pending_weight'], $before[$delivery]['covered_weight'] ?? '0', 4), 4) > 0) { throw new \DomainException('本次覆盖量超过该交付剩余量'); }
-            $difference = bcsub($weight, $covered, 4); $differenceReason = '';
+            $source = $available[$delivery]; $pricing = [];
+            if (($source['fact_version'] ?? 1) >= 2) {
+                if (!empty($source['legacy_covered']) || ($source['coverage_document_id'] && (int)$source['coverage_document_id'] !== (int)($original['id'] ?? 0))) {
+                    throw new \DomainException('该交付子组已确认金额，不能切换单位重复覆盖');
+                }
+                $pricingSource = $source;
+                if (isset($before[$delivery]) && !empty($item['return_adjustments'] ?? $before[$delivery]['return_adjustments'] ?? [])) {
+                    $pricingSource['pricing_units'] = $before[$delivery]['pricing_units'];
+                    $pricingSource['source_version'] = $before[$delivery]['source_version'];
+                    $source['pricing_units'] = $pricingSource['pricing_units']; $source['source_version'] = $pricingSource['source_version'];
+                }
+                $pricing = FinanceSalesQuantity::price($pricingSource, $item);
+                $covered = $pricing['covered_weight']; $weight = $pricing['settlement_weight'];
+                $quantity = $pricing['settlement_quantity']; $difference = $pricing['weight_difference'];
+            } else {
+                if (isset($item['price_unit_id']) || isset($item['settlement_quantity'])) { throw new \DomainException('历史交付缺少独立数量事实，只能沿原重量方式结算'); }
+                $covered = self::weight($item['covered_weight'] ?? null); $weight = self::weight($item['settlement_weight'] ?? null, true);
+                if (bccomp($covered, bcadd($source['pending_weight'], $before[$delivery]['covered_weight'] ?? '0', 4), 4) > 0) { throw new \DomainException('本次覆盖量超过该交付剩余量'); }
+                $quantity = $weight; $difference = bcsub($weight, $covered, 4);
+            }
+            $differenceReason = '';
             if (bccomp($difference, '0', 4) !== 0) { FinanceAccess::require('', true); $differenceReason = FinanceValue::text($item['difference_reason'] ?? '', 1000); }
             $price = FinanceValue::money($item['price'] ?? null, true);
-            if (bccomp($weight, '0', 4) === 0 && bccomp($price, '0', 2) > 0) { throw new \DomainException('免费、赠送或赔偿应明确零价及原因，不能用零计费重量代替'); }
+            if (bccomp($quantity, '0', 4) === 0 && bccomp($price, '0', 2) > 0) { throw new \DomainException('免费、赠送或赔偿应明确零价及原因，不能用零计费重量代替'); }
             $zeroReason = bccomp($price, '0', 2) === 0 ? FinanceValue::text($item['zero_price_reason'] ?? '', 500) : '';
-            $calculation = FinanceSalesPrecision::amount($weight, $price, $precision['actual_mode']);
+            $calculation = FinanceSalesPrecision::amount($quantity, $price, $precision['actual_mode']);
+            if (($source['fact_version'] ?? 1) >= 2) {
+                $returns = FinanceCustomerReturnPricing::adjustment($source, $item, $before[$delivery] ?? null, $price, $quantity, $precision['actual_mode']);
+                $calculation['gross_sales_amount'] = $calculation['amount'];
+                $calculation['amount'] = bcsub($calculation['amount'], $returns['return_amount'], 2);
+                $calculation['gross_raw_amount'] = $calculation['raw_amount'];
+                $calculation['raw_amount'] = bcsub($calculation['raw_amount'], $returns['return_raw_amount'], 6);
+                $calculation['automatic_rounding_difference'] = bcsub($calculation['amount'], $calculation['raw_amount'], 6);
+                if (bccomp($calculation['amount'], '0', 2) < 0) { throw new \DomainException('退货冲减金额超过原商品金额'); }
+                $calculation = array_merge($calculation, $returns);
+            }
             FinanceValue::money($calculation['amount'], true);
             $terms = $before[$delivery]['terms'] ?? self::datedTerms($currentTerms, $source['date']);
             if (isset($item['terms_version']) && FinanceValue::id($item['terms_version'], true) !== (int)$terms['version']) { throw new \DomainException('客户付款规则已变化，请重新核对'); }
@@ -86,7 +114,7 @@ final class FinanceSalesBatches
             }
             if ($due && $due < $source['date']) { throw new \DomainException('付款日不能早于实际交付日'); }
             $ledger->postingMonth($source['date']);
-            $lines[] = array_merge($source, $calculation, ['covered_weight' => $covered, 'settlement_weight' => $weight, 'price' => $price,
+            $lines[] = array_merge($source, $calculation, $pricing, ['covered_weight' => $covered, 'settlement_weight' => $weight, 'price' => $price,
                 'weight_difference' => $difference, 'difference_reason' => $differenceReason, 'zero_price_reason' => $zeroReason,
                 'terms' => $terms, 'due_date' => $due, 'due_override_reason' => $dueReason, 'due_override_applied' => $dueApplied, 'receivable_sources' => $receivableSources]);
             $goods = bcadd($goods, $calculation['amount'], 2); $automatic = bcadd($automatic, $calculation['automatic_rounding_difference'], 6);
@@ -105,6 +133,16 @@ final class FinanceSalesBatches
         $after = array_column($lines, null, 'delivery_item_id'); $created = []; $credits = []; $months = [];
         foreach (array_unique(array_merge(array_keys($before), array_keys($after))) as $delivery) {
             $old = $before[$delivery] ?? null; $new = $after[$delivery] ?? null; $line = $new ?? $old;
+            if (!$new && !empty($old['return_adjustments'])) { throw new \DomainException('原成交已关联退货冲减，不能直接释放整组覆盖；请保留交付与退货来源核对金额'); }
+            if (($line['fact_version'] ?? 1) >= 2) {
+                $claim = Db::name('finance_sales_group_coverage')->where('tenant_id', $tenant)->where('delivery_item_id', $delivery)->lock(true)->find();
+                if ($claim && (int)$claim['document_id'] > 0 && (int)$claim['document_id'] !== (int)($original['id'] ?? 0)) { throw new \DomainException('该交付子组已被其他金额确认覆盖，请刷新'); }
+                if ($claim) {
+                    Db::name('finance_sales_group_coverage')->where('tenant_id', $tenant)->where('delivery_item_id', $delivery)->update(['document_id' => $new ? $id : 0, 'update_time' => time()]);
+                } elseif ($new) {
+                    Db::name('finance_sales_group_coverage')->insert(['tenant_id' => $tenant, 'delivery_item_id' => $delivery, 'document_id' => $id, 'update_time' => time()]);
+                }
+            }
             $coverage = bcsub($new['covered_weight'] ?? '0', $old['covered_weight'] ?? '0', 4);
             Db::name('finance_sales_coverage')->insert(['tenant_id' => $tenant, 'document_id' => $id, 'delivery_item_id' => $delivery, 'order_id' => $line['order_id'], 'covered_delta' => $coverage, 'create_time' => time()]);
             $delta = bcsub($new['net_amount'] ?? '0', $old['net_amount'] ?? '0', 2); $month = $ledger->postingMonth($line['date']); $months[] = $month;
@@ -122,6 +160,7 @@ final class FinanceSalesBatches
         }
         if ($credits) { self::allocateCredits($ledger, $id, $customer, $credits, $data); }
         if ($original) { Db::name('finance_correction')->insert(['tenant_id' => $tenant, 'original_document_id' => $original['id'], 'replacement_document_id' => $id, 'reason' => $correctionReason, 'actor' => FinanceValue::json(FinanceAccess::actor()), 'create_time' => time()]); }
+        FinanceSalesPricingPreference::record($customer, $id, array_values($after));
         Db::name('customer_sales_preference')->duplicate(['show_cumulative_debt' => $showDebt, 'operator_id' => FinanceAccess::operator(), 'update_time' => time()])
             ->insert(['tenant_id' => $tenant, 'customer_id' => $customer, 'show_cumulative_debt' => $showDebt, 'operator_id' => FinanceAccess::operator(), 'create_time' => time(), 'update_time' => time()]);
         return ['subject_id' => $customer, 'subject_name' => $name, 'lines' => array_values($after), 'goods_amount' => $goods, 'amount' => bcsub($goods, $rounding, 2),

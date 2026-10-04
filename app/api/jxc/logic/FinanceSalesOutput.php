@@ -26,7 +26,11 @@ final class FinanceSalesOutput
             $lines[] = ['id' => $line['delivery_item_id'], 'name' => $line['goods_name'], 'sku_name' => $line['sku_name'],
                 'delivery_date' => $line['date'], 'delivery_customer_name' => $line['delivery_customer_name'], 'covered_weight' => $line['covered_weight'],
                 'actual_delivery_weight' => $line['actual_weight'], 'customer_settlement_weight' => $line['settlement_weight'],
-                'base_unit_name' => '斤', 'pricing_unit_name' => '斤', 'pricing_quantity' => $line['settlement_weight'], 'price' => $line['price'], 'amount' => $line['amount']];
+                'base_unit_name' => $line['inventory_base_unit_name'] ?? '斤', 'pricing_unit_name' => $line['price_unit_name'] ?? '斤',
+                'pricing_quantity' => $line['settlement_quantity'] ?? $line['settlement_weight'], 'price' => $line['price'], 'amount' => $line['amount'],
+                'quantity_facts' => $line['quantity_facts'] ?? [], 'inventory_base_quantity' => $line['inventory_base_quantity'] ?? $line['actual_weight'],
+                'gross_sales_amount' => $line['gross_sales_amount'] ?? $line['amount'], 'return_amount' => $line['return_amount'] ?? '0.00', 'return_adjustments' => $line['return_adjustments'] ?? [],
+                'zero_price_reason' => $line['zero_price_reason'] ?? '', 'fact_version' => $line['fact_version'] ?? 1];
         }
         return ['tenant_id' => $tenant, 'id' => $id, 'order_id' => $id, 'sales_id' => $root, 'order_sn' => 'FS' . $root, 'document_version' => (int)$row['version'],
             'version' => $version, 'settlement_status' => 'formal', 'can_print' => true, 'can_share' => FinanceAccess::owner(),

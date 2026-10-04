@@ -42,11 +42,15 @@ final class TenantClosureWorkflowTest extends TestCase
             Db::execute(str_replace('{{prefix}}', 'la_', $match[0]));
             self::$createdTables[] = 'la_' . $name;
         }
+        // 模拟同进程前置用例已读取过字段，避免只有单独运行才成功。
+        Db::connect()->getTableFields('la_user_session');
         $columns = array_column(Db::query('SHOW COLUMNS FROM la_user_session'), 'Field');
         if (!in_array('terminal', $columns, true)) {
             Db::execute('ALTER TABLE la_user_session ADD terminal int NOT NULL DEFAULT 1');
             self::$addedTerminal = true;
         }
+        Db::connect()->getSchemaInfo('la_user_session', true);
+        self::assertContains('terminal', Db::connect()->getTableFields('la_user_session'));
     }
 
     protected function setUp(): void
@@ -92,6 +96,7 @@ final class TenantClosureWorkflowTest extends TestCase
         }
         if (self::$addedTerminal) {
             Db::execute('ALTER TABLE la_user_session DROP terminal');
+            Db::connect()->getSchemaInfo('la_user_session', true);
         }
         self::$createdTables = [];
         self::$addedTerminal = false;
@@ -231,7 +236,7 @@ final class TenantClosureWorkflowTest extends TestCase
     {
         return [
             'remark and version' => [[], ['remark' => '修改后的要求', 'version' => 2]],
-            'fractional quantity' => [['total_base_qty' => '10.01'], ['total_base_qty' => '10.02']],
+            'fractional quantity' => [['total_base_qty' => '10.0100'], ['total_base_qty' => '10.0200']],
         ];
     }
 

@@ -10,7 +10,7 @@ use think\facade\Db;
 /** 把客户默认车辆冻结为报货单自己的送货安排快照。 */
 final class CustomerReportDeliveryArrangementService extends BaseLogic
 {
-    private const METHODS = ['customer_vehicle', 'third_party', 'self_delivery'];
+    private const METHODS = ['customer_vehicle', 'third_party', 'self_delivery', 'counter_pickup'];
     private const REQUIRED_CUSTOMER_VEHICLE_FIELDS = [
         'earliest_delivery_time',
         'plate_number',

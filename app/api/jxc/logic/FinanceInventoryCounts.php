@@ -16,12 +16,12 @@ final class FinanceInventoryCounts
         if ($type === 'inventory_count_review') { return array_intersect_key($payload, array_flip(['count_result_document_id', 'sku_id', 'expected_review_id', 'expected_cost_event_id', 'reason_verified', 'reason_kind', 'cost_verified', 'reason', 'cost_basis', 'cost_amount'])); }
         if (!in_array($type, ['inventory_count_start', 'inventory_count', 'inventory_count_cancel'], true)) { return $payload; }
         if ($type === 'inventory_count_start') { return array_intersect_key($payload, array_flip(['warehouse_id', 'scope', 'sku_ids', 'reason'])); }
-        $input = array_intersect_key($payload, array_flip(['count_document_id', 'reason']));
+        $input = array_intersect_key($payload, array_flip(['count_document_id', 'reason', 'based_on_measurement_id']));
         if ($type === 'inventory_count_cancel') { return $input; }
         if (!is_array($payload['lines'] ?? [])) { throw new \DomainException('实盘明细格式无效'); }
         $input['lines'] = array_map(static function ($line): array {
             if (!is_array($line)) { throw new \DomainException('实盘明细格式无效'); }
-            return array_intersect_key($line, array_flip(['sku_id', 'counted_quantity', 'reason', 'reason_verified']));
+            return array_intersect_key($line, array_flip(['sku_id', 'counted_quantity', 'reason', 'reason_verified', 'measurements', 'basis_token', 'movement_review']));
         }, $payload['lines'] ?? []);
         return $input;
     }
@@ -42,14 +42,25 @@ final class FinanceInventoryCounts
                 $basis = FinanceValue::decode($count['snapshot']); $lines = array_column($basis['lines'], null, 'sku_id'); unset($basis['lines']);
                 $payload['selected_count'] = $basis + ['status' => $count['status'], 'result_document_id' => (int)($count['result_document_id'] ?? 0)];
                 $payload['warehouse_id'] = (int)$count['warehouse_id'];
-                $payload['lines'] = array_map(static fn(array $line): array => ($lines[$line['sku_id'] ?? 0] ?? []) + $line + ['row_key' => (string)($line['sku_id'] ?? '')], $payload['lines'] ?? []);
+                $history = Db::name('finance_inventory_count_measurement')->where('tenant_id', $tenant)->where('document_id', $document['id'])->order('id desc')->limit(20)->select()->toArray();
+                $payload['measurement_history'] = array_map(static fn(array $row): array => ['id' => (int)$row['id']] + FinanceValue::decode($row['snapshot']), $history);
+                $fullBasis = FinanceValue::decode($count['snapshot']);
+                $payload['lines'] = array_map(static function (array $line) use ($lines, $fullBasis, $tenant): array {
+                    $original = $lines[$line['sku_id'] ?? 0] ?? [];
+                    $sku = Db::name('goods_sku')->where('tenant_id', $tenant)->where('id', $line['sku_id'] ?? 0)->find();
+                    return $original + $line + ['row_key' => (string)($line['sku_id'] ?? ''),
+                        'unit_metadata' => $sku && array_key_exists('measurements', $line) ? TradeQuantityService::unit((int)$sku['base_unit_id']) : null,
+                        'packaging_sources' => GoodsPackagingSourceService::sources((int)$fullBasis['warehouse_id'], (int)($line['sku_id'] ?? 0)),
+                        'measurements' => [], 'movement_review' => ['reviewed' => false, 'included_flow_ids' => [], 'last_stock_flow_id' => 0, 'reason' => ''], 'show_basis' => false,
+                        'current_basis' => $original ? InventoryCountBasis::current($fullBasis, $original) : null];
+                }, $payload['lines'] ?? []);
             }
         }
         $document['payload'] = $payload;
         return $document;
     }
 
-    public static function prepare(array $document, string $action): void
+    public static function prepare(array &$document, string $action): void
     {
         if ($document['type'] !== 'inventory_count' || !in_array($action, ['save', 'prepare', 'submit', 'record', 'reopen'], true)) { return; }
         FinanceAccess::require('finance.inventory.count'); $tenant = FinanceAccess::tenant(); $data = FinanceValue::decode($document['payload']);
@@ -59,6 +70,9 @@ final class FinanceInventoryCounts
             throw new \DomainException('原盘点已结束或已有另一份实盘结果，请读取原记录');
         }
         $pending = in_array($action, ['prepare', 'submit', 'record'], true);
+        if (!empty($data['based_on_measurement_id']) && !Db::name('finance_inventory_count_measurement')->where('tenant_id', $tenant)->where('document_id', $document['id'])->where('id', FinanceValue::id($data['based_on_measurement_id']))->find()) {
+            throw new \DomainException('选用实盘结果不属于当前盘点，请重新读取');
+        }
         if ($pending) {
             $basis = FinanceValue::decode($count['snapshot']); $rawLines = $data['lines'] ?? null;
             if (!is_array($rawLines) || count($rawLines) !== count($basis['lines'])) { throw new \DomainException('请逐项录入所选盘点范围，空白数量不等于零'); }
@@ -72,19 +86,45 @@ final class FinanceInventoryCounts
             $lines = [];
             foreach ($basis['lines'] as $line) {
                 $raw = $selected[$line['sku_id']] ?? throw new \DomainException('实盘SKU必须与原盘点范围一致');
-                $quantity = FinancePurchaseSettlement::quantity($raw['counted_quantity'] ?? null, true);
+                $facts = [];
+                if (array_key_exists('measurements', $raw)) {
+                    $current = InventoryCountBasis::current($basis, $line);
+                    $sku = Db::name('goods_sku')->where('tenant_id', $tenant)->where('id', $line['sku_id'])->find();
+                    $unit = TradeQuantityService::unit((int)$sku['base_unit_id']);
+                    if (!$unit) { throw new \DomainException('库存基础单位已停用，请核实商品后再录入实盘'); }
+                    $packages = [];
+                    $facts = InventoryMeasurements::normalize($raw, $unit, strtotime($basis['cutoff_at']), time(),
+                        static function (array $package) use ($count, $line, &$packages): array {
+                            $item = ['warehouse_id' => (int)$count['warehouse_id'], 'sku_id' => (int)$line['sku_id'], 'goods_id' => (int)$line['goods_id']];
+                            $verified = GoodsPackagingSourceService::verify($package, $item);
+                            $packages[$verified['source_id']] = bcadd($packages[$verified['source_id']] ?? '0', $verified['quantity'], 4);
+                            GoodsPackagingSourceService::verify(array_replace($package, ['quantity' => $packages[$verified['source_id']]]), $item);
+                            return $verified;
+                        });
+                    $facts = InventoryCountBasis::reconcile($raw, $facts, $current);
+                    $line['original_book_quantity'] = $line['book_quantity']; $line['book_quantity'] = $current['book_quantity'];
+                    if ($current['cost_basis_changed']) { $line['unit_cost'] = null; $line['cost_pending'] = true; }
+                    $line['late_movements'] = $current['late_movements'];
+                    $quantity = $facts['counted_quantity'];
+                } else {
+                    $current = InventoryCountBasis::current($basis, $line);
+                    if ($current['cost_basis_changed']) { throw new \DomainException('截止前有晚补录，请在新版盘点页核对依据后重新提交'); }
+                    $quantity = FinancePurchaseSettlement::quantity($raw['counted_quantity'] ?? null, true);
+                }
                 $difference = bcsub($quantity, $line['book_quantity'], 4); $changed = bccomp($difference, '0', 4) !== 0;
                 $reason = FinanceValue::text($raw['reason'] ?? '', 1000, $changed);
                 $verified = $raw['reason_verified'] ?? 0;
                 if (!in_array($verified, [0, 1], true)) { throw new \DomainException('请明确盘点差异原因是否已核实'); }
-                $lines[] = $line + ['counted_quantity' => $quantity, 'difference_quantity' => $difference,
+                $lines[] = $line + $facts + ['counted_quantity' => $quantity, 'difference_quantity' => $difference,
                     'difference_amount' => !$changed ? '0.000000' : ($line['unit_cost'] === null ? null : bcmul($difference, $line['unit_cost'], 6)),
                     'reason' => $reason, 'reason_verified' => !$changed || $verified === 1];
             }
             $measurement = ['count_document_id' => $id, 'cutoff_at' => $basis['cutoff_at'], 'warehouse_id' => (int)$count['warehouse_id'], 'warehouse_name' => $basis['warehouse_name'],
-                'reason' => FinanceValue::text($data['reason'] ?? null, 1000), 'counted_by' => FinanceAccess::actor(), 'counted_at' => time(), 'lines' => $lines];
-            Db::name('finance_inventory_count_measurement')->insert(['tenant_id' => $tenant, 'document_id' => $document['id'], 'count_document_id' => $id,
+                'reason' => FinanceValue::text($data['reason'] ?? null, 1000), 'counted_by' => FinanceAccess::actor(), 'counted_at' => time(), 'lines' => $lines, 'input' => $data];
+            $measurementId = (int)Db::name('finance_inventory_count_measurement')->insertGetId(['tenant_id' => $tenant, 'document_id' => $document['id'], 'count_document_id' => $id,
                 'snapshot' => FinanceValue::json($measurement), 'create_time' => time()]);
+            $data['selected_measurement_id'] = $measurementId;
+            $document['payload'] = FinanceValue::json($data);
         }
         Db::name('finance_inventory_count')->where('tenant_id', $tenant)->where('id', $count['id'])->update(['status' => $pending ? 'pending' : 'counting', 'result_document_id' => $document['id']]);
     }
@@ -99,6 +139,15 @@ final class FinanceInventoryCounts
         $counts = [];
         foreach ($rows as $row) {
             $snapshot = FinanceValue::decode($row['snapshot']);
+            if (in_array($row['status'], ['counting', 'pending'], true)) {
+                foreach ($snapshot['lines'] as &$line) {
+                    $current = InventoryCountBasis::current($snapshot, $line);
+                    $sku = Db::name('goods_sku')->where('tenant_id', $tenant)->where('id', $line['sku_id'])->find();
+                    $line['unit_metadata'] = TradeQuantityService::unit((int)$sku['base_unit_id']);
+                    $line['current_basis'] = $current;
+                    $line['packaging_sources'] = GoodsPackagingSourceService::sources((int)$row['warehouse_id'], (int)$line['sku_id']);
+                } unset($line);
+            }
             $counts[] = $snapshot + ['status' => $row['status'], 'result_document_id' => (int)($row['result_document_id'] ?? 0)];
         }
         return ['counts' => $counts, 'count_has_more' => count($rows) === 20];
@@ -163,11 +212,19 @@ final class FinanceInventoryCounts
         if (!$count || $count['status'] !== 'pending' || (int)$count['result_document_id'] !== (int)$document['id']) {
             throw new \DomainException('请先提交本次实盘结果，已结束盘点不能重复调整');
         }
-        $row = Db::name('finance_inventory_count_measurement')->where('tenant_id', $tenant)->where('document_id', $document['id'])->order('id desc')->lock(true)->find();
+        $query = Db::name('finance_inventory_count_measurement')->where('tenant_id', $tenant)->where('document_id', $document['id']);
+        if (!empty($data['selected_measurement_id'])) { $query->where('id', FinanceValue::id($data['selected_measurement_id'])); }
+        $row = $query->order('id desc')->lock(true)->find();
         if (!$row) { throw new \DomainException('缺少已提交的实盘明细'); }
-        $measurement = FinanceValue::decode($row['snapshot']); $date = substr($measurement['cutoff_at'], 0, 10);
+        $measurement = FinanceValue::decode($row['snapshot']); $measurement['selected_measurement_id'] = (int)$row['id']; $date = substr($measurement['cutoff_at'], 0, 10);
+        $originalBasis = FinanceValue::decode($count['snapshot']);
+        $originalLines = array_column($originalBasis['lines'], null, 'sku_id');
         $month = $ledger->postingMonth($date); $lines = [];
         foreach ($measurement['lines'] as $line) {
+            $currentBasis = InventoryCountBasis::current($originalBasis, $originalLines[$line['sku_id']]);
+            if (isset($line['basis_token']) ? !hash_equals($line['basis_token'], $currentBasis['basis_token']) : $currentBasis['cost_basis_changed']) {
+                throw new \DomainException('盘点提交后截止前来源已有变化，请退回草稿重新核清差额');
+            }
             $flow = 0;
             if (bccomp($line['difference_quantity'], '0', 4) !== 0) {
                 $flow = StockService::financeInventoryCountWithinTransaction((int)$count['warehouse_id'], $line, (int)$document['id'], $date);

@@ -21,6 +21,10 @@ final class FinanceLegacySales
             ->where('d.tenant_id', $tenant)->where('d.sales_order_id', $id)->group('e.delivered_time')->column('e.delivered_time');
         foreach ($times as $time) { $dates[date('Y-m-d', (int)$time)] = true; } $dates = array_keys($dates); sort($dates);
         $explicit = Db::name('finance_sales_coverage')->where('tenant_id', $tenant)->where('order_id', $id)->count() > 0;
+        $quantityFacts = false;
+        foreach (Db::name('fulfillment_delivery_item')->where('tenant_id', $tenant)->where('sales_order_id', $id)->select()->toArray() as $delivery) {
+            if ((int)($delivery['fact_version'] ?? 1) >= 2) { $quantityFacts = true; break; }
+        }
         $preserve = $version > 0 && $explicit;
         if ($lines) {
             $current = Db::name('order_goods')->where('tenant_id', $tenant)->where('order_id', $id)->where('order_type', 'sales')->column('base_quantity', 'id');
@@ -28,7 +32,7 @@ final class FinanceLegacySales
             foreach ($current as $lineId => $quantity) { if (!isset($lines[$lineId]) || bccomp((string)$quantity, (string)$lines[$lineId]['actual_delivery_weight'], 4) !== 0) { $preserve = true; } }
         }
         return ['business_date' => $finance['business_date'] ?? ($version ? date('Y-m-d', (int)$order['datetimesingle']) : (count($dates) === 1 ? $dates[0] : null)),
-            'delivery_dates' => $dates, 'requires_delivery_batches' => !$version && ($explicit || count($dates) !== 1),
+            'delivery_dates' => $dates, 'requires_delivery_batches' => !$version && ($quantityFacts || $explicit || count($dates) !== 1),
             'preserves_legacy_coverage' => $preserve, 'legacy_lines' => $lines];
     }
 
