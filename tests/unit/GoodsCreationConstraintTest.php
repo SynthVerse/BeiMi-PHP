@@ -10,6 +10,7 @@ use app\api\jxc\logic\GoodsLogic;
 use app\api\jxc\logic\WorkforceLogic;
 use app\common\service\goods\GoodsMaintenancePermissionService;
 use app\common\service\goods\GoodsAliasService;
+use app\common\service\cloud\CloudGoodsDimensionService;
 use PHPUnit\Framework\TestCase;
 use think\facade\Db;
 use tests\support\GoodsCategoryTestSchema;
@@ -107,6 +108,104 @@ final class GoodsCreationConstraintTest extends TestCase
         ]);
         self::assertNotFalse($dimension, GoodsDimensionLogic::getError());
         self::assertSame('测试产地', $dimension['name']);
+    }
+
+    public function test_cloud_goods_dimension_snapshot_can_be_imported_while_public_feature_is_disabled(): void
+    {
+        $categoryId = $this->createCategory(self::TENANT_ID, '水产');
+        $unitId = $this->createCustomerReportUnit('斤');
+        $cloudGoodsId = (int)Db::name('cloud_goods')->insertGetId([
+            'scope' => 1,
+            'tenant_id' => 0,
+            'name' => '云端自定义规格商品',
+            'product_code' => 'CLOUD-GENERIC-DIMENSION',
+            'status' => 1,
+            'create_time' => time(),
+            'update_time' => time(),
+        ]);
+        $sourceDimensionId = (int)Db::name('goods_spec')->insertGetId([
+            'tenant_id' => 0,
+            'template_id' => 0,
+            'name' => '产地',
+            'code' => 'cloud_origin',
+            'dimension_type' => 'sku',
+            'status' => 1,
+            'sort' => 0,
+            'create_time' => time(),
+            'update_time' => time(),
+        ]);
+        $sourceValues = [];
+        foreach ([['福建', 'fujian'], ['广东', 'guangdong']] as $sort => [$name, $code]) {
+            $sourceValues[$code] = (int)Db::name('goods_spec_value')->insertGetId([
+                'tenant_id' => 0,
+                'goods_id' => $cloudGoodsId,
+                'spec_id' => $sourceDimensionId,
+                'name' => $name,
+                'code' => $code,
+                'status' => 1,
+                'sort' => $sort,
+                'create_time' => time(),
+                'update_time' => time(),
+            ]);
+        }
+        Db::name('goods_dimension_setting')->insert([
+            'tenant_id' => 0,
+            'goods_id' => $cloudGoodsId,
+            'spec_id' => $sourceDimensionId,
+            'usage_mode' => 'sku',
+            'sort' => 0,
+            'create_time' => time(),
+            'update_time' => time(),
+        ]);
+        foreach ([['fujian', 1], ['guangdong', 0]] as $sort => [$code, $status]) {
+            $skuId = (int)Db::name('goods_sku')->insertGetId([
+                'tenant_id' => 0,
+                'goods_id' => $cloudGoodsId,
+                'sku_name' => '云端自定义规格商品-' . $code,
+                'sku_code' => 'CLOUD-SKU-' . $code,
+                'status' => $status,
+                'purchase_status' => $status,
+                'sale_status' => $status,
+                'is_auto_generated' => 1,
+                'sort' => $sort,
+                'create_time' => time(),
+                'update_time' => time(),
+            ]);
+            Db::name('goods_sku_spec_value')->insert([
+                'tenant_id' => 0,
+                'goods_id' => $cloudGoodsId,
+                'sku_id' => $skuId,
+                'spec_id' => $sourceDimensionId,
+                'spec_value_id' => $sourceValues[$code],
+                'spec_name' => '产地',
+                'spec_value_name' => $code === 'fujian' ? '福建' : '广东',
+                'create_time' => time(),
+            ]);
+        }
+
+        $created = GoodsLogic::add($this->goodsParams(
+            '租户维度导入目标商品',
+            'TENANT-DIMENSION-IMPORT',
+            $categoryId,
+            $unitId
+        ));
+        self::assertNotFalse($created, GoodsLogic::getError());
+        $goodsId = (int)$created['id'];
+
+        $snapshot = CloudGoodsDimensionService::snapshot($cloudGoodsId);
+        self::assertCount(1, $snapshot['dimensions']);
+        self::assertCount(1, $snapshot['combinations']);
+        CloudGoodsDimensionService::importToTenant($snapshot, self::TENANT_ID, $goodsId);
+        $detail = GoodsDimensionLogic::productDimensions(['goods_id' => $goodsId]);
+
+        self::assertCount(1, $detail['dimensions']);
+        self::assertSame('cloud_origin', $detail['dimensions'][0]['code']);
+        self::assertEqualsCanonicalizing(
+            ['fujian', 'guangdong'],
+            array_column($detail['dimensions'][0]['values'], 'code')
+        );
+        self::assertCount(1, $detail['skus']);
+        self::assertSame('福建', $detail['skus'][0]['dimensions'][0]['value_name']);
     }
 
     public function test_bound_employee_with_goods_maintenance_permission_can_maintain_goods(): void
@@ -762,6 +861,45 @@ final class GoodsCreationConstraintTest extends TestCase
                 `role_id` int unsigned NOT NULL DEFAULT 0,
                 `menu_id` int unsigned NOT NULL DEFAULT 0
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4',
+            'CREATE TABLE IF NOT EXISTS `la_cloud_goods` (
+                `id` int unsigned NOT NULL AUTO_INCREMENT,
+                `scope` tinyint unsigned NOT NULL DEFAULT 1,
+                `tenant_id` int unsigned NOT NULL DEFAULT 0,
+                `owner_admin_id` int unsigned NOT NULL DEFAULT 0,
+                `owner_user_id` int unsigned NOT NULL DEFAULT 0,
+                `name` varchar(200) NOT NULL DEFAULT "",
+                `product_code` varchar(100) NOT NULL DEFAULT "",
+                `units` varchar(50) NOT NULL DEFAULT "",
+                `price` decimal(12,2) NOT NULL DEFAULT 0,
+                `cost` decimal(12,2) NOT NULL DEFAULT 0,
+                `stock` decimal(12,2) NOT NULL DEFAULT 0,
+                `category_id` int unsigned NOT NULL DEFAULT 0,
+                `category_name` varchar(100) NOT NULL DEFAULT "",
+                `supplier_name` varchar(100) NOT NULL DEFAULT "",
+                `is_disabled` tinyint NOT NULL DEFAULT 0,
+                `status` tinyint NOT NULL DEFAULT 1,
+                `sort` int NOT NULL DEFAULT 0,
+                `remark` varchar(500) NOT NULL DEFAULT "",
+                `create_time` int unsigned NOT NULL DEFAULT 0,
+                `update_time` int unsigned NOT NULL DEFAULT 0,
+                PRIMARY KEY (`id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4',
+            'CREATE TABLE IF NOT EXISTS `la_cloud_goods_import` (
+                `id` int unsigned NOT NULL AUTO_INCREMENT,
+                `tenant_id` int unsigned NOT NULL DEFAULT 0,
+                `cloud_goods_id` int unsigned NOT NULL DEFAULT 0,
+                `goods_id` int unsigned NOT NULL DEFAULT 0,
+                `user_id` int unsigned NOT NULL DEFAULT 0,
+                `admin_id` int unsigned NOT NULL DEFAULT 0,
+                `source_scope` tinyint unsigned NOT NULL DEFAULT 1,
+                `load_unit_id` int unsigned NOT NULL DEFAULT 0,
+                `load_category_id` int unsigned NOT NULL DEFAULT 0,
+                `load_supplier_id` int unsigned NOT NULL DEFAULT 0,
+                `load_snapshot` text NULL,
+                `create_time` int unsigned NOT NULL DEFAULT 0,
+                `update_time` int unsigned NOT NULL DEFAULT 0,
+                PRIMARY KEY (`id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4',
         ] as $statement) {
             Db::execute(str_replace('`', chr(96), $statement));
         }
@@ -804,6 +942,13 @@ final class GoodsCreationConstraintTest extends TestCase
         Db::name('tenant_system_menu')->where('tenant_id', 'in', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('tenant_system_role')->where('tenant_id', 'in', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('tenant_admin')->where('id', self::ADMIN_ID)->delete();
+        Db::name('cloud_goods_import')->where('tenant_id', self::TENANT_ID)->delete();
+        Db::name('cloud_goods')->where('tenant_id', 0)->delete();
+        Db::name('goods_sku_spec_value')->where('tenant_id', 0)->delete();
+        Db::name('goods_dimension_setting')->where('tenant_id', 0)->delete();
+        Db::name('goods_spec_value')->where('tenant_id', 0)->delete();
+        Db::name('goods_sku')->where('tenant_id', 0)->delete();
+        Db::name('goods_spec')->where('tenant_id', 0)->delete();
         Db::name('tenant_goodscat')->where('tenant_id', 'in', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         Db::name('goods_alias')->where('tenant_id', self::OTHER_TENANT_ID)->delete();
         Db::name('goods_unit')->where('tenant_id', self::OTHER_TENANT_ID)->delete();

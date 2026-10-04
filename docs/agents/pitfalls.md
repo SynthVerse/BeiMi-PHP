@@ -2,6 +2,67 @@
 
 按根因去重。每条记录必须指向实际防线；仅有“不要这样做”的提醒不算已防护。
 
+## PIT-0076：复制主数据时遗漏其关联业务聚合
+
+日期：2026-10-04
+
+### 报告来源
+
+- 生成原因：工作流要求
+- 主工作流：Matt Pocock
+- 实际使用的 Skill：
+  - `Matt Pocock / diagnosing-bugs`（自动调用）
+  - `用户级自定义 / prevent-repeat-pitfalls`（自动调用）
+  - `Matt Pocock / tdd`（用户确认公开接口测试边界）
+- 说明：云端商品加载只复制商品主记录与别名，遗漏通用维度、选项和有效 SKU 组合；本记录保留关联聚合复制边界及验收限制。
+
+- 状态：防护中
+- 首次发生：2026-10-04
+- 最近发生：2026-10-04
+- 复发次数：0
+- 适用范围：`POST /goods/cloud/load` 及以后所有“模板／云端主数据 → 租户主数据”的复制流程
+- 相关问题：无
+
+### 触发场景
+
+租户从公共云端商品库加载商品。云端模板在 `tenant_id=0` 的通用维度表中包含自定义维度、选项与已启用 SKU 组合，但本地商品只得到 `goods`、别名和基准 SKU，详情读取为空后退回旧“品质／规格”兼容区。
+
+### 根因
+
+加载服务把“商品”误当作单张 `goods` 记录处理，没有定义云端商品复制聚合的完整边界。通用维度功能晚于云端加载功能加入，新增的 `goods_spec_value`、`goods_dimension_setting`、`goods_sku` 与 `goods_sku_spec_value` 没有进入加载快照和租户映射。
+
+### 错误做法
+
+复制主表后创建一个基准 SKU 就宣称商品加载完成；或只复制维度名称和值，重新生成全部笛卡尔积，从而把云端已排除的 SKU 组合重新启用。
+
+### 正确做法
+
+把云端商品视为聚合：读取 `tenant_id=0 + goods_id=cloud_goods_id` 的维度定义引用、商品选项、用途设置和同时启用销售／采购的 SKU 组合；在租户内按稳定维度编码复用或创建定义，再通过正式商品维度保存入口生成本地选项与 SKU。整个复制仍位于云端加载事务中，任一步失败都回滚主商品。
+
+### 防线
+
+- 自动化防线：`GoodsCreationConstraintTest` 直接验证维度快照、两个选项和唯一已启用组合可完整导入；`tests/cloud_goods_disabled_api_test.php` 验证本版本公开加载入口返回明确的禁用提示。
+- 架构防线：`CloudGoodsDimensionService` 集中生成云端维度快照与租户映射；`CloudGoodsService::loadToTenant()` 在同一事务内调用，并把快照写入 `cloud_goods_import.load_snapshot`。
+- 静态接线防线：`GoodsCreationControllerContractTest` 要求云端加载同时调用快照和导入边界，并复用 `GoodsDimensionLogic::saveProductDimensions()`。
+
+### 已验证事实
+
+代码结构检查确认原 `loadToTenant()` 仅创建商品、别名和基准 SKU，没有读取任何通用维度表。修复后 PHP 语法检查通过；`GoodsCreationControllerContractTest` 3 tests / 36 assertions 与 `SkuInventoryContractTest` 3 tests / 29 assertions 通过。
+
+### 尚未验证
+
+本机 MySQL `localhost:3306` 未启动，公开 HTTP 用例和数据库集成用例均在登录／建表前因 `SQLSTATE[HY000] [2002]` 连接拒绝而停止，未形成业务层绿色结果；不得据此声明端到端通过。尚未在部署环境验证既有云端商品是否已写入 `tenant_id=0` 的维度模板数据。
+
+### 后续建议
+
+恢复测试 MySQL 后先运行 `php tests/cloud_goods_disabled_api_test.php`，再运行 `GoodsCreationConstraintTest`。未来重新开放功能前，抽查一个具有排除组合的云端商品，确认加载后维度和值完整，且未启用组合没有被重新生成。
+
+### 发生记录
+
+| 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-10-04 | 云端商品自定义规格检查与修复 | 云端加载后详情只显示旧品质／规格 | 云端加载测试只覆盖权限、去重、别名与基准 SKU，没有用公开维度读取接口核对关联聚合。 |
+
 ## PIT-0075：关联查询用 `column()` 覆盖限定字段导致 SQL 列歧义
 
 日期：2026-09-21

@@ -16,6 +16,14 @@ use think\facade\Db;
 
 class CloudGoodsService extends BaseLogic
 {
+    public const FEATURE_ENABLED = false;
+    public const FEATURE_DISABLED_MESSAGE = '云端商品功能当前版本暂未开放';
+
+    public static function isFeatureEnabled(): bool
+    {
+        return self::FEATURE_ENABLED;
+    }
+
     public static function visibleQuery(int $tenantId)
     {
         return self::publicQuery()->where('status', CloudGoods::STATUS_ENABLED);
@@ -37,6 +45,9 @@ class CloudGoodsService extends BaseLogic
 
     public static function listVisible(array $params, int $tenantId, int $offset, int $limit): array
     {
+        if (!self::isFeatureEnabled()) {
+            return [];
+        }
         $cacheParams = self::cacheParams('visible', $params, $tenantId, $offset, $limit);
         $cache = new CloudGoodsCache();
         $rows = $cache->rememberValue($cache->listKey($cacheParams), function () use ($params, $tenantId, $offset, $limit) {
@@ -52,6 +63,9 @@ class CloudGoodsService extends BaseLogic
 
     public static function countVisible(array $params, int $tenantId): int
     {
+        if (!self::isFeatureEnabled()) {
+            return 0;
+        }
         $cacheParams = self::cacheParams('visible_count', $params, $tenantId, 0, 0);
         $cache = new CloudGoodsCache();
         return (int)$cache->rememberValue($cache->listKey($cacheParams), function () use ($params, $tenantId) {
@@ -61,6 +75,9 @@ class CloudGoodsService extends BaseLogic
 
     public static function listPublic(array $params, int $offset, int $limit): array
     {
+        if (!self::isFeatureEnabled()) {
+            return [];
+        }
         $cacheParams = self::cacheParams('public', $params, 0, $offset, $limit);
         $cache = new CloudGoodsCache();
         $rows = $cache->rememberValue($cache->listKey($cacheParams), function () use ($params, $offset, $limit) {
@@ -76,6 +93,9 @@ class CloudGoodsService extends BaseLogic
 
     public static function countPublic(array $params): int
     {
+        if (!self::isFeatureEnabled()) {
+            return 0;
+        }
         $cacheParams = self::cacheParams('public_count', $params, 0, 0, 0);
         $cache = new CloudGoodsCache();
         return (int)$cache->rememberValue($cache->listKey($cacheParams), function () use ($params) {
@@ -85,6 +105,9 @@ class CloudGoodsService extends BaseLogic
 
     public static function listArchivedPublic(array $params, int $offset, int $limit): array
     {
+        if (!self::isFeatureEnabled()) {
+            return [];
+        }
         $cacheParams = self::cacheParams('public_archive', $params, 0, $offset, $limit);
         $cache = new CloudGoodsCache();
         $rows = $cache->rememberValue($cache->listKey($cacheParams), function () use ($params, $offset, $limit) {
@@ -100,6 +123,9 @@ class CloudGoodsService extends BaseLogic
 
     public static function countArchivedPublic(array $params): int
     {
+        if (!self::isFeatureEnabled()) {
+            return 0;
+        }
         $cacheParams = self::cacheParams('public_archive_count', $params, 0, 0, 0);
         $cache = new CloudGoodsCache();
         return (int)$cache->rememberValue($cache->listKey($cacheParams), function () use ($params) {
@@ -109,6 +135,9 @@ class CloudGoodsService extends BaseLogic
 
     public static function detailVisible(int $id, int $tenantId): array
     {
+        if (!self::isFeatureEnabled()) {
+            return [];
+        }
         $cache = new CloudGoodsCache();
         $row = $cache->rememberValue($cache->detailKey($id, 0), function () use ($id, $tenantId) {
             $model = self::visibleQuery($tenantId)->where('id', $id)->findOrEmpty();
@@ -124,6 +153,9 @@ class CloudGoodsService extends BaseLogic
 
     public static function detailPublic(int $id): array
     {
+        if (!self::isFeatureEnabled()) {
+            return [];
+        }
         $model = CloudGoods::where('scope', CloudGoods::SCOPE_PUBLIC)
             ->where('tenant_id', 0)
             ->where('id', $id)
@@ -138,21 +170,33 @@ class CloudGoodsService extends BaseLogic
 
     public static function addPublic(array $params, int $adminId = 0): array|false
     {
+        if (self::rejectDisabledFeature()) {
+            return false;
+        }
         return self::saveCloudGoods($params, CloudGoods::SCOPE_PUBLIC, 0, $adminId);
     }
 
     public static function editPublic(array $params, int $adminId = 0): bool
     {
+        if (self::rejectDisabledFeature()) {
+            return false;
+        }
         return self::updateCloudGoods($params, CloudGoods::SCOPE_PUBLIC, 0, $adminId);
     }
 
     public static function deletePublic(array $params): bool
     {
+        if (self::rejectDisabledFeature()) {
+            return false;
+        }
         return self::archiveCloudGoods((array)($params['id'] ?? []), CloudGoods::SCOPE_PUBLIC, 0);
     }
 
     public static function loadToTenant(array $params, int $tenantId, int $userId = 0, int $adminId = 0): array|false
     {
+        if (self::rejectDisabledFeature()) {
+            return false;
+        }
         if ($tenantId <= 0) {
             self::setError('商品租户上下文缺失，请重新登录');
             return false;
@@ -236,6 +280,8 @@ class CloudGoodsService extends BaseLogic
 
             $source = $cloudGoods->toArray();
             $source['aliases'] = GoodsAliasService::cloudAliases($cloudGoodsId);
+            $dimensionSnapshot = CloudGoodsDimensionService::snapshot($cloudGoodsId);
+            $source['dimension_snapshot'] = $dimensionSnapshot;
             $conflict = GoodsAliasService::resolveTenantCreateConflict(
                 $tenantId,
                 (string)$source['name'],
@@ -276,6 +322,11 @@ class CloudGoodsService extends BaseLogic
                 (string)$goods->name,
                 (int)$goods->unit_id,
                 (string)$goods->units
+            );
+            CloudGoodsDimensionService::importToTenant(
+                $dimensionSnapshot,
+                $tenantId,
+                (int)$goods->id
             );
 
             CloudGoodsImport::create([
@@ -702,5 +753,14 @@ class CloudGoodsService extends BaseLogic
     public static function clearCache(): void
     {
         (new CloudGoodsCache())->clearAll();
+    }
+
+    protected static function rejectDisabledFeature(): bool
+    {
+        if (self::isFeatureEnabled()) {
+            return false;
+        }
+        self::setError(self::FEATURE_DISABLED_MESSAGE);
+        return true;
     }
 }

@@ -8,6 +8,16 @@ use PHPUnit\Framework\TestCase;
 
 final class GoodsCreationControllerContractTest extends TestCase
 {
+    public function test_cloud_goods_feature_is_disabled_for_this_release(): void
+    {
+        self::assertFalse(\app\common\service\cloud\CloudGoodsService::isFeatureEnabled());
+        self::assertFalse(\app\common\service\cloud\CloudGoodsService::loadToTenant([], 1));
+        self::assertSame(
+            '云端商品功能当前版本暂未开放',
+            \app\common\service\cloud\CloudGoodsService::getError()
+        );
+    }
+
     public function test_goods_controller_exposes_permission_conflict_and_recovery_messages(): void
     {
         $root = dirname(__DIR__, 2);
@@ -36,6 +46,9 @@ final class GoodsCreationControllerContractTest extends TestCase
     {
         $root = dirname(__DIR__, 2);
         $service = (string)file_get_contents($root . '/app/common/service/cloud/CloudGoodsService.php');
+        $dimensionService = (string)file_get_contents(
+            $root . '/app/common/service/cloud/CloudGoodsDimensionService.php'
+        );
 
         self::assertStringContainsString('GoodsMaintenancePermissionService::canMaintain()', $service);
         self::assertStringContainsString("'当前账号没有商品维护权限'", $service);
@@ -46,6 +59,11 @@ final class GoodsCreationControllerContractTest extends TestCase
         self::assertStringContainsString("'normalized_name' => GoodsAliasService::normalize", $service);
         self::assertStringContainsString("'existing_state' => \$state", $service);
         self::assertStringContainsString("'requires_activation' => !\$reusable", $service);
+        self::assertStringContainsString('CloudGoodsDimensionService::snapshot', $service);
+        self::assertStringContainsString('CloudGoodsDimensionService::importToTenant', $service);
+        self::assertStringContainsString("->where('tenant_id', 0)", $dimensionService);
+        self::assertStringContainsString("->where('status', 1)", $dimensionService);
+        self::assertStringContainsString('GoodsDimensionLogic::saveProductDimensions', $dimensionService);
     }
 
     public function test_customer_report_controller_returns_recovery_data_on_quick_create_failure(): void
