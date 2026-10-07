@@ -101,11 +101,8 @@ class CustomerReportLineService extends BaseLogic
             return false;
         }
         $processingGroupsInput = (array)($item['processing_groups'] ?? []);
-        if ($processingGroupsInput === [] && $version === 2) {
-            $processingGroupsInput = [['group_key' => 'direct', 'name' => '直接配货', 'planned_qty' => $orderQuantity, 'process_ids' => []]];
-        }
         if ($processingGroupsInput === []) {
-            self::setError('每条报货明细必须至少添加一个加工分组');
+            self::setError('每条报货明细必须至少添加一个分批处理组');
             return false;
         }
         $processingGroups = self::normalizeProcessingGroups($processingGroupsInput, $orderQuantity, $version === 2);
@@ -360,10 +357,10 @@ class CustomerReportLineService extends BaseLogic
         return null;
     }
 
-    private static function normalizeProcessingGroups(array $groups, string $orderQuantity, bool $allowDirect = false): array|false
+    private static function normalizeProcessingGroups(array $groups, string $orderQuantity, bool $quantityContractV2 = false): array|false
     {
         if ($groups === []) {
-            self::setError('每条报货明细必须至少添加一个加工分组');
+            self::setError('每条报货明细必须至少添加一个分批处理组');
             return false;
         }
         $normalized = [];
@@ -371,45 +368,45 @@ class CustomerReportLineService extends BaseLogic
         $total = '0.00';
         foreach (array_values($groups) as $index => $group) {
             if (!is_array($group)) {
-                self::setError('加工分组格式无效');
+                self::setError('分批处理格式无效');
                 return false;
             }
             $key = trim((string)($group['group_key'] ?? $group['client_group_id'] ?? 'group-' . ($index + 1)));
             if ($key === '' || strlen($key) > 64 || isset($keys[$key])) {
-                self::setError('加工分组标识无效或重复');
+                self::setError('分批处理标识无效或重复');
                 return false;
             }
             $keys[$key] = true;
-            try { $quantity = $allowDirect ? TradeQuantityFacts::decimal($group['planned_qty'] ?? null) : self::positive($group['planned_qty'] ?? null, 2); }
+            try { $quantity = $quantityContractV2 ? TradeQuantityFacts::decimal($group['planned_qty'] ?? null) : self::positive($group['planned_qty'] ?? null, 2); }
             catch (\DomainException $e) { self::setError($e->getMessage()); return false; }
             if ($quantity === false) {
-                self::setError('加工分组计划数量必须为最多两位小数的正数');
+                self::setError('分批处理计划数量必须为正数');
                 return false;
             }
             $processIds = array_values(array_unique(array_filter(array_map('intval', (array)($group['process_ids'] ?? [])), static fn(int $id): bool => $id > 0)));
-            if ($processIds === [] && !$allowDirect) {
-                self::setError('每个加工分组必须选择至少一个执行工序');
+            if ($processIds === []) {
+                self::setError('每个分批处理组必须选择至少一个执行工序');
                 return false;
             }
-            $processes = $processIds === [] ? [] : Db::name('work_process')->where('tenant_id', self::tenantId())->whereIn('id', $processIds)
+            $processes = Db::name('work_process')->where('tenant_id', self::tenantId())->whereIn('id', $processIds)
                 ->where('trigger_type', 'report_selection')->where('is_enabled', 1)->whereNull('delete_time')
                 ->field('id,name,sort')->select()->toArray();
             if (count($processes) !== count($processIds)) {
-                self::setError('加工分组包含不可用的报货选择工序');
+                self::setError('分批处理包含不可用的报货选择工序');
                 return false;
             }
             usort($processes, static fn(array $left, array $right): int => [(int)$left['sort'], (int)$left['id']] <=> [(int)$right['sort'], (int)$right['id']]);
             $normalized[] = [
                 'group_key' => $key,
-                'name' => mb_substr(trim((string)($group['name'] ?? '')) ?: '加工分组' . ($index + 1), 0, 100),
+                'name' => mb_substr(trim((string)($group['name'] ?? '')) ?: '第' . ($index + 1) . '组', 0, 100),
                 'planned_qty' => $quantity,
                 'processes' => array_values($processes),
                 'sort' => $index,
             ];
-            $total = bcadd($total, $quantity, $allowDirect ? 4 : self::SCALE);
+            $total = bcadd($total, $quantity, $quantityContractV2 ? 4 : self::SCALE);
         }
-        if (bccomp($total, $orderQuantity, $allowDirect ? 4 : self::SCALE) !== 0) {
-            self::setError('加工分组计划数量之和必须等于报货数量');
+        if (bccomp($total, $orderQuantity, $quantityContractV2 ? 4 : self::SCALE) !== 0) {
+            self::setError('分批处理计划数量之和必须等于报货数量');
             return false;
         }
         return $normalized;

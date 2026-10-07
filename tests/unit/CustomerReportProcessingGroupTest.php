@@ -80,7 +80,7 @@ final class CustomerReportProcessingGroupTest extends TestCase
         ];
 
         self::assertFalse(CustomerReportLogic::submit($payload));
-        self::assertSame('加工分组计划数量之和必须等于报货数量', CustomerReportLogic::getError());
+        self::assertSame('分批处理计划数量之和必须等于报货数量', CustomerReportLogic::getError());
     }
 
     public function test_processing_group_payload_is_required_and_cannot_be_empty(): void
@@ -92,13 +92,26 @@ final class CustomerReportProcessingGroupTest extends TestCase
         unset($payload['items'][0]['processing_groups']);
 
         self::assertFalse(CustomerReportLogic::submit($payload));
-        self::assertSame('每条报货明细必须至少添加一个加工分组', CustomerReportLogic::getError());
+        self::assertSame('每条报货明细必须至少添加一个分批处理组', CustomerReportLogic::getError());
 
         $payload['idempotency_key'] = 'processing-group-explicit-empty';
         $payload['items'][0]['processing_groups'] = [];
 
         self::assertFalse(CustomerReportLogic::submit($payload));
-        self::assertSame('每条报货明细必须至少添加一个加工分组', CustomerReportLogic::getError());
+        self::assertSame('每条报货明细必须至少添加一个分批处理组', CustomerReportLogic::getError());
+    }
+
+    public function test_report_submission_requires_an_enabled_final_delivery_process(): void
+    {
+        $customerId = $this->createCustomer('交付工序校验客户');
+        $goodsId = $this->createCustomerReportGoods('交付工序校验商品', 'DELIVERY-PROCESS');
+        $warehouseId = $this->createCustomerReportWarehouse('交付工序校验仓');
+        $payload = $this->fulfillmentPayload($customerId, $goodsId, $warehouseId, 'missing-delivery-process', '5', '');
+        Db::name('work_process')->where('tenant_id', self::TENANT_ID)
+            ->where('trigger_type', 'all_processing_completed')->update(['is_enabled' => 0]);
+
+        self::assertFalse(CustomerReportLogic::submit($payload));
+        self::assertSame('请先配置启用的最终交付工序', CustomerReportLogic::getError());
     }
 
     public function test_pending_billing_records_final_weight_per_processing_group_and_sums_the_item(): void

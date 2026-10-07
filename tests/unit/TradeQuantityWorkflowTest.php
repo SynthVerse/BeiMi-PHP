@@ -17,6 +17,7 @@ final class TradeQuantityWorkflowTest extends TestCase
     protected function setUp(): void
     {
         $this->prepareCustomerReportRequestContext(); $this->ensureCustomerReportTables(); $this->cleanCustomerReportData();
+        WorkforceLogic::saveProcess(['name' => '直接备货', 'trigger_type' => 'report_selection', 'is_enabled' => 1, 'sort' => 10]);
         WorkforceLogic::saveProcess(['name' => '送货', 'trigger_type' => 'all_processing_completed', 'is_enabled' => 1, 'sort' => 900]);
     }
     protected function tearDown(): void { $this->cleanCustomerReportData(); }
@@ -33,12 +34,45 @@ final class TradeQuantityWorkflowTest extends TestCase
         }
         $warehouse = $this->createCustomerReportWarehouse('数量事实仓');
         if (bccomp($opening, '0', 4) > 0) { WarehouseSkuBalanceService::inbound($warehouse, $sku, $opening); }
-        $report = CustomerReportLogic::submit(['quantity_contract_version' => 2, 'main_customer_id' => $this->createCustomer('数量客户'),
+        $process = (int)Db::name('work_process')->where('tenant_id', self::TENANT_ID)->where('trigger_type', 'report_selection')->where('is_enabled', 1)->value('id');
+        $payload = ['quantity_contract_version' => 2, 'main_customer_id' => $this->createCustomer('数量客户'),
             'delivery_date' => date('Y-m-d'), 'delivery_arrangement' => ['delivery_method' => $method], 'idempotency_key' => uniqid('trade-'),
             'items' => [['goods_id' => $goods, 'sku_id' => $sku, 'warehouse_id' => $warehouse,
-                'unit_id' => $count, 'unit_name' => $baseName === '瓶' ? '瓶' : '把', 'order_qty' => '5', 'price_status' => 'unpriced']]]);
+                'unit_id' => $count, 'unit_name' => $baseName === '瓶' ? '瓶' : '把', 'order_qty' => '5', 'price_status' => 'unpriced',
+                'processing_groups' => [['group_key' => 'all', 'name' => '全部数量', 'planned_qty' => '5', 'process_ids' => [$process]]]]]];
+        $report = CustomerReportLogic::submit($payload);
         self::assertNotFalse($report, CustomerReportLogic::getError());
-        return compact('base', 'count', 'goods', 'sku', 'warehouse', 'report');
+        return compact('base', 'count', 'goods', 'sku', 'warehouse', 'report', 'payload', 'process');
+    }
+
+    public function test_quantity_v2_requires_an_explicit_selected_process(): void
+    {
+        $f = $this->fixture();
+        $payload = $f['payload'];
+        $payload['idempotency_key'] = 'v2-missing-processing-groups';
+        unset($payload['items'][0]['processing_groups']);
+        self::assertFalse(CustomerReportLogic::submit($payload));
+        self::assertSame('每条报货明细必须至少添加一个分批处理组', CustomerReportLogic::getError());
+
+        $payload['idempotency_key'] = 'v2-missing-selected-process';
+        $payload['items'][0]['processing_groups'] = [[
+            'group_key' => 'all', 'name' => '全部数量', 'planned_qty' => '5', 'process_ids' => [],
+        ]];
+        self::assertFalse(CustomerReportLogic::submit($payload));
+        self::assertSame('每个分批处理组必须选择至少一个执行工序', CustomerReportLogic::getError());
+    }
+
+    public function test_quantity_v2_processing_groups_sum_with_four_decimal_precision(): void
+    {
+        $f = $this->fixture();
+        $payload = $f['payload'];
+        $payload['idempotency_key'] = 'v2-four-decimal-processing-groups';
+        $payload['items'][0]['processing_groups'] = [
+            ['group_key' => 'first', 'name' => '第一批', 'planned_qty' => '0.0050', 'process_ids' => [$f['process']]],
+            ['group_key' => 'second', 'name' => '第二批', 'planned_qty' => '4.9950', 'process_ids' => [$f['process']]],
+        ];
+
+        self::assertNotFalse(CustomerReportLogic::submit($payload), CustomerReportLogic::getError());
     }
 
     public function test_unknown_estimate_saves_demand_then_measured_delivery_uses_real_stock_and_replays(): void
@@ -161,7 +195,8 @@ final class TradeQuantityWorkflowTest extends TestCase
         $next = CustomerReportLogic::submit(['quantity_contract_version' => 2, 'main_customer_id' => $report['main_customer_id'],
             'delivery_date' => date('Y-m-d'), 'delivery_arrangement' => ['delivery_method' => 'self_delivery'], 'idempotency_key' => 'reference-report',
             'items' => [['goods_id' => $f['goods'], 'sku_id' => $f['sku'], 'warehouse_id' => $f['warehouse'], 'unit_id' => $f['count'],
-                'unit_name' => '把', 'order_qty' => '5', 'price_status' => 'unpriced']]]);
+                'unit_name' => '把', 'order_qty' => '5', 'price_status' => 'unpriced', 'processing_groups' => [[
+                    'group_key' => 'all', 'name' => '全部数量', 'planned_qty' => '5', 'process_ids' => [$f['process']]]]]]]);
         self::assertNotFalse($next, CustomerReportLogic::getError());
         self::assertSame('completed_delivery_reference', $next['items'][0]['estimate_source']);
         self::assertSame('9.1666', $next['items'][0]['expected_base_qty']);
@@ -187,8 +222,8 @@ final class TradeQuantityWorkflowTest extends TestCase
             'delivery_date' => date('Y-m-d'), 'delivery_arrangement' => ['delivery_method' => 'self_delivery'], 'idempotency_key' => 'two-weight-groups',
             'items' => [['goods_id' => $f['goods'], 'sku_id' => $f['sku'], 'warehouse_id' => $f['warehouse'], 'unit_id' => $f['base'],
                 'unit_name' => '斤', 'order_qty' => '5', 'price_status' => 'unpriced', 'processing_groups' => [
-                    ['group_key' => 'first', 'name' => '第一批', 'planned_qty' => '2', 'process_ids' => []],
-                    ['group_key' => 'second', 'name' => '第二批', 'planned_qty' => '3', 'process_ids' => []]]]]]);
+                    ['group_key' => 'first', 'name' => '第一批', 'planned_qty' => '2', 'process_ids' => [$f['process']]],
+                    ['group_key' => 'second', 'name' => '第二批', 'planned_qty' => '3', 'process_ids' => [$f['process']]]]]]]);
         self::assertNotFalse($report, CustomerReportLogic::getError());
         $groups = $report['items'][0]['processing_groups'];
         $first = CustomerReportLogic::saveProcessingWeights(['id' => $report['id'], 'version' => $report['version'], 'idempotency_key' => 'measure-first-weight',

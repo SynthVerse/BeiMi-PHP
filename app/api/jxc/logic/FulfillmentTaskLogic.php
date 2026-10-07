@@ -324,7 +324,14 @@ final class FulfillmentTaskLogic extends BaseLogic
             ->order(['process_id' => 'asc', 'id' => 'asc'])
             ->select()
             ->toArray();
-        $group['tasks'] = self::sortTasksByDeliverySchedule(self::hydrateTasks($tasks));
+        $tasks = self::hydrateTasks($tasks);
+        foreach ($tasks as &$task) {
+            if (in_array((string)$task['exception_code'], ['missing_inventory_shortage_process', 'missing_delivery_process'], true)) {
+                $task['action'] = self::exceptionAction($task);
+            }
+        }
+        unset($task);
+        $group['tasks'] = self::sortTasksByDeliverySchedule($tasks);
         return $group;
     }
 

@@ -138,7 +138,7 @@ final class ProcedureTaskPoolConfigurationTest extends TestCase
         self::assertSame(1, Db::name('employee_process')->where('employee_id', $employeeId)->count());
     }
 
-    public function test_enabling_automatic_procedures_recovers_waiting_configuration_exceptions(): void
+    public function test_enabling_shortage_procedure_recovers_waiting_configuration_exception(): void
     {
         $customerId = $this->createCustomer('配置恢复客户');
         $goodsId = $this->createCustomerReportGoods('配置恢复商品', 'CONFIG-RECOVERY');
@@ -152,25 +152,56 @@ final class ProcedureTaskPoolConfigurationTest extends TestCase
             ''
         ));
         self::assertNotFalse($report, CustomerReportLogic::getError());
-        self::assertSame(2, Db::name('fulfillment_task')->where('report_id', (int)$report['id'])
-            ->whereIn('exception_code', ['missing_inventory_shortage_process', 'missing_delivery_process'])
+        self::assertSame(1, Db::name('fulfillment_task')->where('report_id', (int)$report['id'])
+            ->where('exception_code', 'missing_inventory_shortage_process')
             ->where('status', 'exception')->count());
 
         self::assertNotFalse(WorkforceLogic::saveProcess([
             'name' => '采购', 'trigger_type' => 'inventory_shortage', 'is_enabled' => 1, 'sort' => 10,
         ]), WorkforceLogic::getError());
-        self::assertNotFalse(WorkforceLogic::saveProcess([
-            'name' => '送货', 'trigger_type' => 'all_processing_completed', 'is_enabled' => 1, 'sort' => 30,
-        ]), WorkforceLogic::getError());
-
         self::assertSame(0, Db::name('fulfillment_task')->where('report_id', (int)$report['id'])
-            ->whereIn('exception_code', ['missing_inventory_shortage_process', 'missing_delivery_process'])
+            ->where('exception_code', 'missing_inventory_shortage_process')
             ->where('status', 'exception')->count());
-        self::assertSame(2, Db::name('fulfillment_task')->where('report_id', (int)$report['id'])
-            ->whereIn('source_key', [
-                'item:' . (int)$report['items'][0]['id'] . ':shortage',
-                'report:' . (int)$report['id'] . ':delivery',
-            ])->where('status', 'printable')->count());
+        self::assertSame(1, Db::name('fulfillment_task')->where('report_id', (int)$report['id'])
+            ->where('source_key', 'item:' . (int)$report['items'][0]['id'] . ':shortage')
+            ->where('status', 'printable')->count());
+    }
+
+    public function test_report_detail_exposes_repair_action_for_historical_missing_delivery_process(): void
+    {
+        $customerId = $this->createCustomer('历史异常客户');
+        $goodsId = $this->createCustomerReportGoods('历史异常商品', 'HISTORICAL-CONFIG');
+        $warehouseId = $this->createCustomerReportWarehouse('历史异常仓');
+        $report = CustomerReportLogic::submit($this->fulfillmentPayload(
+            $customerId,
+            $goodsId,
+            $warehouseId,
+            'historical-config-detail',
+            '1',
+            ''
+        ));
+        self::assertNotFalse($report, CustomerReportLogic::getError());
+        $deliverySourceKey = 'report:' . (int)$report['id'] . ':delivery';
+        Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)
+            ->where('source_key', $deliverySourceKey)->update([
+                'process_id' => 0,
+                'process_name_snapshot' => '待配置送货工序',
+                'status' => 'exception',
+                'exception_code' => 'missing_delivery_process',
+                'update_time' => time(),
+            ]);
+
+        $detail = CustomerReportLogic::detail(['id' => (int)$report['id']]);
+
+        self::assertNotFalse($detail, CustomerReportLogic::getError());
+        $tasks = $detail['task_group']['tasks'];
+        $task = array_values(array_filter($tasks, static fn(array $row): bool => (string)$row['source_key'] === $deliverySourceKey))[0];
+        self::assertSame('missing_delivery_process', $task['exception_code']);
+        self::assertSame([
+            'label' => '配置工序',
+            'type' => 'configure_process',
+            'trigger_type' => 'all_processing_completed',
+        ], $task['action']);
     }
 
     public function test_zero_execution_order_snapshot_is_not_rewritten_after_catalog_reorder(): void

@@ -407,6 +407,25 @@ SQL;
                 'delete_time' => null,
             ]);
         }
+        $deliveryProcessId = (int)Db::name('work_process')->where('tenant_id', self::TENANT_ID)
+            ->where('trigger_type', 'all_processing_completed')->where('is_enabled', 1)
+            ->whereNull('delete_time')->order(['sort' => 'asc', 'id' => 'asc'])->value('id');
+        if ($deliveryProcessId <= 0) {
+            $now = time();
+            Db::name('work_process')->insert([
+                'tenant_id' => self::TENANT_ID,
+                'code' => 'test_delivery_' . substr(sha1(uniqid('', true)), 0, 12),
+                'name' => '测试送货',
+                'trigger_type' => 'all_processing_completed',
+                'trigger_keywords' => '[]',
+                'sort' => 30,
+                'is_enabled' => 1,
+                'is_system' => 0,
+                'create_time' => $now,
+                'update_time' => $now,
+                'delete_time' => null,
+            ]);
+        }
         return [
             'main_customer_id' => $customerId,
             'delivery_date' => '2026-08-10',

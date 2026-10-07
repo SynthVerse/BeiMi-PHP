@@ -1132,6 +1132,16 @@ class CustomerReportLogic extends BaseLogic
             self::setError(CustomerReportLineService::getError());
             return false;
         }
+        $hasDeliveryProcess = Db::name('work_process')
+            ->where('tenant_id', $tenantId)
+            ->where('trigger_type', 'all_processing_completed')
+            ->where('is_enabled', 1)
+            ->whereNull('delete_time')
+            ->count() > 0;
+        if (!$hasDeliveryProcess) {
+            self::setError('请先配置启用的最终交付工序');
+            return false;
+        }
         $deliveryArrangement = CustomerReportDeliveryArrangementService::forSubmit(
             $params,
             (int)$items[0]['delivery_customer_id'],
