@@ -25,7 +25,7 @@ final class WorkforceValidate extends BaseValidate
     public function sceneSaveEmployee() { return $this->only(['id', 'name', 'mobile', 'bind_user_id', 'is_enabled', 'permission_keys'])->remove('id', 'require|gt')->append('id', 'egt:0'); }
     public function sceneStatusEmployee() { return $this->only(['id', 'is_enabled'])->append('is_enabled', 'require'); }
     public function sceneProcesses() { return $this->only(['keyword', 'is_enabled']); }
-    public function sceneSaveProcess() { return $this->only(['id', 'name', 'trigger_type', 'keywords', 'sort', 'is_enabled'])->remove('id', 'require'); }
+    public function sceneSaveProcess() { return $this->only(['id', 'name', 'trigger_type', 'keywords', 'sort', 'is_enabled'])->remove('id', 'require|gt')->append('id', 'egt:0'); }
     public function sceneStatusProcess() { return $this->only(['id', 'is_enabled'])->append('is_enabled', 'require'); }
     public function sceneReorderProcesses() { return $this->only(['ids']); }
     public function sceneDeleteProcess() { return $this->only(['id']); }

@@ -2945,24 +2945,34 @@ Vue2 使用新文件、组件或顶层常量验证，不以 Options API 对象�
 
 ## PIT-0030：新建保存场景继承更新 ID 的正数校验
 
+### 报告来源（2026-10-09 复发）
+
+- 生成原因：工作流要求
+- 主工作流：Matt Pocock
+- 实际使用的 Skill：
+  - `Matt Pocock / diagnosing-bugs`（自动调用）
+  - `用户级自定义 / prevent-repeat-pitfalls`（自动调用）
+  - `Matt Pocock / tdd`（由防复发流程调用）
+- 说明：新增执行工序复现了已有的新建 ID 校验根因；本次更新原 PIT 并把自动化防线扩展到工序保存场景。
+
 - 状态：已防护
 - 首次发生：2026-08-29
-- 最近发生：2026-08-29
-- 复发次数：1
-- 适用范围：`BeiMi-PHP` 员工档案新建与 `POST /jxc/workforce/employee/save`
+- 最近发生：2026-10-09
+- 复发次数：2
+- 适用范围：`BeiMi-PHP` 中同时承担新建与编辑的 Workforce 保存场景，当前包括员工档案与执行工序
 - 相关问题：无
 
 ### 触发场景
 
-小程序新增一个启用的纸质员工，填写姓名、测试手机号和“杀鱼”工序能力，并按保存。前端按既定新建语义提交 `id: 0`。
+小程序新增员工或执行工序时，前端按既定新建语义提交 `id: 0`。员工保存曾因此被拒绝；2026-10-09 新增“采购”工序时再次出现“id必须大于 0”。
 
 ### 根因
 
-`WorkforceValidate` 的全局 `id` 规则为 `require|integer|gt:0`。ThinkPHP 在执行验证规则时先把 `gt:0` 标准化为规则类型 `gt`，再以该类型匹配 `remove()` 项；因此 `remove('id', 'require|gt:0')` 中的 `gt:0` 不会命中，旧的 `gt` 规则仍会在控制器进入 `WorkforceLogic::saveEmployee()` 之前拒绝 `id: 0`。逻辑层实际已把 `id <= 0` 作为插入分支，前后契约不一致。
+`WorkforceValidate` 的全局 `id` 规则为 `require|integer|gt:0`。ThinkPHP 在执行验证规则时先把 `gt:0` 标准化为规则类型 `gt`，再以该类型匹配 `remove()` 项。员工场景曾因错误使用 `remove('id', 'require|gt:0')` 残留 `gt`；工序场景则只移除了 `require`，同样残留 `gt`。两者都会在控制器进入逻辑层的新增分支之前拒绝 `id: 0`，造成前后契约不一致。
 
 ### 错误做法
 
-为可新建也可编辑的保存场景只移除 ID 的必填规则；或误以为 `remove()` 可以按带参数的 `gt:0` 删除规则；或把前端的 `id: 0` 改成伪造的正数 ID。
+为可新建也可编辑的保存场景只移除 ID 的必填规则；只修复一个相邻场景而不检查同一验证器中的其他保存场景；误以为 `remove()` 可以按带参数的 `gt:0` 删除规则；或把前端的 `id: 0` 改成伪造的正数 ID。
 
 ### 正确做法
 
@@ -2970,10 +2980,11 @@ Vue2 使用新文件、组件或顶层常量验证，不以 Options API 对象�
 
 ### 防线
 
-- 自动化防线：`tests/unit/WorkforceValidateSaveEmployeeTest.php` 覆盖 `id: 0` 的纸质员工新建校验、正数 ID 的编辑校验和负数 ID 拒绝。
-- 架构防线：`WorkforceValidate::sceneSaveEmployee()` 按 ThinkPHP 规则类型显式移除继承的 `require|gt`，并追加 `egt:0`，与 `WorkforceLogic::saveEmployee()` 的新增／编辑分支一致。
+- 自动化防线：`tests/unit/WorkforceValidateSaveEmployeeTest.php` 与 `tests/unit/WorkforceValidateSaveProcessTest.php` 分别覆盖员工和执行工序的 `id: 0` 新建、正数 ID 编辑和负数 ID 拒绝。
+- 架构防线：`WorkforceValidate::sceneSaveEmployee()` 与 `sceneSaveProcess()` 都按 ThinkPHP 规则类型显式移除继承的 `require|gt`，再追加 `egt:0`，与对应逻辑层的新增／编辑分支一致。
 - 决策与知识：根目录 `CONTEXT.md` 中“员工档案”“员工工序能力”和“员工电子权限”的独立定义。
 - 验证结果：修正前用 `D:\xampp\php\php.exe vendor\bin\phpunit tests\unit\WorkforceValidateSaveEmployeeTest.php --colors=never` 稳定复现 3 例中的 `id: 0` 失败；修正后同一聚焦命令通过（3 tests, 3 assertions）。本机可使用 `D:\xampp\php\php.exe`；完整 PHPUnit 因等待外部依赖而在约 9 分钟、CPU 约 0.64 秒后被终止，未完成且不得写成通过。真实微信开发者工具回归仍待部署后完成。
+- 2026-10-09 复发验证：`C:\Users\ASUS\AppData\Local\Programs\PHP\8.2\php.exe vendor/bin/phpunit tests/unit/WorkforceValidateSaveProcessTest.php` 修复前稳定得到“id必须大于 0”（1 failure），修复后 3 tests / 3 assertions 通过；尚未在部署后的微信小程序使用真实账号完成保存验收。
 
 ### 发生记录
 
@@ -2981,6 +2992,7 @@ Vue2 使用新文件、组件或顶层常量验证，不以 Options API 对象�
 |---|---|---|---|
 | 2026-08-29 | 冻结 V1 真实数据验收 / 员工工序能力配置 | 新增只具备“杀鱼”能力的纸质员工被保存接口拒绝 | 既有履约测试直接调用逻辑层，绕过控制器校验；没有覆盖小程序实际提交的 `id: 0` 保存契约。 |
 | 2026-08-29 | 新增员工保存校验回归 | 首版候选补丁写为 `remove('id', 'require|gt:0')`，聚焦 PHPUnit 仍拒绝 `id: 0` | 当时未使用可用的 `D:\xampp\php\php.exe` 执行聚焦测试，未暴露 ThinkPHP `remove()` 只按标准化规则类型匹配的细节。 |
+| 2026-10-09 | 新增执行工序保存修复 | 新增“采购”工序提交 `id: 0` 后弹出“id必须大于 0” | 原防线只覆盖 `sceneSaveEmployee()`，没有约束同一验证器内同样承担新增／编辑的 `sceneSaveProcess()`。 |
 
 ## PIT-0031：业务回归未执行到断言，留下无效测试夹具
 
