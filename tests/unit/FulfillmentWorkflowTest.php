@@ -1059,6 +1059,48 @@ final class FulfillmentWorkflowTest extends TestCase
         self::assertSame(0, Db::name('receivable_flow')->where('tenant_id', self::TENANT_ID)->count());
     }
 
+    public function test_c_ticket_print_lines_keep_report_scope_and_original_quantities(): void
+    {
+        $customerId = $this->createCustomer('C版客户');
+        $goodsId = $this->createCustomerReportGoods('C版桂鱼', 'TICKET-C-FISH');
+        $otherGoodsId = $this->createCustomerReportGoods('C版鲍鱼', 'TICKET-C-ABALONE');
+        $warehouseId = $this->createCustomerReportWarehouse('C版票据仓');
+        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, '10.00'));
+        self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $otherGoodsId, '10.00'));
+        $payload = $this->fulfillmentPayload($customerId, $goodsId, $warehouseId, 'ticket-c-lines', '1', '充氧打包');
+        $payload['items'][] = array_merge($payload['items'][0], [
+            'goods_id' => $otherGoodsId, 'order_qty' => '2',
+            'processing_groups' => [array_merge($payload['items'][0]['processing_groups'][0], ['planned_qty' => '2'])],
+        ]);
+        $report = CustomerReportLogic::submit($payload);
+        self::assertNotFalse($report, CustomerReportLogic::getError());
+        $unrelated = CustomerReportLogic::submit($this->fulfillmentPayload(
+            $customerId, $goodsId, $warehouseId, 'ticket-c-other-report', '3', '其他报货'
+        ));
+        self::assertNotFalse($unrelated, CustomerReportLogic::getError());
+        Db::name('customer_report_item')->where('tenant_id', self::TENANT_ID)
+            ->where('id', (int)$report['items'][1]['id'])->update(['sku_name' => '6头']);
+        $deliveryTask = Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)
+            ->where('report_id', (int)$report['id'])->whereLike('source_key', '%:delivery')->find();
+        $deliveryPrint = FulfillmentTaskLogic::printData(['id' => (int)$deliveryTask['id']]);
+        self::assertNotFalse($deliveryPrint, FulfillmentTaskLogic::getError());
+        $lines = $deliveryPrint['ticket']['print_lines'];
+        self::assertCount(2, $lines);
+        self::assertSame(['C版桂鱼', 'C版鲍鱼'], array_column($lines, 'goods_name'));
+        self::assertSame('6头', $lines[1]['sku_name']);
+        self::assertSame(['1.0000', '2.0000'], array_column($lines, 'quantity'));
+        self::assertSame(['件', '件'], array_column($lines, 'unit_name'));
+        self::assertSame(1, $deliveryPrint['ticket']['copy_no']);
+        self::assertFalse($deliveryPrint['ticket']['is_reprint']);
+        $processingTask = Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)
+            ->where('report_item_id', (int)$report['items'][1]['id'])->where('task_type', 'process')->find();
+        $processPrint = FulfillmentTaskLogic::printData(['id' => (int)$processingTask['id']]);
+        self::assertNotFalse($processPrint, FulfillmentTaskLogic::getError());
+        self::assertCount(1, $processPrint['ticket']['print_lines']);
+        self::assertSame((string)$processingTask['planned_qty'], $processPrint['ticket']['print_lines'][0]['quantity']);
+        self::assertSame('件', $processPrint['ticket']['print_lines'][0]['unit_name']);
+    }
+
     public function test_print_data_exposes_supplement_and_main_child_customer_hierarchy(): void
     {
         $mainCustomerId = $this->createCustomer('层级主客户');

@@ -733,13 +733,17 @@ final class FulfillmentTaskLogic extends BaseLogic
                     'content_hash' => (string)$raw['content_hash'], 'paper_status' => 'not_issued',
                     'create_time' => $now, 'update_time' => $now,
                 ]);
+                $ticket = self::taskById($id);
+                $ticket['print_lines'] = self::printLines($ticket);
+                $ticket['copy_no'] = $copyNo;
+                $ticket['is_reprint'] = $successfulCopies > 0;
                 return [
                     'print_log_id' => $logId,
                     'print_requested_time' => $now,
                     'copy_no' => $copyNo,
                     'is_reprint' => $successfulCopies > 0,
                     'printer' => ['name' => 'XP-N160II', 'paper_width_mm' => 80, 'transport' => 'bluetooth'],
-                    'ticket' => self::taskById($id),
+                    'ticket' => $ticket,
                 ];
             });
         } catch (\Throwable) {
@@ -748,6 +752,39 @@ final class FulfillmentTaskLogic extends BaseLogic
             }
             return false;
         }
+    }
+
+    /** 只补充打印内容，不改任务身份、库存或履约状态。 @return array<int,array<string,mixed>> */
+    private static function printLines(array $task): array
+    {
+        $delivery = str_ends_with((string)($task['source_key'] ?? ''), ':delivery');
+        $itemId = (int)($task['report_item_id'] ?? 0);
+        if (!$delivery && $itemId <= 0) {
+            return [];
+        }
+        $query = Db::name('customer_report_item')->where('tenant_id', self::tenantId())
+            ->where('report_id', (int)$task['report_id'])->whereNull('delete_time')
+            ->whereNotIn('status', ['cancelled', 'undelivered']);
+        if (!$delivery) {
+            $query->where('id', $itemId);
+        }
+        $lines = [];
+        foreach ($query->order('id')->select()->toArray() as $item) {
+            $child = (int)($item['delivery_customer_id'] ?? 0) > 0
+                && (int)$item['delivery_customer_id'] !== (int)($task['main_customer_id'] ?? 0);
+            $lines[] = [
+                'goods_name' => (string)$item['goods_name'],
+                'sku_name' => (string)($item['sku_name'] ?? ''),
+                'quantity' => (string)($delivery ? $item['order_qty'] : $task['planned_qty']),
+                'unit_name' => (string)($delivery ? $item['unit_name'] : $task['unit_name']),
+                'delivery_customer_name' => $child ? (string)($item['delivery_customer_name'] ?? '') : '',
+                'requirement' => implode('；', array_unique(array_filter([
+                    trim((string)($item['processing_requirement'] ?? '')),
+                    trim((string)($item['line_remark'] ?? '')),
+                ]))),
+            ];
+        }
+        return $lines;
     }
 
     /** @return array<string,mixed>|false */
