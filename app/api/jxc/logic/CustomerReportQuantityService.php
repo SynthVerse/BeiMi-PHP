@@ -107,12 +107,23 @@ final class CustomerReportQuantityService
                     $facts['version'] = (int)$report['version'] + 1;
                     if ((int)$item['piece_weight_confirmed'] === 1) {
                         $verification = $params['specification_verifications'][$item['id']] ?? $params['specification_verifications'][(string)$item['id']] ?? null;
-                        if (!$verification || ($verification['confirmed'] ?? false) !== true) { throw new \DomainException('客户有大小要求，请保留逐件核实依据及核验阶段'); }
-                        $minimum = TradeQuantityFacts::decimal($verification['min'] ?? null);
-                        $maximum = TradeQuantityFacts::decimal($verification['max'] ?? null);
-                        if (bccomp($minimum, (string)$item['piece_weight_min'], 4) < 0 || bccomp($maximum, (string)$item['piece_weight_max'], 4) > 0
-                            || bccomp($maximum, $minimum, 4) < 0 || ($verification['stage'] ?? '') !== ($item['size_check_stage'] ?? 'delivery')) {
-                            throw new \DomainException('逐件核验范围不符合客户要求或核验阶段未明确');
+                        if (!is_array($verification) || ($verification['confirmed'] ?? false) !== true) { throw new \DomainException('客户有大小要求，请先按要求核对大小并确认'); }
+                        $mode = $verification['mode'] ?? 'measured_range';
+                        if (!in_array($mode, ['manual_confirmation', 'measured_range'], true)
+                            || ($verification['stage'] ?? '') !== ($item['size_check_stage'] ?? 'delivery')) {
+                            throw new \DomainException('大小核验方式或核验阶段不正确');
+                        }
+                        if ($mode === 'measured_range') {
+                            $minimum = TradeQuantityFacts::decimal($verification['min'] ?? null);
+                            $maximum = TradeQuantityFacts::decimal($verification['max'] ?? null);
+                            if (bccomp($minimum, (string)$item['piece_weight_min'], 4) < 0 || bccomp($maximum, (string)$item['piece_weight_max'], 4) > 0
+                                || bccomp($maximum, $minimum, 4) < 0) {
+                                throw new \DomainException('逐件核验范围不符合客户要求');
+                            }
+                        } else {
+                            // Manual confirmation records the customer's requirement, never invented measurements.
+                            $verification = array_intersect_key($verification, array_flip(['mode', 'confirmed', 'stage', 'count']));
+                            $verification['requirement'] = ['min' => (string)$item['piece_weight_min'], 'max' => (string)$item['piece_weight_max'], 'unit' => '斤'];
                         }
                         $facts['specification_verification'] = $verification;
                     }
@@ -131,9 +142,12 @@ final class CustomerReportQuantityService
                 }
                 if ((int)$item['piece_weight_confirmed'] === 1 && $normalized !== []) {
                     $verification = $params['specification_verifications'][$item['id']] ?? [];
-                    $count = TradeQuantityFacts::decimal($verification['count'] ?? null, 0);
-                    if (isset($newCounts[(int)$item['unit_id']]) && bccomp($count, $newCounts[(int)$item['unit_id']], 4) !== 0) {
-                        throw new \DomainException('逐件核验数量必须与实际清点数量一致');
+                    if (($verification['mode'] ?? 'measured_range') !== 'manual_confirmation'
+                        || array_key_exists('count', $verification) || isset($newCounts[(int)$item['unit_id']])) {
+                        $count = TradeQuantityFacts::decimal($verification['count'] ?? null, 0);
+                        if (isset($newCounts[(int)$item['unit_id']]) && bccomp($count, $newCounts[(int)$item['unit_id']], 4) !== 0) {
+                            throw new \DomainException('逐件核验数量必须与实际清点数量一致');
+                        }
                     }
                 }
                 $remainingCount = isset($countTotals[(int)$item['unit_id']]) ? bcsub((string)$item['order_qty'], $countTotals[(int)$item['unit_id']], 4) : null;

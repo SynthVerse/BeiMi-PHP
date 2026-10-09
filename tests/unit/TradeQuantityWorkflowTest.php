@@ -62,6 +62,63 @@ final class TradeQuantityWorkflowTest extends TestCase
         self::assertSame('每个分批处理组必须选择至少一个执行工序', CustomerReportLogic::getError());
     }
 
+    /** @dataProvider sizeConfirmationCases */
+    public function test_size_confirmation_without_measured_extrema(array $verification, bool $weightOrder, ?string $error): void
+    {
+        $f = $this->fixture(); $report = $f['report']; $item = $report['items'][0];
+        $groupId = (int)$item['processing_groups'][0]['id'];
+        Db::name('customer_report_item')->where('id', $item['id'])->update([
+            'piece_weight_confirmed' => 1, 'piece_weight_min' => '1', 'piece_weight_max' => '2',
+            'size_check_stage' => 'before_processing',
+            'unit_id' => $weightOrder ? $f['base'] : $f['count'],
+        ]);
+        Db::name('customer_report_processing_group_process')->where('processing_group_id', $groupId)->delete();
+        $save = ['id' => $report['id'], 'version' => $report['version'], 'idempotency_key' => 'manual-size',
+            'specification_verifications' => [$item['id'] => $verification],
+            'groups' => [['id' => $groupId, 'net_weight_input' => ['value' => '5', 'unit' => '斤'],
+                'quantity_facts' => $weightOrder ? [] : [['unit_id' => $f['count'], 'quantity' => '5']]]]];
+        $result = CustomerReportLogic::saveProcessingWeights($save);
+        if ($error !== null) {
+            self::assertFalse($result);
+            self::assertStringContainsString($error, CustomerReportLogic::getError());
+            self::assertSame((int)$report['version'], (int)Db::name('customer_report')->where('id', $report['id'])->value('version'));
+            return;
+        }
+        self::assertNotFalse($result, CustomerReportLogic::getError());
+        $facts = json_decode(Db::name('customer_report_processing_group')->where('id', $groupId)->value('quantity_facts_snapshot'), true);
+        $saved = $facts['specification_verification'];
+        if (($verification['mode'] ?? '') === 'manual_confirmation') {
+            self::assertArrayNotHasKey('min', $saved); self::assertArrayNotHasKey('max', $saved);
+            self::assertSame('manual_confirmation', $saved['mode']);
+            self::assertEquals(1, $saved['requirement']['min']);
+            self::assertEquals(2, $saved['requirement']['max']);
+        } else {
+            self::assertSame('1', $saved['min']); self::assertSame('2', $saved['max']);
+        }
+        self::assertSame((int)$result['version'], (int)CustomerReportLogic::saveProcessingWeights($save)['version']);
+    }
+
+    public static function sizeConfirmationCases(): array
+    {
+        $manual = ['mode' => 'manual_confirmation', 'confirmed' => true, 'stage' => 'before_processing'];
+        $legacy = ['confirmed' => true, 'stage' => 'before_processing', 'min' => '1', 'max' => '2', 'count' => '5'];
+        return [
+            'counted confirmation' => [$manual + ['count' => '5'], false, null],
+            'weight confirmation without invented count' => [$manual, true, null],
+            'manual ignores claimed extrema' => [$manual + ['min' => '8', 'max' => '9'], true, null],
+            'invalid explicit count' => [$manual + ['count' => 'abc'], true, '数量必须'],
+            'negative explicit count' => [$manual + ['count' => '-1'], true, '数量必须'],
+            'unchecked' => [array_replace($manual, ['confirmed' => false]), true, '核对大小'],
+            'wrong stage' => [array_replace($manual, ['stage' => 'delivery']), true, '核验阶段'],
+            'unknown mode' => [array_replace($manual, ['mode' => 'unknown']), true, '核验方式'],
+            'wrong count' => [$manual + ['count' => '4'], false, '实际清点数量一致'],
+            'missing count' => [$manual, false, '数量必须'],
+            'legacy accepted' => [$legacy, false, null],
+            'legacy out of range' => [array_replace($legacy, ['max' => '3']), false, '核验范围'],
+            'legacy missing extrema' => [array_diff_key($legacy, ['min' => 1, 'max' => 1]), false, '数量必须'],
+        ];
+    }
+
     public function test_quantity_v2_processing_groups_sum_with_four_decimal_precision(): void
     {
         $f = $this->fixture();
