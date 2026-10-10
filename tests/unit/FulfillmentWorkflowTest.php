@@ -1080,6 +1080,11 @@ final class FulfillmentWorkflowTest extends TestCase
         self::assertNotFalse($unrelated, CustomerReportLogic::getError());
         Db::name('customer_report_item')->where('tenant_id', self::TENANT_ID)
             ->where('id', (int)$report['items'][1]['id'])->update(['sku_name' => '6头']);
+        Db::name('customer_report_item')->where('tenant_id', self::TENANT_ID)
+            ->where('id', (int)$report['items'][0]['id'])->update([
+                'piece_weight_confirmed' => 1, 'piece_weight_min' => '1.80', 'piece_weight_max' => '2.00',
+                'acceptable_base_qty_min' => '0.00', 'acceptable_base_qty_max' => '0.00',
+            ]);
         $deliveryTask = Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)
             ->where('report_id', (int)$report['id'])->whereLike('source_key', '%:delivery')->find();
         $deliveryPrint = FulfillmentTaskLogic::printData(['id' => (int)$deliveryTask['id']]);
@@ -1090,6 +1095,9 @@ final class FulfillmentWorkflowTest extends TestCase
         self::assertSame('6头', $lines[1]['sku_name']);
         self::assertSame(['1.0000', '2.0000'], array_column($lines, 'quantity'));
         self::assertSame(['件', '件'], array_column($lines, 'unit_name'));
+        self::assertSame('单条 1.8～2斤', $lines[0]['size_requirement'] ?? null);
+        self::assertSame('', $lines[0]['weight_requirement'] ?? null, '未填写总重范围不能印成0～0斤');
+        self::assertSame(2, $deliveryPrint['ticket']['print_layout_version'] ?? null);
         self::assertSame(1, $deliveryPrint['ticket']['copy_no']);
         self::assertFalse($deliveryPrint['ticket']['is_reprint']);
         $processingTask = Db::name('fulfillment_task')->where('tenant_id', self::TENANT_ID)

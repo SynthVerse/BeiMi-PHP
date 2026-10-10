@@ -735,6 +735,7 @@ final class FulfillmentTaskLogic extends BaseLogic
                 ]);
                 $ticket = self::taskById($id);
                 $ticket['print_lines'] = self::printLines($ticket);
+                $ticket['print_layout_version'] = 2;
                 $ticket['copy_no'] = $copyNo;
                 $ticket['is_reprint'] = $successfulCopies > 0;
                 return [
@@ -768,6 +769,13 @@ final class FulfillmentTaskLogic extends BaseLogic
         if (!$delivery) {
             $query->where('id', $itemId);
         }
+        $number = static fn(mixed $value): string => rtrim(rtrim(bcadd((string)($value ?? '0'), '0', 4), '0'), '.');
+        $range = static function (string $label, mixed $min, mixed $max) use ($number): string {
+            if (bccomp((string)($min ?? '0'), '0', 4) <= 0 || bccomp((string)($max ?? '0'), (string)$min, 4) < 0) {
+                return '';
+            }
+            return $label . ' ' . $number($min) . '～' . $number($max) . '斤';
+        };
         $lines = [];
         foreach ($query->order('id')->select()->toArray() as $item) {
             $child = (int)($item['delivery_customer_id'] ?? 0) > 0
@@ -778,6 +786,9 @@ final class FulfillmentTaskLogic extends BaseLogic
                 'quantity' => (string)($delivery ? $item['order_qty'] : $task['planned_qty']),
                 'unit_name' => (string)($delivery ? $item['unit_name'] : $task['unit_name']),
                 'delivery_customer_name' => $child ? (string)($item['delivery_customer_name'] ?? '') : '',
+                'size_requirement' => (int)($item['piece_weight_confirmed'] ?? 0) === 1
+                    ? $range('单条', $item['piece_weight_min'] ?? null, $item['piece_weight_max'] ?? null) : '',
+                'weight_requirement' => $range('可接受总重', $item['acceptable_base_qty_min'] ?? null, $item['acceptable_base_qty_max'] ?? null),
                 'requirement' => implode('；', array_unique(array_filter([
                     trim((string)($item['processing_requirement'] ?? '')),
                     trim((string)($item['line_remark'] ?? '')),
