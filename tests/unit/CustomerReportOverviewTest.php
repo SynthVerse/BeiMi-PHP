@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace tests\unit;
 
 use app\api\jxc\logic\CustomerReportOverviewLogic;
+use app\api\jxc\logic\CustomerReportLogic;
 use PHPUnit\Framework\TestCase;
 use think\facade\Db;
 
@@ -39,6 +40,55 @@ final class CustomerReportOverviewTest extends TestCase
         self::assertSame($first, $result['customers'][0]['reports'][1]['supplement_for_report_id']);
         self::assertSame(['5.5000', '7.0000'], array_column($result['goods_summary'], 'quantity'));
         self::assertSame(['斤', '条'], array_column($result['goods_summary'], 'unit_name'));
+    }
+
+    public function test_cancelled_report_history_preserves_reason_and_does_not_change_effective_overview(): void
+    {
+        $cancelledTime = strtotime('2026-10-10 09:30:00');
+        $id = $this->report('取消客户', '取消客户', '9', '斤', [
+            'status' => 'cancelled', 'cancellation_reason' => '客户撤回报货',
+            'cancelled_by' => 7, 'cancelled_time' => $cancelledTime,
+        ]);
+        $this->report('有效客户', '有效客户', '3', '斤');
+
+        $effective = CustomerReportOverviewLogic::overview(['delivery_date' => '2026-10-10']);
+        self::assertSame(1, $effective['summary']['report_count']);
+        $history = CustomerReportOverviewLogic::overview(['delivery_date' => '2026-10-10', 'status' => 'cancelled']);
+        self::assertNotFalse($history, CustomerReportOverviewLogic::getError());
+        self::assertSame(1, $history['summary']['report_count']);
+        $report = $history['customers'][0]['reports'][0];
+        self::assertSame($id, $report['id']);
+        self::assertSame('已取消', $report['status_label']);
+        self::assertSame('客户撤回报货', $report['cancellation_reason']);
+        self::assertSame($cancelledTime, $report['cancelled_time']);
+        self::assertSame(7, $report['cancelled_by']);
+        self::assertFalse(CustomerReportOverviewLogic::exportWord([
+            'delivery_date' => '2026-10-10', 'status' => 'cancelled',
+            'expected_tenant_id' => self::TENANT_ID, 'snapshot_hash' => $history['snapshot_hash'],
+        ]));
+        self::assertStringContainsString('取消记录', CustomerReportOverviewLogic::getError());
+    }
+
+    public function test_cancelled_history_lists_all_delivery_dates_in_cancellation_order(): void
+    {
+        $olderId = $this->report('旧单客户', '旧单客户', '2', '斤', [
+            'delivery_date' => '2026-08-01', 'status' => 'cancelled',
+            'cancellation_reason' => '改期', 'cancelled_time' => strtotime('2026-10-10 11:00:00'),
+        ]);
+        $newerId = $this->report('新单客户', '新单客户', '1', '斤', [
+            'status' => 'cancelled', 'cancellation_reason' => '撤回',
+            'cancelled_time' => strtotime('2026-10-10 09:00:00'),
+        ]);
+        $this->report('有效客户', '有效客户', '3', '斤');
+
+        $first = CustomerReportLogic::lists(['status_scope' => 'cancelled', 'page_no' => 1, 'page_size' => 1]);
+        self::assertNotFalse($first, CustomerReportLogic::getError());
+        self::assertSame(2, $first['count']);
+        self::assertSame($olderId, (int)$first['lists'][0]['id']);
+        self::assertSame('改期', $first['lists'][0]['cancellation_reason']);
+        self::assertSame('2026-08-01', $first['lists'][0]['delivery_date']);
+        $second = CustomerReportLogic::lists(['status_scope' => 'cancelled', 'page_no' => 2, 'page_size' => 1]);
+        self::assertSame($newerId, (int)$second['lists'][0]['id']);
     }
 
     public function test_word_exports_the_displayed_snapshot_and_refuses_stale_or_cross_store_requests(): void

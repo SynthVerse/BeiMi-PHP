@@ -79,8 +79,9 @@ class CustomerReportLogic extends BaseLogic
         $pageSize = min(100, max(1, (int)($params['page_size'] ?? 20)));
         $statusScope = (string)($params['status_scope'] ?? '');
         $count = self::listQuery($statusScope)->count();
+        $order = $statusScope === 'cancelled' ? ['cancelled_time' => 'desc', 'id' => 'desc'] : ['id' => 'desc'];
         return [
-            'lists' => self::listQuery($statusScope)->order(['id' => 'desc'])->page($pageNo, $pageSize)->select()->toArray(),
+            'lists' => self::listQuery($statusScope)->order($order)->page($pageNo, $pageSize)->select()->toArray(),
             'count' => $count,
             'page_no' => $pageNo,
             'page_size' => $pageSize,

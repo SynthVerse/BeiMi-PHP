@@ -11,7 +11,7 @@ final class CustomerReportOverviewLogic extends BaseLogic
 {
     private const STATUSES = ['submitted_ready', 'submitted_shortage', 'submitted_pending_measurement', 'completed'];
     private const STATUS_LABELS = ['submitted_ready' => '已报货', 'submitted_shortage' => '有缺货',
-        'submitted_pending_measurement' => '待称重', 'completed' => '已完成'];
+        'submitted_pending_measurement' => '待称重', 'completed' => '已完成', 'cancelled' => '已取消'];
 
     public static function overview(array $params): array|false
     {
@@ -44,6 +44,10 @@ final class CustomerReportOverviewLogic extends BaseLogic
         }
         $snapshot = self::overview($params);
         if ($snapshot === false) { return false; }
+        if ($snapshot['query']['status'] === 'cancelled') {
+            self::setError('取消记录仅供查询，不支持备货汇总导出');
+            return false;
+        }
         if (!hash_equals($snapshot['snapshot_hash'], $params['snapshot_hash'])) {
             self::setError('报货内容已变化，请刷新总览后重新导出');
             return false;
@@ -67,7 +71,7 @@ final class CustomerReportOverviewLogic extends BaseLogic
         $parsed = \DateTimeImmutable::createFromFormat('!Y-m-d', $date);
         if (!$parsed || $parsed->format('Y-m-d') !== $date) { throw new \DomainException('请选择有效的送货日期'); }
         $status = $params['status'] ?? 'all';
-        if (!in_array($status, ['all', 'pending', 'completed'], true)) { throw new \DomainException('报货状态无效'); }
+        if (!in_array($status, ['all', 'pending', 'completed', 'cancelled'], true)) { throw new \DomainException('报货状态无效'); }
         $keyword = trim($params['keyword'] ?? '');
         if (mb_strlen($keyword) > 100) { throw new \DomainException('客户名称最多 100 个字'); }
         return ['delivery_date' => $date, 'status' => $status, 'keyword' => $keyword];
@@ -76,7 +80,8 @@ final class CustomerReportOverviewLogic extends BaseLogic
     private static function snapshot(int $tenantId, array $filters): array
     {
         $statuses = match ($filters['status']) {
-            'pending' => array_slice(self::STATUSES, 0, 3), 'completed' => ['completed'], default => self::STATUSES,
+            'pending' => array_slice(self::STATUSES, 0, 3), 'completed' => ['completed'],
+            'cancelled' => ['cancelled'], default => self::STATUSES,
         };
         $query = Db::name('customer_report')->where('tenant_id', $tenantId)->whereNull('delete_time')
             ->where('delivery_date', $filters['delivery_date'])->whereIn('status', $statuses);
@@ -118,6 +123,8 @@ final class CustomerReportOverviewLogic extends BaseLogic
                     'id' => (int)$report['id'], 'sn' => (string)$report['sn'], 'version' => (int)$report['version'],
                     'supplement_for_report_id' => (int)$report['supplement_for_report_id'],
                     'status' => (string)$report['status'], 'status_label' => self::STATUS_LABELS[$report['status']],
+                    'cancellation_reason' => (string)($report['cancellation_reason'] ?? ''),
+                    'cancelled_by' => (int)($report['cancelled_by'] ?? 0), 'cancelled_time' => (int)($report['cancelled_time'] ?? 0),
                     'remark' => (string)$report['remark'], 'delivery_arrangement' => CustomerReportDeliveryArrangementService::fromRow($report), 'items' => [],
                 ];
                 $line = self::line($item, $groupMap[$item['id']] ?? []);
