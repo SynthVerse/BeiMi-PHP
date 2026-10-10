@@ -225,6 +225,8 @@ Route::group('', function () {
     Route::post('jxc/customer_report/recognize', 'jxc.CustomerReport/recognize');
     Route::post('jxc/customer_report/quick_create_goods', 'jxc.CustomerReport/quickCreateGoods');
     Route::get('jxc/customer_report/lists', 'jxc.CustomerReport/lists');
+    Route::get('jxc/customer_report/overview', 'jxc.CustomerReportOverview/overview');
+    Route::post('jxc/customer_report/export_word', 'jxc.CustomerReportOverview/exportWord');
     Route::post('jxc/customer_report/submit', 'jxc.CustomerReport/submit');
     Route::post('jxc/customer_report/submit_grouped', 'jxc.CustomerReport/submitGrouped');
     Route::get('jxc/customer_report/detail', 'jxc.CustomerReport/detail');
