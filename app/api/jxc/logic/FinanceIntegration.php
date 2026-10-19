@@ -19,7 +19,14 @@ final class FinanceIntegration
         if (!self::installed()) { return false; }
         Db::name('finance_preparation')->duplicate(['tenant_id'])->insert(['tenant_id' => FinanceAccess::tenant()]);
         Db::name('finance_preparation')->where('tenant_id', FinanceAccess::tenant())->lock(true)->find();
-        return Db::name('finance_opening_book')->where('tenant_id', FinanceAccess::tenant())->lock(true)->value('status') === 'active';
+        $book = Db::name('finance_opening_book')->where('tenant_id', FinanceAccess::tenant())->lock(true)->find();
+        if (($book['status'] ?? '') === 'active') { return true; }
+        // 存量门店在承接期间继续原经营；真正空白门店须先明确记账起点。
+        // 同一准备行锁保证检查、业务写入与期初确认不会并行跨过启用边界。
+        if (!(new FinanceOpeningGuide(FinanceAccess::tenant()))->legacyOperatingAllowed()) {
+            throw new \DomainException('请先选择从零开始记账或接续已有经营，再办理门店业务');
+        }
+        return false;
     }
 
     private static function installed(): bool

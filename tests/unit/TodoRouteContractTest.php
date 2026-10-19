@@ -17,7 +17,7 @@ final class TodoRouteContractTest extends TestCase
         self::assertStringContainsString("Route::get('jxc/todos/summary', 'jxc.Todo/summary');", $routes);
         self::assertStringContainsString("Route::get('jxc/todos/lists', 'jxc.Todo/lists');", $routes);
         self::assertSame(
-            array_map(static fn(int $number): string => sprintf('S%02d', $number), range(1, 23)),
+            array_map(static fn(int $number): string => sprintf('S%02d', $number), range(1, 25)),
             array_keys(TodoSourceRegistry::coverage())
         );
         foreach (TodoSourceRegistry::coverage() as $source => $definition) {

@@ -7,6 +7,13 @@ namespace app\api\jxc\logic;
 final class FinanceDocumentPolicy
 {
     public const TYPES = [
+        'capital_in' => ['title' => '经营投入', 'prepare' => '', 'confirm' => '', 'owner' => true, 'subject' => 'none', 'sources' => [], 'direction' => 'in'],
+        'capital_out' => ['title' => '经营取回', 'prepare' => '', 'confirm' => '', 'owner' => true, 'subject' => 'none', 'sources' => ['capital'], 'direction' => 'out'],
+        'loan_receipt' => ['title' => '借款到账', 'prepare' => '', 'confirm' => '', 'owner' => true, 'subject' => 'none', 'sources' => [], 'direction' => 'in'],
+        'loan_repayment' => ['title' => '归还借款', 'prepare' => '', 'confirm' => '', 'owner' => true, 'subject' => 'none', 'sources' => ['loan'], 'direction' => 'out'],
+        'supplier_advance' => ['title' => '给供应商预付款', 'prepare' => '', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => [], 'direction' => 'out'],
+        'supplier_advance_allocate' => ['title' => '预付款抵货款', 'prepare' => '', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => ['payable'], 'direction' => 'none'],
+        'supplier_advance_refund' => ['title' => '预付款退回', 'prepare' => '', 'confirm' => '', 'owner' => true, 'subject' => 'vendor', 'sources' => ['supplier_advance'], 'direction' => 'in'],
         'inventory_count_correction_cancel' => ['title' => '撤回盘点关联反向', 'prepare' => 'finance.inventory.confirm', 'confirm' => 'finance.inventory.confirm', 'owner' => false, 'subject' => 'none', 'sources' => [], 'direction' => 'none'],
         'inventory_count_correction' => ['title' => '关联漏业务反向盘点', 'prepare' => 'finance.inventory.confirm', 'confirm' => 'finance.inventory.confirm', 'owner' => false, 'subject' => 'none', 'sources' => [], 'direction' => 'none'],
         'inventory_count_review' => ['title' => '核实原盘点差额', 'prepare' => 'finance.inventory.confirm', 'confirm' => 'finance.inventory.confirm', 'owner' => false, 'subject' => 'none', 'sources' => [], 'direction' => 'none'],

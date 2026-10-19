@@ -115,7 +115,12 @@ class SupplyOrderLogic extends BaseLogic
         usort($createdGoods, static fn(array $left, array $right): int =>
             [(int)$left['sku_id'], (int)$left['goods_id']] <=> [(int)$right['sku_id'], (int)$right['goods_id']]
         );
-        foreach ($createdGoods as $row) {
+        $financeActive = FinanceIntegration::active();
+        if ($financeActive) {
+            try { FinancePurchaseLegacySources::recordCurrentWithinTransaction($built['order'] + ['id' => (int)$order->id], $createdGoods); }
+            catch (\DomainException $error) { throw new BusinessException($error->getMessage()); }
+        }
+        foreach ($financeActive ? [] : $createdGoods as $row) {
             if (!StockService::inbound(
                 (int)$built['order']['warehouse_id'],
                 (int)$row['goods_id'],
@@ -132,7 +137,7 @@ class SupplyOrderLogic extends BaseLogic
         }
 
         $arrearsMoney = (string)$built['order']['order_arrears_money'];
-        if (bccomp($arrearsMoney, '0', 2) > 0 && !FinanceService::addPayable(
+        if (!$financeActive && bccomp($arrearsMoney, '0', 2) > 0 && !FinanceService::addPayable(
             (int)$built['order']['supplier_id'],
             $arrearsMoney,
             (int)$order->id,
@@ -164,6 +169,7 @@ class SupplyOrderLogic extends BaseLogic
 
     public static function edit(array $params): array|false
     {
+        if (FinanceIntegration::active()) { self::setError('财务启用后的实际到货保留原记录，请从原到货办理退货或关联更正'); return false; }
         $tenantId = (int)(request()->tenantId ?? 0);
         $order = SupplyOrder::where('id', (int)$params['id'])
             ->where('tenant_id', $tenantId)
@@ -185,7 +191,7 @@ class SupplyOrderLogic extends BaseLogic
 
         Db::startTrans();
         try {
-            FinanceIntegration::lock();
+            if (FinanceIntegration::lock() || FinancePurchaseLegacySources::linked((int)$params['id'])) { throw new BusinessException('原到货已进入财务或已核实历史来源，请保留原记录并办理关联更正'); }
             $order = SupplyOrder::where('id', (int)$params['id'])
                 ->where('tenant_id', $tenantId)
                 ->lock(true)
@@ -286,6 +292,7 @@ class SupplyOrderLogic extends BaseLogic
 
     public static function remove(array $params): array|false
     {
+        if (FinanceIntegration::active()) { self::setError('财务启用后的实际到货不能删除，请使用关联更正或采购退货'); return false; }
         $tenantId = (int)(request()->tenantId ?? 0);
         $order = SupplyOrder::where('id', (int)$params['id'])
             ->where('tenant_id', $tenantId)
@@ -298,7 +305,7 @@ class SupplyOrderLogic extends BaseLogic
 
         Db::startTrans();
         try {
-            FinanceIntegration::lock();
+            if (FinanceIntegration::lock() || FinancePurchaseLegacySources::linked((int)$params['id'])) { throw new BusinessException('原到货已进入财务或已核实历史来源，请保留原记录并办理关联更正'); }
             $order = SupplyOrder::where('id', (int)$params['id'])
                 ->where('tenant_id', $tenantId)
                 ->lock(true)
@@ -386,6 +393,12 @@ class SupplyOrderLogic extends BaseLogic
             ->select()
             ->toArray();
         $item['goods'] = self::formatGoodsRows($goodsRows, self::purchaseReturnedQtyMap((int)$order->id));
+        if (FinanceIntegration::active()) {
+            $links = Db::name('finance_purchase_legacy_link')->where('tenant_id', $tenantId)->where('original_supply_order_id', $order->id)->column('arrival_line_id', 'original_order_goods_id');
+            $item['arrival_line_ids'] = array_map('intval', array_values($links));
+            foreach ($item['goods'] as &$row) { $row['finance_arrival_line_id'] = (int)($links[(int)$row['id']] ?? 0); } unset($row);
+            $item['status'] = 'arrived'; $item['can_edit'] = false; $item['can_delete'] = false;
+        }
         return $item;
     }
 

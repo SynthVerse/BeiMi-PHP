@@ -13,6 +13,7 @@ class FulfillmentTaskController extends BaseJxcController
     public function detail() { return $this->read('detail'); }
     public function resolve() { return $this->write('resolveException', 'resolve'); }
     public function printData() { return $this->write('printData'); }
+    public function pendingPrint() { return $this->read('pendingPrint'); }
     public function printResult() { return $this->write('printResult'); }
     public function paperControl() { return $this->write('paperControl'); }
     public function controlPrintData() { return $this->write('controlPrintData'); }

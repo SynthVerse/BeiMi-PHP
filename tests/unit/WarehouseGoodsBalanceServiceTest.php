@@ -25,6 +25,7 @@ final class WarehouseGoodsBalanceServiceTest extends TestCase
         $this->ensureCustomerReportTables();
         $this->resetWarehouseGoodsBalanceSchema();
         $this->cleanWarehouseGoodsBalanceTenantData();
+        $this->cleanWarehouseGoodsBalanceTenantData(self::OTHER_TENANT_ID);
     }
 
     protected function tearDown(): void
@@ -138,6 +139,11 @@ final class WarehouseGoodsBalanceServiceTest extends TestCase
 
         $this->prepareCustomerReportRequestContext();
         self::assertSame('3.0000', WarehouseGoodsBalanceService::available($warehouseId, $goodsId));
+
+        $this->cleanWarehouseGoodsBalanceTenantData(self::OTHER_TENANT_ID);
+        self::assertSame(0, Db::name('goods')->where('id', $otherGoodsId)->count(), '其他租户的库存商品不能污染后续空白门店测试');
+        self::assertSame(0, Db::name('goods_sku')->where('goods_id', $otherGoodsId)->count());
+        self::assertSame(0, Db::name('warehouse')->where('id', $otherWarehouseId)->count());
     }
 
     public function test_migration_can_be_run_repeatedly_without_losing_the_balance_table(): void
@@ -206,6 +212,19 @@ final class WarehouseGoodsBalanceServiceTest extends TestCase
 
     private function cleanWarehouseGoodsBalanceTenantData(int $tenantId = self::TENANT_ID): void
     {
+        if ($tenantId === self::OTHER_TENANT_ID) {
+            // 只回收本类的跨租户夹具，包括上次中断留下的商品总库存。
+            $goodsIds = Db::name('goods')->where('tenant_id', $tenantId)
+                ->where('product_code', 'like', 'WH-TENANT-B-%')->column('id');
+            if ($goodsIds !== []) {
+                foreach (['warehouse_goods_balance', 'warehouse_sku_balance', 'goods_sku'] as $table) {
+                    Db::name($table)->where('tenant_id', $tenantId)->whereIn('goods_id', $goodsIds)->delete();
+                }
+                Db::name('goods')->where('tenant_id', $tenantId)->whereIn('id', $goodsIds)->delete();
+            }
+            Db::name('warehouse')->where('tenant_id', $tenantId)->where('name', '租户二仓')->delete();
+            return;
+        }
         Db::name('warehouse_goods_balance')->where('tenant_id', $tenantId)->delete();
         Db::name('warehouse_sku_balance')->where('tenant_id', $tenantId)->delete();
     }

@@ -44,6 +44,10 @@ final class FinancePurchaseCosts
     public static function revalue(array $arrival, array $document, array $snapshot): array
     {
         $value = self::value($arrival);
+        if (!empty(FinanceValue::decode($arrival['snapshot'])['legacy_history'])) {
+            // 历史库存已按盘存承接，旧采购金额不能再回写期初库存成本或重放历史损益。
+            return $value + ['cost_changes' => [], 'historical_cost_preserved' => true];
+        }
         return self::recordValue($arrival, $document, $snapshot, $value, 'purchase-cost:' . $document['id'] . ':' . $arrival['id']);
     }
 

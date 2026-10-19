@@ -23,7 +23,8 @@ final class FinancePurchaseReturnAcceptances
         $coverage = FinancePurchaseCoverage::totals((int)$arrival['id']);
         return ['row' => $returned, 'arrival' => $arrival, 'remaining_quantity' => bcsub($returned['quantity'], $resolved, 4), 'expected_resolution_id' => $latest,
             'unsettled_available' => bcsub($arrival['actual_quantity'], $coverage['covered_quantity'], 4),
-            'settled_available' => bcsub($coverage['settled_quantity'], $coverage['settled_return_quantity'], 4)];
+            'settled_available' => bcsub(bcsub($coverage['settled_quantity'], $coverage['settled_return_quantity'], 4),
+                (string)(FinanceValue::decode($arrival['snapshot'])['historical_returned_quantity'] ?? '0'), 4)];
     }
 
     public static function options(int $vendor, array $params): array
@@ -32,6 +33,7 @@ final class FinancePurchaseReturnAcceptances
         $resolved = Db::name('finance_purchase_return_resolution')->where('tenant_id', $tenant)->field('return_line_id,SUM(quantity) AS quantity')->group('return_line_id')->buildSql();
         $query = Db::name('finance_purchase_return_line')->alias('r')->leftJoin([$resolved => 'c'], 'c.return_line_id=r.id')
             ->where('r.tenant_id', $tenant)->where('r.vendor_id', $vendor)->whereRaw('r.quantity>COALESCE(c.quantity,0)');
+        if ((int)($params['return_line_id'] ?? 0) > 0) { $query->where('r.id', (int)$params['return_line_id']); }
         if ($keyword !== '') { $query->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(r.snapshot,'$.goods_name')) LIKE ?", ['%' . addcslashes($keyword, '%_\\') . '%']); }
         $rows = $query->field('r.id')->order('r.business_date,r.id')->limit(($page - 1) * 20, 21)->select()->toArray(); $choices = [];
         foreach (array_slice($rows, 0, 20) as $row) {

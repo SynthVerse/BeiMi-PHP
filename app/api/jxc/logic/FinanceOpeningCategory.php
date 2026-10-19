@@ -25,6 +25,9 @@ final class FinanceOpeningCategory
         'transit' => ['finance_account', 'name', '原转出账户'],
         'unclaimed' => ['finance_account', 'name', '实际到账账户'],
         'inventory' => ['warehouse_sku_balance', 'id', '核算仓库 / SKU'],
+        'capital' => ['', '', '投入人'],
+        'loan' => ['', '', '出借人'],
+        'supplier_advance' => ['vendor', 'supplier_name', '供应商'],
     ];
     private const ORIGINS = [
         'advance' => '原客户收款或预收凭据',
@@ -41,6 +44,9 @@ final class FinanceOpeningCategory
         'transit' => '原互转及已处理组成核对依据',
         'unclaimed' => '实际到账及已认领组成核对依据',
         'inventory' => '截点盘存及历史成本核对依据',
+        'capital' => '原经营投入及取回核对依据',
+        'loan' => '原借款及已还本金核对依据',
+        'supplier_advance' => '原预付款及已抵扣、退回核对依据',
     ];
     private const EFFECTS = [
         'account' => '承接已核实的账户余额；不新增实际收付款。',
@@ -60,6 +66,9 @@ final class FinanceOpeningCategory
         'transit' => '在途已离开来源账户，单列为门店资金；额外扣费不扣减在途，未知差额不能填成手续费。',
         'unclaimed' => '到账已包含在账户余额，只承接待认领余额；不再次增加资金，不猜测客户或用途。',
         'inventory' => '按仓库和 SKU 承接截点已有数量与历史总成本；不增加第二次库存，不用售价估算成本。',
+        'capital' => '承接净投入剩余额度，后续取回沿此来源核对；不重复增加账户资金，也不视为借款或营业收入。',
+        'loan' => '只承接尚未归还的本金，后续还本金冲减此余额；不重复增加资金，利息另记费用。',
+        'supplier_advance' => '承接尚未抵扣或退回的供应商预付款；不再次付款，后续抵货款或退款使用此来源。',
     ];
 
     public static function supported(string $category): bool { return isset(self::SUBJECTS[$category]); }
@@ -72,14 +81,22 @@ final class FinanceOpeningCategory
     public static function metadata(string $category): array
     {
         $fields = [];
+        if (in_array($category, ['capital', 'loan'], true)) { $fields[] = ['key' => 'counterparty', 'label' => $category === 'capital' ? '投入人姓名' : '出借人姓名', 'type' => 'text']; }
         if (self::hasBenefitMonth($category)) { $fields[] = ['key' => 'benefit_month', 'label' => '原受益月份', 'type' => 'month']; }
         if (isset(self::ORIGINS[$category])) { $fields[] = ['key' => 'origin_reference', 'label' => self::ORIGINS[$category], 'type' => 'text']; }
         if ($category === 'recovery') { $fields[] = ['key' => 'receivable_reference', 'label' => '原应收凭据', 'type' => 'text']; }
+        $descriptions = ['expense_payable' => '什么费用、所属期间', 'reimbursement' => '垫付什么费用', 'customer_refund' => '退款原因和对应事项', 'supplier_refund' => '对方同意退回什么款项', 'expense_refund' => '什么费用、谁同意退款', 'equipment_refund' => '什么设备、退款事项', 'recovery' => '已作坏账的事项'];
+        if (isset($descriptions[$category])) { $fields[] = ['key' => 'business_description', 'label' => $descriptions[$category], 'type' => 'text', 'required' => false]; }
+        if (in_array($category, ['customer_refund', 'supplier_refund', 'expense_refund', 'equipment_refund'], true)) { $fields[] = ['key' => 'refund_confirmed', 'label' => '双方已确认退款义务，金额无争议', 'type' => 'acknowledgement', 'required' => false]; }
         $fields = array_merge($fields, FinanceOpeningAssets::fields($category));
         return [
+            'entry_contract' => 2,
+            'default_source_mode' => self::allowsSummary($category) ? 'summary' : 'detail',
+            'subject_kind' => self::SUBJECTS[$category][0] ?? '',
             'subject_label' => self::SUBJECTS[$category][2] ?? '',
+            'subject_input' => in_array($category, ['capital', 'loan'], true) ? 'text' : 'select',
             'allows_summary' => self::allowsSummary($category),
-            'has_due_date' => in_array($category, ['receivable', 'payable', 'expense_payable', 'salary', 'reimbursement'], true),
+            'has_due_date' => in_array($category, ['receivable', 'payable', 'expense_payable', 'salary', 'reimbursement', 'loan'], true),
             'detail_fields' => $fields, 'effect_notice' => self::EFFECTS[$category] ?? '',
             'amount_label' => match ($category) {
                 'advance' => '剩余可用预收（元）', 'customer_refund' => '剩余应退款（元）',
@@ -88,6 +105,7 @@ final class FinanceOpeningCategory
                 'expense_payable' => '剩余费用待付（元）', 'equipment' => '剩余可付额度（元）',
                 'equipment_refund' => '剩余设备退款待收（元）', 'inventory' => '核实历史总成本（元）',
                 'deferred' => '剩余未摊金额（元）', 'transit' => '剩余在途金额（元）', 'unclaimed' => '剩余待认领金额（元）', default => '核实金额（元）',
+                'capital' => '净投入剩余额度（元）', 'loan' => '尚未还清本金（元）', 'supplier_advance' => '剩余可用预付款（元）',
             },
         ];
     }
@@ -99,26 +117,37 @@ final class FinanceOpeningCategory
         foreach (self::metadata($category)['detail_fields'] as $field) {
             $value = $details[$field['key']] ?? '';
             $result[$field['key']] = FinanceOpeningAssets::normalize($field, $value);
+            if ($field['key'] === 'counterparty' && mb_strlen($result[$field['key']]) > 100) { throw new \DomainException('资金对象姓名不能超过100字'); }
         }
+        if (array_key_exists('owner_note', $details)) { $result['owner_note'] = FinanceOpeningAssets::normalize(['label' => '补充说明', 'type' => 'text'], $details['owner_note']); }
         return $result;
     }
 
     /** 每次响应（包括旧幂等结果）按当前权限过滤，不能把缓存快照当成授权。 */
     public static function visibleSnapshot(array $snapshot, array $salaryAccess): array
     {
+        unset($snapshot['guide']['submitted_business_basis']);
         foreach ($snapshot['categories'] as &$category) {
             $salary = $category['key'] === 'salary';
             $category = array_merge($category, self::metadata($category['key']));
             $category['can_view'] = !$salary || $salaryAccess['view'];
             $category['can_edit'] = !$salary || $salaryAccess['prepare'];
+            $category['can_create'] = match ($category['key']) { 'account', 'transit', 'unclaimed' => FinanceAccess::owner(), 'salary', 'reimbursement' => FinanceAccess::has('employee.manage'), default => true };
             if (!$category['can_view']) {
                 $category['count'] = null; $category['total'] = null; $category['unknown_count'] = null;
                 $category['review'] = ['state' => 'restricted', 'evidence' => ''];
             }
         }
         if (!$salaryAccess['view']) {
+            unset($snapshot['editor_drafts']['salary'], $snapshot['unfinished_editor_counts']['salary']);
             $snapshot['items'] = array_values(array_filter($snapshot['items'], static fn(array $item): bool => $item['category'] !== 'salary'));
             $snapshot['blockers'] = array_values(array_unique(array_map(self::restrictedError(...), $snapshot['blockers'])));
+            if (isset($snapshot['blocker_details'])) {
+                foreach ($snapshot['blocker_details'] as &$detail) {
+                    if ($detail['category'] === 'salary') { $detail['message'] = '工资待付资料需由有工资权限人员核对'; $detail['entity_id'] = null; $detail['entity_name'] = null; }
+                }
+                unset($detail);
+            }
         }
         return $snapshot;
     }

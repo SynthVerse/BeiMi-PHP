@@ -24,7 +24,7 @@ final class CustomerReportOverviewLogic extends BaseLogic
             $tenantId = (int)(request()->tenantId ?? 0);
             if ($tenantId <= 0 || (isset($params['expected_tenant_id'])
                 && (!is_scalar($params['expected_tenant_id']) || !ctype_digit((string)$params['expected_tenant_id']) || (int)$params['expected_tenant_id'] !== $tenantId))) {
-                throw new \DomainException('门店已变化，请重新加载报货总览');
+                throw new \DomainException('门店已变化，请重新加载报货汇总');
             }
             $query = self::filters($params);
             return Db::transaction(static fn() => self::snapshot($tenantId, $query));
@@ -39,17 +39,17 @@ final class CustomerReportOverviewLogic extends BaseLogic
         self::clearError();
         if (!isset($params['expected_tenant_id']) || !is_string($params['snapshot_hash'] ?? null)
             || !preg_match('/^[a-f0-9]{64}$/D', $params['snapshot_hash'])) {
-            self::setError('请先加载报货总览，再导出 Word');
+            self::setError('请先加载报货汇总，再导出 Word');
             return false;
         }
         $snapshot = self::overview($params);
         if ($snapshot === false) { return false; }
         if ($snapshot['query']['status'] === 'cancelled') {
-            self::setError('取消记录仅供查询，不支持备货汇总导出');
+            self::setError('取消记录仅供查询，不支持报货汇总导出');
             return false;
         }
         if (!hash_equals($snapshot['snapshot_hash'], $params['snapshot_hash'])) {
-            self::setError('报货内容已变化，请刷新总览后重新导出');
+            self::setError('报货内容已变化，请刷新报货汇总后重新导出');
             return false;
         }
         if ($snapshot['summary']['report_count'] === 0) {
@@ -57,7 +57,7 @@ final class CustomerReportOverviewLogic extends BaseLogic
             return false;
         }
         return ['tenant_id' => $snapshot['tenant_id'], 'query' => $snapshot['query'], 'snapshot_hash' => $snapshot['snapshot_hash'],
-            'filename' => '客户报货总览_' . $snapshot['query']['delivery_date'] . '.docx',
+            'filename' => '报货汇总_' . $snapshot['query']['delivery_date'] . '.docx',
             'mime' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
             'base64' => base64_encode(CustomerReportWordDocument::create($snapshot))];
     }

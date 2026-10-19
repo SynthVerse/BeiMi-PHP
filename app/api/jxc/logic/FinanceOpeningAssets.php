@@ -76,15 +76,15 @@ final class FinanceOpeningAssets
     public static function fields(string $category): array
     {
         $definitions = match ($category) {
-            'equipment' => [['original_amount', '已确认购置金额', 'money'], ['price_adjustment', '有效价格调整（可负数）', 'signed_money'], ['paid_amount', '累计有效付款', 'money'], ['cancelled_amount', '已取消未付金额', 'money']],
+            'equipment' => [['equipment_name', '什么设备（名称及必要规格）', 'text'], ['opening_balance_only', '只登记核实的未付余款，历史原价和已付不详', 'acknowledgement'], ['original_amount', '已确认购置金额', 'money'], ['price_adjustment', '有效价格调整（可负数）', 'signed_money'], ['paid_amount', '累计有效付款', 'money'], ['cancelled_amount', '已取消未付金额', 'money']],
             'equipment_refund' => [['equipment_reference', '原设备购置及退款依据', 'text']],
-            'inventory' => [['quantity', '截点实物数量（基础单位）', 'quantity']],
+            'inventory' => [['inventory_entry', '库存录入方式', 'text'], ['warehouse_id', '仓库', 'id'], ['sku_id', '规格', 'id'], ['goods_id', '商品', 'id'], ['warehouse_name', '仓库名称', 'text'], ['sku_name', '规格名称', 'text'], ['base_unit_name', '基础单位', 'text'], ['quantity', '截点实物数量（基础单位）', 'quantity']],
             'transit' => [['target_account_id', '目标资金账户', 'account'], ['principal', '原转出本金', 'money'], ['arrived_amount', '已到账本金', 'money'], ['returned_amount', '已实际返还本金', 'money'], ['withheld_fee', '已从在途扣除手续费', 'money'], ['additional_fee', '来源账户额外手续费', 'money']],
             'unclaimed' => [['original_amount', '原实际到账金额', 'money'], ['claimed_amount', '已认领金额', 'money'], ['account_inclusion', '该笔到账已包含在期初账户余额中', 'acknowledgement']],
-            'deferred' => [['original_amount', '原费用总金额', 'money'], ['amortized_amount', '启用前已摊金额', 'money'], ['paid_amount', '原费用已付款', 'money'], ['unpaid_amount', '原费用未付款', 'money'], ['payable_reference', '另列费用应付来源标识（未付为零可空）', 'text'], ['original_service_start', '原服务开始月份', 'month'], ['benefited_until', '已受益截至月份（尚未受益可空）', 'month'], ['service_start', '剩余服务起始月份', 'month'], ['service_end', '剩余服务结束月份', 'month'], ['schedule', '剩余逐月摊销计划', 'schedule']],
+            'deferred' => [['expense_name', '什么费用', 'text'], ['remaining_only', '只登记剩余服务和待摊余额', 'acknowledgement'], ['payable_item_id', '关联费用待付款', 'id'], ['original_amount', '原费用总金额', 'money'], ['amortized_amount', '启用前已摊金额', 'money'], ['paid_amount', '原费用已付款', 'money'], ['unpaid_amount', '原费用未付款', 'money'], ['payable_reference', '另列费用应付来源标识（未付为零可空）', 'text'], ['original_service_start', '原服务开始月份', 'month'], ['benefited_until', '已受益截至月份（尚未受益可空）', 'month'], ['service_start', '剩余服务起始月份', 'month'], ['service_end', '剩余服务结束月份', 'month'], ['schedule', '剩余逐月摊销计划', 'schedule']],
             default => [],
         };
-        return array_map(static fn(array $field): array => ['key' => $field[0], 'label' => $field[1], 'type' => $field[2], 'required' => !in_array($field[0], ['payable_reference', 'benefited_until'], true)], $definitions);
+        return array_map(static fn(array $field): array => ['key' => $field[0], 'label' => $field[1], 'type' => $field[2], 'required' => !in_array($field[0], ['equipment_name', 'opening_balance_only', 'expense_name', 'remaining_only', 'payable_item_id', 'payable_reference', 'benefited_until', 'inventory_entry', 'warehouse_id', 'sku_id', 'goods_id', 'warehouse_name', 'sku_name', 'base_unit_name'], true)], $definitions);
     }
 
     public static function normalize(array $field, mixed $value): mixed
@@ -109,7 +109,7 @@ final class FinanceOpeningAssets
             if (!preg_match('/^' . $sign . '(0|[1-9][0-9]{0,11})(\.[0-9]{1,' . $scale . '})?$/D', $value)) { throw new \DomainException($field['label'] . '必须填写有效数字，最多' . $scale . '位小数'); }
             return bcadd($value, '0', $scale);
         }
-        if ($type === 'account' && !preg_match('/^[1-9][0-9]{0,9}$/D', $value)) { throw new \DomainException('请选择有效资金账户'); }
+        if (in_array($type, ['account', 'id'], true) && !preg_match('/^[1-9][0-9]{0,9}$/D', $value)) { throw new \DomainException('请选择有效资金账户'); }
         if ($type === 'acknowledgement' && $value !== 'confirmed') { throw new \DomainException('请明确核对到账与期初账户余额的关系'); }
         return $value;
     }
@@ -118,17 +118,28 @@ final class FinanceOpeningAssets
     {
         $category = $item['category']; $details = $item['details']; $amount = $item['amount'];
         $errors = [];
+        if ($category === 'inventory' && (int)$item['subject_id'] === 0 && FinanceOpeningInventory::isFirst($details) && ($details['quantity'] ?? '') !== '' && bccomp($details['quantity'], '0', 4) <= 0) { $errors[] = '首次实物数量须大于零；没有实物请移除这笔草稿并核对没有库存'; }
+        if (($details['_capture']['contract'] ?? null) === 2) {
+            if (in_array($category, ['expense_payable', 'reimbursement', 'customer_refund', 'supplier_refund', 'expense_refund', 'equipment_refund', 'recovery'], true) && ($details['business_description'] ?? '') === '') { $errors[] = '请填写具体事项及必要期间，方便后续结清'; }
+            if (in_array($category, ['customer_refund', 'supplier_refund', 'expense_refund', 'equipment_refund'], true) && ($details['refund_confirmed'] ?? '') !== 'confirmed') { $errors[] = '退款义务和金额尚未确认，请保留待核实'; }
+        }
         if (in_array($category, ['transit', 'unclaimed'], true) && !$item['historical_date']) { $errors[] = '实际资金日期尚未核实'; }
         if ($category === 'transit' && ($details['target_account_id'] ?? '') !== '') {
             $target = (int)$details['target_account_id'];
             if ($target === (int)$item['subject_id'] || !Db::name('finance_account')->where('tenant_id', $tenantId)->where('id', $target)->count()) { $errors[] = '目标账户必须是本门店的另一个资金账户'; }
         }
+        $remainingOnly = $category === 'equipment' && ($details['opening_balance_only'] ?? '') === 'confirmed' && ($details['_capture']['contract'] ?? null) === 2;
+        if ($category === 'equipment' && ($details['_capture']['contract'] ?? null) === 2 && ($details['equipment_name'] ?? '') === '') { $errors[] = '请填写设备名称，方便后续付款识别'; }
+        $remainingDeferred = $category === 'deferred' && ($details['remaining_only'] ?? '') === 'confirmed' && ($details['_capture']['contract'] ?? null) === 2;
+        if ($remainingDeferred && ($details['expense_name'] ?? '') === '') { $errors[] = '请填写这是什么费用'; }
         foreach (self::fields($category) as $field) {
+            if ($remainingDeferred && in_array($field['key'], ['original_amount', 'amortized_amount', 'paid_amount', 'original_service_start', 'benefited_until'], true)) { continue; }
+            if ($remainingOnly && in_array($field['key'], ['original_amount', 'price_adjustment', 'paid_amount', 'cancelled_amount'], true)) { continue; }
             $value = $details[$field['key']] ?? '';
             if (($field['required'] ?? true) && ($value === '' || $value === [])) { return $errors; }
         }
         if ($amount === null) { return $errors; }
-        if ($category === 'equipment') {
+        if ($category === 'equipment' && !$remainingOnly) {
             $remaining = bcsub(bcsub(bcadd($details['original_amount'], $details['price_adjustment'], 2), $details['paid_amount'], 2), $details['cancelled_amount'], 2);
             if (bccomp($remaining, $amount, 2) !== 0 || bccomp($remaining, '0', 2) < 0) { $errors[] = '剩余额度与购置金额、调整、已付和取消组成不一致'; }
         }
@@ -142,16 +153,17 @@ final class FinanceOpeningAssets
             if (bccomp($details['quantity'], '0', 4) === 0 && bccomp($amount, '0', 2) !== 0) { $errors[] = '零数量不能承接非零库存成本'; }
             if (bccomp($details['quantity'], '0', 4) > 0 && bccomp($amount, '0', 2) <= 0) { $errors[] = '非零库存须有已核实的历史总成本'; }
             $subject = $item['subject_snapshot'];
-            if ($subject && bccomp($details['quantity'], $subject['cutoff_qty'], 4) !== 0) { $errors[] = '期初数量与启用截点库存不一致，须核对截点后来源流水'; }
+            if ($subject && FinanceOpeningInventory::isFirst($details) && (int)$item['subject_id'] === 0) { $errors = array_merge($errors, FinanceOpeningInventory::blockers($tenantId, $subject)); }
+            elseif ($subject && bccomp($details['quantity'], $subject['cutoff_qty'], 4) !== 0) { $errors[] = '期初数量与启用截点库存不一致，须核对截点后来源流水'; }
         }
         if ($category === 'deferred') {
-            if (bccomp(bcadd($details['amortized_amount'], $amount, 2), $details['original_amount'], 2) !== 0) { $errors[] = '已摊与未摊合计必须等于原费用金额'; }
-            if (bccomp(bcadd($details['paid_amount'], $details['unpaid_amount'], 2), $details['original_amount'], 2) !== 0) { $errors[] = '已付款与未付款合计必须等于原费用金额'; }
+            if (!$remainingDeferred && bccomp(bcadd($details['amortized_amount'], $amount, 2), $details['original_amount'], 2) !== 0) { $errors[] = '已摊与未摊合计必须等于原费用金额'; }
+            if (!$remainingDeferred && bccomp(bcadd($details['paid_amount'], $details['unpaid_amount'], 2), $details['original_amount'], 2) !== 0) { $errors[] = '已付款与未付款合计必须等于原费用金额'; }
             if (bccomp($details['unpaid_amount'], '0', 2) > 0 && $details['payable_reference'] === '') { $errors[] = '未付款必须关联另列费用应付来源'; }
             $start = $details['service_start']; $end = $details['service_end'];
             if ($start > $end || ($activationDate && $start < substr($activationDate, 0, 7))) { $errors[] = '剩余服务期间须从启用月份或之后开始，且结束不早于开始'; }
-            if ($details['original_service_start'] > $start) { $errors[] = '原服务起始月份不能晚于剩余服务期间'; }
-            if (bccomp($details['amortized_amount'], '0', 2) > 0) {
+            if (!$remainingDeferred && $details['original_service_start'] > $start) { $errors[] = '原服务起始月份不能晚于剩余服务期间'; }
+            if (!$remainingDeferred && bccomp($details['amortized_amount'], '0', 2) > 0) {
                 $benefited = $details['benefited_until'];
                 $cutoffMonth = $activationDate ? (new \DateTimeImmutable($activationDate))->modify('-1 day')->format('Y-m') : '';
                 if ($benefited === '' || $benefited < $details['original_service_start'] || $benefited > $start || ($cutoffMonth && $benefited > $cutoffMonth)) { $errors[] = '已摊费用的已受益期间尚未核实或超出截点'; }

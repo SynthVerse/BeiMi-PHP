@@ -9,7 +9,7 @@ use think\facade\Db;
 /** 供应商往来按正式来源读取，未结到货单列，不产生应付账龄或自动抵扣。 */
 final class FinanceSupplierBalances
 {
-    private const CATEGORIES = ['payable', 'expense_payable', 'supplier_refund', 'expense_refund'];
+    private const CATEGORIES = ['payable', 'expense_payable', 'supplier_refund', 'expense_refund', 'supplier_advance'];
 
     public static function lists(array $params): array
     {
@@ -51,7 +51,7 @@ final class FinanceSupplierBalances
                 $source['available_payment'] = in_array($category, ['payable', 'expense_payable'], true) && bccomp($available, '0', 2) > 0 ? $available : '0.00';
             }
             $actions = [];
-            foreach (['supplier_payment', 'supplier_credit_allocate', 'supplier_refund', 'expense_refund', 'payable_due'] as $type) {
+            foreach (['supplier_payment', 'supplier_credit_allocate', 'supplier_refund', 'expense_refund', 'payable_due', 'supplier_advance', 'supplier_advance_allocate', 'supplier_advance_refund'] as $type) {
                 try { $policy = FinanceDocumentPolicy::authorize($type); $actions[] = ['type' => $type, 'title' => $policy['title']]; } catch (\DomainException) { continue; }
             }
             return ['tenant_id' => $tenant, 'vendor' => $vendor, 'balances' => $balances, 'category' => $category, 'actions' => $actions,

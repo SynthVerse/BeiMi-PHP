@@ -126,8 +126,20 @@ final class PurchasePlanLogic extends BaseLogic
     /** @return array<string,mixed>|false */
     public static function create(array $params): array|false
     {
+        return self::createForTasks($params, true);
+    }
+
+    /** 打印缺货采购工票时在同一事务内归集来源；打印权限由调用方校验。 */
+    public static function ensureForPrint(int $taskId): array|false
+    {
+        return self::createForTasks(['task_ids' => [$taskId]], false);
+    }
+
+    /** @return array<string,mixed>|false */
+    private static function createForTasks(array $params, bool $requireManagePermission): array|false
+    {
         self::clearError();
-        if (!WorkforceLogic::requirePermission('purchase.plan.manage')) {
+        if ($requireManagePermission && !WorkforceLogic::requirePermission('purchase.plan.manage')) {
             return false;
         }
         $taskIds = array_values(array_unique(array_filter(array_map('intval', (array)($params['task_ids'] ?? [])))));
@@ -180,17 +192,29 @@ final class PurchasePlanLogic extends BaseLogic
                     $first = $rows[0];
                     $warehouseName = (string)Db::name('warehouse')->where('tenant_id', self::tenantId())
                         ->where('id', $warehouseId)->value('name');
-                    $planId = (int)Db::name('purchase_plan')->insertGetId([
-                        'tenant_id' => self::tenantId(), 'batch_id' => $batchId,
-                        'warehouse_id' => $warehouseId, 'warehouse_name' => $warehouseName,
-                        'goods_id' => (int)$first['goods_id'], 'goods_name' => (string)$first['goods_name'],
-                        'sku_id' => $skuId, 'sku_name' => (string)$first['sku_name'],
-                        'base_unit_name' => (string)$first['base_unit_name'],
-                        'planned_qty' => '0.0000', 'arrived_qty' => '0.0000',
-                        'allocated_qty' => '0.0000', 'surplus_qty' => '0.0000',
-                        'status' => 'pending', 'active_scope_key' => $scopeKey,
-                        'termination_reason' => '', 'create_time' => $now, 'update_time' => $now,
-                    ]);
+                    try {
+                        $planId = (int)Db::name('purchase_plan')->insertGetId([
+                            'tenant_id' => self::tenantId(), 'batch_id' => $batchId,
+                            'warehouse_id' => $warehouseId, 'warehouse_name' => $warehouseName,
+                            'goods_id' => (int)$first['goods_id'], 'goods_name' => (string)$first['goods_name'],
+                            'sku_id' => $skuId, 'sku_name' => (string)$first['sku_name'],
+                            'base_unit_name' => (string)$first['base_unit_name'],
+                            'planned_qty' => '0.0000', 'arrived_qty' => '0.0000',
+                            'allocated_qty' => '0.0000', 'surplus_qty' => '0.0000',
+                            'status' => 'pending', 'active_scope_key' => $scopeKey,
+                            'termination_reason' => '', 'create_time' => $now, 'update_time' => $now,
+                        ]);
+                    } catch (\Throwable $error) {
+                        if (!str_contains($error->getMessage(), 'Duplicate entry')) {
+                            throw $error;
+                        }
+                        $existing = Db::name('purchase_plan')->where('tenant_id', self::tenantId())
+                            ->where('active_scope_key', $scopeKey)->whereIn('status', self::ACTIVE)->lock(true)->find();
+                        if (!$existing) {
+                            throw $error;
+                        }
+                        $planId = (int)$existing['id'];
+                    }
                 } else {
                     $planId = (int)$plan['id'];
                 }
@@ -444,7 +468,8 @@ final class PurchasePlanLogic extends BaseLogic
         $sources = Db::name('purchase_plan_source')->where('tenant_id', self::tenantId())
             ->where('purchase_plan_id', $id)->order(['delivery_date' => 'asc', 'id' => 'asc'])->select()->toArray();
         foreach ($sources as &$source) {
-            $source['remaining_qty'] = self::decimal(bcsub(
+            $source['report_sn'] = (string)Db::name('customer_report')->where('tenant_id', self::tenantId())->where('id', $source['report_id'])->value('sn');
+            $source['remaining_qty'] = $source['status'] === 'released' ? '0.0000' : self::decimal(bcsub(
                 (string)$source['shortage_qty'],
                 (string)$source['allocated_qty'],
                 self::SCALE
@@ -464,7 +489,7 @@ final class PurchasePlanLogic extends BaseLogic
         if ($attachedBatchIds !== []) {
             $pendingBatchQuery->whereNotIn('id', $attachedBatchIds);
         }
-        $pendingArrivalBatches = $pendingBatchQuery->order('id')->field('id,batch_no,datetimesingle,status')->select()->toArray();
+        $pendingArrivalBatches = $pendingBatchQuery->order('id')->field('id,batch_no,datetimesingle,status,plan_held_qty')->select()->toArray();
         $plan['remaining_qty'] = self::decimal(bcsub(
             (string)$plan['planned_qty'],
             (string)$plan['allocated_qty'],
@@ -534,6 +559,42 @@ final class PurchasePlanLogic extends BaseLogic
         ];
     }
 
+    /** 客户取消只退出自己的采购来源；已经入库的实物和历史分配不撤销。调用方持有报货锁并处于事务内。 */
+    public static function releaseReportSourcesWithinTransaction(int $reportId, string $reason): void
+    {
+        $planIds = Db::name('purchase_plan_source')->where('tenant_id', self::tenantId())
+            ->where('report_id', $reportId)->order('purchase_plan_id')->column('purchase_plan_id');
+        foreach (array_unique(array_map('intval', $planIds)) as $planId) {
+            $plan = Db::name('purchase_plan')->where('tenant_id', self::tenantId())->where('id', $planId)->lock(true)->find();
+            if (!$plan) { continue; }
+            $now = time();
+            Db::name('purchase_plan_source')->where('tenant_id', self::tenantId())->where('purchase_plan_id', $planId)
+                ->where('report_id', $reportId)->lock(true)->select();
+            Db::name('purchase_plan_source')->where('tenant_id', self::tenantId())->where('purchase_plan_id', $planId)
+                ->where('report_id', $reportId)->update(['status' => 'released', 'update_time' => $now]);
+            $active = Db::name('purchase_plan_source')->where('tenant_id', self::tenantId())->where('purchase_plan_id', $planId)
+                ->whereIn('status', ['pending', 'partial'])->count();
+            if ($active === 0 && in_array((string)$plan['status'], self::ACTIVE, true)) {
+                $batches = Db::name('purchase_batch')->where('tenant_id', self::tenantId())->where('purchase_plan_id', $planId)
+                    ->order('id')->lock(true)->select()->toArray();
+                foreach ($batches as $batch) {
+                    $held = (string)($batch['plan_held_qty'] ?? '0');
+                    if (bccomp($held, '0', self::SCALE) <= 0) { continue; }
+                    PendingGoodsLogic::captureBatchWithinTransaction($reportId, $plan, $batch, $held);
+                    Db::name('purchase_batch')->where('tenant_id', self::tenantId())->where('id', $batch['id'])
+                        ->update(['plan_held_qty' => '0.0000', 'update_time' => $now]);
+                }
+                self::refreshPlanTotals($planId, $now);
+                Db::name('purchase_plan')->where('tenant_id', self::tenantId())->where('id', $planId)->update([
+                    'status' => 'terminated', 'active_scope_key' => null,
+                    'termination_reason' => '客户取消：' . $reason, 'update_time' => $now,
+                ]);
+            } elseif (in_array((string)$plan['status'], self::ACTIVE, true)) {
+                self::refreshPlanTotals($planId, $now);
+            }
+        }
+    }
+
     private static function refreshPlanTotals(int $planId, int $now): void
     {
         $sources = Db::name('purchase_plan_source')->where('tenant_id', self::tenantId())
@@ -541,7 +602,7 @@ final class PurchasePlanLogic extends BaseLogic
         $planned = '0.0000';
         $allocated = '0.0000';
         foreach ($sources as $source) {
-            $planned = bcadd($planned, (string)$source['shortage_qty'], self::SCALE);
+            $planned = bcadd($planned, (string)($source['status'] === 'released' ? $source['allocated_qty'] : $source['shortage_qty']), self::SCALE);
             $allocated = bcadd($allocated, (string)$source['allocated_qty'], self::SCALE);
         }
         $arrivals = Db::name('purchase_plan_arrival')->where('tenant_id', self::tenantId())

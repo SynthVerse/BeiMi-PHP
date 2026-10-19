@@ -13,7 +13,7 @@ final class FinanceStatementSnapshot
     {
         $tenant = FinanceAccess::tenant(); $activation = (string)Db::name('finance_preparation')->where('tenant_id', $tenant)->value('activation_date');
         if ($from < $activation || $to > date('Y-m-d') || $from > $to) { throw new \DomainException('对账期间须在启用日至今天之间，起始日不能晚于截止日'); }
-        $categories = $supplier ? ['payable', 'expense_payable', 'supplier_refund', 'expense_refund'] : ['receivable', 'advance', 'customer_refund', 'recovery']; $sources = []; $balances = []; $movements = [];
+        $categories = $supplier ? ['payable', 'expense_payable', 'supplier_refund', 'expense_refund', 'supplier_advance'] : ['receivable', 'advance', 'customer_refund', 'recovery']; $sources = []; $balances = []; $movements = [];
         foreach ($categories as $category) { $balances[$category] = ['opening' => '0.00', 'change' => '0.00', 'closing' => '0.00']; }
         foreach (['o' => 'finance_opening_source', 'n' => 'finance_source'] as $kind => $table) {
             $rows = Db::name($table)->where('tenant_id', $tenant)->where('subject_id', $customer)->whereIn('category', $categories)->order('id')->limit(5001)->select()->toArray();
@@ -67,8 +67,9 @@ final class FinanceStatementSnapshot
             'actual_money' => self::actualMoney($customer, $from, $to, $supplier),
             'pending_deliveries' => $supplier ? [] : self::pendingDeliveries($customer, $from, $to),
             'pending_arrivals' => $supplier ? self::pendingArrivals($customer, $to) : [],
+            'net_reference_notice' => $supplier ? '参考净额包含可用预付款；实际应付、退款与预付款分别保留，未经明确核销不会自动抵扣。' : '余额分别保留，未经明确核销不会自动抵扣。',
             'net_reference' => $supplier
-                ? bcsub(bcsub(bcadd($balances['payable']['closing'], $balances['expense_payable']['closing'], 2), $balances['supplier_refund']['closing'], 2), $balances['expense_refund']['closing'], 2)
+                ? bcsub(bcsub(bcsub(bcadd($balances['payable']['closing'], $balances['expense_payable']['closing'], 2), $balances['supplier_refund']['closing'], 2), $balances['expense_refund']['closing'], 2), $balances['supplier_advance']['closing'], 2)
                 : bcsub(bcsub($balances['receivable']['closing'], $balances['advance']['closing'], 2), $balances['customer_refund']['closing'], 2)];
     }
 
@@ -79,7 +80,7 @@ final class FinanceStatementSnapshot
         $rows = Db::name('finance_entry')->alias('e')->join('finance_document d', 'd.id=e.document_id AND d.tenant_id=e.tenant_id')
             ->where('e.tenant_id', $tenant)->where('e.metric', 'cash')->whereIn('e.purpose', ['actual_money', 'correction_replacement'])
             ->whereBetween('e.business_date', [$from, $to])->where('d.status', 'confirmed')
-            ->whereIn('d.type', $supplier ? ['supplier_payment', 'supplier_refund', 'expense_refund'] : ['receipt', 'receipt_return', 'advance_refund', 'customer_refund', 'recovery_receipt'])
+            ->whereIn('d.type', $supplier ? ['supplier_payment', 'supplier_refund', 'expense_refund', 'supplier_advance', 'supplier_advance_refund'] : ['receipt', 'receipt_return', 'advance_refund', 'customer_refund', 'recovery_receipt'])
             ->whereRaw("CAST(JSON_UNQUOTE(JSON_EXTRACT(d.payload,'$.subject_id')) AS UNSIGNED)=?", [$customer])
             ->whereRaw('d.id NOT IN ' . $replaced)->field('e.id,e.document_id,e.amount,e.business_date,e.details,d.type,d.confirmed_result')->order('e.business_date,e.id')->limit(5001)->select()->toArray();
         if (count($rows) > 5000) { throw new \DomainException('期间收退款过多，请缩短对账期间'); }

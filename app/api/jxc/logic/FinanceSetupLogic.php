@@ -25,9 +25,19 @@ final class FinanceSetupLogic extends BaseLogic
         catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
         $managedReports = false;
         if ($owner) { try { $managedReports = count(FinanceManagedStoreScope::stores()) > 1; } catch (\DomainException) { $managedReports = false; } }
+        $book = Db::name('finance_opening_book')->where('tenant_id', self::tenantId())->find();
+        $zeroStart = $book && $book['status'] === 'active' && (json_decode($book['reviews'], true)['_guide']['mode'] ?? '') === 'zero';
+        $firstBusiness = [];
+        if ($zeroStart && !Db::name('finance_document')->where('tenant_id', self::tenantId())->count()) {
+            foreach (['purchase_arrival' => '/sub-finance/purchase/edit', 'sales_batch' => '/sub-documents/sales/create/index', 'capital_in' => '/sub-finance/business/edit?type=capital_in', 'receipt' => '/sub-finance/business/edit?type=receipt'] as $type => $url) {
+                $policy = FinanceDocumentPolicy::TYPES[$type];
+                if (FinanceAccess::has($policy['prepare'])) { $firstBusiness[] = ['type' => $type, 'title' => $policy['title'], 'url' => $url]; }
+            }
+        }
         return [
+            'first_business' => $firstBusiness,
             'tenant_id' => self::tenantId(),
-            'operator_id' => self::operatorId(),
+            'operator_id' => self::operatorId(), 'actor_type' => self::actor()['type'],
             'reports' => array_values(array_filter(array_map(static fn(string $key, string $name): array => ['key' => $key, 'name' => $name, 'can_view' => FinanceAccess::has('finance.report.' . $key . '.view'), 'can_export' => FinanceAccess::has('finance.report.' . $key . '.export')], array_keys(FinanceReports::TYPES), array_values(FinanceReports::TYPES)), static fn(array $row): bool => $row['can_view'])),
             'capabilities' => [
                 'close_month' => $owner,
@@ -51,17 +61,98 @@ final class FinanceSetupLogic extends BaseLogic
         return Db::transaction(static fn(): array => self::preparationResult(self::preparationRow(true)));
     }
 
+    /** 所有门店成员可读取准入摘要；无准备权限者不能读取余额、工资或期初候选。 */
+    public static function openingGuide(): array|false
+    {
+        self::clearError();
+        if (self::tenantId() <= 0 || self::operatorId() <= 0) { self::setError('请先登录并选择门店'); return false; }
+        try {
+            return Db::transaction(static function (): array {
+                Db::name('finance_preparation')->duplicate(['tenant_id'])->insert(['tenant_id' => self::tenantId()]);
+                self::preparationRow(true);
+                return self::guideResult((new FinanceOpeningService(self::tenantId(), self::actor()))->snapshot());
+            });
+        } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
+    }
+
+    public static function startOpening(array $params): array|false
+    {
+        if (!self::authorize(false)) { return false; }
+        if (($params['mode'] ?? '') === 'zero' && !self::isOwner()) { self::setError('仅门店最高权限人员可从零启用财务'); return false; }
+        return self::guideAction('start', $params);
+    }
+
+    public static function saveGuideCard(array $params): array|false
+    {
+        if (!self::authorize(false)) { return false; }
+        return self::guideAction('guide_card', $params);
+    }
+
+    private static function guideAction(string $action, array $params): array|false
+    {
+        try {
+            $data = $params;
+            unset($data['expected_tenant_id'], $data['expected_version'], $data['idempotency_key']);
+            $result = self::mutate('opening.' . $action, $params, $data,
+                static fn(int $version): array => (new FinanceOpeningService(self::tenantId(), self::actor()))->execute($action, $data, $version),
+                static fn(?array $existing) => self::authorizeOpeningSalary($action, $data, $existing));
+            return self::guideResult($result);
+        } catch (\DomainException $error) {
+            self::setError(self::salaryAccess()['view'] ? $error->getMessage() : FinanceOpeningCategory::restrictedError($error->getMessage()));
+            return false;
+        }
+    }
+
+    private static function guideResult(array $opening): array
+    {
+        $owner = self::isOwner();
+        $prepare = $owner || (self::isUserIdentity() && WorkforceLogic::hasPermission('finance.opening.prepare'));
+        $mode = $opening['guide']['mode'] ?? ($opening['status'] === 'active' ? 'carryover' : null);
+        $guide = new FinanceOpeningGuide(self::tenantId());
+        $result = ['tenant_id' => self::tenantId(), 'operator_id' => self::operatorId(), 'actor_type' => self::actor()['type'], 'mode' => $mode,
+            'legacy_operating_allowed' => $opening['status'] !== 'active' && $guide->legacyOperatingAllowed(),
+            'activation_available' => $opening['activation_available'],
+            'capabilities' => ['prepare_opening' => $prepare, 'confirm_opening' => $owner],
+            'cards' => [], 'current_card' => null, 'progress' => ['completed' => 0, 'total' => 21, 'pending' => 21]];
+        $summary = array_intersect_key($opening, array_flip(['tenant_id', 'status', 'version', 'activation_date', 'activation_available', 'confirmed_at']));
+        if (!$prepare) {
+            return $result + ['start_status' => $opening['status'] === 'active' ? 'active' : 'waiting_owner', 'opening' => $summary, 'preparation' => null];
+        }
+        $result['preparation'] = self::preparationResult(self::preparationRow());
+        $result['removed_account_ids'] = FinanceAccountLifecycle::removedIds(self::tenantId());
+        $result['opening'] = FinanceOpeningCategory::visibleSnapshot($opening, self::salaryAccess());
+        if ($opening['status'] === 'active') { $result['start_status'] = 'active'; $result['progress'] = ['completed' => 21, 'total' => 21, 'pending' => 0]; return $result; }
+        $conflicts = $mode === 'carryover' ? [] : $guide->zeroConflicts();
+        if ($opening['status'] === 'pending') { $result['start_status'] = 'pending_confirm'; }
+        elseif ($mode === 'carryover') { $result['start_status'] = 'reviewing'; }
+        else { $result['start_status'] = $result['legacy_operating_allowed'] ? 'legacy_transition' : 'choose_mode'; }
+        $result['zero_conflicts'] = $conflicts;
+        if ($mode !== 'carryover') { return $result; }
+        $cards = $guide->cards($opening, self::salaryAccess());
+        $result['cards'] = $cards;
+        $completed = count(array_filter($cards, static fn(array $card): bool => in_array($card['state'], ['none', 'complete'], true)));
+        $result['progress'] = ['completed' => $completed, 'total' => count($cards), 'pending' => count($cards) - $completed];
+        $preferred = $opening['guide']['current_card'] ?? null;
+        $states = array_column($cards, 'state', 'key');
+        if ($preferred && !in_array($states[$preferred] ?? '', ['none', 'complete', 'pending_supplement', 'restricted'], true)) { $result['current_card'] = $preferred; }
+        else {
+            foreach ($cards as $card) { if (!in_array($card['state'], ['none', 'complete', 'pending_supplement', 'restricted'], true)) { $result['current_card'] = $card['key']; break; } }
+            if (!$result['current_card']) { foreach ($cards as $card) { if (!in_array($card['state'], ['none', 'complete'], true)) { $result['current_card'] = $card['key']; break; } } }
+        }
+        return $result;
+    }
+
     public static function accounts(): array|false
     {
         if (!self::authorize(true)) {
             return false;
         }
-        return [
-            'tenant_id' => self::tenantId(),
-            'types' => self::ACCOUNT_TYPES,
-            'lists' => Db::name('finance_account')->where('tenant_id', self::tenantId())
-                ->field('id,name,account_type,is_enabled,version')->order('id')->select()->toArray(),
-        ];
+        return Db::transaction(static function (): array {
+            $lifecycle = new FinanceAccountLifecycle(self::tenantId());
+            return ['tenant_id' => self::tenantId(), 'types' => self::ACCOUNT_TYPES, 'opening_version' => $lifecycle->openingVersion(),
+                'lists' => array_map(static fn(array $row): array => $lifecycle->project($row), Db::name('finance_account')->where('tenant_id', self::tenantId())
+                    ->field('id,name,account_type,is_enabled,version')->order('id')->select()->toArray())];
+        });
     }
 
     public static function savePreparation(array $params): array|false
@@ -150,6 +241,22 @@ final class FinanceSetupLogic extends BaseLogic
         }
     }
 
+    public static function removeAccount(array $params): array|false
+    {
+        if (!self::authorize(true)) { return false; }
+        try {
+            $data = ['id' => self::integer($params['id'] ?? 0), 'remove_opening_draft' => self::flag($params['remove_opening_draft'] ?? 0),
+                'expected_opening_version' => array_key_exists('expected_opening_version', $params) ? self::integer($params['expected_opening_version']) : null];
+            return self::mutate('account.remove', $params, $data, static function (int $version) use ($data): array {
+                $before = Db::name('finance_account')->where('tenant_id', self::tenantId())->where('id', $data['id'])->lock(true)->find();
+                if (!$before) { throw new \DomainException('资金账户不存在或不属于当前门店'); }
+                if ((int)$before['version'] !== $version) { throw new \DomainException('账户已更新，请重新加载后再删除'); }
+                $result = (new FinanceAccountLifecycle(self::tenantId()))->remove($before, (bool)$data['remove_opening_draft'], $data['expected_opening_version'], self::actor());
+                return [$before, $result];
+            });
+        } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
+    }
+
     public static function opening(array $params = [], bool $subjects = false): array|false
     {
         if (!self::authorize(false)) { return false; }
@@ -199,7 +306,7 @@ final class FinanceSetupLogic extends BaseLogic
     /** 在门店锁内校验原对象和旧幂等操作；不能用伪造类别或权限撤销后的重放绕过工资权限。 */
     private static function authorizeOpeningSalary(string $action, array $data, ?array $existing): void
     {
-        if (!in_array($action, ['item', 'remove', 'review'], true)) { return; }
+        if (!in_array($action, ['item', 'editor', 'remove', 'review', 'guide_card'], true)) { return; }
         $category = is_string($data['category'] ?? null) ? trim($data['category']) : '';
         $salary = $category === 'salary';
         if (in_array($action, ['item', 'remove'], true)) {

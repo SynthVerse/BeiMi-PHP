@@ -20,7 +20,7 @@ final class FulfillmentTaskLogic extends BaseLogic
         if (!$report) {
             return;
         }
-        if ((string)$report['status'] === 'cancelled') {
+        if (in_array((string)$report['status'], ['cancelled', 'fulfilled_undelivered'], true)) {
             return;
         }
         $processes = Db::name('work_process')->where('tenant_id', $tenantId)->where('is_enabled', 1)->whereNull('delete_time')
@@ -65,6 +65,10 @@ final class FulfillmentTaskLogic extends BaseLogic
         $items = Db::name('customer_report_item')->where('tenant_id', $tenantId)->where('report_id', $reportId)
             ->whereNull('delete_time')->order(['sort' => 'asc', 'id' => 'asc'])->select()->toArray();
         foreach ($items as $item) {
+            if ((string)($item['fulfillment_status'] ?? '') === 'undelivered'
+                || (string)($item['status'] ?? '') === 'undelivered') {
+                continue;
+            }
             $itemId = (int)$item['id'];
             $requirement = trim((string)$item['processing_requirement']);
             $shortageTaskId = 0;
@@ -253,6 +257,16 @@ final class FulfillmentTaskLogic extends BaseLogic
             ->where('status', '<>', 'cancelled')->column('id');
         $tasks = $groupIds === [] ? [] : Db::name('fulfillment_task')->where('tenant_id', self::tenantId())
             ->whereIn('group_id', $groupIds)->where('status', '<>', 'cancelled')->order(['process_id' => 'asc', 'id' => 'asc'])->select()->toArray();
+        // 报货取消后，未收回的旧纸票仍必须可处理，不能随取消任务从看板消失。
+        $voidTaskIds = Db::name('fulfillment_ticket_control')->alias('c')
+            ->join('fulfillment_task t', 't.id=c.task_id AND t.tenant_id=c.tenant_id')
+            ->join('fulfillment_task_group g', 'g.id=t.group_id AND g.tenant_id=t.tenant_id')
+            ->where('c.tenant_id', self::tenantId())->where('c.status', '<>', 'closed')
+            ->where('t.status', 'cancelled')->where('g.delivery_date', $deliveryDate)->column('t.id');
+        if ($voidTaskIds !== []) {
+            $tasks = array_merge($tasks, Db::name('fulfillment_task')->where('tenant_id', self::tenantId())
+                ->whereIn('id', array_unique($voidTaskIds))->order('id')->select()->toArray());
+        }
         $tasks = self::hydrateTasks($tasks);
         $exceptions = [];
         $groups = [];
@@ -301,6 +315,7 @@ final class FulfillmentTaskLogic extends BaseLogic
             'exception_count' => count($exceptions) + count($negativeTodos),
             'negative_inventory_todos' => array_slice($negativeTodos, 0, 20),
             'negative_inventory_count' => count($negativeTodos),
+            'pending_goods_count' => (int)Db::name('pending_goods')->where('tenant_id', self::tenantId())->whereRaw('(pending_qty>0 OR return_qty>0)')->count(),
             'tabs' => $counts,
             'process_groups' => $processGroups,
         ];
@@ -682,6 +697,32 @@ final class FulfillmentTaskLogic extends BaseLogic
         }
     }
 
+    /** 找回准备完成但响应遗失的工票，先核对实际出纸再上传回执。 @return array<string,mixed>|false */
+    public static function pendingPrint(array $params): array|false
+    {
+        self::clearError();
+        if (!WorkforceLogic::requireAnyPermission(['task.print', 'task.reprint'])) {
+            return false;
+        }
+        $taskId = (int)($params['id'] ?? 0);
+        $task = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', $taskId)->find();
+        if (!$task) {
+            self::setError('任务不存在');
+            return false;
+        }
+        $pending = Db::name('fulfillment_print_log')->alias('l')
+            ->join('fulfillment_paper_copy c', 'c.print_log_id=l.id AND c.tenant_id=l.tenant_id')
+            ->where('l.tenant_id', self::tenantId())->where('l.task_id', $taskId)
+            ->where('c.print_type', 'task')->where('l.status', 'pending')
+            ->order('l.id desc')->field('l.id AS print_log_id,l.create_time,c.ticket_no')->find();
+        return $pending ? [
+            'id' => $taskId,
+            'print_log_id' => (int)$pending['print_log_id'],
+            'ticket_no' => (string)$pending['ticket_no'],
+            'print_requested_time' => (int)$pending['create_time'],
+        ] : [];
+    }
+
     /** @return array<string,mixed>|false */
     public static function printData(array $params): array|false
     {
@@ -719,6 +760,15 @@ final class FulfillmentTaskLogic extends BaseLogic
                 if ($pending) {
                     self::setError('上一张工票的打印回执尚未确认');
                     return false;
+                }
+                // 旧版已打印工票也可能没有计划；已有计划历史则不因补打重启已终止计划。
+                if (preg_match('/^item:\d+:shortage$/', (string)$raw['source_key']) === 1
+                    && bccomp((string)(Db::name('customer_report_item')->where('tenant_id', self::tenantId())
+                        ->where('id', (int)$raw['report_item_id'])->value('shortage_base_qty') ?? '0'), '0.00', 2) > 0
+                    && !Db::name('purchase_plan_source')->where('tenant_id', self::tenantId())->where('task_id', $id)->find()
+                    && PurchasePlanLogic::ensureForPrint($id) === false) {
+                    self::setError(PurchasePlanLogic::getError());
+                    throw new \RuntimeException('purchase_plan_prepare_failed');
                 }
                 $now = time();
                 $logId = (int)Db::name('fulfillment_print_log')->insertGetId([
@@ -1604,10 +1654,15 @@ final class FulfillmentTaskLogic extends BaseLogic
         string $reason,
         array $before,
         array $after,
-        string $plannedQty
+        string $plannedQty,
+        int $batchReportId = 0
     ): array {
-        $tasks = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('report_item_id', $itemId)
-            ->where('status', '<>', 'cancelled')->order('id')->lock(true)->select()->toArray();
+        $groupQuantities = Db::name('customer_report_processing_group')->where('tenant_id', self::tenantId())
+            ->where('report_item_id', $itemId)->column('planned_qty', 'id');
+        if ($itemId <= 0 && $batchReportId <= 0) { throw new \InvalidArgumentException('整单工票作废必须明确报货单'); }
+        $taskQuery = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('report_item_id', $itemId);
+        if ($itemId <= 0) { $taskQuery->where('report_id', $batchReportId); }
+        $tasks = $taskQuery->where('status', '<>', 'cancelled')->order('id')->lock(true)->select()->toArray();
         $controls = [];
         foreach ($tasks as $task) {
             $task = self::ensureContentIdentity($task);
@@ -1620,7 +1675,10 @@ final class FulfillmentTaskLogic extends BaseLogic
                 || bccomp((string)($task['process_weight'] ?? '0'), '0.00', 2) > 0
                 || in_array((string)$task['status'], ['recovered', 'ready_to_bill', 'completed'], true);
             Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', (int)$task['id'])->update([
-                'planned_qty' => self::decimal($plannedQty), 'content_version' => $nextVersion, 'content_hash' => '',
+                'planned_qty' => self::decimal((string)($groupQuantities[(int)($task['processing_group_id'] ?? 0)]
+                    ?? (preg_match('/^item:\d+:shortage$/', (string)$task['source_key']) === 1
+                        ? ($after['shortage_base_qty'] ?? $plannedQty) : $plannedQty))),
+                'content_version' => $nextVersion, 'content_hash' => '',
                 'status' => $mustRepeatTask ? 'printable' : (string)$task['status'],
                 'actual_weight' => '0.00', 'process_weight' => '0.00', 'actual_price' => '0.00',
                 'recovery_note' => '', 'recovered_by' => 0, 'recovered_time' => 0, 'update_time' => time(),
@@ -1830,6 +1888,15 @@ final class FulfillmentTaskLogic extends BaseLogic
             }
         }
         $settlementTaskIds = self::settlementTaskIdsForItems($itemIds);
+        $processingChangeTaskIds = [];
+        if ($itemIds !== []) {
+            $groupTasks = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())
+                ->whereIn('report_item_id', $itemIds)->where('processing_group_id', '>', 0)
+                ->where('status', '<>', 'cancelled')->order('id')->field('id,processing_group_id')->select()->toArray();
+            foreach ($groupTasks as $groupTask) {
+                $processingChangeTaskIds[(int)$groupTask['processing_group_id']] ??= (int)$groupTask['id'];
+            }
+        }
         $reservationItemIds = $itemIds === [] ? [] : array_map('intval', Db::name('customer_report_reservation')
             ->where('tenant_id', self::tenantId())->whereIn('report_item_id', $itemIds)->column('report_item_id'));
         $reservationItems = array_fill_keys($reservationItemIds, true);
@@ -1900,6 +1967,12 @@ final class FulfillmentTaskLogic extends BaseLogic
                 'shortage_qty' => self::decimal((string)($requirementItem['shortage_base_qty'] ?? '0')),
                 'base_unit_name' => (string)($requirementItem['base_unit_name'] ?? ''),
             ] : null;
+            $task['purchase_plan_id'] = $task['is_purchase_task']
+                ? (int)Db::name('purchase_plan_source')->alias('s')
+                    ->join('purchase_plan p', 'p.id=s.purchase_plan_id AND p.tenant_id=s.tenant_id')
+                    ->where('s.tenant_id', self::tenantId())->where('s.task_id', (int)$task['id'])
+                    ->whereIn('p.status', ['pending', 'partial', 'complete'])->order('s.id desc')->value('s.purchase_plan_id')
+                : 0;
             $processingGroup = (int)($task['processing_group_id'] ?? 0) > 0
                 ? Db::name('customer_report_processing_group')->where('tenant_id', self::tenantId())
                     ->where('id', (int)$task['processing_group_id'])->field('id,group_key,name,planned_qty,final_actual_weight,sort')->find()
@@ -1909,6 +1982,11 @@ final class FulfillmentTaskLogic extends BaseLogic
                 ->where('task_id', (int)$task['id'])->where('print_type', 'task')
                 ->whereNotIn('paper_status', ['not_issued', 'print_failed'])->count();
             $task['reprint_count'] = max(0, $successfulCopies - 1);
+            $task['print_permission'] = $successfulCopies > 0
+                || in_array((string)$task['status'], ['print_failed', 'printed', 'in_progress'], true)
+                ? 'task.reprint' : 'task.print';
+            $task['can_print'] = in_array((string)$task['status'], ['printable', 'print_failed', 'printed', 'in_progress'], true)
+                && WorkforceLogic::hasPermission($task['print_permission']);
             $task['outstanding_paper_count'] = (int)Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
                 ->where('task_id', (int)$task['id'])->whereIn('paper_status', ['issued', 'void_required'])->count();
             $task['issued_paper_copies'] = Db::name('fulfillment_paper_copy')->where('tenant_id', self::tenantId())
@@ -1933,7 +2011,9 @@ final class FulfillmentTaskLogic extends BaseLogic
                 $report,
                 $requirementItem,
                 isset($reservationItems[$itemId]),
-                (bool)$task['requires_settlement'],
+                (bool)$task['requires_settlement']
+                    || ((int)($task['processing_group_id'] ?? 0) > 0
+                        && (int)($processingChangeTaskIds[(int)$task['processing_group_id']] ?? 0) === (int)$task['id']),
                 isset($controlledItems[$itemId]),
                 $hasControlPermission
             );

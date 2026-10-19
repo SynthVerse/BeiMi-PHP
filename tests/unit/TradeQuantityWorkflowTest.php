@@ -2,6 +2,7 @@
 declare(strict_types=1);
 namespace tests\unit;
 use app\api\jxc\logic\CustomerReportLogic;
+use app\api\jxc\logic\FulfillmentTaskLogic;
 use app\api\jxc\logic\DeliveryInventoryLogic;
 use app\api\jxc\logic\WarehouseSkuBalanceService;
 use app\api\jxc\logic\WorkforceLogic;
@@ -43,6 +44,67 @@ final class TradeQuantityWorkflowTest extends TestCase
         $report = CustomerReportLogic::submit($payload);
         self::assertNotFalse($report, CustomerReportLogic::getError());
         return compact('base', 'count', 'goods', 'sku', 'warehouse', 'report', 'payload', 'process');
+    }
+
+    private function deliverySelection(array $report, array $groupIds, string $remainingAction = 'none'): array
+    {
+        $groups = $report['items'][0]['processing_groups'];
+        $selected = array_values(array_filter($groups, static fn(array $group): bool => in_array((int)$group['id'], $groupIds, true)));
+        self::assertNotEmpty($selected);
+        return [[
+            'report_item_id' => (int)$report['items'][0]['id'],
+            'delivery_group_ids' => $groupIds,
+            'facts_version' => (int)$selected[0]['version'],
+            'remaining_action' => $remainingAction,
+        ]];
+    }
+
+    public function test_single_operator_can_save_net_weight_without_size_or_processing_confirmation(): void
+    {
+        $f = $this->fixture(); $report = $f['report']; $item = $report['items'][0];
+        Db::name('customer_report_item')->where('id', $item['id'])->update([
+            'piece_weight_confirmed' => 1, 'piece_weight_min' => '1', 'piece_weight_max' => '2',
+            'size_check_stage' => 'before_processing',
+        ]);
+        $saved = CustomerReportLogic::saveProcessingWeights([
+            'id' => $report['id'], 'version' => $report['version'], 'idempotency_key' => 'single-operator-net',
+            'groups' => [['id' => $item['processing_groups'][0]['id'],
+                'quantity_facts' => [['unit_id' => $f['count'], 'quantity' => '5']],
+                'net_weight_input' => ['value' => '9.5', 'unit' => '斤']]],
+        ]);
+        self::assertNotFalse($saved, CustomerReportLogic::getError());
+        self::assertSame('9.5000', $saved['items'][0]['actual_delivery_weight']);
+        self::assertSame('100.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
+        self::assertArrayNotHasKey('specification_verification', json_decode($saved['items'][0]['processing_groups'][0]['quantity_facts_snapshot'], true));
+    }
+
+    public function test_cancel_prepared_report_voids_printed_papers_and_keeps_controls_reachable(): void
+    {
+        $f = $this->fixture(); $report = $f['report'];
+        $saved = CustomerReportLogic::saveProcessingWeights(['id' => $report['id'], 'version' => $report['version'],
+            'idempotency_key' => 'prepared-cancel-weight', 'groups' => [['id' => $report['items'][0]['processing_groups'][0]['id'],
+                'quantity_facts' => [['unit_id' => $f['count'], 'quantity' => '5']],
+                'net_weight_input' => ['value' => '9.5', 'unit' => '斤']]]]);
+        self::assertNotFalse($saved, CustomerReportLogic::getError());
+        $tasks = $saved['task_group']['tasks'];
+        foreach ($tasks as $task) {
+            $print = FulfillmentTaskLogic::printData(['id' => $task['id']]);
+            self::assertNotFalse($print, FulfillmentTaskLogic::getError());
+            self::assertNotFalse(FulfillmentTaskLogic::printResult(['id' => $task['id'], 'print_log_id' => $print['print_log_id'], 'success' => 1]));
+        }
+        $cancelled = CustomerReportLogic::cancel(['id' => $saved['id'], 'version' => $saved['version'], 'reason' => '已全部备齐，客户取消']);
+        self::assertNotFalse($cancelled, CustomerReportLogic::getError());
+        self::assertSame('100.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
+        self::assertSame('0.0000', WarehouseSkuBalanceService::reserved($f['warehouse'], $f['sku']));
+        self::assertSame('9.5000', $cancelled['items'][0]['actual_delivery_weight']);
+        self::assertCount(count($tasks), $cancelled['cancellation_followup']['paper_controls']);
+        $dashboard = FulfillmentTaskLogic::dashboard(['delivery_date' => $report['delivery_date']]);
+        $visible = array_merge(...array_column($dashboard['process_groups'], 'tasks'));
+        self::assertCount(count($tasks), $visible, '取消任务的旧纸票必须仍可在看板处理');
+        foreach ($cancelled['cancellation_followup']['paper_controls'] as $control) {
+            self::assertNotFalse(FulfillmentTaskLogic::paperControl(['control_id' => $control['id'], 'resolution' => 'recovered', 'note' => '现场收回作废']));
+        }
+        self::assertSame('cancelled', CustomerReportLogic::detail(['id' => $report['id']])['status']);
     }
 
     public function test_quantity_v2_requires_an_explicit_selected_process(): void
@@ -147,6 +209,10 @@ final class TradeQuantityWorkflowTest extends TestCase
         self::assertFalse(CustomerReportLogic::saveProcessingWeights($stale));
         $task = (int)Db::name('fulfillment_task')->where('report_id', $report['id'])->where('source_key', 'report:' . $report['id'] . ':delivery')->value('id');
         $delivery = ['task_id' => $task, 'event_type' => 'customer_handoff', 'facts_version' => $weighted['version'], 'idempotency_key' => 'delivery-v2'];
+        self::assertFalse(DeliveryInventoryLogic::confirmSelfDelivery($delivery));
+        self::assertStringContainsString('明确选择', DeliveryInventoryLogic::getError());
+        self::assertSame('100.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
+        $delivery['items'] = $this->deliverySelection($weighted, [(int)$weighted['items'][0]['processing_groups'][0]['id']]);
         $event = DeliveryInventoryLogic::confirmSelfDelivery($delivery); self::assertNotFalse($event, DeliveryInventoryLogic::getError());
         self::assertSame('91.3000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
         self::assertSame('8.7000', $event['items'][0]['inventory_base_quantity']);
@@ -162,7 +228,8 @@ final class TradeQuantityWorkflowTest extends TestCase
             'id' => $report['items'][0]['processing_groups'][0]['id'], 'quantity_facts' => [['unit_id' => $f['count'], 'quantity' => '3']]]]]);
         self::assertNotFalse($weighted, CustomerReportLogic::getError()); self::assertNull($weighted['items'][0]['actual_delivery_weight']);
         $task = (int)Db::name('fulfillment_task')->where('report_id', $report['id'])->where('source_key', 'report:' . $report['id'] . ':delivery')->value('id');
-        $event = DeliveryInventoryLogic::confirmSelfDelivery(['task_id' => $task, 'event_type' => 'customer_handoff', 'facts_version' => $weighted['version'], 'idempotency_key' => 'bottle-delivery']);
+        $event = DeliveryInventoryLogic::confirmSelfDelivery(['task_id' => $task, 'event_type' => 'customer_handoff', 'facts_version' => $weighted['version'], 'idempotency_key' => 'bottle-delivery',
+            'items' => $this->deliverySelection($weighted, [(int)$weighted['items'][0]['processing_groups'][0]['id']])]);
         self::assertNotFalse($event, DeliveryInventoryLogic::getError()); self::assertNull($event['items'][0]['actual_delivery_weight']);
         self::assertSame('97.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
         self::assertSame('partially_delivered_pending', Db::name('customer_report_item')->where('id', $report['items'][0]['id'])->value('fulfillment_status'));
@@ -181,12 +248,14 @@ final class TradeQuantityWorkflowTest extends TestCase
         self::assertNotFalse(CustomerReportLogic::saveProcessingWeights($save));
         self::assertSame(1, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->where('order_type', 'fulfillment_internal_loss')->count());
         $task = (int)Db::name('fulfillment_task')->where('report_id', $report['id'])->where('source_key', 'report:' . $report['id'] . ':delivery')->value('id');
-        $event = DeliveryInventoryLogic::confirmSelfDelivery(['task_id' => $task, 'event_type' => 'customer_handoff', 'facts_version' => $weighted['version'], 'idempotency_key' => 'processed-delivery']);
+        $event = DeliveryInventoryLogic::confirmSelfDelivery(['task_id' => $task, 'event_type' => 'customer_handoff', 'facts_version' => $weighted['version'], 'idempotency_key' => 'processed-delivery',
+            'items' => $this->deliverySelection($weighted, [(int)$weighted['items'][0]['processing_groups'][0]['id']])]);
         self::assertNotFalse($event, DeliveryInventoryLogic::getError()); self::assertSame('80.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
     }
 
     public function test_verified_packaging_uses_receipt_snapshot_and_consumes_source_once(): void
     {
+        $this->prepareLegacyOperatingStore();
         $f = $this->fixture('斤', '0'); $report = $f['report'];
         $rule = (int)Db::name('goods_unit_conversion_rule')->insertGetId(['tenant_id' => self::TENANT_ID, 'goods_id' => $f['goods'], 'sku_id' => $f['sku'],
             'supplier_id' => 0, 'from_unit_id' => $f['count'], 'to_unit_id' => $f['base'], 'from_unit_name' => '把', 'to_unit_name' => '斤', 'ratio' => '1', 'status' => 1]);
@@ -199,7 +268,8 @@ final class TradeQuantityWorkflowTest extends TestCase
         self::assertNotFalse($weighted, CustomerReportLogic::getError()); self::assertSame('5.0000', $weighted['items'][0]['actual_delivery_weight']);
         self::assertSame('verified_packaging_rule', $weighted['items'][0]['processing_groups'][0]['weight_source']);
         $task = (int)Db::name('fulfillment_task')->where('report_id', $report['id'])->where('source_key', 'report:' . $report['id'] . ':delivery')->value('id');
-        $event = DeliveryInventoryLogic::confirmSelfDelivery(['task_id' => $task, 'event_type' => 'customer_handoff', 'facts_version' => $weighted['version'], 'idempotency_key' => 'package-delivery']);
+        $event = DeliveryInventoryLogic::confirmSelfDelivery(['task_id' => $task, 'event_type' => 'customer_handoff', 'facts_version' => $weighted['version'], 'idempotency_key' => 'package-delivery',
+            'items' => $this->deliverySelection($weighted, [(int)$weighted['items'][0]['processing_groups'][0]['id']])]);
         self::assertNotFalse($event, DeliveryInventoryLogic::getError()); self::assertSame('0.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
         self::assertSame('0.0000', Db::name('goods_packaging_source')->where('id', $source)->value('remaining_package_quantity'));
     }
@@ -213,7 +283,8 @@ final class TradeQuantityWorkflowTest extends TestCase
             'groups' => [['id' => $report['items'][0]['processing_groups'][0]['id'], 'quantity_facts' => [['unit_id' => $f['count'], 'quantity' => '5']]]]]);
         self::assertNotFalse($weighted, CustomerReportLogic::getError());
         $task = (int)Db::name('fulfillment_task')->where('report_id', $report['id'])->where('source_key', 'report:' . $report['id'] . ':delivery')->value('id');
-        $event = DeliveryInventoryLogic::confirmCounterPickup(['task_id' => $task, 'facts_version' => $weighted['version'], 'idempotency_key' => 'counter-delivery']);
+        $event = DeliveryInventoryLogic::confirmCounterPickup(['task_id' => $task, 'facts_version' => $weighted['version'], 'idempotency_key' => 'counter-delivery',
+            'items' => $this->deliverySelection($weighted, [(int)$weighted['items'][0]['processing_groups'][0]['id']])]);
         self::assertNotFalse($event, DeliveryInventoryLogic::getError()); self::assertSame('counter_pickup', $event['delivery_method']);
         self::assertSame('95.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
     }
@@ -225,7 +296,8 @@ final class TradeQuantityWorkflowTest extends TestCase
             'groups' => [['id' => $group, 'quantity_facts' => [['unit_id' => $f['count'], 'quantity' => '2']], 'net_weight_input' => ['value' => '3.2', 'unit' => '斤']]]]);
         self::assertNotFalse($first, CustomerReportLogic::getError());
         $task = (int)Db::name('fulfillment_task')->where('report_id', $report['id'])->where('source_key', 'report:' . $report['id'] . ':delivery')->value('id');
-        $event = DeliveryInventoryLogic::confirmSelfDelivery(['task_id' => $task, 'event_type' => 'customer_handoff', 'facts_version' => $first['version'], 'idempotency_key' => 'give-two']);
+        $event = DeliveryInventoryLogic::confirmSelfDelivery(['task_id' => $task, 'event_type' => 'customer_handoff', 'facts_version' => $first['version'], 'idempotency_key' => 'give-two',
+            'items' => $this->deliverySelection($first, [(int)$group])]);
         self::assertNotFalse($event, DeliveryInventoryLogic::getError());
         self::assertSame('96.8000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
         self::assertSame('0.0000', WarehouseSkuBalanceService::reserved($f['warehouse'], $f['sku']));
@@ -241,7 +313,8 @@ final class TradeQuantityWorkflowTest extends TestCase
         self::assertSame('0.0000', $second['items'][0]['remaining_order_quantity']);
         self::assertNotFalse(CustomerReportLogic::saveProcessingWeights($save));
         self::assertSame(2, Db::name('customer_report_processing_group')->where('report_id', $report['id'])->count());
-        $secondEvent = DeliveryInventoryLogic::confirmSelfDelivery(['task_id' => $task, 'event_type' => 'customer_handoff', 'facts_version' => $second['version'], 'idempotency_key' => 'give-three']);
+        $secondEvent = DeliveryInventoryLogic::confirmSelfDelivery(['task_id' => $task, 'event_type' => 'customer_handoff', 'facts_version' => $second['version'], 'idempotency_key' => 'give-three',
+            'items' => $this->deliverySelection($second, [(int)$second['items'][0]['processing_groups'][1]['id']])]);
         self::assertNotFalse($secondEvent, DeliveryInventoryLogic::getError());
         self::assertSame('5.5000', $secondEvent['items'][0]['inventory_base_quantity']);
         self::assertNotSame($event['items'][0]['delivery_group_key'], $secondEvent['items'][0]['delivery_group_key']);
@@ -289,7 +362,8 @@ final class TradeQuantityWorkflowTest extends TestCase
         self::assertTrue($first['items'][0]['has_unmeasured_groups']);
         self::assertNull($first['items'][0]['remaining_order_quantity']);
         $task = (int)Db::name('fulfillment_task')->where('report_id', $report['id'])->where('source_key', 'report:' . $report['id'] . ':delivery')->value('id');
-        $event = DeliveryInventoryLogic::confirmSelfDelivery(['task_id' => $task, 'event_type' => 'customer_handoff', 'facts_version' => $first['version'], 'idempotency_key' => 'give-first-weight']);
+        $event = DeliveryInventoryLogic::confirmSelfDelivery(['task_id' => $task, 'event_type' => 'customer_handoff', 'facts_version' => $first['version'], 'idempotency_key' => 'give-first-weight',
+            'items' => $this->deliverySelection($first, [(int)$groups[0]['id']])]);
         self::assertNotFalse($event, DeliveryInventoryLogic::getError());
         self::assertSame('partial', $event['delivery_outcome']);
         self::assertSame('partially_delivered_pending', Db::name('customer_report')->where('id', $report['id'])->value('status'));
@@ -302,7 +376,8 @@ final class TradeQuantityWorkflowTest extends TestCase
         self::assertFalse($second['items'][0]['has_unmeasured_groups']);
         self::assertSame($original, Db::name('customer_report_processing_group')->where('id', $groups[0]['id'])->value('quantity_facts_snapshot'));
         self::assertSame('3.0000', WarehouseSkuBalanceService::reserved($f['warehouse'], $f['sku']));
-        $completed = DeliveryInventoryLogic::confirmSelfDelivery(['task_id' => $task, 'event_type' => 'customer_handoff', 'facts_version' => $second['version'], 'idempotency_key' => 'give-second-weight']);
+        $completed = DeliveryInventoryLogic::confirmSelfDelivery(['task_id' => $task, 'event_type' => 'customer_handoff', 'facts_version' => $second['version'], 'idempotency_key' => 'give-second-weight',
+            'items' => $this->deliverySelection($second, [(int)$groups[1]['id']])]);
         self::assertNotFalse($completed, DeliveryInventoryLogic::getError());
         self::assertSame('partial_completed', $completed['delivery_outcome']);
         self::assertSame('partial_pending_settlement', Db::name('customer_report')->where('id', $report['id'])->value('status'));
@@ -313,6 +388,7 @@ final class TradeQuantityWorkflowTest extends TestCase
 
     public function test_packaging_source_does_not_round_indivisible_single_package(): void
     {
+        $this->prepareLegacyOperatingStore();
         $f = $this->fixture('斤', '0');
         $rule = (int)Db::name('goods_unit_conversion_rule')->insertGetId(['tenant_id' => self::TENANT_ID, 'goods_id' => $f['goods'], 'sku_id' => $f['sku'],
             'supplier_id' => 0, 'from_unit_id' => $f['count'], 'to_unit_id' => $f['base'], 'from_unit_name' => '把', 'to_unit_name' => '斤', 'ratio' => '0.333330', 'status' => 1]);

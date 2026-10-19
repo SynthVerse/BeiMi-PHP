@@ -48,7 +48,8 @@ class WarehouseSkuBalanceService
     public static function purchaseReturnWithinTransaction(int $warehouseId, int $skuId, string $quantity): array|false
     {
         $quantity = self::normalizeQuantity($quantity);
-        return $quantity === false ? false : self::changeWithinTransaction($warehouseId, $skuId, '-' . $quantity, '0.0000', true);
+        if ($quantity === false || !self::lockBalanceWithinTransaction($warehouseId, $skuId) || !PendingGoodsLogic::permitsOutboundWithinTransaction($warehouseId, $skuId, $quantity)) { return false; }
+        return self::changeWithinTransaction($warehouseId, $skuId, '-' . $quantity, '0.0000', true);
     }
 
     /** 实盘截止差额不取消已有预留；调用方必须为新增真负现存量建立来源待办。 */
@@ -155,6 +156,7 @@ class WarehouseSkuBalanceService
         if ($actualQuantity === false || $reservationQuantity === false) {
             return false;
         }
+        if (!self::lockBalanceWithinTransaction($warehouseId, $skuId) || !PendingGoodsLogic::permitsOutboundWithinTransaction($warehouseId, $skuId, $actualQuantity)) { return false; }
         $movement = self::changeWithinTransaction(
             $warehouseId,
             $skuId,

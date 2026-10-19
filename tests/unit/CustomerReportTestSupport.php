@@ -57,6 +57,17 @@ trait CustomerReportTestSupport
     protected const OTHER_TENANT_ID = 882102;
     protected const ADMIN_ID = 992101;
     private static bool $customerReportSchemaReady = false;
+    private const LEGACY_OPERATING_CUSTOMER_NAME = '旧经营准入夹具';
+
+    /** 为旧业务工作流显式准备历史欠款；不依赖其他测试遗留的库存或流水。 */
+    protected function prepareLegacyOperatingStore(int $tenantId = self::TENANT_ID): void
+    {
+        Db::name('customer')->insert([
+            'tenant_id' => $tenantId, 'customer_name' => self::LEGACY_OPERATING_CUSTOMER_NAME, 'parent_id' => 0,
+            'phone' => '', 'address' => '', 'order_receivable' => '1.00',
+            'is_disabled' => 0, 'create_time' => time(), 'update_time' => time(),
+        ]);
+    }
 
     protected function prepareCustomerReportRequestContext(int $tenantId = self::TENANT_ID): void
     {
@@ -317,19 +328,28 @@ SQL;
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260930_000005_delivery_arrangement_change.sql')));
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20260930_000006_customer_vehicle_delivery.sql')));
         $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20261004_000001_trade_quantity_facts.sql')));
+        $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/20261011_000001_pending_goods.sql')));
         self::$customerReportSchemaReady = true;
     }
 
     protected function cleanCustomerReportData(): void
     {
+        // 固定标识同时用于前置清理，恢复上次被中断的用例；不清空其他租户。
+        Db::name('customer')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])
+            ->where('customer_name', self::LEGACY_OPERATING_CUSTOMER_NAME)->delete();
         Db::name('goods_packaging_source')->whereIn('tenant_id', [self::TENANT_ID, self::OTHER_TENANT_ID])->delete();
         // 财务和履约用例共用员工夹具；权限清理不能代替员工主记录的清理。
         Db::name('employee')->where('tenant_id', self::TENANT_ID)->delete();
+        foreach (['purchase_return_order_lists', 'purchase_return_order', 'payable_flow'] as $table) {
+            if (Db::query('SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?', ['la_' . $table])) {
+                Db::name($table)->where('tenant_id', self::TENANT_ID)->delete();
+            }
+        }
         try {
             Db::name('sales_delivery_correction')->where('tenant_id', self::TENANT_ID)->delete();
         } catch (\Throwable) {
         }
-        foreach (['purchase_plan_allocation', 'purchase_plan_arrival', 'purchase_plan_source', 'purchase_plan', 'purchase_batch_supply_order', 'purchase_batch', 'customer_report_processing_group_process', 'customer_report_processing_group', 'customer_sales_print_log', 'sales_weight_difference_todo', 'sales_settlement_action', 'sales_order_version', 'customer_sales_preference', 'sales_settlement_setting', 'negative_inventory_action', 'negative_inventory_todo', 'negative_inventory_attribution', 'fulfillment_delivery_loss', 'fulfillment_delivery_remainder', 'line_vehicle_return_event', 'line_vehicle_trip_report', 'line_vehicle_trip', 'line_vehicle_schedule', 'fulfillment_delivery_item', 'fulfillment_delivery_event', 'third_party_driver', 'negative_inventory_setting', 'fulfillment_ticket_control', 'fulfillment_paper_copy', 'fulfillment_item_change', 'fulfillment_print_log', 'fulfillment_task', 'fulfillment_task_group', 'employee_permission', 'employee_process', 'work_process', 'audit_log', 'receivable_flow', 'stock_flow', 'order_goods', 'supply_order', 'sales_order', 'sales_return_order', 'customer_report_grouped_submission', 'customer_report_reservation', 'customer_report_item', 'customer_report', 'customer_report_batch', 'customer_goods_report_preference', 'delivery_vehicle_migration_conflict', 'customer_delivery_vehicle', 'delivery_vehicle', 'warehouse_sku_balance', 'warehouse_goods_balance', 'goods_supplier_price_history', 'goods_supplier', 'goods_sku_spec_value', 'goods_dimension_setting', 'goods_spec_value', 'goods_sku', 'goods_spec', 'goods_spec_template', 'goods_alias', 'goods_units_binding', 'goods_unit', 'warehouse', 'goods', 'customer'] as $table) {
+        foreach (['pending_goods_return_resolution', 'pending_goods_return_fact', 'pending_goods_return_order', 'pending_goods_action', 'pending_goods_return', 'pending_goods', 'purchase_plan_allocation', 'purchase_plan_arrival', 'purchase_plan_source', 'purchase_plan', 'purchase_batch_supply_order', 'purchase_batch', 'customer_report_processing_group_process', 'customer_report_processing_group', 'customer_sales_print_log', 'sales_weight_difference_todo', 'sales_settlement_action', 'sales_order_version', 'customer_sales_preference', 'sales_settlement_setting', 'negative_inventory_action', 'negative_inventory_todo', 'negative_inventory_attribution', 'fulfillment_delivery_loss', 'fulfillment_delivery_remainder', 'line_vehicle_return_event', 'line_vehicle_trip_report', 'line_vehicle_trip', 'line_vehicle_schedule', 'fulfillment_delivery_item', 'fulfillment_delivery_event', 'third_party_driver', 'negative_inventory_setting', 'fulfillment_ticket_control', 'fulfillment_paper_copy', 'fulfillment_item_change', 'fulfillment_print_log', 'fulfillment_task', 'fulfillment_task_group', 'employee_permission', 'employee_process', 'work_process', 'audit_log', 'receivable_flow', 'stock_flow', 'order_goods', 'supply_order', 'sales_order', 'sales_return_order', 'customer_report_grouped_submission', 'customer_report_reservation', 'customer_report_item', 'customer_report', 'customer_report_batch', 'customer_goods_report_preference', 'delivery_vehicle_migration_conflict', 'customer_delivery_vehicle', 'delivery_vehicle', 'warehouse_sku_balance', 'warehouse_goods_balance', 'goods_supplier_price_history', 'goods_supplier', 'goods_sku_spec_value', 'goods_dimension_setting', 'goods_spec_value', 'goods_sku', 'goods_spec', 'goods_spec_template', 'goods_alias', 'goods_units_binding', 'goods_unit', 'warehouse', 'goods', 'customer'] as $table) {
             try {
                 Db::name($table)->where('tenant_id', self::TENANT_ID)->delete();
             } catch (\Throwable) {

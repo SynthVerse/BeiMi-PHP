@@ -36,6 +36,7 @@ final class FinancePurchaseReturnResolutions
             $before = $costLedger->destination($warehouse, $sku, 'return', 'purchase-return:' . $line);
             StockService::inboundFinancePurchaseReturnWithinTransaction($target, (int)$basis['goods_id'], $sku, $quantity,
                 (int)$document['id'], $returned, $date);
+            PendingGoodsReturnService::financeBack($line, $target, $quantity);
             $after = $costLedger->destination($warehouse, $sku, 'return', 'purchase-return:' . $line);
             if (bccomp(bcsub($before['quantity'], $after['quantity'], 12), $quantity, 12) !== 0) { throw new \DomainException('返回入库缺少对应原退货成本'); }
             // 历史实物流重放先计算事件、后补价，确认快照必须读取整个重放完成后的去向差额。

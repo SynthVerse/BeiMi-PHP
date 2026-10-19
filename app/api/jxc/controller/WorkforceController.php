@@ -34,6 +34,11 @@ class WorkforceController extends BaseJxcController
     private function write(string $action)
     {
         $params = (new WorkforceValidate())->post()->goCheck($action);
+        if ($action === 'saveEmployee') {
+            $raw = $this->request->post(false);
+            // 仅保留 JSON 显式历史人员标记的类型；普通资料仍经过项目 trim。
+            if (array_key_exists('mobile_unknown', $raw)) { $params['mobile_unknown'] = $raw['mobile_unknown']; }
+        }
         $result = WorkforceLogic::$action($params);
         return $result === false ? $this->fail(WorkforceLogic::getError()) : $this->success('操作成功', $result, 1, 1);
     }

@@ -114,7 +114,14 @@ class GoodsValidate extends BaseValidate
             'remark',
             'dimensions',
             'combinations',
-        ]);
+        ])->remove('dimensions', 'require')->append('dimensions', [static function ($value, array $data): bool|string {
+            if (!array_key_exists('dimensions', $data)) { return true; }
+            if (!is_array($value) || !array_is_list($value)) { return '商品维度必须为数组'; }
+            // JSON 对象会被框架解成关联数组；保留 [] 与 {} 的协议区别。
+            $raw = json_decode(request()->getInput());
+            if (is_object($raw) && property_exists($raw, 'dimensions') && !is_array($raw->dimensions)) { return '商品维度必须为数组'; }
+            return true;
+        }]);
     }
 
     public function sceneEdit()

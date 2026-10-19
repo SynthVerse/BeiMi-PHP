@@ -6,6 +6,8 @@ Use project-local PHP, ThinkPHP, LikeAdmin, authentication, tenant-isolation, va
 
 Protect business files and existing user changes. The legacy BeiMi workflow is compatibility-only for tasks explicitly bound to it before the migration.
 
+开始本子项目任务时，先读取 `../AGENTS.md` 中“开发阶段与兼容性”约定并应用到本次开发、重构与验收。
+
 ## Agent skills
 
 ### Issue tracker

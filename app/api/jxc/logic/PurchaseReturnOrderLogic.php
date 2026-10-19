@@ -70,6 +70,7 @@ class PurchaseReturnOrderLogic extends BaseLogic
             if ($originalOrder->isEmpty()) {
                 self::throwFailure('原进货单不存在', 'RETURN_ORIGINAL_NOT_FOUND');
             }
+            if ((int)($params['pending_return_id'] ?? 0) <= 0) { PendingGoodsLogic::assertDirectReturnAllowed($originalOrderId); }
             $built = self::buildOrderData($params);
             if ($built === false) {
                 Db::rollback();
@@ -77,6 +78,9 @@ class PurchaseReturnOrderLogic extends BaseLogic
             }
             $order = PurchaseReturnOrder::create($built['order']);
             self::replaceDetails((int)$order->id, $built['goods']);
+            if ((int)($params['pending_return_id'] ?? 0) > 0) {
+                PendingGoodsLogic::consumeReturnWithinTransaction((int)$params['pending_return_id'], $built['order'], $built['goods'], (int)$order->id);
+            }
 
             usort($built['goods'], static fn(array $left, array $right): int =>
                 [(int)$left['sku_id'], (int)$left['goods_id']] <=> [(int)$right['sku_id'], (int)$right['goods_id']]
@@ -99,7 +103,8 @@ class PurchaseReturnOrderLogic extends BaseLogic
             }
 
             $orderMoney = (string)$built['order']['order_money'];
-            if (bccomp($orderMoney, '0', 2) > 0) {
+            // 待定来源仅确认实物退离；供应商认可与钱款处理另留事实。
+            if ((int)($params['pending_return_id'] ?? 0) === 0 && bccomp($orderMoney, '0', 2) > 0) {
                 $financeOk = FinanceService::reducePayable(
                     (int)$built['order']['supplier_id'],
                     $orderMoney,
@@ -131,6 +136,8 @@ class PurchaseReturnOrderLogic extends BaseLogic
                 'order_sn' => (string)$order->order_sn,
                 'sn' => (string)$order->order_sn,
             ];
+        } catch (\DomainException $e) {
+            Db::rollback(); self::setError($e->getMessage()); return false;
         } catch (BusinessException $e) {
             Db::rollback();
             self::setError($e->getMessage());
@@ -167,6 +174,9 @@ class PurchaseReturnOrderLogic extends BaseLogic
                 ->value('id');
             if ($lockedTenantId !== $tenantId) {
                 self::throwFailure('租户无效', 'RETURN_ORDER_NOT_FOUND');
+            }
+            if (Db::name('pending_goods_return_order')->where('tenant_id', $tenantId)->where('return_order_id', (int)$params['id'])->lock(true)->find()) {
+                self::throwFailure('待定货物已按实际退离处理，不能覆盖或删除；请登记关联更正', 'RETURN_PENDING_IMMUTABLE');
             }
             $order = PurchaseReturnOrder::where('id', (int)$params['id'])
                 ->where('tenant_id', $tenantId)
@@ -298,6 +308,9 @@ class PurchaseReturnOrderLogic extends BaseLogic
                 ->value('id');
             if ($lockedTenantId !== $tenantId) {
                 self::throwFailure('租户无效', 'RETURN_ORDER_NOT_FOUND');
+            }
+            if (Db::name('pending_goods_return_order')->where('tenant_id', $tenantId)->where('return_order_id', (int)$params['id'])->lock(true)->find()) {
+                self::throwFailure('待定货物已按实际退离处理，不能覆盖或删除；请登记关联更正', 'RETURN_PENDING_IMMUTABLE');
             }
             $order = PurchaseReturnOrder::where('id', (int)$params['id'])
                 ->where('tenant_id', $tenantId)
@@ -636,6 +649,11 @@ class PurchaseReturnOrderLogic extends BaseLogic
         }
     }
 
+    public static function historicalReturnedSupplyQtyMap(int $originalOrderId): array
+    {
+        return self::returnedSupplyQtyMap($originalOrderId, 0, true);
+    }
+
     protected static function returnedSupplyQtyMap(
         int $originalOrderId,
         int $ignoreReturnOrderId = 0,
@@ -651,7 +669,7 @@ class PurchaseReturnOrderLogic extends BaseLogic
         // finance availability probe can create a REPEATABLE READ snapshot before
         // the shared tenant/original-order lock is acquired, which otherwise lets
         // a waiter validate against quantities from before the preceding commit.
-        $query->field('original_supply_order_list_id,return_num');
+        $query->field('purchase_return_order_id,original_supply_order_list_id,return_num');
         if ($lockRows) {
             $query->lock(true);
         }
@@ -659,10 +677,18 @@ class PurchaseReturnOrderLogic extends BaseLogic
             ->select()
             ->toArray();
 
+        $backs = [];
+        foreach (array_unique(array_column($rows, 'purchase_return_order_id')) as $returnOrderId) {
+            $fact = Db::name('pending_goods_return_fact')->where('tenant_id', (int)request()->tenantId)->where('legacy_order_id', $returnOrderId)->find();
+            if ($fact) { $backs[$returnOrderId] = (string)Db::name('pending_goods_return_resolution')->where('tenant_id', (int)request()->tenantId)->where('fact_id', $fact['id'])->where('kind', 'returned')->sum('quantity'); }
+        }
         $map = [];
         foreach ($rows as $row) {
-            $lineId = (int)$row['original_supply_order_list_id'];
-            $map[$lineId] = bcadd($map[$lineId] ?? '0.0000', (string)$row['return_num'], 4);
+            $lineId = (int)$row['original_supply_order_list_id']; $orderId = (int)$row['purchase_return_order_id'];
+            $quantity = (string)$row['return_num']; $back = $backs[$orderId] ?? '0.0000';
+            $offset = bccomp($back, $quantity, 4) < 0 ? $back : $quantity;
+            $backs[$orderId] = bcsub($back, $offset, 4);
+            $map[$lineId] = bcadd($map[$lineId] ?? '0.0000', bcsub($quantity, $offset, 4), 4);
         }
         return $map;
     }

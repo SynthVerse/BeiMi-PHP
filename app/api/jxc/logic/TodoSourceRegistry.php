@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace app\api\jxc\logic;
 
-/** S01-S23 的权威接入登记；新增人工处理来源时必须先扩展此登记再接入查询。 */
+/** 权威接入登记；新增人工处理来源时必须先扩展此登记再接入查询。 */
 final class TodoSourceRegistry
 {
     /** @return array<string,array{title:string,provider:string,decision:string,inclusion:string,completion:string,permission:string,identity:string,date_rule:string,target:string}> */
@@ -34,6 +34,8 @@ final class TodoSourceRegistry
             'S21' => self::source('月结步骤与历史遗留', 'finance_periods', '首个可处理未结月份或历史遗留未结案', '月结完成或遗留证据结案', '门店最高权限', 'finance-period 或实时来源规范键', '月份末/原月份', 'finance_period'),
             'S22' => self::source('持久化打印结果恢复核实', 'print_recovery', '服务端持久化打印尝试仍待核实', '回执核实完成', 'settlement.view 或 settlement.bill', 'finance-print:{id}', '打印发生日期', 'print_recovery'),
             'S23' => self::source('其他人工待处理来源审计', 'coverage_audit', '满足 R07 但未登记的候选', '完成控制器、状态与页面提示全量核查并登记结论', '按新增来源实际动作权限', 'coverage-audit:{candidate}', '按新增来源规则', '先登记再接入', '审计控制项本身不产生运行时待办'),
+            'S24' => self::source('资金本金与退款后续处理', 'finance_funds_followups', '借款到期、有合法采购应付可抵预付，或已确认退款及员工待付未结', '按原来源结清后消除', '资金本金最高权限；退款及工资按业务类型权限', 'fund-followup:{source}', '真实业务日及到期日', 'finance_fund 或 finance_balance'),
+            'S25' => self::source('主动稍后继续的财务草稿', 'finance_draft_continuations', 'draft 且显式 resume_requested=1', '提交、确认或撤销待续提醒', '该业务准备／编辑权限', 'finance-resume:{id}', '真实业务日期；未知为空', 'finance_document'),
         ];
     }
 

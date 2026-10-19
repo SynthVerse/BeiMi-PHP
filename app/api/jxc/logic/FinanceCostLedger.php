@@ -14,6 +14,17 @@ final class FinanceCostLedger
         if ($tenantId <= 0) { throw new \DomainException('成本核算必须指定门店'); }
     }
 
+    public function initializeOpeningWithinTransaction(): void
+    {
+        $pdo = Db::connect()->getPdo();
+        if ($this->tenantId !== FinanceAccess::tenant() || !$pdo || !$pdo->inTransaction()) { throw new \DomainException('期初成本须在本门店启用事务内建立'); }
+        $skus = [];
+        foreach ($this->query('finance_opening_source')->where('category', 'inventory')->select()->toArray() as $row) {
+            $snapshot = FinanceValue::decode($row['source_snapshot']); $skus[(int)$snapshot['subject_snapshot']['sku_id']] = true;
+        }
+        foreach (array_keys($skus) as $sku) { $stored = $this->load($sku); $this->persist($stored, $this->withOpening($stored, $sku), ['origin' => 'opening_confirmation']); }
+    }
+
     public function recordWithinTransaction(array $event): array
     {
         $pdo = Db::connect()->getPdo();

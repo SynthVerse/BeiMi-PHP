@@ -100,6 +100,7 @@ final class CustomerReportOverviewTest extends TestCase
         $file = CustomerReportOverviewLogic::exportWord($command);
         self::assertNotFalse($file, CustomerReportOverviewLogic::getError());
         self::assertSame($snapshot['snapshot_hash'], $file['snapshot_hash']);
+        self::assertSame('报货汇总_2026-10-10.docx', $file['filename']);
         $path = tempnam(sys_get_temp_dir(), 'overview-test-');
         try {
             file_put_contents($path, base64_decode($file['base64'], true));
@@ -108,6 +109,12 @@ final class CustomerReportOverviewTest extends TestCase
             $xml = $zip->getFromName('word/document.xml');
             $doc = new \DOMDocument();
             self::assertTrue($doc->loadXML($xml));
+            $xpath = new \DOMXPath($doc);
+            $xpath->registerNamespace('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main');
+            self::assertSame('报货汇总', $xpath->query('//w:p[w:pPr/w:pStyle[@w:val="Title"]]')->item(0)->textContent);
+            $header = new \DOMDocument();
+            self::assertTrue($header->loadXML($zip->getFromName('word/header1.xml')));
+            self::assertSame($snapshot['store_name'] . ' · 报货汇总 · 2026-10-10', $header->textContent);
             self::assertStringContainsString('甲<&总店', $doc->textContent);
             self::assertStringContainsString('甲分店', $doc->textContent);
             self::assertStringContainsString('商品需求汇总', $doc->textContent);

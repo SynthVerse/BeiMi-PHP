@@ -96,16 +96,13 @@ final class CustomerReportQuantityService
                         $facts['packaging'] = $package; $facts['weight_source'] = 'verified_packaging_rule'; $facts['net_weight_input'] = null;
                         if ($facts['processing'] !== null) { throw new \DomainException('包装加工破坏完整条件，请录实际净重并核实来源'); }
                     }
-                    if ($facts['processing'] === null && Db::name('customer_report_processing_group_process')->where('tenant_id', $tenant)
-                        ->where('processing_group_id', $id)->count() > 0) {
-                        throw new \DomainException('已选择加工工序，请核实加工前取用、交付净重与差额去向；无损耗也须明确核实为零');
-                    }
+                    // 工序是现场作业要求；本版不自动核算加工损耗，也不伪造零损耗事实。
                     unset($entries[$id]);
                     $facts['measured_at'] = time(); $facts['recorded_by'] = (int)(request()->userId ?? request()->adminId ?? 0);
                     $facts['report_item_id'] = (int)$item['id']; $facts['processing_group_id'] = $id;
                     $facts['delivery_group_key'] = 'report:' . $report['id'] . ':group:' . $id;
                     $facts['version'] = (int)$report['version'] + 1;
-                    if ((int)$item['piece_weight_confirmed'] === 1) {
+                    if ((int)$item['piece_weight_confirmed'] === 1 && !empty($params['specification_verifications'][$item['id']])) {
                         $verification = $params['specification_verifications'][$item['id']] ?? $params['specification_verifications'][(string)$item['id']] ?? null;
                         if (!is_array($verification) || ($verification['confirmed'] ?? false) !== true) { throw new \DomainException('客户有大小要求，请先按要求核对大小并确认'); }
                         $mode = $verification['mode'] ?? 'measured_range';
@@ -140,7 +137,7 @@ final class CustomerReportQuantityService
                 if (isset($countTotals[(int)$item['unit_id']]) && bccomp($countTotals[(int)$item['unit_id']], (string)$item['order_qty'], 4) > 0) {
                     throw new \DomainException('实际交付数量超过原需求，请先明确追加需求');
                 }
-                if ((int)$item['piece_weight_confirmed'] === 1 && $normalized !== []) {
+                if ((int)$item['piece_weight_confirmed'] === 1 && $normalized !== [] && !empty($params['specification_verifications'][$item['id']])) {
                     $verification = $params['specification_verifications'][$item['id']] ?? [];
                     if (($verification['mode'] ?? 'measured_range') !== 'manual_confirmation'
                         || array_key_exists('count', $verification) || isset($newCounts[(int)$item['unit_id']])) {

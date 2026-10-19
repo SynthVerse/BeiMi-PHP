@@ -12,6 +12,7 @@ final class FulfillmentTaskValidate extends BaseValidate
         'print_log_id' => 'integer|gt:0',
         'control_id' => 'integer|gt:0',
         'report_item_id' => 'integer|gt:0',
+        'processing_group_id' => 'integer|gt:0',
         'success' => 'require|in:0,1',
         'error_message' => 'max:255',
         'actual_weight' => 'max:20',
@@ -45,6 +46,7 @@ final class FulfillmentTaskValidate extends BaseValidate
     public function sceneDetail() { return $this->only(['id']); }
     public function sceneResolve() { return $this->only(['id', 'process_id', 'requirement']); }
     public function scenePrintData() { return $this->only(['id']); }
+    public function scenePendingPrint() { return $this->only(['id']); }
     public function scenePrintResult() { return $this->only(['id', 'print_log_id', 'success', 'error_message'])->append('print_log_id', 'require'); }
     public function sceneRecover() { return $this->only(['id', 'print_log_id', 'actual_weight', 'actual_price', 'recovery_note', 'specification_result', 'verified_piece_count', 'verified_piece_weight_min', 'verified_piece_weight_max', 'specification_note']); }
     public function sceneSpecificationShortage() { return $this->only(['id', 'print_log_id', 'specification_note'])->append('specification_note', 'require'); }
@@ -53,7 +55,7 @@ final class FulfillmentTaskValidate extends BaseValidate
     public function sceneControlPrintData() { return $this->only(['control_id'])->append('control_id', 'require'); }
     public function sceneControlPrintResult() { return $this->only(['control_id', 'print_log_id', 'success', 'error_message'])->append('control_id', 'require')->append('print_log_id', 'require'); }
     public function sceneChangeDeliveryArrangement() { return $this->only(['id', 'version', 'delivery_date', 'delivery_arrangement', 'reason'])->append('version', 'require')->append('delivery_date', 'require')->append('delivery_arrangement', 'require')->append('reason', 'require'); }
-    public function sceneReduceItem() { return $this->only(['report_item_id', 'new_expected_base_qty', 'processed_reduction_qty', 'processed_disposition', 'other_inventory_action', 'reason', 'idempotency_key'])->append('report_item_id', 'require'); }
+    public function sceneReduceItem() { return $this->only(['report_item_id', 'processing_group_id', 'new_expected_base_qty', 'processed_reduction_qty', 'processed_disposition', 'other_inventory_action', 'reason', 'idempotency_key'])->append('report_item_id', 'require'); }
     public function sceneMarkUndelivered() { return $this->only(['report_item_id', 'reason_code', 'reason', 'idempotency_key'])->append('report_item_id', 'require'); }
     public function sceneBill() { return $this->only(['id']); }
 }

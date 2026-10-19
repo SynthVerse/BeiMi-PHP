@@ -15,7 +15,7 @@ final class FinanceCostBootstrap
         if ($tenant !== FinanceAccess::tenant() || !$pdo || !$pdo->inTransaction()) { throw new \DomainException('启用成本承接须在本门店期初确认事务内执行'); }
         $rows = Db::name('stock_flow')->where('tenant_id', $tenant)->where('create_time', '>=', strtotime($date))->order('create_time,id')->lock(true)->select()->toArray();
         $transfers = FinanceStockTransferPairs::forFlows($tenant, $rows);
-        $cost = new FinanceCostLedger($tenant); $count = 0; $pending = []; $last = 0;
+        $cost = new FinanceCostLedger($tenant); $cost->initializeOpeningWithinTransaction(); $count = 0; $pending = []; $last = 0;
         foreach ($rows as $flow) {
             $last = max($last, (int)$flow['id']); $delta = bcsub($flow['after_stock'], $flow['before_stock'], 4);
             if (bccomp($delta, '0', 4) === 0) { continue; }

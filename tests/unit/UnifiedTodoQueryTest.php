@@ -32,9 +32,13 @@ final class UnifiedTodoQueryTest extends TestCase
                 glob(dirname(__DIR__, 2) . '/database/migrations/20260908_*.sql') ?: [],
                 glob(dirname(__DIR__, 2) . '/database/migrations/20260909_*.sql') ?: [],
                 glob(dirname(__DIR__, 2) . '/database/migrations/20260913_*.sql') ?: [],
+                [dirname(__DIR__, 2) . '/database/migrations/20261015_000002_finance_draft_continuation.sql'],
             );
             sort($files);
-            foreach ($files as $file) { $this->runStatements($this->prepareMigration((string)file_get_contents($file))); }
+            foreach ($files as $file) {
+                if (str_ends_with($file, '20261015_000002_finance_draft_continuation.sql') && Db::query("SHOW COLUMNS FROM la_finance_document LIKE 'resume_requested'")) { continue; }
+                $this->runStatements($this->prepareMigration((string)file_get_contents($file)));
+            }
             self::$financeSchemaReady = true;
         }
         $this->cleanTodoFixtures([self::TENANT_ID, self::OTHER_TENANT_ID]);
@@ -44,6 +48,43 @@ final class UnifiedTodoQueryTest extends TestCase
     {
         $this->prepareCustomerReportRequestContext();
         $this->cleanTodoFixtures([self::TENANT_ID, self::OTHER_TENANT_ID]);
+    }
+
+    public function test_only_an_explicit_continue_later_draft_creates_one_recoverable_todo(): void
+    {
+        $save = static fn(array $extra) => \app\api\jxc\logic\FinanceBusinessLogic::action('save', $extra + ['type' => 'receipt', 'id' => 0, 'expected_version' => 0,
+            'expected_tenant_id' => self::TENANT_ID, 'payload' => ['amount' => '20.00']]);
+        $plain = $save(['idempotency_key' => 'owner-ordinary-save-01']);
+        self::assertNotFalse($plain, \app\api\jxc\logic\FinanceBusinessLogic::getError());
+        $later = $save(['idempotency_key' => 'owner-continue-later-01', 'continue_later' => true]);
+        self::assertNotFalse($later, \app\api\jxc\logic\FinanceBusinessLogic::getError());
+        $items = TodoQueryLogic::lists(['branch' => 'finance', 'page_size' => 100]);
+        $resume = array_values(array_filter($items['items'], static fn(array $item): bool => ($item['source']['code'] ?? '') === 'S25'));
+        self::assertCount(1, $resume);
+        self::assertSame($later['id'], $resume[0]['target']['params']['id']);
+        $withdraw = \app\api\jxc\logic\FinanceBusinessLogic::action('reminder_off', ['id' => $later['id'], 'expected_tenant_id' => self::TENANT_ID, 'expected_version' => $later['version'], 'idempotency_key' => 'owner-reminder-off-01']);
+        self::assertNotFalse($withdraw, \app\api\jxc\logic\FinanceBusinessLogic::getError());
+        self::assertSame('draft', $withdraw['status']);
+        self::assertSame('20.00', $withdraw['payload']['amount']);
+        $items = TodoQueryLogic::lists(['branch' => 'finance', 'page_size' => 100]);
+        self::assertSame([], array_values(array_filter($items['items'], static fn(array $item): bool => ($item['source']['code'] ?? '') === 'S25')));
+    }
+
+    public function test_continuation_hands_off_to_confirmation_and_confirm_only_employee_cannot_see_draft(): void
+    {
+        $draft = \app\api\jxc\logic\FinanceBusinessLogic::action('save', ['type' => 'receipt', 'expected_version' => 0, 'expected_tenant_id' => self::TENANT_ID, 'idempotency_key' => 'continue-handoff-save-01', 'continue_later' => true, 'payload' => ['amount' => '35.00']]);
+        self::assertNotFalse($draft, \app\api\jxc\logic\FinanceBusinessLogic::getError());
+        $this->useEmployeePermissions(99178831, ['finance.receipt.confirm']);
+        $hidden = TodoQueryLogic::lists(['branch' => 'finance', 'page_size' => 100]);
+        self::assertNotFalse($hidden, TodoQueryLogic::getError());
+        self::assertSame([], array_values(array_filter($hidden['items'], static fn(array $item): bool => ($item['source']['code'] ?? '') === 'S25')));
+        $this->prepareCustomerReportRequestContext();
+        $pending = \app\api\jxc\logic\FinanceBusinessLogic::action('submit', ['id' => $draft['id'], 'expected_version' => $draft['version'], 'expected_tenant_id' => self::TENANT_ID, 'idempotency_key' => 'continue-handoff-submit-01']);
+        self::assertNotFalse($pending, \app\api\jxc\logic\FinanceBusinessLogic::getError());
+        self::assertSame(0, $pending['resume_requested']);
+        $items = TodoQueryLogic::lists(['branch' => 'finance', 'page_size' => 100])['items'];
+        self::assertSame([], array_values(array_filter($items, static fn(array $item): bool => ($item['source']['code'] ?? '') === 'S25')));
+        self::assertCount(1, array_values(array_filter($items, static fn(array $item): bool => ($item['source']['code'] ?? '') === 'S05' && $item['target']['params']['id'] === $draft['id'])));
     }
 
     public function test_cross_day_items_draft_and_future_balance_boundaries_and_large_cursor_pagination(): void
@@ -620,7 +661,7 @@ final class UnifiedTodoQueryTest extends TestCase
     /** @param array<int,int> $tenants */
     private function cleanTodoFixtures(array $tenants): void
     {
-        foreach (['finance_sales_print', 'finance_inventory_count_measurement', 'finance_inventory_count_line',
+        foreach (['finance_command', 'finance_sales_print', 'finance_inventory_count_measurement', 'finance_inventory_count_line',
             'finance_inventory_count', 'finance_entry', 'finance_source', 'finance_document', 'finance_period', 'finance_opening_book',
             'negative_inventory_action', 'negative_inventory_todo', 'negative_inventory_attribution',
             'employee_permission', 'employee', 'tenant_member', 'fulfillment_delivery_event',

@@ -567,6 +567,7 @@ final class SalesSettlementWorkflowTest extends TestCase
 
     public function test_detail_and_submit_reject_cross_tenant_id_guessing(): void
     {
+        $this->prepareLegacyOperatingStore(self::OTHER_TENANT_ID);
         $fixture = $this->pendingOrderFixture('1.0000');
         $payload = $this->settlementPayload($fixture, 'settlement-cross-tenant', '1.0000', '8.00');
         $this->prepareCustomerReportRequestContext(self::OTHER_TENANT_ID);

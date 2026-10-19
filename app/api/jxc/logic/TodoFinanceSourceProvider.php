@@ -14,6 +14,8 @@ final class TodoFinanceSourceProvider
     {
         $buffer = new TodoItemBuffer($source, 'finance', $limit, $after, $filters, $excludedIdentities);
         match ($source) {
+            'S25' => self::continuations($buffer),
+            'S24' => self::fundFollowups($buffer),
             'S05' => self::documents($buffer),
             'S06' => self::salesSettlement($buffer),
             'S07' => self::purchaseSettlement($buffer),
@@ -37,6 +39,20 @@ final class TodoFinanceSourceProvider
         return $buffer->finish();
     }
 
+    private static function continuations(TodoItemBuffer $buffer): void
+    {
+        self::chunks('finance_document', static fn($query) => $query->where('status', 'draft')->where('resume_requested', 1),
+            static function (array $row) use ($buffer): void {
+                $type = (string)$row['type'];
+                try { $policy = FinanceDocumentPolicy::authorize($type, false); } catch (\DomainException) { return; }
+                $payload = FinanceValue::decode((string)$row['payload']);
+                if (!FinanceAccess::has($policy['prepare'])) { return; }
+                $buffer->add(self::item('finance-resume:' . $row['id'], 'finance_document', (int)$row['id'], '继续填写' . $policy['title'],
+                    (string)($payload['subject_name'] ?? ''), self::firstDate($payload, ['actual_date', 'business_date']), null,
+                    '已选择稍后继续，草稿尚未记账', '继续填写', 'finance_document', ['type' => $type, 'id' => (int)$row['id']]));
+            });
+    }
+
     private static function documents(TodoItemBuffer $buffer): void
     {
         self::chunks('finance_document', static fn($query) => $query->where('status', 'pending'),
@@ -51,6 +67,39 @@ final class TodoFinanceSourceProvider
                     $businessDate, null, '单据已提交，尚未确认', '审核确认', 'finance_document',
                     ['type' => $type, 'id' => (int)$row['id']]));
             });
+    }
+
+    private static function fundFollowups(TodoItemBuffer $buffer): void
+    {
+        $ledger = new FinanceLedger(FinanceAccess::tenant());
+        $actions = ['loan' => 'loan_repayment', 'supplier_advance' => 'supplier_advance_allocate', 'supplier_refund' => 'supplier_refund',
+            'expense_refund' => 'expense_refund', 'equipment_refund' => 'equipment_refund', 'salary' => 'salary_payment', 'reimbursement' => 'reimbursement_payment', 'customer_refund' => 'customer_refund'];
+        foreach ($actions as $category => $type) {
+            try { FinanceDocumentPolicy::authorize($type); } catch (\DomainException) { continue; }
+            foreach (['o' => 'finance_opening_source', 'n' => 'finance_source'] as $prefix => $table) {
+                self::chunks($table, static fn($query) => $query->where('category', $category), static function (array $row) use ($buffer, $ledger, $prefix, $category, $type, $table): void {
+                    $source = $ledger->source($prefix . ':' . $row['id']);
+                    if (bccomp($source['balance'], '0', 2) <= 0) { return; }
+                    if ($category === 'loan' && (!$source['due_date'] || $source['due_date'] > date('Y-m-d'))) { return; }
+                    if (in_array($category, ['salary', 'reimbursement', 'customer_refund'], true) && $source['due_date'] && $source['due_date'] > date('Y-m-d')) { return; }
+                    if ($category === 'supplier_advance') {
+                        $available = false;
+                        foreach ($ledger->sources('payable', $source['subject_id']) as $payable) {
+                            if (bccomp(bcsub($payable['balance'], FinanceStatements::disputedAmount($payable['reference']), 2), '0', 2) > 0) { $available = true; break; }
+                        }
+                        if (!$available) { return; }
+                    }
+                    // 已有到期款项来源承接同一任务，避免工资与应退款重复展示。
+                    if (in_array($category, ['salary', 'reimbursement', 'customer_refund'], true) && $source['due_date'] && $source['due_date'] <= date('Y-m-d')) { return; } // 已到期由 S09 唯一承接。
+                    $key = 'fund-followup:' . $source['reference'];
+                    $params = ['type' => $type, 'source' => $source['reference'], 'subject_id' => $source['subject_id']];
+                    $title = ($source['subject_name'] ?: '原资金来源') . ' · ' . FinanceDocumentPolicy::type($type)['title'];
+                    $buffer->add(self::item($key, $table, (int)$row['id'], $title, $source['subject_name'], $source['business_date'], $source['due_date'],
+                        '已确认来源仍有未结余额；请核对实际发生的下一步', '核对并继续', FinanceFunds::supports($type) ? 'finance_fund' : 'finance_balance', $params,
+                        ['value' => $source['balance'], 'unit' => '元']));
+                });
+            }
+        }
     }
 
     private static function salesSettlement(TodoItemBuffer $buffer): void

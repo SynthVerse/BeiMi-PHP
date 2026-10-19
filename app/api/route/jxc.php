@@ -42,9 +42,13 @@ Route::group('', function () {
     Route::get('jxc/todos/lists', 'jxc.Todo/lists');
     Route::get('finance/workbench', 'jxc.FinanceSetup/workbench');
     Route::get('finance/preparation', 'jxc.FinanceSetup/preparation');
+    Route::get('finance/opening/guide', 'jxc.FinanceSetup/openingGuide');
+    Route::post('finance/opening/start', 'jxc.FinanceSetup/startOpening');
+    Route::post('finance/opening/guide/card/save', 'jxc.FinanceSetup/saveGuideCard');
     Route::post('finance/preparation/save', 'jxc.FinanceSetup/savePreparation');
     Route::get('finance/accounts', 'jxc.FinanceSetup/accounts');
     Route::post('finance/accounts/save', 'jxc.FinanceSetup/saveAccount');
+    Route::post('finance/accounts/remove', 'jxc.FinanceSetup/removeAccount');
     Route::get('finance/opening/subjects', 'jxc.FinanceSetup/openingSubjects');
     Route::get('finance/opening', 'jxc.FinanceSetup/opening');
     Route::post('finance/opening/item/save', 'jxc.FinanceSetup/saveOpeningItem');
@@ -68,6 +72,8 @@ Route::group('', function () {
     Route::get('finance/business/lists', 'jxc.FinanceBusiness/lists');
     Route::get('finance/business/detail', 'jxc.FinanceBusiness/detail');
     Route::get('finance/business/options', 'jxc.FinanceBusiness/options');
+    Route::get('finance/business/historyPurchaseOptions', 'jxc.FinanceBusiness/historyPurchaseOptions');
+    Route::post('finance/business/historyPurchaseConfirm', 'jxc.FinanceBusiness/historyPurchaseConfirm');
     Route::get('finance/business/subjects', 'jxc.FinanceBusiness/subjects');
     Route::get('finance/business/salesSources', 'jxc.FinanceBusiness/salesSources');
     Route::get('finance/business/salesOutput', 'jxc.FinanceBusiness/salesOutput');
@@ -229,6 +235,7 @@ Route::group('', function () {
     Route::post('jxc/customer_report/export_word', 'jxc.CustomerReportOverview/exportWord');
     Route::post('jxc/customer_report/submit', 'jxc.CustomerReport/submit');
     Route::post('jxc/customer_report/submit_grouped', 'jxc.CustomerReport/submitGrouped');
+    Route::post('jxc/customer_report/processing_weights', 'jxc.CustomerReport/processingWeights');
     Route::get('jxc/customer_report/detail', 'jxc.CustomerReport/detail');
     Route::get('jxc/customer_report/availability', 'jxc.CustomerReport/availability');
     Route::post('jxc/customer_report/edit', 'jxc.CustomerReport/edit');
@@ -240,12 +247,26 @@ Route::group('', function () {
     Route::post('jxc/customer_report/batch_end', 'jxc.CustomerReport/batchEnd');
     Route::get('jxc/customer_report/batch_detail', 'jxc.CustomerReport/batchDetail');
 
+    // === 采购计划与到货关联 ===
+    Route::get('jxc/pending_goods/lists', 'jxc.PendingGoods/lists');
+    Route::get('jxc/pending_goods/detail', 'jxc.PendingGoods/detail');
+    Route::get('jxc/pending_goods/recovery_preview', 'jxc.PendingGoods/recoveryPreview');
+    Route::post('jxc/pending_goods/action', 'jxc.PendingGoods/action');
+    Route::post('jxc/pending_goods/recover', 'jxc.PendingGoods/recover');
+    Route::get('jxc/purchase_plan/lists', 'jxc.PurchasePlan/lists');
+    Route::get('jxc/purchase_plan/detail', 'jxc.PurchasePlan/detail');
+    Route::get('jxc/purchase_plan/arrival_preview', 'jxc.PurchasePlan/arrivalPreview');
+    Route::post('jxc/purchase_plan/create', 'jxc.PurchasePlan/create');
+    Route::post('jxc/purchase_plan/attach_arrival', 'jxc.PurchasePlan/attachArrival');
+    Route::post('jxc/purchase_plan/terminate', 'jxc.PurchasePlan/terminate');
+
     // === 任务调度、纸质工票与员工系统 ===
     Route::get('jxc/tasks/dashboard', 'jxc.FulfillmentTask/dashboard');
     Route::get('jxc/tasks/lists', 'jxc.FulfillmentTask/lists');
     Route::get('jxc/tasks/detail', 'jxc.FulfillmentTask/detail');
     Route::post('jxc/tasks/resolve', 'jxc.FulfillmentTask/resolve');
     Route::post('jxc/tasks/print_data', 'jxc.FulfillmentTask/printData');
+    Route::get('jxc/tasks/pending_print', 'jxc.FulfillmentTask/pendingPrint');
     Route::post('jxc/tasks/print_result', 'jxc.FulfillmentTask/printResult');
     Route::post('jxc/tasks/paper_control', 'jxc.FulfillmentTask/paperControl');
     Route::post('jxc/tasks/control_print_data', 'jxc.FulfillmentTask/controlPrintData');

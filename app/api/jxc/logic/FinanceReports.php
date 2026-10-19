@@ -146,16 +146,22 @@ final class FinanceReports
                 $summary[$field] = bcadd($summary[$field], $incoming ? $entry['amount'] : bcsub('0', $entry['amount'], 2), 2); $external[] = $entry;
             }
         }
+        $funding = ['capital_in' => '0.00', 'capital_out' => '0.00', 'loan_receipt' => '0.00', 'loan_repayment' => '0.00', 'supplier_advance' => '0.00', 'supplier_advance_refund' => '0.00'];
+        foreach ($external as $entry) {
+            $type = $entry['document_type'] ?? $entry['type'] ?? '';
+            if (isset($funding[$type])) { $funding[$type] = bcadd($funding[$type], ltrim($entry['amount'], '-'), 2); }
+        }
         $summary['external_net'] = bcsub($summary['external_in'], $summary['external_out'], 2);
         $transit['closing'] = $summary['closing_transit'];
         return ['summary' => $summary, 'accounts' => array_values($accounts), 'transit' => $transit, 'opening_sources' => $opening,
-            'entries' => $period, 'external_money' => $external, 'internal_transfers' => $internal, 'adjustments' => $adjustments];
+            'entries' => $period, 'external_money' => $external, 'internal_transfers' => $internal, 'adjustments' => $adjustments,
+            'funding' => $funding, 'funding_balances' => self::balances($month, ['capital', 'loan', 'supplier_advance'])];
     }
 
     public static function closingBalances(string $month): array
     {
         FinanceAccess::require('', true);
-        return self::balances($month, ['receivable', 'advance', 'customer_refund', 'recovery', 'payable', 'supplier_refund', 'expense_payable', 'expense_refund', 'salary', 'reimbursement', 'deferred', 'equipment', 'equipment_refund', 'unclaimed', 'transit']);
+        return self::balances($month, ['receivable', 'advance', 'customer_refund', 'recovery', 'payable', 'supplier_refund', 'expense_payable', 'expense_refund', 'salary', 'reimbursement', 'deferred', 'equipment', 'equipment_refund', 'unclaimed', 'transit', 'capital', 'loan', 'supplier_advance']);
     }
 
     private static function balances(string $month, array $categories): array
@@ -194,8 +200,8 @@ final class FinanceReports
         $totals = []; $subjects = [];
         foreach ($categories as $category) { $totals[$category] = ['category' => $category, 'opening' => '0.00', 'new_sources' => '0.00', 'entries_change' => '0.00', 'closing' => '0.00']; }
         foreach ($sources as $source) {
-            $key = $source['subject_id'] . ':' . $source['category'];
-            $subjects[$key] ??= ['subject_id' => $source['subject_id'], 'subject_name' => $source['subject_name'], 'category' => $source['category'], 'opening' => '0.00', 'new_sources' => '0.00', 'entries_change' => '0.00', 'closing' => '0.00'];
+            $key = ($source['subject_id'] ? (string)$source['subject_id'] : 'external:' . $source['reference']) . ':' . $source['category'];
+            $subjects[$key] ??= ['subject_key' => $key, 'subject_id' => $source['subject_id'], 'subject_name' => $source['subject_name'], 'category' => $source['category'], 'opening' => '0.00', 'new_sources' => '0.00', 'entries_change' => '0.00', 'closing' => '0.00'];
             foreach (['opening', 'new_sources', 'entries_change', 'closing'] as $field) {
                 $totals[$source['category']][$field] = bcadd($totals[$source['category']][$field], $source[$field], 2); $subjects[$key][$field] = bcadd($subjects[$key][$field], $source[$field], 2);
             }
@@ -205,7 +211,7 @@ final class FinanceReports
 
     private static function vendor(string $month, string $cutoff): array
     {
-        $result = self::balances($month, ['payable', 'expense_payable', 'supplier_refund', 'expense_refund', 'equipment_refund']);
+        $result = self::balances($month, ['payable', 'expense_payable', 'supplier_refund', 'expense_refund', 'equipment_refund', 'supplier_advance']);
         $arrivals = [];
         foreach (Db::name('finance_purchase_arrival_line')->where('tenant_id', FinanceAccess::tenant())->where('business_date', '<=', $cutoff)->distinct(true)->column('vendor_id') as $vendor) {
             foreach (FinanceStatementSnapshot::pendingArrivals((int)$vendor, $cutoff) as $arrival) { $arrivals[] = $arrival; }
@@ -282,16 +288,19 @@ final class FinanceReports
 
     private static function visible(array $report): array
     {
-        if (FinanceAccess::has('finance.salary.view')) { return array_replace($report, ['salary_details_visible' => true]); }
+        $salaryVisible = FinanceAccess::has('finance.salary.view'); $fundsVisible = FinanceAccess::owner();
+        if ($salaryVisible && $fundsVisible) { return array_replace($report, ['salary_details_visible' => true, 'funds_details_visible' => true]); }
         $tenant = FinanceAccess::tenant();
-        $documents = array_fill_keys(Db::name('finance_document')->where('tenant_id', $tenant)->whereIn('type', ['salary_expense', 'salary_adjustment', 'salary_payment'])->column('id'), true);
+        $privateTypes = array_merge($salaryVisible ? [] : ['salary_expense', 'salary_adjustment', 'salary_payment'], $fundsVisible ? [] : FinanceFunds::TYPES);
+        $privateCategories = array_merge($salaryVisible ? [] : ['salary'], $fundsVisible ? [] : ['capital', 'loan', 'supplier_advance']);
+        $documents = array_fill_keys(Db::name('finance_document')->where('tenant_id', $tenant)->whereIn('type', $privateTypes)->column('id'), true);
         $sources = [];
         foreach (['o' => 'finance_opening_source', 'n' => 'finance_source'] as $prefix => $table) {
-            foreach (Db::name($table)->where('tenant_id', $tenant)->where('category', 'salary')->column('id') as $id) { $sources[$prefix . ':' . $id] = true; }
+            foreach (Db::name($table)->where('tenant_id', $tenant)->whereIn('category', $privateCategories)->column('id') as $id) { $sources[$prefix . ':' . $id] = true; }
         }
-        $filter = static function (array $value) use (&$filter, $documents, $sources): ?array {
+        $filter = static function (array $value) use (&$filter, $documents, $sources, $privateCategories, $salaryVisible): ?array {
             if (isset($documents[$value['document_id'] ?? 0]) || isset($sources[$value['source_ref'] ?? $value['reference'] ?? ''])
-                || (($value['category'] ?? '') === 'salary' && isset($value['subject_id'])) || ($value['details']['salary_private'] ?? false)) { return null; }
+                || (in_array($value['category'] ?? '', $privateCategories, true) && isset($value['subject_id'])) || (!$salaryVisible && ($value['details']['salary_private'] ?? false))) { return null; }
             $result = [];
             foreach ($value as $key => $part) {
                 $next = is_array($part) ? $filter($part) : $part;
@@ -300,6 +309,6 @@ final class FinanceReports
             }
             return array_is_list($value) ? array_values($result) : $result;
         };
-        return array_replace($filter($report), ['salary_details_visible' => false]);
+        return array_replace($filter($report), ['salary_details_visible' => $salaryVisible, 'funds_details_visible' => $fundsVisible]);
     }
 }

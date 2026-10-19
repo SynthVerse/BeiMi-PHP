@@ -457,8 +457,11 @@ class CustomerReportLogic extends BaseLogic
                     }
                     self::setError('报货单已取消，取消请求与已保存事实不一致'); return false;
                 }
-                if ((int)$report->version !== $version || (string)$report->status === 'completed') {
+                if ((int)$report->version !== $version) {
                     self::setError('报货单不存在、版本冲突或不可取消'); return false;
+                }
+                if (DeliveryInventoryLogic::hasCompletedDelivery($reportId)) {
+                    self::setError('已有真实交付，请从原销售单登记客户退货；交付库存与账款不能直接撤销'); return false;
                 }
                 if (Db::name('customer_report_processing_group')->where('tenant_id', self::tenantId())->where('report_id', $reportId)->where('processing_loss_flow_id', '>', 0)->count() > 0) {
                     self::setError('该报货已经实际加工，请先核清未交实物去向，不能取消后恢复可售'); return false;
@@ -467,27 +470,25 @@ class CustomerReportLogic extends BaseLogic
                     ->where('report_id', $reportId)->lock(true)->find();
                 $tasks = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())
                     ->where('report_id', $reportId)->order('id')->lock(true)->select()->toArray();
-                if (self::hasActivePurchasePlanSource($reportId, true)) {
-                    self::setError('报货缺货来源已归入活动采购计划，请先终止采购计划后再取消报货');
-                    return false;
-                }
-                $taskIds = array_map(static fn(array $task): int => (int)$task['id'], $tasks);
-                $hasPrintAttempt = $taskIds !== [] && Db::name('fulfillment_print_log')
-                    ->where('tenant_id', self::tenantId())->whereIn('task_id', $taskIds)->lock(true)->count() > 0;
-                $hasStartedTask = array_filter($tasks, static fn(array $task): bool => !in_array(
-                    (string)$task['status'], ['unassigned', 'blocked', 'printable', 'exception', 'cancelled'], true
-                )) !== [];
-                if ($hasPrintAttempt || $hasStartedTask) {
-                    self::setError('报货单已经开始纸票或履约作业，不能取消'); return false;
-                }
                 $items = CustomerReportItem::where('tenant_id', self::tenantId())->where('report_id', $reportId)->order(['goods_id' => 'asc', 'warehouse_id' => 'asc', 'id' => 'asc'])->lock(true)->select()->toArray();
                 $now=time();
                 $before = $report->toArray();
+                $before['items'] = $items; $before['tasks'] = $tasks;
+                $pendingHolds = PendingGoodsLogic::captureAllocatedWithinTransaction($reportId, $items);
+                PurchasePlanLogic::releaseReportSourcesWithinTransaction($reportId, $reason);
                 foreach ($items as $item) {
+                    FulfillmentTaskLogic::invalidatePrintedItemTickets((int)$item['id'], 0, 'void',
+                        'report-cancel:' . $reportId . ':' . ($version + 1) . ':item:' . $item['id'], $reason, $item,
+                        array_replace($item, ['status' => 'cancelled', 'fulfillment_status' => 'cancelled', 'shortage_base_qty' => '0.0000']), '0.0000');
+                    // 作废工票不能抹去已保存的称重事实。
+                    CustomerReportItem::where('tenant_id', self::tenantId())->where('id', (int)$item['id'])->update([
+                        'final_actual_weight' => $item['final_actual_weight'], 'final_weight_task_id' => $item['final_weight_task_id'],
+                    ]);
                     self::releaseLine($item);
                     CustomerReportItem::where('tenant_id', self::tenantId())->where('id',(int)$item['id'])->update(['reserved_base_qty'=>'0.00','shortage_base_qty'=>'0.00','status'=>'cancelled','update_time'=>$now]);
                     CustomerReportReservation::where('tenant_id', self::tenantId())->where('report_item_id',(int)$item['id'])->update(['reserved_base_qty'=>'0.00','released_base_qty'=>self::decimal((string)$item['reserved_base_qty']),'status'=>'released','update_time'=>$now]);
                 }
+                PendingGoodsLogic::retainAllocatedWithinTransaction($pendingHolds);
                 $cancelled = [
                     'status'=>'cancelled','reserved_base_qty'=>'0.00','shortage_base_qty'=>'0.00',
                     'cancellation_reason'=>$reason,'cancelled_by'=>self::operatorId(),'cancelled_time'=>$now,
@@ -496,7 +497,11 @@ class CustomerReportLogic extends BaseLogic
                 $updated = CustomerReport::where('tenant_id', self::tenantId())->where('id',$reportId)
                     ->where('version',$version)->update($cancelled);
                 if ($updated !== 1) { throw new \RuntimeException('version_conflict'); }
+                FulfillmentTaskLogic::invalidatePrintedItemTickets(0, 0, 'void', 'report-cancel:' . $reportId . ':' . ($version + 1) . ':batch',
+                    $reason, $before, array_replace($before, $cancelled), '0.0000', $reportId);
                 FulfillmentTaskLogic::cancelReport($reportId);
+                Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('report_id', $reportId)
+                    ->update(['status' => 'cancelled', 'update_time' => $now]);
                 AuditService::logWithinTransaction(
                     AuditService::MODULE_CUSTOMER_REPORT,
                     AuditService::ACTION_CANCEL,
@@ -822,7 +827,7 @@ class CustomerReportLogic extends BaseLogic
         if (!$report) { self::setError('客户报货单不存在'); return false; }
         $data=$report->toArray();
         $data['capabilities'] = ['quantity_contract_version' => 2, 'independent_quantity_facts' => true, 'atomic_delivery_groups' => true,
-            'complex_processing' => false, 'batch_expiry_control' => false];
+            'complex_processing' => false, 'batch_expiry_control' => false, 'size_verification' => false, 'processing_loss_entry' => false, 'single_operator' => true];
         $data['delivery_arrangement'] = CustomerReportDeliveryArrangementService::fromRow($data);
         $data['items']=CustomerReportItem::where('tenant_id',self::tenantId())->where('report_id',$id)->whereNull('delete_time')->order('sort asc,id asc')->select()->toArray();
         foreach ($data['items'] as &$item) {
@@ -838,7 +843,53 @@ class CustomerReportLogic extends BaseLogic
         $data['sales_orders'] = self::salesOrdersByReport($id);
         $data['task_group'] = FulfillmentTaskLogic::groupForReport($id);
         $data['actions'] = self::actionStates($id, $data, $data['items']);
+        $data['procurement_sources'] = self::procurementSources($id);
+        $data['older_open_reports'] = CustomerReport::where('tenant_id', self::tenantId())
+            ->where('main_customer_id', (int)$data['main_customer_id'])->where('id', '<>', $id)
+            ->where('delivery_date', '<', (string)$data['delivery_date'])
+            ->whereNotIn('status', ['cancelled', 'completed', 'settled', 'fulfilled_undelivered'])
+            ->field('id,sn,delivery_date,status')->order('delivery_date asc,id asc')->select()->toArray();
+        $data['cancellation_followup'] = [
+            'purchase_returns_automatic' => false,
+            'stock_note' => '原库存预留已释放；关联采购余货转入待定，确认留库存前不能被新订单使用。',
+            'open_paper_controls' => (int)Db::name('fulfillment_ticket_control')->where('tenant_id', self::tenantId())
+                ->where('report_id', $id)->where('status', '<>', 'closed')->count(),
+            'paper_controls' => Db::name('fulfillment_ticket_control')->where('tenant_id', self::tenantId())
+                ->where('report_id', $id)->order('id')->field('id,task_id,status,resolution,resolution_note')->select()->toArray(),
+        ];
         return $data;
+    }
+
+    /** 采购分配依据保留到原进货单；取消后也显示历史来源，退货必须再核对实际可退量。 */
+    private static function procurementSources(int $reportId): array
+    {
+        $sources = Db::name('purchase_plan_source')->where('tenant_id', self::tenantId())->where('report_id', $reportId)
+            ->order('id')->select()->toArray();
+        $result = [];
+        foreach ($sources as $source) {
+            $allocations = Db::name('purchase_plan_allocation')->alias('a')
+                ->join('purchase_plan_arrival r', 'r.id=a.arrival_id AND r.tenant_id=a.tenant_id')
+                ->join('purchase_batch b', 'b.id=r.purchase_batch_id AND b.tenant_id=r.tenant_id')
+                ->where('a.tenant_id', self::tenantId())->where('a.source_id', (int)$source['id'])
+                ->field('a.allocated_qty,b.id as purchase_batch_id,b.batch_no')->select()->toArray();
+            foreach ($allocations as &$allocation) {
+                $allocation['supply_orders'] = Db::name('purchase_batch_supply_order')->where('tenant_id', self::tenantId())
+                    ->where('purchase_batch_id', $allocation['purchase_batch_id'])->select()->toArray();
+            }
+            unset($allocation);
+            $attached = Db::name('purchase_plan_arrival')->where('tenant_id', self::tenantId())
+                ->where('purchase_plan_id', $source['purchase_plan_id'])->column('purchase_batch_id');
+            $pendingQuery = Db::name('purchase_batch')->where('tenant_id', self::tenantId())->where('purchase_plan_id', $source['purchase_plan_id']);
+            if ($attached !== []) { $pendingQuery->whereNotIn('id', $attached); }
+            $pending = $pendingQuery->field('id,batch_no,plan_held_qty')->order('id')->select()->toArray();
+            foreach ($pending as &$batch) {
+                $batch['supply_orders'] = Db::name('purchase_batch_supply_order')->where('tenant_id', self::tenantId())
+                    ->where('purchase_batch_id', $batch['id'])->select()->toArray();
+            }
+            unset($batch);
+            $result[] = $source + ['allocations' => $allocations, 'unallocated_arrivals' => $pending];
+        }
+        return $result;
     }
 
     /** @param array<int,array<string,mixed>> $groups */
@@ -941,22 +992,13 @@ class CustomerReportLogic extends BaseLogic
             'blocked_reason' => $reason,
             'reason_required' => true,
         ];
-        if (in_array((string)($report['status'] ?? ''), ['cancelled', 'completed'], true)) {
-            return $unavailable('当前报货单不可取消');
+        if ((string)($report['status'] ?? '') === 'cancelled') { return $unavailable('报货单已取消'); }
+        if (DeliveryInventoryLogic::hasCompletedDelivery($reportId)) {
+            return $unavailable('已有真实交付，请从原销售单登记客户退货，保留出库与账款记录');
         }
-        if (self::hasActivePurchasePlanSource($reportId)) {
-            return $unavailable('报货缺货来源已归入活动采购计划，请先终止采购计划');
-        }
-        $tasks = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())
-            ->where('report_id', $reportId)->order('id')->select()->toArray();
-        $taskIds = array_map(static fn(array $task): int => (int)$task['id'], $tasks);
-        $hasPrintAttempt = $taskIds !== [] && Db::name('fulfillment_print_log')
-            ->where('tenant_id', self::tenantId())->whereIn('task_id', $taskIds)->count() > 0;
-        $hasStartedTask = array_filter($tasks, static fn(array $task): bool => !in_array(
-            (string)$task['status'], ['unassigned', 'blocked', 'printable', 'exception', 'cancelled'], true
-        )) !== [];
-        if ($hasPrintAttempt || $hasStartedTask) {
-            return $unavailable('报货单已经开始纸票或履约作业，不能取消');
+        if (Db::name('customer_report_processing_group')->where('tenant_id', self::tenantId())->where('report_id', $reportId)
+            ->where('processing_loss_flow_id', '>', 0)->count() > 0) {
+            return $unavailable('已登记实际加工损耗，请先核清未交实物去向，不能直接恢复为原料库存');
         }
         return ['allowed' => true, 'blocked_reason' => '', 'reason_required' => true];
     }
@@ -967,6 +1009,7 @@ class CustomerReportLogic extends BaseLogic
             ->join('purchase_plan p', 'p.id=s.purchase_plan_id AND p.tenant_id=s.tenant_id')
             ->where('s.tenant_id', self::tenantId())
             ->where('s.report_id', $reportId)
+            ->where('s.status', '<>', 'released')
             ->whereIn('p.status', ['pending', 'partial'])
             ->field('s.id');
         if ($lock) {

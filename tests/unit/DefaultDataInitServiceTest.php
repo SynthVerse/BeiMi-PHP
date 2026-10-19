@@ -45,6 +45,25 @@ final class DefaultDataInitServiceTest extends TestCase
     /**
      * initForTenant() 正确初始化四类默认数据（仓库、客户、供应商、5个计量单位）
      */
+    public function testRepairPreservesRenamedMastersAndOnlyAddsMissingUnits(): void
+    {
+        DefaultDataInitService::initForTenant($this->testTenantId);
+        Db::name('warehouse')->where('tenant_id', $this->testTenantId)->update(['name' => '门店实际仓库']);
+        Db::name('customer')->where('tenant_id', $this->testTenantId)->update(['customer_name' => '真实客户']);
+        Db::name('tenant_goodscat')->where('tenant_id', $this->testTenantId)->where('is_default', 1)->update(['name' => '我的常用分类', 'is_show' => 1]);
+        Db::name('goods_unit')->where('tenant_id', $this->testTenantId)->where('name', '斤')->delete();
+        self::assertFalse(DefaultDataInitService::hasInitialized($this->testTenantId));
+        DefaultDataInitService::repairMissingForTenant($this->testTenantId);
+        DefaultDataInitService::repairMissingForTenant($this->testTenantId);
+        $category = Db::name('tenant_goodscat')->where('tenant_id', $this->testTenantId)->where('is_default', 1)->find();
+        self::assertSame('我的常用分类', $category['name']);
+        self::assertSame(1, (int)$category['is_show']);
+        self::assertSame(1, Db::name('warehouse')->where('tenant_id', $this->testTenantId)->count());
+        self::assertSame('门店实际仓库', Db::name('warehouse')->where('tenant_id', $this->testTenantId)->value('name'));
+        self::assertSame(1, Db::name('customer')->where('tenant_id', $this->testTenantId)->count());
+        self::assertSame(1, Db::name('goods_unit')->where('tenant_id', $this->testTenantId)->where('name', '斤')->count());
+    }
+
     public function testInitForTenantCreatesAllDefaults(): void
     {
         $result = DefaultDataInitService::initForTenant($this->testTenantId);
@@ -80,7 +99,7 @@ final class DefaultDataInitServiceTest extends TestCase
             ->where('tenant_id', $this->testTenantId)
             ->whereIn('name', DefaultDataInitService::DEFAULT_GOODS_UNITS)
             ->column('name');
-        self::assertCount(5, $units, '应创建5个默认计量单位');
+        self::assertCount(count(DefaultDataInitService::DEFAULT_GOODS_UNITS), $units, '应创建5个默认计量单位');
     }
 
     public function testInitForTenantCreatesDefaultGoodsCategory(): void
@@ -193,7 +212,7 @@ final class DefaultDataInitServiceTest extends TestCase
      */
     public function testDefaultUnitNames(): void
     {
-        $expectedNames = ['个', '件', '箱', '千克', '升'];
+        $expectedNames = ['个', '件', '斤', '公斤', '箱', '千克', '升'];
 
         // 验证常量定义
         self::assertSame($expectedNames, DefaultDataInitService::DEFAULT_GOODS_UNITS);

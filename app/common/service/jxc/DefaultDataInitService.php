@@ -36,7 +36,7 @@ class DefaultDataInitService
     public const DEFAULT_GOODS_CATEGORY_NAME = '默认分类';
 
     /** @var string[] 默认计量单位 */
-    public const DEFAULT_GOODS_UNITS = ['个', '件', '箱', '千克', '升'];
+    public const DEFAULT_GOODS_UNITS = ['个', '件', '斤', '公斤', '箱', '千克', '升'];
 
     /**
      * 为指定租户初始化默认数据
@@ -79,6 +79,17 @@ class DefaultDataInitService
         return true;
     }
 
+    /** 在建店准备锁内补缺；用户已改名的真实档案不重新造默认对象。 */
+    public static function repairMissingForTenant(int $tenantId): void
+    {
+        if ($tenantId <= 0) { throw new \DomainException('缺少门店，不能补全基础资料'); }
+        foreach (['warehouse' => 'ensureWarehouse', 'customer' => 'ensureCustomer', 'vendor' => 'ensureVendor'] as $table => $method) {
+            if (!Db::name($table)->where('tenant_id', $tenantId)->count()) { self::$method($tenantId); }
+        }
+        if (!Db::name('tenant_goodscat')->where('tenant_id', $tenantId)->where('is_default', 1)->whereNull('delete_time')->count()) { self::ensureGoodsCategory($tenantId); }
+        self::ensureGoodsUnits($tenantId);
+    }
+
     /**
      * 判断租户是否已经完成默认数据初始化（默认主数据均已存在）
      * @param int $tenantId
@@ -113,7 +124,8 @@ class DefaultDataInitService
             ->whereNull('delete_time')
             ->count() === 1;
 
-        return $hasWarehouse && $hasCustomer && $hasVendor && $hasGoodsCategory;
+        $hasUnits = Db::name('goods_unit')->where('tenant_id', $tenantId)->whereIn('name', self::DEFAULT_GOODS_UNITS)->distinct(true)->count('name') >= count(self::DEFAULT_GOODS_UNITS);
+        return $hasWarehouse && $hasCustomer && $hasVendor && $hasGoodsCategory && $hasUnits;
     }
 
     /**

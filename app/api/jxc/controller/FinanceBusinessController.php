@@ -10,6 +10,8 @@ class FinanceBusinessController extends BaseJxcController
     public function lists() { return $this->respond(FinanceBusinessLogic::lists($this->request->get())); }
     public function detail() { return $this->respond(FinanceBusinessLogic::detail($this->request->get())); }
     public function options() { return $this->respond(FinanceBusinessLogic::options($this->request->get())); }
+    public function historyPurchaseOptions() { return $this->respond(FinanceBusinessLogic::historyPurchaseOptions($this->request->get())); }
+    public function historyPurchaseConfirm() { return $this->respond(FinanceBusinessLogic::historyPurchaseConfirm($this->request->post())); }
     public function closingChecklist() { return $this->respond(FinanceBusinessLogic::closingChecklist($this->request->get())); }
     public function monthlyReport() { return $this->respond(FinanceBusinessLogic::monthlyReport($this->request->get())); }
     public function managedReport() { return $this->respond(FinanceBusinessLogic::managedReport($this->request->get())); }
@@ -46,7 +48,14 @@ class FinanceBusinessController extends BaseJxcController
         try { return $this->data(\app\api\jxc\logic\FinanceSalesPrecision::save($this->request->post())); }
         catch (\DomainException $error) { return $this->fail($error->getMessage()); }
     }
-    public function action() { return $this->respond(FinanceBusinessLogic::action((string)$this->request->post('action', ''), $this->request->post())); }
+    public function action()
+    {
+        $params = $this->request->post();
+        $raw = $this->request->post(false);
+        // 保留 JSON 布尔值，由领域层继续拒绝字符串和数字等非布尔提醒选项。
+        if (array_key_exists('continue_later', $raw)) { $params['continue_later'] = $raw['continue_later']; }
+        return $this->respond(FinanceBusinessLogic::action((string)$this->request->post('action', ''), $params));
+    }
     public function preview()
     {
         try { return $this->data(\app\api\jxc\logic\FinancePreview::calculate($this->request->post())); }

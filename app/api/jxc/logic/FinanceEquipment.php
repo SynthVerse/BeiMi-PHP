@@ -76,7 +76,13 @@ final class FinanceEquipment
         if (FinanceValue::id($data['expected_revision_id'] ?? null, true) !== $current['expected_revision_id']) { throw new \DomainException('设备已有后续额度调整，请重新读取'); }
         if (($data['adjustment_verified'] ?? null) !== 1) { throw new \DomainException('请核实购置、已付金额、本次调整及依据'); }
         $mode = $data['mode'] ?? ''; $equipment = $before;
-        if ($mode === 'price') {
+        if ($mode === 'remaining') {
+            if (empty($before['opening_balance_only'])) { throw new \DomainException('完整购置来源请按总价或取消金额调整'); }
+            $newRemaining = FinanceValue::money($data['new_remaining'] ?? null, true);
+            $delta = bcsub($newRemaining, $current['remaining_amount'], 2);
+            $equipment['limit_adjustment'] = bcadd($before['limit_adjustment'], $delta, 2);
+        } elseif ($mode === 'price') {
+            if (!empty($before['opening_balance_only'])) { throw new \DomainException('历史总价未知，请调整核实的剩余可付额度，不得编造原总价'); }
             $equipment['amount'] = FinanceValue::money($data['new_amount'] ?? null, true); $delta = bcsub($equipment['amount'], $before['amount'], 2);
         } elseif ($mode === 'cancel') {
             $cancel = FinanceValue::money($data['cancel_amount'] ?? null); $equipment['cancelled_amount'] = bcadd($before['cancelled_amount'], $cancel, 2); $delta = '-' . $cancel;
@@ -107,19 +113,27 @@ final class FinanceEquipment
         if ($revision) { $equipment = FinanceValue::decode($revision['snapshot'])['equipment']; }
         else {
             $snapshot = $source['snapshot']; $details = $snapshot['details'] ?? [];
+            if (($details['opening_balance_only'] ?? '') === 'confirmed' && ($details['_capture']['contract'] ?? null) === 2) {
+                $equipment = ['type' => 'opening_equipment', 'opening_balance_only' => true, 'subject_id' => $source['subject_id'], 'subject_name' => $source['subject_name'],
+                    'equipment_name' => $details['equipment_name'], 'source_reference' => $snapshot['source_reference'], 'opening_item_id' => (int)$snapshot['id'],
+                    'actual_date' => $source['business_date'], 'amount' => null, 'historical_paid_amount' => null, 'opening_limit' => $source['original_amount'] ?? $source['confirmed_amount'],
+                    'limit_adjustment' => '0.00', 'cancelled_amount' => '0.00', 'opening_details' => $details, 'confirmation_basis' => $snapshot['evidence'] ?? '', 'material_status' => 'opening', 'evidence' => []];
+            } else {
             foreach (['original_amount', 'price_adjustment', 'paid_amount', 'cancelled_amount'] as $key) {
                 if (!isset($details[$key])) { throw new \DomainException('期初设备金额组成未完整核实，不能调整额度'); }
                 FinanceValue::money($details[$key], true, $key === 'price_adjustment');
             }
             $equipment = ['type' => 'opening_equipment', 'subject_id' => $source['subject_id'], 'subject_name' => $source['subject_name'],
-                'equipment_name' => $snapshot['source_reference'], 'source_reference' => $snapshot['source_reference'], 'opening_item_id' => (int)($snapshot['id'] ?? 0),
+                'equipment_name' => ($details['equipment_name'] ?? '') ?: $snapshot['source_reference'], 'source_reference' => $snapshot['source_reference'], 'opening_item_id' => (int)($snapshot['id'] ?? 0),
                 'actual_date' => $source['business_date'], 'amount' => bcadd($details['original_amount'], $details['price_adjustment'], 2),
                 'cancelled_amount' => $details['cancelled_amount'], 'opening_details' => $details, 'confirmation_basis' => $snapshot['evidence'] ?? '',
                 'material_status' => 'opening', 'evidence' => []];
+            }
         }
-        $paid = bcsub(bcsub($equipment['amount'], $equipment['cancelled_amount'], 2), $source['balance'], 2);
+        $remainingOnly = !empty($equipment['opening_balance_only']);
+        $paid = bcsub(bcsub($remainingOnly ? bcadd($equipment['opening_limit'], $equipment['limit_adjustment'], 2) : $equipment['amount'], $equipment['cancelled_amount'], 2), $source['balance'], 2);
         if (bccomp($paid, '0', 2) < 0) { throw new \DomainException('期初设备有效付款与剩余额度不一致，请核实来源'); }
-        return ['equipment' => $equipment, 'source' => $source, 'paid_amount' => $paid, 'remaining_amount' => $source['balance'], 'expected_revision_id' => (int)($revision['id'] ?? 0)];
+        return ['equipment' => $equipment, 'source' => $source, 'paid_amount' => $remainingOnly ? null : $paid, 'paid_since_opening' => $remainingOnly ? $paid : null, 'remaining_amount' => $source['balance'], 'expected_revision_id' => (int)($revision['id'] ?? 0)];
     }
 
     private static function openingOptions(int $vendor, array $params): array
@@ -136,7 +150,7 @@ final class FinanceEquipment
         foreach (array_slice($rows, 0, 20) as $id) {
             $current = self::currentOpening('o:' . $id);
             $bills[] = ['original_equipment_document_id' => 0, 'equipment_source' => 'o:' . $id, 'equipment' => $current['equipment'],
-                'paid_amount' => $current['paid_amount'], 'remaining_amount' => $current['remaining_amount'], 'expected_revision_id' => $current['expected_revision_id']];
+                'paid_amount' => $current['paid_amount'], 'paid_since_opening' => $current['paid_since_opening'] ?? null, 'remaining_amount' => $current['remaining_amount'], 'expected_revision_id' => $current['expected_revision_id']];
             if ($exact && bccomp($current['remaining_amount'], '0', 2) > 0) { $sources[] = $current['source']; }
         }
         if ($exact && !$bills) { throw new \DomainException('期初设备来源不存在或不属于本门店'); }

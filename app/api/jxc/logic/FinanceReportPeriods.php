@@ -66,7 +66,7 @@ final class FinanceReportPeriods
         $rows = [];
         foreach ($months as $index => $month) {
             foreach ($month[$key] ?? [] as $row) {
-                $id = FinanceValue::json(array_map(static fn(string $field): mixed => $row[$field], $identity));
+                $id = FinanceValue::json(array_map(static fn(string $field): mixed => $row[$field] ?? null, $identity));
                 $old = $rows[$id] ?? null; $rows[$id] = $row;
                 $rows[$id]['opening'] = $old['opening'] ?? ($index === 0 ? $row['opening'] : '0.00');
                 foreach ($flows as $field) { $rows[$id][$field] = bcadd($old[$field] ?? '0', $row[$field], 2); }
@@ -78,7 +78,7 @@ final class FinanceReportPeriods
     private static function balances(array $months): array
     {
         return ['categories' => self::balanceRows($months, 'categories', ['category'], ['new_sources', 'entries_change']),
-            'subjects' => self::balanceRows($months, 'subjects', ['subject_id', 'category'], ['new_sources', 'entries_change']),
+            'subjects' => self::balanceRows($months, 'subjects', ['subject_key', 'subject_id', 'category'], ['new_sources', 'entries_change']),
             'sources' => self::balanceRows($months, 'sources', ['reference'], ['new_sources', 'entries_change']), 'entries' => self::concatenate($months, 'entries'),
             'advance_movements' => self::concatenate($months, 'advance_movements')];
     }
@@ -98,6 +98,10 @@ final class FinanceReportPeriods
             $result = ['summary' => $summary, 'accounts' => self::balanceRows($months, 'accounts', ['account_id'], ['change']),
                 'transit' => ['opening' => $first['transit']['opening'], 'change' => self::sumSummary(array_column($months, 'transit'))['change'], 'closing' => $last['transit']['closing']], 'opening_sources' => $first['opening_sources']];
             foreach (['entries', 'external_money', 'internal_transfers', 'adjustments'] as $key) { $result[$key] = self::concatenate($months, $key); }
+            $fundingMonths = array_values(array_filter(array_column($months, 'funding'), 'is_array'));
+            $balanceMonths = array_values(array_filter(array_column($months, 'funding_balances'), 'is_array'));
+            if ($fundingMonths) { $result['funding'] = self::sumSummary($fundingMonths); }
+            if ($balanceMonths) { $result['funding_balances'] = self::balances($balanceMonths); }
             return $result;
         }
         if ($kind === 'expense') {

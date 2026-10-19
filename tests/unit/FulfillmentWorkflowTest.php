@@ -470,7 +470,7 @@ final class FulfillmentWorkflowTest extends TestCase
         self::assertSame(0, Db::name('fulfillment_task')->where('report_id', (int)$submitted['id'])->whereNotIn('status', ['cancelled', 'recovered', 'ready_to_bill', 'completed'])->count());
     }
 
-    public function test_report_cannot_be_cancelled_after_any_paper_work_has_started(): void
+    public function test_report_can_be_cancelled_after_paper_work_has_started_before_delivery(): void
     {
         $customerId = $this->createCustomer('已开工客户');
         $goodsId = $this->createCustomerReportGoods('已开工海鲈鱼', 'TASK-STARTED-CANCEL');
@@ -487,13 +487,16 @@ final class FulfillmentWorkflowTest extends TestCase
             'status' => 'pending', 'create_time' => time(), 'update_time' => time(),
         ]);
 
-        self::assertFalse(CustomerReportLogic::cancel([
+        $cancelled = CustomerReportLogic::cancel([
             'id' => $submitted['id'], 'version' => $submitted['version'], 'reason' => '纸票已经开始处理',
-        ]));
-        self::assertSame('报货单已经开始纸票或履约作业，不能取消', CustomerReportLogic::getError());
-        self::assertSame('submitted_ready', Db::name('customer_report')->where('id', (int)$submitted['id'])->value('status'));
-        self::assertSame('1.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
-        self::assertSame(0, Db::name('audit_log')->where('tenant_id', self::TENANT_ID)
+        ]);
+        self::assertNotFalse($cancelled, CustomerReportLogic::getError());
+        self::assertSame('cancelled', Db::name('customer_report')->where('id', (int)$submitted['id'])->value('status'));
+        self::assertSame('0.0000', WarehouseGoodsBalanceService::reserved($warehouseId, $goodsId));
+        self::assertSame('2.0000', WarehouseGoodsBalanceService::onHand($warehouseId, $goodsId));
+        self::assertSame('pending', Db::name('fulfillment_print_log')->where('task_id', $taskId)->value('status'));
+        self::assertSame(0, Db::name('fulfillment_task')->where('report_id', (int)$submitted['id'])->where('status', '<>', 'cancelled')->count());
+        self::assertSame(1, Db::name('audit_log')->where('tenant_id', self::TENANT_ID)
             ->where('module', 'customer_report')->where('action', 'cancel')->where('target_id', (int)$submitted['id'])->count());
     }
 
@@ -1306,6 +1309,7 @@ final class FulfillmentWorkflowTest extends TestCase
 
     public function test_fulfillment_changes_enforce_electronic_permission_and_tenant_scope(): void
     {
+        $this->prepareLegacyOperatingStore(self::OTHER_TENANT_ID);
         $customerId = $this->createCustomer('权限隔离客户');
         $goodsId = $this->createCustomerReportGoods('权限隔离鱼', 'TASK-CONTROL-AUTH');
         $warehouseId = $this->createCustomerReportWarehouse('权限隔离仓');
@@ -2184,6 +2188,7 @@ final class FulfillmentWorkflowTest extends TestCase
 
     public function test_delivery_confirmation_rejects_cross_tenant_ids_and_missing_electronic_permission(): void
     {
+        $this->prepareLegacyOperatingStore(self::OTHER_TENANT_ID);
         $fixture = $this->selfDeliveryFixture('delivery-tenant-permission', '1.00', '1.00');
         $params = [
             'task_id' => $fixture['delivery_task_id'], 'event_type' => 'customer_handoff',
@@ -2281,6 +2286,7 @@ final class FulfillmentWorkflowTest extends TestCase
 
     public function test_third_party_delivery_requires_an_enabled_registered_driver_and_replays_one_fact(): void
     {
+        $this->prepareLegacyOperatingStore(self::OTHER_TENANT_ID);
         $fixture = $this->selfDeliveryFixture('third-party-driver', '2.00', '2.00', 'third_party');
         $payload = [
             'task_id' => $fixture['delivery_task_id'],

@@ -39,6 +39,7 @@ final class FulfillmentChangeLogic extends BaseLogic
             return false;
         }
         $itemId = (int)($params['report_item_id'] ?? 0);
+        $processingGroupId = (int)($params['processing_group_id'] ?? 0);
         $key = trim((string)($params['idempotency_key'] ?? ''));
         $target = self::quantity((string)($params['new_expected_base_qty'] ?? ''));
         $processed = self::quantity((string)($params['processed_reduction_qty'] ?? '0'));
@@ -62,14 +63,15 @@ final class FulfillmentChangeLogic extends BaseLogic
             return false;
         }
         $fingerprint = self::fingerprint([
-            'action' => 'reduce', 'item_id' => $itemId, 'target' => $target, 'processed' => $processed,
+            'action' => 'reduce', 'item_id' => $itemId, 'processing_group_id' => $processingGroupId,
+            'target' => $target, 'processed' => $processed,
             'disposition' => $disposition, 'inventory_action' => $inventoryAction, 'reason' => $reason,
         ]);
         if (($replay = self::replay($key, $fingerprint)) !== null) {
             return $replay;
         }
         try {
-            return self::transactionWithRetry(static function () use ($itemId, $key, $target, $processed, $disposition, $inventoryAction, $reason, $fingerprint) {
+            return self::transactionWithRetry(static function () use ($itemId, $processingGroupId, $key, $target, $processed, $disposition, $inventoryAction, $reason, $fingerprint) {
                 if (($replay = self::replay($key, $fingerprint)) !== null) {
                     return $replay;
                 }
@@ -93,6 +95,31 @@ final class FulfillmentChangeLogic extends BaseLogic
                     return false;
                 }
                 $reduction = bcsub($current, $target, self::SCALE);
+                $processingGroups = Db::name('customer_report_processing_group')->where('tenant_id', self::tenantId())
+                    ->where('report_item_id', $itemId)->order('id')->lock(true)->select()->toArray();
+                $selectedGroup = null;
+                if ($processingGroups !== []) {
+                    foreach ($processingGroups as $processingGroup) {
+                        if ((int)$processingGroup['id'] === $processingGroupId) {
+                            $selectedGroup = $processingGroup;
+                            break;
+                        }
+                    }
+                    if ($selectedGroup === null && count($processingGroups) === 1 && $processingGroupId === 0) {
+                        $selectedGroup = $processingGroups[0];
+                    }
+                    if ($selectedGroup === null) {
+                        self::setError('请指定本次减量的加工分组');
+                        return false;
+                    }
+                    if (bccomp((string)$selectedGroup['planned_qty'], $reduction, self::SCALE) <= 0) {
+                        self::setError('本次减量须小于所选加工分组的剩余数量');
+                        return false;
+                    }
+                } elseif ($processingGroupId > 0) {
+                    self::setError('加工分组已失效，请刷新任务');
+                    return false;
+                }
                 if (bccomp($processed, $reduction, self::SCALE) > 0) {
                     self::setError('已加工减量不能大于本次总减量');
                     return false;
@@ -133,6 +160,13 @@ final class FulfillmentChangeLogic extends BaseLogic
                     'shortage_base_qty' => $after['shortage_base_qty'], 'reduction_total_qty' => $after['reduction_total_qty'],
                     'status' => $after['status'], 'update_time' => $after['update_time'],
                 ]);
+                if ($selectedGroup !== null) {
+                    Db::name('customer_report_processing_group')->where('tenant_id', self::tenantId())
+                        ->where('id', (int)$selectedGroup['id'])->update([
+                            'planned_qty' => bcsub((string)$selectedGroup['planned_qty'], $reduction, self::SCALE),
+                            'final_actual_weight' => '0.00', 'update_time' => time(),
+                        ]);
+                }
                 $changeId = self::insertChange([
                     'report_id' => (int)$report['id'], 'report_item_id' => $itemId, 'action_type' => 'reduce',
                     'idempotency_key' => $key, 'request_fingerprint' => $fingerprint, 'quantity' => $reduction,

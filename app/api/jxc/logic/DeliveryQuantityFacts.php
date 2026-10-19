@@ -35,6 +35,9 @@ final class DeliveryQuantityFacts
                         ->where('report_item_id', $item['id'])->where('fact_version', 2)->column('processing_group_id');
                 }
             }
+            if ($selectedIds === []) {
+                throw new \DomainException('请明确选择本次实际交付的 V2 加工子组；待核实子组保持未交付');
+            }
             $groups = self::selectedGroups($item, $selectedIds, false);
             $base = '0.0000';
             foreach ($groups as $group) { $base = bcadd($base, $group['inventory_base_quantity'], 4); }

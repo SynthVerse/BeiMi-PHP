@@ -344,10 +344,15 @@ final class WorkforceLogic extends BaseLogic
         $id = (int)($params['id'] ?? 0);
         $name = trim((string)($params['name'] ?? ''));
         $mobile = trim((string)($params['mobile'] ?? ''));
-        if ($name === '' || $mobile === '') {
+        $unknownMobile = ($params['mobile_unknown'] ?? null) === 1;
+        if ($name === '' || mb_strlen($name) > 60 || ($mobile === '' && !$unknownMobile)) {
             self::setError('员工姓名和手机号不能为空');
             return false;
         }
+        if ($unknownMobile && (!empty($params['bind_user_id']) || !empty($params['permission_keys']))) { self::setError('手机号未知的历史人员不能绑定账号或授予电子权限'); return false; }
+        if ($unknownMobile) { $mobile = null; }
+        $creationKey = trim((string)($params['creation_key'] ?? ''));
+        if (strlen($creationKey) > 100 || ($unknownMobile && !$id && $creationKey === '')) { self::setError('历史人员缺少建档重试身份，请重新打开建档页'); return false; }
         $permissionKeys = self::normalizeStrings((array)($params['permission_keys'] ?? []), 80, 64);
         $known = self::permissionCatalog()['keys'];
         foreach ($permissionKeys as $permissionKey) {
@@ -359,7 +364,7 @@ final class WorkforceLogic extends BaseLogic
         sort($permissionKeys);
         $bindUserId = max(0, (int)($params['bind_user_id'] ?? 0));
         try {
-            Db::transaction(static function () use (&$id, $name, $mobile, $bindUserId, $params, $permissionKeys): void {
+            Db::transaction(static function () use (&$id, $name, $mobile, $bindUserId, $params, $permissionKeys, $creationKey): void {
                 $now = time();
                 $data = [
                     'name' => $name,
@@ -368,6 +373,13 @@ final class WorkforceLogic extends BaseLogic
                     'is_enabled' => (int)($params['is_enabled'] ?? 1) === 1 ? 1 : 0,
                     'update_time' => $now,
                 ];
+                if (!$id && $creationKey !== '') {
+                    $old = Db::name('employee')->where('tenant_id', self::tenantId())->where('creation_key', $creationKey)->lock(true)->find();
+                    if ($old) {
+                        if ($old['name'] !== $name || $old['mobile'] !== $mobile) { throw new \DomainException('建档重试身份对应的人员资料不一致'); }
+                        $id = (int)$old['id']; return;
+                    }
+                }
                 if ($id > 0) {
                     $exists = Db::name('employee')->where('tenant_id', self::tenantId())->where('id', $id)->whereNull('delete_time')->lock(true)->find();
                     if (!$exists) {
@@ -375,7 +387,7 @@ final class WorkforceLogic extends BaseLogic
                     }
                     Db::name('employee')->where('tenant_id', self::tenantId())->where('id', $id)->update($data);
                 } else {
-                    $id = (int)Db::name('employee')->insertGetId($data + ['tenant_id' => self::tenantId(), 'create_time' => $now]);
+                    $id = (int)Db::name('employee')->insertGetId($data + ['tenant_id' => self::tenantId(), 'create_time' => $now] + ($creationKey !== '' ? ['creation_key' => $creationKey] : []));
                 }
                 Db::name('employee_permission')->where('tenant_id', self::tenantId())->where('employee_id', $id)->delete();
                 foreach ($permissionKeys as $permissionKey) {
