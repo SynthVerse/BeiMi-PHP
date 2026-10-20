@@ -266,9 +266,9 @@ final class FinanceOpeningWorkflowTest extends TestCase
     {
         $pending = $this->ready();
         Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
-        $this->prepare('2026-09-02', 1);
-        self::assertFalse(FinanceSetupLogic::openingAction('confirm', $this->command((int)$pending['version'])));
-        self::assertStringContainsString('已变化', FinanceSetupLogic::getError());
+        self::assertFalse(FinanceSetupLogic::savePreparation($this->command(1) + ['activation_date' => '2026-09-02']));
+        self::assertStringContainsString('退回草稿', FinanceSetupLogic::getError());
+        self::assertSame('2026-09-01', FinanceSetupLogic::preparation()['activation_date']);
         $this->action('reopen');
         $pending = $this->action('submit');
         $employee = WorkforceLogic::saveEmployee(['name' => '期初经办', 'mobile' => '13800009927', 'bind_user_id' => 996927,

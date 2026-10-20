@@ -183,6 +183,12 @@ final class FinanceSetupLogic extends BaseLogic
                 $row = array_merge($before, $data, [
                     'version' => $version + 1, 'operator_id' => self::operatorId(), 'update_time' => time(),
                 ]);
+                if ($before['activation_date'] !== $row['activation_date']) {
+                    (new FinanceOpeningService(self::tenantId(), self::actor()))->invalidateCutoff();
+                    if ($before['activation_date']) {
+                        foreach (['inventory_cost_reviewed', 'legacy_settlement_reviewed', 'excluded_business_reviewed'] as $flag) { $row[$flag] = 0; }
+                    }
+                }
                 Db::name('finance_preparation')->where('tenant_id', self::tenantId())->update($row);
                 return [$before, self::preparationResult($row, [
                     'id' => self::operatorId(),
@@ -354,8 +360,10 @@ final class FinanceSetupLogic extends BaseLogic
                 }
                 return json_decode($existing['result_data'], true, 512, JSON_THROW_ON_ERROR);
             }
-            if ($action === 'preparation.save' && Db::name('finance_opening_book')->where('tenant_id', self::tenantId())->value('status') === 'active') {
-                throw new \DomainException('财务已启用，不能覆盖启用日期和期初准备历史');
+            if ($action === 'preparation.save') {
+                $status = Db::name('finance_opening_book')->where('tenant_id', self::tenantId())->value('status');
+                if ($status === 'active') { throw new \DomainException('财务已启用，不能覆盖启用日期和期初准备历史'); }
+                if ($status === 'pending') { throw new \DomainException('期初正在等待确认，请先退回草稿再修改'); }
             }
             [$before, $result] = $write($version);
             Db::name('finance_setup_action')->insert([

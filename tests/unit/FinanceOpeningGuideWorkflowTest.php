@@ -201,6 +201,106 @@ final class FinanceOpeningGuideWorkflowTest extends TestCase
         self::assertSame('pending_review', array_column($changed['cards'], null, 'key')['receivable']['state']);
     }
 
+    public function test_category_review_uses_the_same_confirmation_rules_and_basis_as_the_guide(): void
+    {
+        $customer = $this->createCustomer('类别核对候选客户');
+        Db::name('customer')->where('id', $customer)->update(['order_receivable' => '60.00']);
+        $guide = $this->start();
+        $review = ['category' => 'receivable', 'state' => 'none', 'evidence' => '逐项核对'];
+        self::assertFalse(FinanceSetupLogic::openingAction('review', $this->command((int)$guide['opening']['version']) + $review));
+        $review['state'] = 'complete';
+        self::assertFalse(FinanceSetupLogic::openingAction('review', $this->command((int)$guide['opening']['version']) + $review));
+        $this->item('receivable', $customer, '60.00');
+        $guide = FinanceSetupLogic::openingGuide();
+        $payload = $this->command((int)$guide['opening']['version']) + $review;
+        $saved = FinanceSetupLogic::openingAction('review', $payload);
+        self::assertNotFalse($saved, FinanceSetupLogic::getError());
+        self::assertSame($saved, FinanceSetupLogic::openingAction('review', $payload));
+        $card = array_column(FinanceSetupLogic::openingGuide()['cards'], null, 'key')['receivable'];
+        self::assertSame('complete', $card['state']);
+        $review = array_column($saved['categories'], null, 'key')['receivable']['review'];
+        self::assertMatchesRegularExpression('/^[a-f0-9]{64}$/D', $review['candidate_basis']);
+        self::assertSame(self::ADMIN_ID, $review['confirmed_by']['id']);
+    }
+
+    public function test_category_review_cannot_complete_an_unknown_balance_or_unfinished_editor(): void
+    {
+        $customer = $this->createCustomer('类别核对未完成客户');
+        $this->start();
+        $guide = FinanceSetupLogic::openingGuide();
+        $saved = FinanceSetupLogic::openingAction('item', $this->command((int)$guide['opening']['version']) + [
+            'category' => 'receivable', 'subject_id' => $customer, 'entry_contract' => 2, 'amount' => null,
+        ]);
+        self::assertNotFalse($saved, FinanceSetupLogic::getError());
+        $review = ['category' => 'receivable', 'state' => 'complete', 'evidence' => '仍有余额未查清'];
+        self::assertFalse(FinanceSetupLogic::openingAction('review', $this->command((int)$saved['version']) + $review));
+        self::assertStringContainsString('金额尚未核实', FinanceSetupLogic::getError());
+        $saved = FinanceSetupLogic::openingAction('item', $this->command((int)$saved['version']) + [
+            'id' => $saved['items'][0]['id'], 'category' => 'receivable', 'subject_id' => $customer, 'entry_contract' => 2, 'amount' => '60.00',
+        ]);
+        self::assertNotFalse($saved, FinanceSetupLogic::getError());
+        $saved = FinanceSetupLogic::openingAction('editor', $this->command((int)FinanceSetupLogic::opening()['version']) + [
+            'category' => 'receivable', 'form' => ['subject_id' => $customer, 'amount' => '12.00', 'entry_contract' => 2],
+        ]);
+        self::assertNotFalse($saved, FinanceSetupLogic::getError());
+        self::assertFalse(FinanceSetupLogic::openingAction('review', $this->command((int)$saved['version']) + $review));
+        self::assertStringContainsString('未完成', FinanceSetupLogic::getError());
+    }
+
+    public function test_preparation_date_change_invalidates_reviews_and_opening_version_atomically(): void
+    {
+        $customer = $this->createCustomer('准备设置改截点客户');
+        $this->start();
+        $this->item('receivable', $customer, '30.00');
+        $this->card('receivable', 'complete');
+        $guide = $this->card('account', 'none');
+        $openingVersion = (int)$guide['opening']['version'];
+        $payload = $this->command((int)$guide['opening']['preparation_version']) + [
+            'activation_date' => '2026-09-02', 'inventory_cost_reviewed' => 1,
+            'legacy_settlement_reviewed' => 1, 'excluded_business_reviewed' => 1,
+        ];
+        $changed = FinanceSetupLogic::savePreparation($payload);
+        self::assertNotFalse($changed, FinanceSetupLogic::getError());
+        self::assertSame($changed, FinanceSetupLogic::savePreparation($payload));
+        $guide = FinanceSetupLogic::openingGuide();
+        self::assertSame($openingVersion + 1, $guide['opening']['version']);
+        self::assertSame((int)$payload['expected_version'] + 1, (int)$changed['version']);
+        self::assertCount(1, $guide['opening']['items']);
+        self::assertSame('pending_review', array_column($guide['cards'], null, 'key')['receivable']['state']);
+        self::assertSame('pending_choice', array_column($guide['cards'], null, 'key')['account']['state']);
+        foreach (['inventory_cost_reviewed', 'legacy_settlement_reviewed', 'excluded_business_reviewed'] as $flag) { self::assertSame(0, (int)$changed[$flag]); }
+        self::assertFalse(FinanceSetupLogic::saveGuideCard($this->command($openingVersion) + ['category' => 'account', 'choice' => 'none']));
+        self::assertStringContainsString('已更新', FinanceSetupLogic::getError());
+    }
+
+    public function test_preparation_same_date_retains_reviews_and_does_not_advance_opening_version(): void
+    {
+        $this->start();
+        $guide = $this->card('account', 'none');
+        $saved = FinanceSetupLogic::savePreparation($this->command((int)$guide['opening']['preparation_version']) + ['activation_date' => '2026-09-01', 'notes' => '只补充说明']);
+        self::assertNotFalse($saved, FinanceSetupLogic::getError());
+        $latest = FinanceSetupLogic::openingGuide();
+        self::assertSame($guide['opening']['version'], $latest['opening']['version']);
+        self::assertSame('none', array_column($latest['cards'], null, 'key')['account']['state']);
+    }
+
+    public function test_preparation_cannot_change_pending_or_active_opening(): void
+    {
+        $this->start();
+        foreach (array_keys(FinanceOpeningGuide::CARDS) as $category) { $this->card($category, 'none'); }
+        $guide = FinanceSetupLogic::openingGuide();
+        $pending = FinanceSetupLogic::openingAction('submit', $this->command((int)$guide['opening']['version']));
+        self::assertNotFalse($pending, FinanceSetupLogic::getError());
+        $payload = $this->command((int)$pending['preparation_version']) + ['activation_date' => '2026-09-02'];
+        self::assertFalse(FinanceSetupLogic::savePreparation($payload));
+        self::assertSame('2026-09-01', FinanceSetupLogic::preparation()['activation_date']);
+        self::assertSame($pending['version'], FinanceSetupLogic::opening()['version']);
+        $active = FinanceSetupLogic::openingAction('confirm', $this->command((int)$pending['version']));
+        self::assertNotFalse($active, FinanceSetupLogic::getError());
+        self::assertFalse(FinanceSetupLogic::savePreparation($payload));
+        self::assertSame('2026-09-01', FinanceSetupLogic::opening()['activation_date']);
+    }
+
     public function test_employee_without_prepare_permission_sees_only_waiting_summary_and_cannot_start(): void
     {
         $customer = $this->createCustomer('权限私密欠款');

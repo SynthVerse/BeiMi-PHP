@@ -138,12 +138,7 @@ final class FinanceOpeningService
                 } else {
                     $previousDate = $before['activation_date'];
                     if ($previousDate && $previousDate !== $date) {
-                        // 日期变化保留明细和事实声明，但撤销旧截点下的核对完成状态。
-                        foreach (self::CATEGORIES as $key => $title) {
-                            if (!isset($reviews[$key])) { continue; }
-                            $reviews[$key]['state'] = 'unknown';
-                            $reviews[$key]['choice'] = ($reviews[$key]['choice'] ?? '') === 'none' ? null : ($reviews[$key]['choice'] ?? null);
-                        }
+                        $reviews = $this->reviewsForChangedCutoff($reviews);
                     }
                     $reviews['_guide'] = array_merge($reviews['_guide'] ?? [], ['mode' => 'carryover', 'current_card' => $previousDate === $date ? ($reviews['_guide']['current_card'] ?? 'account') : 'account', 'started_by' => $this->actor, 'started_at' => time()]);
                 }
@@ -209,7 +204,10 @@ final class FinanceOpeningService
                 $evidence = self::text($data['evidence'] ?? '', 1000);
                 if ($state !== 'unknown' && $evidence === '') { throw new \DomainException('请填写核对依据或尚待解决的事项'); }
                 $reviews = json_decode($book['reviews'], true, 512, JSON_THROW_ON_ERROR);
-                $reviews[$key] = ['state' => $state, 'evidence' => $evidence];
+                if (($reviews['_guide']['mode'] ?? '') === 'carryover' && in_array($state, ['none', 'complete'], true)) {
+                    // 两个公开确认入口共用校验与资料基线，不能只写一个完成标记。
+                    $reviews = $this->saveGuideCard(['category' => $key, 'choice' => $state, 'evidence' => $evidence], $before, $book);
+                } else { $reviews[$key] = ['state' => $state, 'evidence' => $evidence]; }
                 $book['reviews'] = self::json($reviews);
                 break;
             case 'submit':
@@ -278,6 +276,35 @@ final class FinanceOpeningService
             Db::name('finance_opening_book')->where('tenant_id', $this->tenantId)->update(['confirmed_snapshot' => self::json($confirmed)]);
         }
         return [$auditBefore, $this->snapshot()];
+    }
+
+    /** 调用方已取得门店准备锁；独立日期入口也必须使旧期初编辑版本失效。 */
+    public function invalidateCutoff(): void
+    {
+        $book = Db::name('finance_opening_book')->where('tenant_id', $this->tenantId)->lock(true)->find();
+        if (!$book) { return; }
+        if ($book['status'] !== 'draft') { throw new \DomainException('期初正在等待确认，请先退回草稿再修改'); }
+        Db::name('finance_opening_book')->where('tenant_id', $this->tenantId)->update([
+            'reviews' => self::json($this->reviewsForChangedCutoff(json_decode($book['reviews'], true, 512, JSON_THROW_ON_ERROR))),
+            'version' => (int)$book['version'] + 1, 'submitted_hash' => '',
+            'last_modified_by' => self::json($this->actor), 'update_time' => time(),
+        ]);
+    }
+
+    /** 日期变化保留明细和事实声明，撤销旧截点下的核对完成与提交依据。 */
+    private function reviewsForChangedCutoff(array $reviews): array
+    {
+        foreach (self::CATEGORIES as $key => $title) {
+            if (!isset($reviews[$key])) { continue; }
+            $reviews[$key]['state'] = 'unknown';
+            $reviews[$key]['choice'] = ($reviews[$key]['choice'] ?? '') === 'none' ? null : ($reviews[$key]['choice'] ?? null);
+            unset($reviews[$key]['confirmed_by'], $reviews[$key]['confirmed_at'], $reviews[$key]['candidate_basis']);
+        }
+        if (isset($reviews['_guide'])) {
+            $reviews['_guide']['current_card'] = 'account';
+            unset($reviews['_guide']['submitted_business_basis']);
+        }
+        return $reviews;
     }
 
     private function saveGuideCard(array $data, array $snapshot, array $book): array
