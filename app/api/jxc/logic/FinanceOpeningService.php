@@ -18,6 +18,7 @@ final class FinanceOpeningService
         'recovery' => '坏账追偿备查', 'equipment' => '设备剩余付款额度', 'excluded' => '本期范围外业务',
         'capital' => '经营投入剩余额度', 'loan' => '借款剩余本金', 'supplier_advance' => '供应商预付款',
     ];
+    private const SOURCE_BINDING_CATEGORIES = ['advance', 'supplier_refund'];
     public function __construct(private readonly int $tenantId, private readonly array $actor) {}
     private bool $lockStock = false;
 
@@ -25,7 +26,11 @@ final class FinanceOpeningService
     {
         $book = $this->book();
         if ($book['status'] === 'active') {
-            return json_decode($book['confirmed_snapshot'], true, 512, JSON_THROW_ON_ERROR);
+            $snapshot = json_decode($book['confirmed_snapshot'], true, 512, JSON_THROW_ON_ERROR);
+            // 当前来源关系属于派生投影，不能重写已确认的历史事实。
+            $snapshot['items'] = $this->withSourceBindings($snapshot['items']);
+            $snapshot['editor_drafts'] = $this->withEditorSourceBindings($snapshot['editor_drafts'] ?? []);
+            return $snapshot;
         }
         $items = $this->items();
         $preparation = Db::name('finance_preparation')->where('tenant_id', $this->tenantId)->find() ?: [];
@@ -65,7 +70,7 @@ final class FinanceOpeningService
             'confirmed_at' => 0,
             'guide' => $reviews['_guide'] ?? [],
             'unfinished_editor_counts' => $unfinished,
-            'editor_drafts' => $reviews['_editors'][$this->actor['type'] . ':' . $this->actor['id']] ?? [],
+            'editor_drafts' => $this->withEditorSourceBindings($reviews['_editors'][$this->actor['type'] . ':' . $this->actor['id']] ?? []),
         ];
     }
 
@@ -177,8 +182,18 @@ final class FinanceOpeningService
                     if (in_array($category, ['account', 'transit', 'unclaimed'], true)) { $accountReferences['account_id'] = $form['subject_id'] ?? 0; }
                     FinanceAccountLifecycle::assertDraftAccounts($this->tenantId, '', $accountReferences);
                     $form['details'] = FinanceOpeningCategory::normalizeDetails($category, $form['details'] ?? []);
-                    $reviews['_editors'][$actorKey][$category] = ['form' => $form, 'saved_at' => time()];
-                    unset($reviews[$category]);
+                    if (in_array($category, self::SOURCE_BINDING_CATEGORIES, true) && self::id($form['id'] ?? 0) > 0) {
+                        $existing = Db::name('finance_opening_item')->where('tenant_id', $this->tenantId)
+                            ->where('category', $category)->where('id', self::id($form['id']))->find();
+                        if ($existing) {
+                            $reference = self::text($form['source_reference'] ?? '', 200);
+                            $this->assertBoundSourceIdentity($existing, self::id($form['subject_id'] ?? 0),
+                                $reference === '' ? $existing['source_reference'] : $reference);
+                        }
+                    }
+                    $previous = $reviews['_editors'][$actorKey][$category] ?? [];
+                    $baseline = $this->editorBaseline($before, $previous, $category, $form, $data);
+                    $reviews['_editors'][$actorKey][$category] = ['form' => $form, 'saved_at' => time()] + $baseline;
                 }
                 $book['reviews'] = self::json($reviews);
                 break;
@@ -191,7 +206,7 @@ final class FinanceOpeningService
                 Db::name('finance_opening_item_detail')->where('tenant_id', $this->tenantId)->where('opening_item_id', $id)->delete();
                 $reviews = json_decode($book['reviews'], true);
                 unset($reviews[$removed['category']]);
-                foreach ($reviews['_editors'] ?? [] as $actorKey => $drafts) { if ((int)($drafts[$removed['category']]['form']['id'] ?? 0) === $id) { unset($reviews['_editors'][$actorKey][$removed['category']]); } }
+                // 原稿和原记录基线保留；删除不能替其他操作者选择放弃或另存为新记录。
                 $book['reviews'] = self::json($reviews);
                 break;
             case 'review':
@@ -318,6 +333,9 @@ final class FinanceOpeningService
         $guide = new FinanceOpeningGuide($this->tenantId);
         $candidates = $guide->candidates($snapshot)[$key] ?? [];
         $rows = array_values(array_filter($snapshot['items'], static fn(array $item): bool => $item['category'] === $key));
+        if ($choice === 'none' && (int)($snapshot['unfinished_editor_counts'][$key] ?? 0) > 0) {
+            throw new \DomainException('本项还有未完成输入，请先保存为准备资料或明确放弃');
+        }
         if ($choice === 'none' && ($candidates || $rows || !empty($reviews[$key]['declared_has']))) { throw new \DomainException('这项已有资料或已声明存在，不能标记没有；请核对并保留真实来源'); }
         if ($choice === 'complete') {
             if (!FinanceOpeningCategory::supported($key)) { throw new \DomainException('该事项的后续处理能力尚未开放，须保留待补充，不能启用'); }
@@ -404,6 +422,9 @@ final class FinanceOpeningService
         if ($mode === 'summary' && !FinanceOpeningCategory::allowsSummary($category)) {
             throw new \DomainException('该类型须保留逐笔合法来源，不支持汇总期初');
         }
+        if ($category === 'supplier_refund' && ($data['due_date'] ?? null) !== null && $data['due_date'] !== '') {
+            throw new \DomainException('供应商待退款不填写到期日，请保留原退款事项核对');
+        }
         $details = FinanceOpeningCategory::normalizeDetails($category, $data['details'] ?? []);
         if ($category === 'deferred' && !empty($details['payable_item_id'])) {
             $payable = Db::name('finance_opening_item')->where('tenant_id', $this->tenantId)->where('id', (int)$details['payable_item_id'])->where('category', 'expense_payable')->where('subject_id', $subjectId)->find();
@@ -420,6 +441,7 @@ final class FinanceOpeningService
             $reference = $existing['source_reference'] ?? ($reference !== '' ? $reference : '首次手填-' . bin2hex(random_bytes(12)));
             $details['_capture'] = $previousDetails['_capture'] ?? ['contract' => 2, 'origin' => 'owner_manual', 'actor' => $this->actor, 'captured_at' => time()];
         }
+        if ($existing && in_array($category, self::SOURCE_BINDING_CATEGORIES, true)) { $this->assertBoundSourceIdentity($existing, $subjectId, $reference); }
         if (!$ownerEntry && (!array_key_exists('historical_date', $data) || !array_key_exists('due_date', $data))) {
             throw new \DomainException('请明确历史日期与付款日，未知时标记不详或未约定');
         }
@@ -455,6 +477,26 @@ final class FinanceOpeningService
         if ($details) {
             Db::name('finance_opening_item_detail')->insert(['tenant_id' => $this->tenantId, 'opening_item_id' => $id, 'details' => self::json($details)]);
         }
+    }
+
+    /** 暂存沿用服务器原基线；只有显式核对当前版本后才允许重新建立基线。 */
+    private function editorBaseline(array $before, array $previous, string $category, array $form, array $data): array
+    {
+        $id = self::id($form['id'] ?? 0);
+        $rebase = array_key_exists('rebase_version', $data);
+        if ($rebase && self::id($data['rebase_version']) !== (int)$before['version']) {
+            throw new \DomainException('原稿基线版本已变化，请重新加载并逐项核对');
+        }
+        if (!$rebase && (int)($previous['form']['id'] ?? 0) === $id
+            && array_key_exists('base_version', $previous) && array_key_exists('base_item', $previous)) {
+            return array_intersect_key($previous, array_flip(['base_version', 'base_item']));
+        }
+        $baseItem = null;
+        foreach ($before['items'] as $item) {
+            if ((int)$item['id'] === $id && $item['category'] === $category) { $baseItem = $item; break; }
+        }
+        if ($id > 0 && !$baseItem) { throw new \DomainException('原记录已删除或不属于本事项，请保留原稿并明确选择另存为新记录'); }
+        return ['base_version' => (int)$before['version'], 'base_item' => $baseItem];
     }
 
     /**
@@ -539,7 +581,72 @@ final class FinanceOpeningService
             if ($item['category'] === 'inventory' && (int)$item['subject_id'] === 0 && FinanceOpeningInventory::isFirst($item['details'])) { $subject = FinanceOpeningInventory::subject($this->tenantId, $item['details'], $this->lockStock); $item['subject_snapshot'] = $subject; $item['subject_name'] = $subject['name'] ?? null; }
             if (in_array($item['category'], ['capital', 'loan'], true)) { $item['subject_name'] = $item['details']['counterparty'] ?? ''; $item['subject_snapshot'] = ['id' => 0, 'name' => $item['subject_name']]; }
         }
+        return $this->withSourceBindings($items);
+    }
+
+    /** 只认本门店实际来源行；人工凭据文本不是关联。关系矛盾显式为未知。 */
+    private function withSourceBindings(array $items): array
+    {
+        $ids = array_column(array_filter($items, static fn(array $item): bool => in_array($item['category'], self::SOURCE_BINDING_CATEGORIES, true)), 'id');
+        if (!$ids) { return $items; }
+        $sources = Db::name('finance_opening_source')->where('tenant_id', $this->tenantId)
+            ->whereIn('opening_item_id', $ids)->select()->toArray();
+        $sources = array_column($sources, null, 'opening_item_id');
+        foreach ($items as &$item) {
+            if (!in_array($item['category'], self::SOURCE_BINDING_CATEGORIES, true)) { continue; }
+            $itemId = self::sourceBindingId($item['id'] ?? null);
+            $subjectId = self::sourceBindingId($item['subject_id'] ?? null);
+            $item['source_binding'] = null;
+            if ($itemId === null || $subjectId === null || self::sourceBindingId($item['tenant_id'] ?? null) !== $this->tenantId
+                || !is_string($item['source_reference'] ?? null) || $item['source_reference'] === '') { continue; }
+            $source = $sources[$itemId] ?? null;
+            $binding = ['linked' => false, 'subject_id' => $subjectId,
+                'source_reference' => $item['source_reference'], 'source_id' => null, 'source_ref' => null];
+            if ($source) {
+                $snapshot = json_decode($source['source_snapshot'], true);
+                $sourceId = self::sourceBindingId($source['id']);
+                $valid = $sourceId !== null && $source['category'] === $item['category']
+                    && self::sourceBindingId($source['subject_id']) === $subjectId && is_array($snapshot)
+                    && self::sourceBindingId($snapshot['tenant_id'] ?? null) === $this->tenantId
+                    && self::sourceBindingId($snapshot['id'] ?? null) === $itemId && ($snapshot['category'] ?? '') === $item['category']
+                    && self::sourceBindingId($snapshot['subject_id'] ?? null) === $subjectId
+                    && ($snapshot['source_reference'] ?? null) === $item['source_reference'];
+                $binding = $valid ? array_replace($binding, ['linked' => true,
+                    'source_id' => $sourceId, 'source_ref' => 'o:' . $sourceId]) : null;
+            }
+            $item['source_binding'] = $binding;
+        }
+        unset($item);
         return $items;
+    }
+
+    private function withEditorSourceBindings(array $drafts): array
+    {
+        foreach ($drafts as &$draft) {
+            if (is_array($draft['base_item'] ?? null)) { $draft['base_item'] = $this->withSourceBindings([$draft['base_item']])[0]; }
+        }
+        unset($draft);
+        return $drafts;
+    }
+
+    private static function sourceBindingId(mixed $value): ?int
+    {
+        if (!is_int($value) && !(is_string($value) && preg_match('/^[1-9][0-9]{0,15}$/D', $value))) { return null; }
+        $id = (int)$value;
+        return $id > 0 && $id <= 9007199254740991 ? $id : null;
+    }
+
+    private function assertBoundSourceIdentity(array $existing, int $subjectId, string $reference): void
+    {
+        $item = $this->withSourceBindings([$existing])[0];
+        $binding = $item['source_binding'];
+        if ($binding !== null && !$binding['linked']) { return; }
+        if ($subjectId !== (int)$existing['subject_id'] || $reference !== $existing['source_reference']) {
+            $label = $existing['category'] === 'supplier_refund' ? '供应商退款' : '预存';
+            $subject = $existing['category'] === 'supplier_refund' ? '供应商' : '客户';
+            throw new \DomainException($label . ($binding === null ? '来源关系尚未核实' : '已关联正式来源')
+                . '，不能更换' . $subject . '或来源；请保留原' . $subject . '核对');
+        }
     }
 
     private function subject(string $category, int $id): ?array

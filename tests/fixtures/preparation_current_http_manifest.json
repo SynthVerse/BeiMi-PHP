@@ -1,0 +1,1475 @@
+{
+  "schemaVersion": 1,
+  "protocol": "beimi-preparation-current-source-freeze/v1",
+  "generation": "preparation-http-current-20261029-04",
+  "runId": "preparation-development-20261024-01",
+  "bridgeProtocol": "beimi-preparation-http-bridge/v1",
+  "coreCheckTotal": 179,
+  "dependencyCount": 133,
+  "sourceCount": 135,
+  "supportPaths": [
+    "docs/ui-previews/customer-refund-preparation-20261023/implementation/http-bridge-client.mjs",
+    "docs/ui-previews/payable-preparation-20261023/implementation/current-http-freeze.mjs"
+  ],
+  "targets": {
+    "payable": {
+      "entry": "docs/ui-previews/payable-preparation-20261023/implementation/http-bridge-client.mjs",
+      "coreCheckIds": [
+        "initial_server_guide",
+        "supplier_full_form_receipt_and_id",
+        "master_receipt_actor_isolation",
+        "unknown_amount_null",
+        "zero_frontend_validation",
+        "code0_confirmed_rejection",
+        "remove_saved_record",
+        "summary_self_edit",
+        "summary_detail_exclusion",
+        "financial_response_drop_recovery",
+        "success_readback_get_only",
+        "receipt_storage_blocks_leave",
+        "none_own_draft_guard",
+        "none_peer_draft_guard",
+        "evidence_preserves_cleared_facts",
+        "editor_preserves_cleared_facts",
+        "stale_server_draft_preserved",
+        "explicit_rebase_original_record",
+        "late_store_callback_isolated",
+        "late_account_callback_isolated"
+      ],
+      "dependencies": [
+        "common/api/auth.js",
+        "common/api/customer-report.js",
+        "common/api/customer.js",
+        "common/api/delivery-inventory.js",
+        "common/api/finance.js",
+        "common/api/helpers.js",
+        "common/api/index.js",
+        "common/api/line-vehicle.js",
+        "common/api/procurement.js",
+        "common/api/product.js",
+        "common/api/purchase-batch.js",
+        "common/api/purchase-plan.js",
+        "common/api/purchase-return.js",
+        "common/api/sales-return.js",
+        "common/api/sales.js",
+        "common/api/store.js",
+        "common/api/supplier.js",
+        "common/api/supply.js",
+        "common/api/task.js",
+        "common/api/todo.js",
+        "common/api/unit.js",
+        "common/api/warehouse.js",
+        "common/api/workforce.js",
+        "common/config/mock.js",
+        "common/constants/api.js",
+        "common/constants/error-codes.js",
+        "common/mixin/finance-editor.js",
+        "common/mixin/finance-page.js",
+        "common/mock/customer-mock.js",
+        "common/request.js",
+        "common/selectors/customer-selectors.js",
+        "common/utils/api-response.js",
+        "common/utils/auth.js",
+        "common/utils/customer-status.js",
+        "common/utils/date.js",
+        "common/utils/error-handler.js",
+        "common/utils/finance-admission.js",
+        "common/utils/finance-onboarding.js",
+        "common/utils/finance-submission.js",
+        "common/utils/product-create-permission.js",
+        "common/utils/product-create-policy.js",
+        "common/utils/retry.js",
+        "common/utils/storage.js",
+        "common/utils/store-create-form.js",
+        "common/utils/store-gate.js",
+        "common/utils/validate.js",
+        "components/common/LucideIcon.vue",
+        "docs/agents/pitfalls.md",
+        "docs/ui-previews/payable-preparation-20261023/implementation/http-bridge-client.mjs",
+        "docs/ui-previews/payable-preparation-20261023/implementation/http-bridge-client.test.mjs",
+        "docs/ui-previews/payable-preparation-20261023/implementation/http-bridge-runtime.mjs",
+        "docs/ui-previews/payable-preparation-20261023/implementation/http-bridge-runtime.test.mjs",
+        "scripts/finance-preparation-save.test.mjs",
+        "store/index.js",
+        "sub-finance/components/page-state.vue",
+        "sub-finance/opening/master-create.js",
+        "sub-finance/preparation/account-workspace.js",
+        "sub-finance/preparation/action-policy.js",
+        "sub-finance/preparation/components/finance-account-actions.vue",
+        "sub-finance/preparation/components/finance-inline-master.vue",
+        "sub-finance/preparation/components/inventory-entry-mode-sheet.vue",
+        "sub-finance/preparation/components/inventory-preparation-header.vue",
+        "sub-finance/preparation/components/opening-item-fields.vue",
+        "sub-finance/preparation/components/opening-record-summary.vue",
+        "sub-finance/preparation/index.vue",
+        "sub-finance/preparation/inline-master.js",
+        "sub-finance/preparation/record-presentation.js",
+        "uni_modules/uview-ui/libs/luch-request/adapters/index.js",
+        "uni_modules/uview-ui/libs/luch-request/core/InterceptorManager.js",
+        "uni_modules/uview-ui/libs/luch-request/core/Request.js",
+        "uni_modules/uview-ui/libs/luch-request/core/buildFullPath.js",
+        "uni_modules/uview-ui/libs/luch-request/core/defaults.js",
+        "uni_modules/uview-ui/libs/luch-request/core/dispatchRequest.js",
+        "uni_modules/uview-ui/libs/luch-request/core/mergeConfig.js",
+        "uni_modules/uview-ui/libs/luch-request/core/settle.js",
+        "uni_modules/uview-ui/libs/luch-request/helpers/buildURL.js",
+        "uni_modules/uview-ui/libs/luch-request/helpers/combineURLs.js",
+        "uni_modules/uview-ui/libs/luch-request/helpers/isAbsoluteURL.js",
+        "uni_modules/uview-ui/libs/luch-request/utils.js",
+        "uni_modules/uview-ui/libs/luch-request/utils/clone.js"
+      ]
+    },
+    "customer_refund": {
+      "entry": "docs/ui-previews/customer-refund-preparation-20261023/implementation/http-bridge-client.mjs",
+      "coreCheckIds": [
+        "initial_customer_refund",
+        "native_unknown_archive_rejected",
+        "native_customer_create_recover_and_return",
+        "master_receipt_actor_isolation",
+        "refund_subject_eligibility",
+        "refund_detail_identity",
+        "refund_amount_contract",
+        "refund_review_contract",
+        "draft_exit_restore",
+        "none_draft_actor_guards",
+        "evidence_preserves_facts",
+        "financial_unknown_original_command",
+        "success_get_only",
+        "receipt_storage_blocks_exit",
+        "refund_conflict_field_rebase",
+        "deleted_refund_explicit_new",
+        "native_success_archive_preserves_editor",
+        "late_store_callback_isolated",
+        "late_account_callback_isolated",
+        "complete_customer_refund"
+      ],
+      "dependencies": [
+        "common/api/auth.js",
+        "common/api/customer-report.js",
+        "common/api/customer.js",
+        "common/api/delivery-inventory.js",
+        "common/api/finance.js",
+        "common/api/helpers.js",
+        "common/api/index.js",
+        "common/api/line-vehicle.js",
+        "common/api/procurement.js",
+        "common/api/product.js",
+        "common/api/purchase-batch.js",
+        "common/api/purchase-plan.js",
+        "common/api/purchase-return.js",
+        "common/api/sales-return.js",
+        "common/api/sales.js",
+        "common/api/store.js",
+        "common/api/supplier.js",
+        "common/api/supply.js",
+        "common/api/task.js",
+        "common/api/todo.js",
+        "common/api/unit.js",
+        "common/api/warehouse.js",
+        "common/api/workforce.js",
+        "common/config/mock.js",
+        "common/constants/api.js",
+        "common/constants/error-codes.js",
+        "common/indexList/indexList.js",
+        "common/mixin/finance-editor.js",
+        "common/mixin/finance-page.js",
+        "common/mixin/layout-mixin.js",
+        "common/mixin/navigation-mixin.js",
+        "common/mock/customer-mock.js",
+        "common/request.js",
+        "common/selectors/customer-selectors.js",
+        "common/services/customer-service.js",
+        "common/utils/api-response.js",
+        "common/utils/auth.js",
+        "common/utils/common.js",
+        "common/utils/customer-status.js",
+        "common/utils/customer-sync.js",
+        "common/utils/date.js",
+        "common/utils/error-handler.js",
+        "common/utils/finance-admission.js",
+        "common/utils/finance-onboarding.js",
+        "common/utils/finance-submission.js",
+        "common/utils/format.js",
+        "common/utils/index.js",
+        "common/utils/master-data-return.js",
+        "common/utils/pagination.js",
+        "common/utils/product-create-permission.js",
+        "common/utils/product-create-policy.js",
+        "common/utils/retry.js",
+        "common/utils/storage.js",
+        "common/utils/store-create-form.js",
+        "common/utils/store-gate.js",
+        "common/utils/unit-conversion.js",
+        "common/utils/validate.js",
+        "components/common/LucideIcon.vue",
+        "docs/ui-previews/customer-refund-preparation-20261023/implementation/http-bridge-client.mjs",
+        "node_modules/pinyin-pro/dist/index.mjs",
+        "store/index.js",
+        "sub-finance/components/page-state.vue",
+        "sub-finance/opening/master-create.js",
+        "sub-finance/preparation/account-workspace.js",
+        "sub-finance/preparation/action-policy.js",
+        "sub-finance/preparation/components/finance-account-actions.vue",
+        "sub-finance/preparation/components/finance-inline-master.vue",
+        "sub-finance/preparation/components/inventory-entry-mode-sheet.vue",
+        "sub-finance/preparation/components/inventory-preparation-header.vue",
+        "sub-finance/preparation/components/opening-item-fields.vue",
+        "sub-finance/preparation/components/opening-record-summary.vue",
+        "sub-finance/preparation/index.vue",
+        "sub-finance/preparation/inline-master.js",
+        "sub-finance/preparation/record-presentation.js",
+        "sub-master-data/components/create-modal/create-customer-modal.vue",
+        "sub-master-data/customer/list/index.vue",
+        "uni_modules/uview-ui/libs/luch-request/adapters/index.js",
+        "uni_modules/uview-ui/libs/luch-request/core/InterceptorManager.js",
+        "uni_modules/uview-ui/libs/luch-request/core/Request.js",
+        "uni_modules/uview-ui/libs/luch-request/core/buildFullPath.js",
+        "uni_modules/uview-ui/libs/luch-request/core/defaults.js",
+        "uni_modules/uview-ui/libs/luch-request/core/dispatchRequest.js",
+        "uni_modules/uview-ui/libs/luch-request/core/mergeConfig.js",
+        "uni_modules/uview-ui/libs/luch-request/core/settle.js",
+        "uni_modules/uview-ui/libs/luch-request/helpers/buildURL.js",
+        "uni_modules/uview-ui/libs/luch-request/helpers/combineURLs.js",
+        "uni_modules/uview-ui/libs/luch-request/helpers/isAbsoluteURL.js",
+        "uni_modules/uview-ui/libs/luch-request/utils.js",
+        "uni_modules/uview-ui/libs/luch-request/utils/clone.js"
+      ]
+    },
+    "advance": {
+      "entry": "docs/ui-previews/advance-preparation-20261023/implementation/advance-http-bridge-client.mjs",
+      "coreCheckIds": [
+        "initial_advance_guide",
+        "native_customer_exact_receipt",
+        "main_customer_subject_eligibility",
+        "advance_detail_no_due_date",
+        "unknown_amount_null_blocks_review",
+        "owner_manual_unlinked_rebind",
+        "positive_amount_validation",
+        "financial_unknown_original_command",
+        "success_get_only",
+        "receipt_storage_blocks_exit",
+        "store_draft_local_retention",
+        "conflict_explicit_field_rebase",
+        "deleted_explicit_new",
+        "complete_advance",
+        "evidence_preserves_saved_review"
+      ],
+      "dependencies": [
+        "common/api/auth.js",
+        "common/api/customer-report.js",
+        "common/api/customer.js",
+        "common/api/delivery-inventory.js",
+        "common/api/finance.js",
+        "common/api/helpers.js",
+        "common/api/index.js",
+        "common/api/line-vehicle.js",
+        "common/api/procurement.js",
+        "common/api/product.js",
+        "common/api/purchase-batch.js",
+        "common/api/purchase-plan.js",
+        "common/api/purchase-return.js",
+        "common/api/sales-return.js",
+        "common/api/sales.js",
+        "common/api/store.js",
+        "common/api/supplier.js",
+        "common/api/supply.js",
+        "common/api/task.js",
+        "common/api/todo.js",
+        "common/api/unit.js",
+        "common/api/warehouse.js",
+        "common/api/workforce.js",
+        "common/config/mock.js",
+        "common/constants/api.js",
+        "common/constants/error-codes.js",
+        "common/indexList/indexList.js",
+        "common/mixin/finance-editor.js",
+        "common/mixin/finance-page.js",
+        "common/mixin/layout-mixin.js",
+        "common/mixin/navigation-mixin.js",
+        "common/mock/customer-mock.js",
+        "common/request.js",
+        "common/selectors/customer-selectors.js",
+        "common/services/customer-service.js",
+        "common/utils/api-response.js",
+        "common/utils/auth.js",
+        "common/utils/common.js",
+        "common/utils/customer-status.js",
+        "common/utils/customer-sync.js",
+        "common/utils/date.js",
+        "common/utils/error-handler.js",
+        "common/utils/finance-admission.js",
+        "common/utils/finance-onboarding.js",
+        "common/utils/finance-submission.js",
+        "common/utils/format.js",
+        "common/utils/index.js",
+        "common/utils/master-data-return.js",
+        "common/utils/pagination.js",
+        "common/utils/product-create-permission.js",
+        "common/utils/product-create-policy.js",
+        "common/utils/retry.js",
+        "common/utils/storage.js",
+        "common/utils/store-create-form.js",
+        "common/utils/store-gate.js",
+        "common/utils/unit-conversion.js",
+        "common/utils/validate.js",
+        "components/common/LucideIcon.vue",
+        "docs/ui-previews/advance-preparation-20261023/implementation/advance-http-bridge-client.mjs",
+        "node_modules/pinyin-pro/dist/index.mjs",
+        "store/index.js",
+        "sub-finance/components/page-state.vue",
+        "sub-finance/opening/master-create.js",
+        "sub-finance/preparation/account-workspace.js",
+        "sub-finance/preparation/action-policy.js",
+        "sub-finance/preparation/components/finance-account-actions.vue",
+        "sub-finance/preparation/components/finance-inline-master.vue",
+        "sub-finance/preparation/components/inventory-entry-mode-sheet.vue",
+        "sub-finance/preparation/components/inventory-preparation-header.vue",
+        "sub-finance/preparation/components/opening-item-fields.vue",
+        "sub-finance/preparation/components/opening-record-summary.vue",
+        "sub-finance/preparation/index.vue",
+        "sub-finance/preparation/inline-master.js",
+        "sub-finance/preparation/record-presentation.js",
+        "sub-master-data/components/create-modal/create-customer-modal.vue",
+        "sub-master-data/customer/list/index.vue",
+        "uni_modules/uview-ui/libs/luch-request/adapters/index.js",
+        "uni_modules/uview-ui/libs/luch-request/core/InterceptorManager.js",
+        "uni_modules/uview-ui/libs/luch-request/core/Request.js",
+        "uni_modules/uview-ui/libs/luch-request/core/buildFullPath.js",
+        "uni_modules/uview-ui/libs/luch-request/core/defaults.js",
+        "uni_modules/uview-ui/libs/luch-request/core/dispatchRequest.js",
+        "uni_modules/uview-ui/libs/luch-request/core/mergeConfig.js",
+        "uni_modules/uview-ui/libs/luch-request/core/settle.js",
+        "uni_modules/uview-ui/libs/luch-request/helpers/buildURL.js",
+        "uni_modules/uview-ui/libs/luch-request/helpers/combineURLs.js",
+        "uni_modules/uview-ui/libs/luch-request/helpers/isAbsoluteURL.js",
+        "uni_modules/uview-ui/libs/luch-request/utils.js",
+        "uni_modules/uview-ui/libs/luch-request/utils/clone.js"
+      ]
+    },
+    "supplier_refund": {
+      "entry": "docs/ui-previews/supplier-refund-preparation-20261023/implementation/supplier-refund-http-bridge-client.mjs",
+      "coreCheckIds": [
+        "initial_supplier_refund_guide",
+        "native_supplier_exact_receipt",
+        "detail_no_due_date_optional_refund",
+        "unknown_amount_null_blocks_review",
+        "supplier_id_confirmation_transition",
+        "same_supplier_same_amount_record_identity",
+        "owner_manual_unlinked_rebind",
+        "positive_amount_validation",
+        "financial_unknown_original_command",
+        "success_get_only",
+        "receipt_storage_blocks_exit",
+        "store_draft_local_retention",
+        "conflict_explicit_field_rebase",
+        "conflict_adopt_latest",
+        "deleted_explicit_new",
+        "mark_later_preserves_saved_input",
+        "complete_supplier_refund",
+        "evidence_preserves_saved_review"
+      ],
+      "dependencies": [
+        "common/api/auth.js",
+        "common/api/customer-report.js",
+        "common/api/customer.js",
+        "common/api/delivery-inventory.js",
+        "common/api/finance.js",
+        "common/api/helpers.js",
+        "common/api/index.js",
+        "common/api/line-vehicle.js",
+        "common/api/procurement.js",
+        "common/api/product.js",
+        "common/api/purchase-batch.js",
+        "common/api/purchase-plan.js",
+        "common/api/purchase-return.js",
+        "common/api/sales-return.js",
+        "common/api/sales.js",
+        "common/api/store.js",
+        "common/api/supplier.js",
+        "common/api/supply.js",
+        "common/api/task.js",
+        "common/api/todo.js",
+        "common/api/unit.js",
+        "common/api/warehouse.js",
+        "common/api/workforce.js",
+        "common/config/mock.js",
+        "common/constants/api.js",
+        "common/constants/error-codes.js",
+        "common/mixin/finance-editor.js",
+        "common/mixin/finance-page.js",
+        "common/mock/customer-mock.js",
+        "common/request.js",
+        "common/selectors/customer-selectors.js",
+        "common/utils/api-response.js",
+        "common/utils/auth.js",
+        "common/utils/customer-status.js",
+        "common/utils/date.js",
+        "common/utils/error-handler.js",
+        "common/utils/finance-admission.js",
+        "common/utils/finance-onboarding.js",
+        "common/utils/finance-submission.js",
+        "common/utils/product-create-permission.js",
+        "common/utils/product-create-policy.js",
+        "common/utils/retry.js",
+        "common/utils/storage.js",
+        "common/utils/store-create-form.js",
+        "common/utils/store-gate.js",
+        "common/utils/validate.js",
+        "components/common/LucideIcon.vue",
+        "docs/ui-previews/advance-preparation-20261023/implementation/advance-http-bridge-client.mjs",
+        "docs/ui-previews/payable-preparation-20261023/implementation/http-bridge-client.mjs",
+        "docs/ui-previews/payable-preparation-20261023/implementation/http-bridge-runtime.mjs",
+        "docs/ui-previews/supplier-refund-preparation-20261023/implementation/supplier-refund-http-bridge-client.mjs",
+        "docs/ui-previews/supplier-refund-preparation-20261023/implementation/supplier-refund-http-bridge-client.test.mjs",
+        "docs/ui-previews/supplier-refund-preparation-20261023/implementation/supplier-refund-http-contract-20261025.md",
+        "store/index.js",
+        "sub-finance/components/page-state.vue",
+        "sub-finance/opening/master-create.js",
+        "sub-finance/preparation/account-workspace.js",
+        "sub-finance/preparation/action-policy.js",
+        "sub-finance/preparation/components/finance-account-actions.vue",
+        "sub-finance/preparation/components/finance-inline-master.vue",
+        "sub-finance/preparation/components/inventory-entry-mode-sheet.vue",
+        "sub-finance/preparation/components/inventory-preparation-header.vue",
+        "sub-finance/preparation/components/opening-item-fields.vue",
+        "sub-finance/preparation/components/opening-record-summary.vue",
+        "sub-finance/preparation/index.vue",
+        "sub-finance/preparation/inline-master.js",
+        "sub-finance/preparation/record-presentation.js",
+        "uni_modules/uview-ui/libs/luch-request/adapters/index.js",
+        "uni_modules/uview-ui/libs/luch-request/core/InterceptorManager.js",
+        "uni_modules/uview-ui/libs/luch-request/core/Request.js",
+        "uni_modules/uview-ui/libs/luch-request/core/buildFullPath.js",
+        "uni_modules/uview-ui/libs/luch-request/core/defaults.js",
+        "uni_modules/uview-ui/libs/luch-request/core/dispatchRequest.js",
+        "uni_modules/uview-ui/libs/luch-request/core/mergeConfig.js",
+        "uni_modules/uview-ui/libs/luch-request/core/settle.js",
+        "uni_modules/uview-ui/libs/luch-request/helpers/buildURL.js",
+        "uni_modules/uview-ui/libs/luch-request/helpers/combineURLs.js",
+        "uni_modules/uview-ui/libs/luch-request/helpers/isAbsoluteURL.js",
+        "uni_modules/uview-ui/libs/luch-request/utils.js",
+        "uni_modules/uview-ui/libs/luch-request/utils/clone.js"
+      ]
+    },
+    "salary": {
+      "entry": "docs/ui-previews/salary-preparation-20261023/implementation/salary-http-client-20261025.mjs",
+      "coreCheckIds": [
+        "salary_initial_guide",
+        "employee_full_form_original_receipt",
+        "employee_same_name_distinct_ids",
+        "unknown_amount_null",
+        "missing_month_save_blocks_complete",
+        "cutoff_month_complete",
+        "future_month_save_blocks_complete",
+        "summary_self_edit_and_group",
+        "empty_month_group",
+        "multiple_details_and_distinct_employees",
+        "second_record_edit_store_restore",
+        "positive_amount_frontend_guard",
+        "code0_keeps_original_input",
+        "financial_unknown_original_command",
+        "success_readback_get_only",
+        "receipt_storage_blocks_exit",
+        "local_input_restore",
+        "salary_view_prepare_permissions",
+        "salary_revoked_pending_filters_restore",
+        "complete_salary",
+        "independent_evidence_keeps_complete",
+        "master_unknown_not_created"
+      ],
+      "dependencies": [
+        "common/api/auth.js",
+        "common/api/customer-report.js",
+        "common/api/customer.js",
+        "common/api/delivery-inventory.js",
+        "common/api/finance.js",
+        "common/api/helpers.js",
+        "common/api/index.js",
+        "common/api/line-vehicle.js",
+        "common/api/procurement.js",
+        "common/api/product.js",
+        "common/api/purchase-batch.js",
+        "common/api/purchase-plan.js",
+        "common/api/purchase-return.js",
+        "common/api/sales-return.js",
+        "common/api/sales.js",
+        "common/api/store.js",
+        "common/api/supplier.js",
+        "common/api/supply.js",
+        "common/api/task.js",
+        "common/api/todo.js",
+        "common/api/unit.js",
+        "common/api/warehouse.js",
+        "common/api/workforce.js",
+        "common/config/mock.js",
+        "common/constants/api.js",
+        "common/constants/error-codes.js",
+        "common/mixin/finance-editor.js",
+        "common/mixin/finance-page.js",
+        "common/mock/customer-mock.js",
+        "common/request.js",
+        "common/selectors/customer-selectors.js",
+        "common/utils/api-response.js",
+        "common/utils/auth.js",
+        "common/utils/customer-status.js",
+        "common/utils/date.js",
+        "common/utils/error-handler.js",
+        "common/utils/finance-admission.js",
+        "common/utils/finance-onboarding.js",
+        "common/utils/finance-submission.js",
+        "common/utils/product-create-permission.js",
+        "common/utils/product-create-policy.js",
+        "common/utils/retry.js",
+        "common/utils/storage.js",
+        "common/utils/store-create-form.js",
+        "common/utils/store-gate.js",
+        "common/utils/validate.js",
+        "components/common/LucideIcon.vue",
+        "docs/ui-previews/advance-preparation-20261023/implementation/advance-http-bridge-client.mjs",
+        "docs/ui-previews/payable-preparation-20261023/implementation/http-bridge-client.mjs",
+        "docs/ui-previews/payable-preparation-20261023/implementation/http-bridge-runtime.mjs",
+        "docs/ui-previews/salary-preparation-20261023/implementation/freeze-salary-http-20261025.mjs",
+        "docs/ui-previews/salary-preparation-20261023/implementation/salary-http-client-20261025.mjs",
+        "docs/ui-previews/salary-preparation-20261023/implementation/salary-http-contract-20261025.json",
+        "scripts/finance-salary-http-protocol.test.mjs",
+        "store/index.js",
+        "sub-finance/components/page-state.vue",
+        "sub-finance/opening/master-create.js",
+        "sub-finance/preparation/account-workspace.js",
+        "sub-finance/preparation/action-policy.js",
+        "sub-finance/preparation/components/finance-account-actions.vue",
+        "sub-finance/preparation/components/finance-inline-master.vue",
+        "sub-finance/preparation/components/inventory-entry-mode-sheet.vue",
+        "sub-finance/preparation/components/inventory-preparation-header.vue",
+        "sub-finance/preparation/components/opening-item-fields.vue",
+        "sub-finance/preparation/components/opening-record-summary.vue",
+        "sub-finance/preparation/index.vue",
+        "sub-finance/preparation/inline-master.js",
+        "sub-finance/preparation/record-presentation.js",
+        "uni_modules/uview-ui/libs/luch-request/adapters/index.js",
+        "uni_modules/uview-ui/libs/luch-request/core/InterceptorManager.js",
+        "uni_modules/uview-ui/libs/luch-request/core/Request.js",
+        "uni_modules/uview-ui/libs/luch-request/core/buildFullPath.js",
+        "uni_modules/uview-ui/libs/luch-request/core/defaults.js",
+        "uni_modules/uview-ui/libs/luch-request/core/dispatchRequest.js",
+        "uni_modules/uview-ui/libs/luch-request/core/mergeConfig.js",
+        "uni_modules/uview-ui/libs/luch-request/core/settle.js",
+        "uni_modules/uview-ui/libs/luch-request/helpers/buildURL.js",
+        "uni_modules/uview-ui/libs/luch-request/helpers/combineURLs.js",
+        "uni_modules/uview-ui/libs/luch-request/helpers/isAbsoluteURL.js",
+        "uni_modules/uview-ui/libs/luch-request/utils.js",
+        "uni_modules/uview-ui/libs/luch-request/utils/clone.js"
+      ]
+    },
+    "reimbursement": {
+      "entry": "docs/ui-previews/reimbursement-preparation-20261023/implementation/reimbursement-http-client-20261026.mjs",
+      "coreCheckIds": [
+        "reimbursement_initial_guide",
+        "employee_full_form_original_receipt",
+        "employee_same_name_distinct_ids",
+        "unknown_amount_null",
+        "missing_fee_month_save_blocks_complete",
+        "cutoff_month_complete",
+        "future_month_save_blocks_complete",
+        "summary_self_edit_fee_not_group_key",
+        "empty_month_group",
+        "same_amount_details_distinct_ids",
+        "second_record_edit_store_restore",
+        "positive_amount_frontend_guard",
+        "code0_keeps_original_input",
+        "financial_unknown_original_command",
+        "remove_rejected_original_identity",
+        "remove_success_readback_get_only",
+        "remove_receipt_failure_blocks_exit",
+        "local_input_restore",
+        "ordinary_financial_employee_access",
+        "complete_reimbursement",
+        "independent_evidence_keeps_complete",
+        "master_unknown_not_created"
+      ],
+      "dependencies": [
+        "common/api/auth.js",
+        "common/api/customer-report.js",
+        "common/api/customer.js",
+        "common/api/delivery-inventory.js",
+        "common/api/finance.js",
+        "common/api/helpers.js",
+        "common/api/index.js",
+        "common/api/line-vehicle.js",
+        "common/api/procurement.js",
+        "common/api/product.js",
+        "common/api/purchase-batch.js",
+        "common/api/purchase-plan.js",
+        "common/api/purchase-return.js",
+        "common/api/sales-return.js",
+        "common/api/sales.js",
+        "common/api/store.js",
+        "common/api/supplier.js",
+        "common/api/supply.js",
+        "common/api/task.js",
+        "common/api/todo.js",
+        "common/api/unit.js",
+        "common/api/warehouse.js",
+        "common/api/workforce.js",
+        "common/config/mock.js",
+        "common/constants/api.js",
+        "common/constants/error-codes.js",
+        "common/mixin/finance-editor.js",
+        "common/mixin/finance-page.js",
+        "common/mock/customer-mock.js",
+        "common/request.js",
+        "common/selectors/customer-selectors.js",
+        "common/utils/api-response.js",
+        "common/utils/auth.js",
+        "common/utils/customer-status.js",
+        "common/utils/date.js",
+        "common/utils/error-handler.js",
+        "common/utils/finance-admission.js",
+        "common/utils/finance-onboarding.js",
+        "common/utils/finance-submission.js",
+        "common/utils/product-create-permission.js",
+        "common/utils/product-create-policy.js",
+        "common/utils/retry.js",
+        "common/utils/storage.js",
+        "common/utils/store-create-form.js",
+        "common/utils/store-gate.js",
+        "common/utils/validate.js",
+        "components/common/LucideIcon.vue",
+        "docs/ui-previews/advance-preparation-20261023/implementation/advance-http-bridge-client.mjs",
+        "docs/ui-previews/payable-preparation-20261023/implementation/http-bridge-client.mjs",
+        "docs/ui-previews/payable-preparation-20261023/implementation/http-bridge-runtime.mjs",
+        "docs/ui-previews/reimbursement-preparation-20261023/implementation/freeze-reimbursement-http-20261026.mjs",
+        "docs/ui-previews/reimbursement-preparation-20261023/implementation/reimbursement-http-client-20261026.mjs",
+        "docs/ui-previews/reimbursement-preparation-20261023/implementation/reimbursement-http-contract-20261026.json",
+        "scripts/finance-reimbursement-http-protocol.test.mjs",
+        "store/index.js",
+        "sub-finance/components/page-state.vue",
+        "sub-finance/opening/master-create.js",
+        "sub-finance/preparation/account-workspace.js",
+        "sub-finance/preparation/action-policy.js",
+        "sub-finance/preparation/components/finance-account-actions.vue",
+        "sub-finance/preparation/components/finance-inline-master.vue",
+        "sub-finance/preparation/components/inventory-entry-mode-sheet.vue",
+        "sub-finance/preparation/components/inventory-preparation-header.vue",
+        "sub-finance/preparation/components/opening-item-fields.vue",
+        "sub-finance/preparation/components/opening-record-summary.vue",
+        "sub-finance/preparation/index.vue",
+        "sub-finance/preparation/inline-master.js",
+        "sub-finance/preparation/record-presentation.js",
+        "uni_modules/uview-ui/libs/luch-request/adapters/index.js",
+        "uni_modules/uview-ui/libs/luch-request/core/InterceptorManager.js",
+        "uni_modules/uview-ui/libs/luch-request/core/Request.js",
+        "uni_modules/uview-ui/libs/luch-request/core/buildFullPath.js",
+        "uni_modules/uview-ui/libs/luch-request/core/defaults.js",
+        "uni_modules/uview-ui/libs/luch-request/core/dispatchRequest.js",
+        "uni_modules/uview-ui/libs/luch-request/core/mergeConfig.js",
+        "uni_modules/uview-ui/libs/luch-request/core/settle.js",
+        "uni_modules/uview-ui/libs/luch-request/helpers/buildURL.js",
+        "uni_modules/uview-ui/libs/luch-request/helpers/combineURLs.js",
+        "uni_modules/uview-ui/libs/luch-request/helpers/isAbsoluteURL.js",
+        "uni_modules/uview-ui/libs/luch-request/utils.js",
+        "uni_modules/uview-ui/libs/luch-request/utils/clone.js"
+      ]
+    },
+    "expense_payable": {
+      "entry": "docs/ui-previews/expense-payable-preparation-20261023/implementation/expense-payable-http-client-20261026.mjs",
+      "coreCheckIds": [
+        "expense_initial_guide",
+        "supplier_full_form_original_receipt",
+        "master_receipt_actor_isolation",
+        "unknown_amount_null",
+        "positive_amount_frontend_guard",
+        "missing_description_save_blocks_complete",
+        "historical_date_save_review_layers",
+        "summary_self_edit",
+        "summary_to_detail_blocked",
+        "summary_to_summary_blocked",
+        "detail_to_summary_blocked",
+        "detail_records_same_amount_distinct_id",
+        "second_record_store_restore",
+        "financial_unknown_original_command",
+        "success_readback_get_only",
+        "receipt_failure_blocks_exit",
+        "complete_expense",
+        "independent_evidence_keeps_complete",
+        "source_identity_version_handoff",
+        "deferred_real_id_reference",
+        "deferred_cumulative_exact",
+        "deferred_edit_excludes_self",
+        "deferred_over_limit",
+        "deferred_unknown_source",
+        "deferred_changed_subject",
+        "deferred_lowered_amount",
+        "deferred_removed_source",
+        "deferred_same_name_no_inheritance",
+        "deferred_reused_reference_not_inherit",
+        "supplier_unknown_not_created"
+      ],
+      "dependencies": [
+        "common/api/auth.js",
+        "common/api/customer-report.js",
+        "common/api/customer.js",
+        "common/api/delivery-inventory.js",
+        "common/api/finance.js",
+        "common/api/helpers.js",
+        "common/api/index.js",
+        "common/api/line-vehicle.js",
+        "common/api/procurement.js",
+        "common/api/product.js",
+        "common/api/purchase-batch.js",
+        "common/api/purchase-plan.js",
+        "common/api/purchase-return.js",
+        "common/api/sales-return.js",
+        "common/api/sales.js",
+        "common/api/store.js",
+        "common/api/supplier.js",
+        "common/api/supply.js",
+        "common/api/task.js",
+        "common/api/todo.js",
+        "common/api/unit.js",
+        "common/api/warehouse.js",
+        "common/api/workforce.js",
+        "common/config/mock.js",
+        "common/constants/api.js",
+        "common/constants/error-codes.js",
+        "common/mixin/finance-editor.js",
+        "common/mixin/finance-page.js",
+        "common/mock/customer-mock.js",
+        "common/request.js",
+        "common/selectors/customer-selectors.js",
+        "common/utils/api-response.js",
+        "common/utils/auth.js",
+        "common/utils/customer-status.js",
+        "common/utils/date.js",
+        "common/utils/error-handler.js",
+        "common/utils/finance-admission.js",
+        "common/utils/finance-onboarding.js",
+        "common/utils/finance-submission.js",
+        "common/utils/product-create-permission.js",
+        "common/utils/product-create-policy.js",
+        "common/utils/retry.js",
+        "common/utils/storage.js",
+        "common/utils/store-create-form.js",
+        "common/utils/store-gate.js",
+        "common/utils/validate.js",
+        "components/common/LucideIcon.vue",
+        "docs/ui-previews/advance-preparation-20261023/implementation/advance-http-bridge-client.mjs",
+        "docs/ui-previews/expense-payable-preparation-20261023/implementation/expense-payable-http-client-20261026.mjs",
+        "docs/ui-previews/expense-payable-preparation-20261023/implementation/expense-payable-http-contract-20261026.json",
+        "docs/ui-previews/expense-payable-preparation-20261023/implementation/freeze-expense-payable-http-20261026.mjs",
+        "docs/ui-previews/payable-preparation-20261023/implementation/http-bridge-client.mjs",
+        "docs/ui-previews/payable-preparation-20261023/implementation/http-bridge-runtime.mjs",
+        "scripts/finance-expense-payable-http-protocol.test.mjs",
+        "store/index.js",
+        "sub-finance/components/page-state.vue",
+        "sub-finance/opening/master-create.js",
+        "sub-finance/preparation/account-workspace.js",
+        "sub-finance/preparation/action-policy.js",
+        "sub-finance/preparation/components/finance-account-actions.vue",
+        "sub-finance/preparation/components/finance-inline-master.vue",
+        "sub-finance/preparation/components/inventory-entry-mode-sheet.vue",
+        "sub-finance/preparation/components/inventory-preparation-header.vue",
+        "sub-finance/preparation/components/opening-item-fields.vue",
+        "sub-finance/preparation/components/opening-record-summary.vue",
+        "sub-finance/preparation/index.vue",
+        "sub-finance/preparation/inline-master.js",
+        "sub-finance/preparation/record-presentation.js",
+        "uni_modules/uview-ui/libs/luch-request/adapters/index.js",
+        "uni_modules/uview-ui/libs/luch-request/core/InterceptorManager.js",
+        "uni_modules/uview-ui/libs/luch-request/core/Request.js",
+        "uni_modules/uview-ui/libs/luch-request/core/buildFullPath.js",
+        "uni_modules/uview-ui/libs/luch-request/core/defaults.js",
+        "uni_modules/uview-ui/libs/luch-request/core/dispatchRequest.js",
+        "uni_modules/uview-ui/libs/luch-request/core/mergeConfig.js",
+        "uni_modules/uview-ui/libs/luch-request/core/settle.js",
+        "uni_modules/uview-ui/libs/luch-request/helpers/buildURL.js",
+        "uni_modules/uview-ui/libs/luch-request/helpers/combineURLs.js",
+        "uni_modules/uview-ui/libs/luch-request/helpers/isAbsoluteURL.js",
+        "uni_modules/uview-ui/libs/luch-request/utils.js",
+        "uni_modules/uview-ui/libs/luch-request/utils/clone.js"
+      ]
+    },
+    "deferred": {
+      "entry": "docs/ui-previews/deferred-preparation-20261023/implementation/deferred-http-client-20261026.mjs",
+      "coreCheckIds": [
+        "deferred_initial_real_fields",
+        "supplier_original_receipt",
+        "master_receipt_actor_isolation",
+        "upstream_real_source_handoff",
+        "remaining_only_real_wire",
+        "full_history_real_wire",
+        "illegal_values_zero_http",
+        "manual_121_zero_http",
+        "unknown_required_save_review_layers",
+        "zero_month_save_review_layers",
+        "history_equalities_save_review_layers",
+        "schedule_semantics_save_review_layers",
+        "service_before_activation_save_review_layers",
+        "schedule_native_confirmation",
+        "real_source_id_reference",
+        "source_cumulative_exact",
+        "source_edit_excludes_self_zero",
+        "source_over_limit",
+        "first_read_vs_server_baseline",
+        "second_record_cold_restore",
+        "financial_unknown_original_command",
+        "success_get_only",
+        "receipt_storage_blocks_exit",
+        "complete_deferred",
+        "independent_evidence_keeps_progress",
+        "source_unknown_amount",
+        "source_changed_subject",
+        "source_lowered_amount",
+        "source_removed",
+        "same_name_no_inheritance",
+        "reused_reference_no_inheritance",
+        "supplier_unknown_not_created"
+      ],
+      "dependencies": [
+        "App.vue",
+        "common/api/auth.js",
+        "common/api/customer-report.js",
+        "common/api/customer.js",
+        "common/api/delivery-inventory.js",
+        "common/api/finance.js",
+        "common/api/helpers.js",
+        "common/api/index.js",
+        "common/api/line-vehicle.js",
+        "common/api/procurement.js",
+        "common/api/product.js",
+        "common/api/purchase-batch.js",
+        "common/api/purchase-plan.js",
+        "common/api/purchase-return.js",
+        "common/api/sales-return.js",
+        "common/api/sales.js",
+        "common/api/store.js",
+        "common/api/supplier.js",
+        "common/api/supply.js",
+        "common/api/task.js",
+        "common/api/todo.js",
+        "common/api/unit.js",
+        "common/api/warehouse.js",
+        "common/api/workforce.js",
+        "common/config/mock.js",
+        "common/constants/api.js",
+        "common/constants/error-codes.js",
+        "common/mixin/finance-editor.js",
+        "common/mixin/finance-page.js",
+        "common/mock/customer-mock.js",
+        "common/request.js",
+        "common/selectors/customer-selectors.js",
+        "common/styles/design-tokens.scss",
+        "common/styles/mixins.scss",
+        "common/utils/api-response.js",
+        "common/utils/auth.js",
+        "common/utils/customer-status.js",
+        "common/utils/date.js",
+        "common/utils/error-handler.js",
+        "common/utils/finance-admission.js",
+        "common/utils/finance-onboarding.js",
+        "common/utils/finance-submission.js",
+        "common/utils/product-create-permission.js",
+        "common/utils/product-create-policy.js",
+        "common/utils/retry.js",
+        "common/utils/storage.js",
+        "common/utils/store-create-form.js",
+        "common/utils/store-gate.js",
+        "common/utils/validate.js",
+        "components/common/LucideIcon.vue",
+        "docs/agents/pitfalls.md",
+        "docs/ui-previews/advance-preparation-20261023/implementation/advance-http-bridge-client.mjs",
+        "docs/ui-previews/deferred-preparation-20261023/implementation/capture-deferred-components-20261026.mjs",
+        "docs/ui-previews/deferred-preparation-20261023/implementation/check-deferred-http-protocol-20261026.mjs",
+        "docs/ui-previews/deferred-preparation-20261023/implementation/deferred-component-fixture-20261026.adapter.js",
+        "docs/ui-previews/deferred-preparation-20261023/implementation/deferred-component-fixture-20261026.assertions.mjs",
+        "docs/ui-previews/deferred-preparation-20261023/implementation/deferred-component-fixture-20261026.entry.js",
+        "docs/ui-previews/deferred-preparation-20261023/implementation/deferred-component-fixture-20261026.interactions.mjs",
+        "docs/ui-previews/deferred-preparation-20261023/implementation/deferred-component-fixture-20261026.loader.cjs",
+        "docs/ui-previews/deferred-preparation-20261023/implementation/deferred-component-fixture-20261026.states.mjs",
+        "docs/ui-previews/deferred-preparation-20261023/implementation/deferred-http-client-20261026.mjs",
+        "docs/ui-previews/deferred-preparation-20261023/implementation/deferred-test-harness.mjs",
+        "docs/ui-previews/deferred-preparation-20261023/template-review/review-states.json",
+        "docs/ui-previews/payable-preparation-20261023/component-fixture/js-loader.cjs",
+        "docs/ui-previews/payable-preparation-20261023/implementation/component-fixture-browser-adapter-responsive-20261025.js",
+        "docs/ui-previews/payable-preparation-20261023/implementation/component-fixture-sfc-loader-responsive-20261025.cjs",
+        "docs/ui-previews/payable-preparation-20261023/implementation/http-bridge-client.mjs",
+        "docs/ui-previews/payable-preparation-20261023/implementation/http-bridge-runtime.mjs",
+        "scripts/finance-deferred-fields.test.mjs",
+        "scripts/finance-deferred-preparation.test.mjs",
+        "scripts/finance-deferred-records.test.mjs",
+        "scripts/finance-deferred-rules.test.mjs",
+        "scripts/payable-preparation-fixture.evidence.mjs",
+        "store/index.js",
+        "sub-finance/components/page-state.vue",
+        "sub-finance/finance.scss",
+        "sub-finance/opening/master-create.js",
+        "sub-finance/preparation/account-workspace.js",
+        "sub-finance/preparation/action-policy.js",
+        "sub-finance/preparation/components/finance-account-actions.vue",
+        "sub-finance/preparation/components/finance-inline-master.vue",
+        "sub-finance/preparation/components/inventory-entry-mode-sheet.vue",
+        "sub-finance/preparation/components/inventory-preparation-header.vue",
+        "sub-finance/preparation/components/opening-item-fields.vue",
+        "sub-finance/preparation/components/opening-record-summary.vue",
+        "sub-finance/preparation/index.vue",
+        "sub-finance/preparation/inline-master.js",
+        "sub-finance/preparation/record-presentation.js",
+        "uni_modules/uview-ui/libs/luch-request/adapters/index.js",
+        "uni_modules/uview-ui/libs/luch-request/core/InterceptorManager.js",
+        "uni_modules/uview-ui/libs/luch-request/core/Request.js",
+        "uni_modules/uview-ui/libs/luch-request/core/buildFullPath.js",
+        "uni_modules/uview-ui/libs/luch-request/core/defaults.js",
+        "uni_modules/uview-ui/libs/luch-request/core/dispatchRequest.js",
+        "uni_modules/uview-ui/libs/luch-request/core/mergeConfig.js",
+        "uni_modules/uview-ui/libs/luch-request/core/settle.js",
+        "uni_modules/uview-ui/libs/luch-request/helpers/buildURL.js",
+        "uni_modules/uview-ui/libs/luch-request/helpers/combineURLs.js",
+        "uni_modules/uview-ui/libs/luch-request/helpers/isAbsoluteURL.js",
+        "uni_modules/uview-ui/libs/luch-request/utils.js",
+        "uni_modules/uview-ui/libs/luch-request/utils/clone.js"
+      ]
+    }
+  },
+  "sources": [
+    {
+      "path": "App.vue",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/api/auth.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/api/customer-report.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/api/customer.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/api/delivery-inventory.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/api/finance.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/api/helpers.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/api/index.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/api/line-vehicle.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/api/procurement.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/api/product.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/api/purchase-batch.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/api/purchase-plan.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/api/purchase-return.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/api/sales-return.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/api/sales.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/api/store.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/api/supplier.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/api/supply.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/api/task.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/api/todo.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/api/unit.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/api/warehouse.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/api/workforce.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/config/mock.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/constants/api.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/constants/error-codes.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/indexList/indexList.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/mixin/finance-editor.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/mixin/finance-page.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/mixin/layout-mixin.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/mixin/navigation-mixin.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/mock/customer-mock.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/request.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/selectors/customer-selectors.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/services/customer-service.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/styles/design-tokens.scss",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/styles/mixins.scss",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/utils/api-response.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/utils/auth.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/utils/common.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/utils/customer-status.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/utils/customer-sync.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/utils/date.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/utils/error-handler.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/utils/finance-admission.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/utils/finance-onboarding.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/utils/finance-submission.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/utils/format.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/utils/index.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/utils/master-data-return.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/utils/pagination.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/utils/product-create-permission.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/utils/product-create-policy.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/utils/retry.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/utils/storage.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/utils/store-create-form.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/utils/store-gate.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/utils/unit-conversion.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "common/utils/validate.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "components/common/LucideIcon.vue",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/agents/pitfalls.md",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/advance-preparation-20261023/implementation/advance-http-bridge-client.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/customer-refund-preparation-20261023/implementation/http-bridge-client.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/deferred-preparation-20261023/implementation/capture-deferred-components-20261026.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/deferred-preparation-20261023/implementation/check-deferred-http-protocol-20261026.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/deferred-preparation-20261023/implementation/deferred-component-fixture-20261026.adapter.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/deferred-preparation-20261023/implementation/deferred-component-fixture-20261026.assertions.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/deferred-preparation-20261023/implementation/deferred-component-fixture-20261026.entry.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/deferred-preparation-20261023/implementation/deferred-component-fixture-20261026.interactions.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/deferred-preparation-20261023/implementation/deferred-component-fixture-20261026.loader.cjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/deferred-preparation-20261023/implementation/deferred-component-fixture-20261026.states.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/deferred-preparation-20261023/implementation/deferred-http-client-20261026.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/deferred-preparation-20261023/implementation/deferred-test-harness.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/deferred-preparation-20261023/template-review/review-states.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/expense-payable-preparation-20261023/implementation/expense-payable-http-client-20261026.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/expense-payable-preparation-20261023/implementation/expense-payable-http-contract-20261026.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/expense-payable-preparation-20261023/implementation/freeze-expense-payable-http-20261026.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/payable-preparation-20261023/component-fixture/js-loader.cjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/payable-preparation-20261023/implementation/component-fixture-browser-adapter-responsive-20261025.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/payable-preparation-20261023/implementation/component-fixture-sfc-loader-responsive-20261025.cjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/payable-preparation-20261023/implementation/current-http-freeze.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/payable-preparation-20261023/implementation/http-bridge-client.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/payable-preparation-20261023/implementation/http-bridge-client.test.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/payable-preparation-20261023/implementation/http-bridge-runtime.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/payable-preparation-20261023/implementation/http-bridge-runtime.test.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/reimbursement-preparation-20261023/implementation/freeze-reimbursement-http-20261026.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/reimbursement-preparation-20261023/implementation/reimbursement-http-client-20261026.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/reimbursement-preparation-20261023/implementation/reimbursement-http-contract-20261026.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/salary-preparation-20261023/implementation/freeze-salary-http-20261025.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/salary-preparation-20261023/implementation/salary-http-client-20261025.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/salary-preparation-20261023/implementation/salary-http-contract-20261025.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/supplier-refund-preparation-20261023/implementation/supplier-refund-http-bridge-client.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/supplier-refund-preparation-20261023/implementation/supplier-refund-http-bridge-client.test.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "docs/ui-previews/supplier-refund-preparation-20261023/implementation/supplier-refund-http-contract-20261025.md",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "node_modules/pinyin-pro/dist/index.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "scripts/finance-deferred-fields.test.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "scripts/finance-deferred-preparation.test.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "scripts/finance-deferred-records.test.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "scripts/finance-deferred-rules.test.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "scripts/finance-expense-payable-http-protocol.test.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "scripts/finance-preparation-save.test.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "scripts/finance-reimbursement-http-protocol.test.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "scripts/finance-salary-http-protocol.test.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "scripts/payable-preparation-fixture.evidence.mjs",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "store/index.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "sub-finance/components/page-state.vue",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "sub-finance/finance.scss",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "sub-finance/opening/master-create.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "sub-finance/preparation/account-workspace.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "sub-finance/preparation/action-policy.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "sub-finance/preparation/components/finance-account-actions.vue",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "sub-finance/preparation/components/finance-inline-master.vue",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "sub-finance/preparation/components/inventory-entry-mode-sheet.vue",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "sub-finance/preparation/components/inventory-preparation-header.vue",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "sub-finance/preparation/components/opening-item-fields.vue",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "sub-finance/preparation/components/opening-record-summary.vue",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "sub-finance/preparation/index.vue",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "sub-finance/preparation/inline-master.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "sub-finance/preparation/record-presentation.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "sub-master-data/components/create-modal/create-customer-modal.vue",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "sub-master-data/customer/list/index.vue",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "uni_modules/uview-ui/libs/luch-request/adapters/index.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "uni_modules/uview-ui/libs/luch-request/core/InterceptorManager.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "uni_modules/uview-ui/libs/luch-request/core/Request.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "uni_modules/uview-ui/libs/luch-request/core/buildFullPath.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "uni_modules/uview-ui/libs/luch-request/core/defaults.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "uni_modules/uview-ui/libs/luch-request/core/dispatchRequest.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "uni_modules/uview-ui/libs/luch-request/core/mergeConfig.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "uni_modules/uview-ui/libs/luch-request/core/settle.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "uni_modules/uview-ui/libs/luch-request/helpers/buildURL.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "uni_modules/uview-ui/libs/luch-request/helpers/combineURLs.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "uni_modules/uview-ui/libs/luch-request/helpers/isAbsoluteURL.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "uni_modules/uview-ui/libs/luch-request/utils.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "uni_modules/uview-ui/libs/luch-request/utils/clone.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ]
+}

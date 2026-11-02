@@ -13,6 +13,19 @@ class SupplierLogic extends BaseLogic
 {
     public static function add(array $params): array|false
     {
+        if (!array_key_exists('idempotency_key', $params)) { return self::createRecord($params); }
+        self::clearError();
+        try {
+            return MasterCreationReceipt::run('supplier', $params, static function () use ($params): array {
+                $result = self::createRecord($params);
+                if ($result === false) { throw new \DomainException(self::getError()); }
+                return $result;
+            });
+        } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
+    }
+
+    private static function createRecord(array $params): array|false
+    {
         if (self::tenantId() <= 0) {
             self::setError('供应商租户上下文缺失，请重新登录');
             return false;

@@ -45,6 +45,8 @@ Route::group('', function () {
     Route::get('finance/opening/guide', 'jxc.FinanceSetup/openingGuide');
     Route::post('finance/opening/start', 'jxc.FinanceSetup/startOpening');
     Route::post('finance/opening/guide/card/save', 'jxc.FinanceSetup/saveGuideCard');
+    Route::post('finance/opening/guide/evidence/save', 'jxc.FinanceSetup/saveGuideEvidence');
+    Route::get('master-data/creation/result', 'jxc.MasterCreation/result');
     Route::post('finance/preparation/save', 'jxc.FinanceSetup/savePreparation');
     Route::get('finance/accounts', 'jxc.FinanceSetup/accounts');
     Route::post('finance/accounts/save', 'jxc.FinanceSetup/saveAccount');

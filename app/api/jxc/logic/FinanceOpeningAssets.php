@@ -188,10 +188,22 @@ final class FinanceOpeningAssets
 
     public static function payableBlockers(array $items): array
     {
-        $obligations = []; $totals = []; $errors = [];
+        $obligations = []; $byId = []; $totals = []; $errors = [];
         foreach ($items as $item) {
-            if ($item['category'] === 'expense_payable') { $obligations[$item['subject_id'] . ':' . $item['source_reference']] = $item['amount']; }
+            if ($item['category'] === 'expense_payable') {
+                $obligations[$item['subject_id'] . ':' . $item['source_reference']] = $item['amount'];
+                $byId[(int)$item['id']] = $item;
+            }
+        }
+        foreach ($items as $item) {
             if ($item['category'] === 'deferred' && ($item['details']['unpaid_amount'] ?? '') !== '' && bccomp($item['details']['unpaid_amount'], '0', 2) > 0) {
+                $linkedId = (int)($item['details']['payable_item_id'] ?? 0);
+                $linked = $byId[$linkedId] ?? null;
+                if ($linkedId <= 0) { $errors[] = '请选择同一收款方的真实费用待付款资料，文字来源尚未核实'; }
+                if ($linkedId > 0 && (!$linked || (int)$linked['subject_id'] !== (int)$item['subject_id']
+                    || $linked['source_reference'] !== ($item['details']['payable_reference'] ?? ''))) {
+                    $errors[] = '待摊关联的费用应付来源已变化，请重新核对真实来源';
+                }
                 $key = $item['subject_id'] . ':' . ($item['details']['payable_reference'] ?? '');
                 $totals[$key] = bcadd($totals[$key] ?? '0.00', $item['details']['unpaid_amount'], 2);
             }

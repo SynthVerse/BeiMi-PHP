@@ -23,7 +23,8 @@ final class WorkforceEmployeeRequestContractTest extends TestCase
         self::assertCount(1, $database->transactions, $response['msg'] ?? '没有进入员工持久化边界');
         self::assertNull($database->transactions[0]['mobile']);
         self::assertSame('历史员工', $database->transactions[0]['name']);
-        self::assertSame('historical-employee-request', $database->transactions[0]['creationKey']);
+        self::assertSame('historical-employee-request', $database->receiptScopes[0]['idempotency_key']);
+        self::assertSame(64, strlen($database->transactions[0]['creationKey']));
         self::assertSame([], $database->transactions[0]['permissionKeys']);
         self::assertSame(0, $database->transactions[0]['bindUserId']);
     }
@@ -74,6 +75,7 @@ final class WorkforceEmployeeRequestContractTest extends TestCase
     {
         $request = (new \app\Request())->withServer(['REQUEST_METHOD' => 'POST'])->withPost(json_decode(json_encode($payload, JSON_THROW_ON_ERROR | JSON_PRESERVE_ZERO_FRACTION), true, 512, JSON_THROW_ON_ERROR));
         $request->tenantId = 4;
+        $request->adminId = 5;
         $request->adminInfo = ['root' => 1, 'tenant_id' => 4, 'admin_id' => 5];
         $app = \think\Container::getInstance();
         $app->instance('request', $request);
@@ -88,10 +90,17 @@ final class WorkforceEmployeeRequestContractTest extends TestCase
 final class WorkforceEmployeeRequestDatabaseBoundary
 {
     public array $transactions = [];
+    public array $receiptScopes = [];
 
-    public function transaction(Closure $action): void
+    public function transaction(Closure $action): mixed
     {
-        $this->transactions[] = (new ReflectionFunction($action))->getStaticVariables();
+        $variables = (new ReflectionFunction($action))->getStaticVariables();
+        if (isset($variables['create'], $variables['scope'])) {
+            // 本测试仅验证Request类型/载荷传递；真实回执事务另由工作流测试覆盖。
+            $this->receiptScopes[] = $variables['scope'];
+            return $variables['create']();
+        }
+        $this->transactions[] = $variables;
         throw new RuntimeException('TEST: stop before database persistence');
     }
 }

@@ -19,6 +19,19 @@ class CustomerLogic extends BaseLogic
 
     public static function add(array $params): array|false
     {
+        if (!array_key_exists('idempotency_key', $params)) { return self::createRecord($params); }
+        self::clearError();
+        try {
+            return MasterCreationReceipt::run('customer', $params, static function () use ($params): array {
+                $result = self::createRecord($params);
+                if ($result === false) { throw new \DomainException(self::getError()); }
+                return $result;
+            });
+        } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
+    }
+
+    private static function createRecord(array $params): array|false
+    {
         $tenantId = self::tenantId();
         if ($tenantId <= 0) {
             self::setError('租户无效');
@@ -770,6 +783,7 @@ class CustomerLogic extends BaseLogic
 
         return [
             'id' => $id,
+            'tenant_id' => $tenantId,
             'customer_name' => (string)($item['customer_name'] ?? ''),
             'contact' => (string)($item['contact'] ?? ''),
             'phone' => (string)($item['phone'] ?? ''),

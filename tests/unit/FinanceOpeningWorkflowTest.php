@@ -209,7 +209,7 @@ final class FinanceOpeningWorkflowTest extends TestCase
         self::assertSame('unknown', $result['categories'][1]['review']['state']);
     }
 
-    public function test_removing_saved_opening_clears_only_its_editor_and_allows_summary_replacement(): void
+    public function test_removing_saved_opening_preserves_its_editor_until_explicit_discard_or_save_as_new(): void
     {
         $customer = $this->createCustomer('误录后核对客户');
         $first = $this->action('item', array_merge($this->item('receivable', $customer, '20'), ['source_reference' => '旧单一']));
@@ -222,12 +222,91 @@ final class FinanceOpeningWorkflowTest extends TestCase
         self::assertFalse(FinanceSetupLogic::openingAction('remove', $this->command($version - 1) + ['id' => $firstId]));
         self::assertCount(2, FinanceSetupLogic::opening()['items']);
         $removed = $this->action('remove', ['id' => $firstId]);
-        self::assertArrayNotHasKey('receivable', $removed['editor_drafts']);
+        self::assertSame($firstId, $removed['editor_drafts']['receivable']['form']['id']);
+        self::assertSame($firstId, $removed['editor_drafts']['receivable']['base_item']['id']);
         self::assertArrayHasKey('account', $removed['editor_drafts']);
         $this->action('remove', ['id' => $secondId]);
         $summary = $this->action('item', ['entry_contract' => 2, 'category' => 'receivable', 'subject_id' => $customer, 'amount' => '50', 'source_mode' => 'summary']);
         self::assertCount(1, $summary['items']);
         self::assertSame('50.00', $summary['categories'][1]['total']);
+    }
+
+    public function test_editor_retains_server_baseline_across_other_actor_changes_and_explicitly_rebases(): void
+    {
+        $customer = $this->createCustomer('恢复基线客户');
+        $first = $this->action('item', ['entry_contract' => 2, 'category' => 'customer_refund',
+            'subject_id' => $customer, 'amount' => '20', 'details' => ['origin_reference' => '原凭据']]);
+        $id = $first['items'][0]['id'];
+        $baseVersion = $first['version'];
+        $draft = $this->action('editor', ['category' => 'customer_refund', 'form' => ['id' => $id,
+            'entry_contract' => 2, 'subject_id' => $customer, 'amount' => '25', 'details' => ['origin_reference' => '我修改的凭据']]]);
+        self::assertSame($baseVersion, $draft['editor_drafts']['customer_refund']['base_version']);
+        self::assertSame('20.00', $draft['editor_drafts']['customer_refund']['base_item']['amount']);
+        request()->adminId = 992649;
+        request()->userId = 992649;
+        $latest = $this->action('item', ['id' => $id, 'entry_contract' => 2, 'category' => 'customer_refund',
+            'subject_id' => $customer, 'amount' => '30', 'details' => ['origin_reference' => '同事新凭据']]);
+        $this->prepareCustomerReportRequestContext();
+        $restored = FinanceSetupLogic::opening();
+        self::assertSame('25', $restored['editor_drafts']['customer_refund']['form']['amount']);
+        self::assertSame('20.00', $restored['editor_drafts']['customer_refund']['base_item']['amount']);
+        self::assertSame('30.00', $restored['items'][0]['amount']);
+        $retained = $this->action('editor', ['category' => 'customer_refund', 'form' => $restored['editor_drafts']['customer_refund']['form']]);
+        self::assertSame($baseVersion, $retained['editor_drafts']['customer_refund']['base_version']);
+        $rebased = $this->action('editor', ['category' => 'customer_refund', 'rebase_version' => $retained['version'],
+            'form' => $restored['editor_drafts']['customer_refund']['form']]);
+        self::assertSame('30.00', $rebased['editor_drafts']['customer_refund']['base_item']['amount']);
+        self::assertSame($retained['version'], $rebased['editor_drafts']['customer_refund']['base_version']);
+        self::assertFalse(FinanceSetupLogic::openingAction('editor', $this->command($rebased['version']) +
+            ['category' => 'customer_refund', 'rebase_version' => $baseVersion, 'form' => $restored['editor_drafts']['customer_refund']['form']]));
+    }
+
+    public function test_recreated_payable_with_same_reference_cannot_replace_a_deleted_link_identity(): void
+    {
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '真实来源身份收款方']);
+        $data = $this->item('expense_payable', $vendor, '300');
+        $payable = $this->action('item', $data);
+        $id = $payable['items'][0]['id'];
+        $this->action('item', ['entry_contract' => 2, 'category' => 'deferred', 'subject_id' => $vendor, 'amount' => '600',
+            'details' => ['expense_name' => '场租', 'remaining_only' => 'confirmed', 'unpaid_amount' => '300',
+                'payable_item_id' => (string)$id, 'service_start' => '2026-09', 'service_end' => '2026-10',
+                'schedule' => [['month' => '2026-09', 'amount' => '300'], ['month' => '2026-10', 'amount' => '300']]]]);
+        $this->action('remove', ['id' => $id]);
+        $recreated = $this->action('item', $data);
+        self::assertNotSame([], FinanceOpeningAssets::payableBlockers($recreated['items']));
+        $deferred = array_values(array_filter($recreated['items'], static fn(array $item): bool => $item['category'] === 'deferred'))[0];
+        self::assertSame((string)$id, $deferred['details']['payable_item_id']);
+    }
+
+    public function test_deferred_update_excludes_old_self_and_over_allocation_saves_but_blocks_review(): void
+    {
+        $started = FinanceSetupLogic::startOpening($this->command(0) + ['mode' => 'carryover', 'activation_date' => '2026-09-01']);
+        self::assertNotFalse($started, FinanceSetupLogic::getError());
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '共用来源收款方']);
+        $payable = $this->action('item', ['entry_contract' => 2, 'category' => 'expense_payable', 'subject_id' => $vendor,
+            'amount' => '300', 'details' => ['origin_reference' => '已核实费用待付']]);
+        $payableId = $payable['items'][0]['id'];
+        $a = ['entry_contract' => 2, 'category' => 'deferred', 'subject_id' => $vendor, 'amount' => '400', 'source_reference' => '分月A',
+            'details' => ['expense_name' => '场租A', 'origin_reference' => '原服务A', 'remaining_only' => 'confirmed',
+                'unpaid_amount' => '200', 'payable_item_id' => (string)$payableId, 'service_start' => '2026-09', 'service_end' => '2026-10',
+                'schedule' => [['month' => '2026-09', 'amount' => '200'], ['month' => '2026-10', 'amount' => '200']]]];
+        $first = $this->action('item', $a);
+        $a['id'] = $first['items'][1]['id'];
+        $b = $a; unset($b['id']); $b['source_reference'] = '分月B'; $b['details']['unpaid_amount'] = '100';
+        $both = $this->action('item', $b);
+        self::assertSame([], FinanceOpeningAssets::payableBlockers($both['items']));
+        $unchanged = $this->action('item', $a);
+        self::assertSame([], FinanceOpeningAssets::payableBlockers($unchanged['items']));
+        $a['details']['unpaid_amount'] = '220';
+        $over = $this->action('item', $a);
+        self::assertNotSame([], FinanceOpeningAssets::payableBlockers($over['items']));
+        self::assertFalse(FinanceSetupLogic::saveGuideCard($this->command($over['version']) + ['category' => 'deferred', 'choice' => 'complete']));
+        self::assertStringContainsString('足额费用应付', FinanceSetupLogic::getError());
+        self::assertSame(0, Db::name('finance_opening_source')->where('tenant_id', self::TENANT_ID)->count());
+        $a['details']['unpaid_amount'] = '200';
+        $released = $this->action('item', $a);
+        self::assertSame([], FinanceOpeningAssets::payableBlockers($released['items']));
+        self::assertCount(3, $released['items']);
     }
 
     public function test_opening_removal_is_rejected_without_permission_and_after_submission(): void
@@ -612,7 +691,11 @@ final class FinanceOpeningWorkflowTest extends TestCase
         $data['details']['schedule'] = [['month' => '2026-09', 'amount' => '200.01'], ['month' => '2026-10', 'amount' => '200.00'], ['month' => '2026-11', 'amount' => '199.99']];
         $this->action('item', $data);
         self::assertStringContainsString('足额费用应付', implode('；', FinanceSetupLogic::opening()['blockers']));
-        $this->action('item', array_merge($this->item('expense_payable', $supplier, '300'), ['source_reference' => '原租金未付', 'details' => ['origin_reference' => '原租赁费用']]));
+        $payable = $this->action('item', array_merge($this->item('expense_payable', $supplier, '300'), ['source_reference' => '原租金未付', 'details' => ['origin_reference' => '原租赁费用']]));
+        self::assertStringContainsString('真实费用待付款', implode('；', $payable['blockers']));
+        $source = array_values(array_filter($payable['items'], static fn(array $row): bool => $row['category'] === 'expense_payable'))[0];
+        $data['details']['payable_item_id'] = (string)$source['id'];
+        $this->action('item', $data);
         foreach (FinanceOpeningService::CATEGORIES as $key => $title) { $this->action('review', ['category' => $key, 'state' => in_array($key, ['deferred', 'expense_payable'], true) ? 'complete' : 'none', 'evidence' => '全部核实']); }
         $this->action('submit'); Config::set(['activation_tenant_ids' => [self::TENANT_ID]], 'finance');
         $active = $this->action('confirm');

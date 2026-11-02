@@ -11,6 +11,7 @@ class FinanceSetupController extends BaseJxcController
     public function openingGuide() { return $this->respond(FinanceSetupLogic::openingGuide()); }
     public function startOpening() { return $this->respond(FinanceSetupLogic::startOpening($this->request->post())); }
     public function saveGuideCard() { return $this->respond(FinanceSetupLogic::saveGuideCard($this->request->post())); }
+    public function saveGuideEvidence() { return $this->respond(FinanceSetupLogic::saveGuideEvidence($this->request->post())); }
     public function accounts() { return $this->respond(FinanceSetupLogic::accounts()); }
     public function savePreparation() { return $this->respond(FinanceSetupLogic::savePreparation($this->request->post())); }
     public function saveAccount() { return $this->respond(FinanceSetupLogic::saveAccount($this->request->post())); }

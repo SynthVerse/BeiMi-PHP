@@ -172,10 +172,12 @@ final class FinanceOpeningGuide
             $state = match ($review['state']) { 'none' => 'none', 'complete' => 'complete', 'unresolved' => 'pending_supplement', default => $choice === 'has' ? 'pending_input' : ($rows ? 'pending_review' : 'pending_choice') };
             $blockerDetails = array_values(array_filter($snapshot['blocker_details'] ?? [], static fn(array $row): bool => ($row['category'] ?? null) === $key));
             $blockers = array_column($blockerDetails, 'message');
-            // 旧基线失效时即使曾核对过，也必须再次核对该卡。
-            if (in_array($state, ['complete', 'none'], true) && $blockers) { $state = 'pending_review'; }
+            // 未完成稿阻止新核清与最终提交，但不撤销已有核清事实；真实基线失效仍须重核。
+            $reviewBlockers = array_filter($blockerDetails, static fn(array $row): bool => ($row['code'] ?? null) !== 'opening_editor_unfinished');
+            if (in_array($state, ['complete', 'none'], true) && $reviewBlockers) { $state = 'pending_review'; }
             $cards[] = ['key' => $key, 'category' => $key, 'title' => $title, 'description' => $description,
                 'state' => $view ? $state : 'restricted', 'choice' => $view ? $choice : null,
+                'declared_has' => $view && (bool)($review['declared_has'] ?? false),
                 'candidate_count' => $view ? count($rows) : null, 'candidates' => $view ? $rows : [],
                 'count' => $view ? (int)$category['count'] : null, 'can_view' => $view, 'can_edit' => $edit,
                 'evidence' => $view ? ($review['evidence'] ?? '') : '',

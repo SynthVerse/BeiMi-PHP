@@ -2,6 +2,81 @@
 
 按根因去重。每条记录必须指向实际防线；仅有“不要这样做”的提醒不算已防护。
 
+## PIT-0106：确认没有只检查已保存资料，遗漏门店未完成稿
+
+日期：2026-10-24（Asia/Shanghai）
+
+### 报告来源
+
+- 生成原因：工作流要求。
+- 主工作流：Matt Pocock。
+- 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`Matt Pocock / code-review`、`用户级自定义 / prevent-repeat-pitfalls`、`Matt Pocock / diagnosing-bugs`（本次定向修订与自动防护调用）。
+- 说明：协调验收指出 U04 后，经真实服务与 HTTP 红例确认，再补事务内门槛；完成防护后返回必要 PHP 定向交付。
+
+- 状态：已防护（当前相关190项／2127断言通过，含真实HTTP19项／471断言／125请求；独立两轴确定遗留均为0；全套导出限制单列）。
+- 首次发生／最近发生：2026-10-24；复发次数：0。
+- 适用范围：接续模式 `saveGuideCard(choice=none)` 及共用该方法的类别核对入口。
+- 相关问题：PIT-0104 是不同入口未共用生命周期；本项入口已经共用，但同一门槛遗漏未完成稿这一状态来源，根因不同。PIT-0053 是零余额推导遗漏业务组成，不合并。
+
+### 触发场景与根因
+
+同事项已有本人、他人或另一认证身份的门店未完成稿，候选和已保存行仍为空。旧 `none` 门槛只检查候选、记录与存在声明，未检查 `unfinished_editor_counts`，会写入没有的成功事实并推进位置。事后 blocker 降回待核对不能代替请求时拒绝。
+
+### 正确做法与防线
+
+- 在现有门店事务锁内、任何结论／位置／版本／回执写入前，用快照跨全部操作者的同事项稿计数拒绝 `none`；异事项和真正空态不串拦。
+- 只返回通用未完成输入提示，不返回他人原稿、金额或身份。普通放弃不替他人清稿。
+- 保持 `mutate` 既有当前权限检查和原成功回执重放顺序；新稿不能抹掉原成功事实，新键必须按当前门槛校验。
+- `FinanceOpeningGuideWorkflowTest::test_none_rejects_same_category_drafts_without_mutating_any_preparation_state`、`test_none_accepts_a_real_empty_category_without_interfering_with_other_category_drafts` 覆盖两个公开入口、拒绝无副作用与空态。
+- `PreparationHttpWorkflowTest::test_none_http_uses_all_same_category_drafts_and_preserves_state`、`test_none_success_replay_keeps_original_fact_and_current_permission_after_another_actor_drafts` 覆盖真实鉴权、不同身份同数字 ID、脱敏、原键重放与撤权。
+- 修复前 13 项／98 断言、9 项失败；修复后同一 13 项／152 断言通过，原 testing guard 未改，只使用既有隔离库和合成数据。
+
+### 发生记录与验证边界
+
+| 日期 | 任务 | 原防线为何未阻止 |
+|---|---|---|
+| 2026-10-24 | `hb-20261024T093909-backend-none-draft-guard` | 既有测试覆盖 complete 对未完成稿的阻挡，未覆盖 none 对跨操作者稿的请求时拒绝。 |
+
+前端组合与全套导出限制仍单列，不能把本条定向绿例扩大为全项目验收通过。
+
+## PIT-0105：核清关联时用来源文字替代已保存的真实记录 ID
+
+日期：2026-10-24（Asia/Shanghai）
+
+### 报告来源
+
+- 生成原因：工作流要求。
+- 主工作流：Matt Pocock。
+- 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`Matt Pocock / code-review`（自动调用）、`用户级自定义 / prevent-repeat-pitfalls`、`Matt Pocock / diagnosing-bugs`（自动防护流程调用）。
+- 说明：必要 PHP 配套阶段以公开保存、移除、再建入口稳定复现后补回归；已有精确失败接缝，未另行扩大排障。完成防护后返回真实 HTTP 和隔离回归验证。
+
+- 状态：已防护（本地最终相关回归 177 项／1975 断言通过，含 12 项真实 HTTP；独立双轴确定遗留 0。全套另有导出临时文件错误，未记全过）。
+- 首次发生／最近发生：2026-10-24；复发次数：0。
+- 适用范围：`FinanceOpeningAssets::payableBlockers()`、分月费用关联费用待付款。
+- 相关问题：PIT-0103 是删除后写入悬空账户引用；本项是已保存来源 ID 在后继核清中被弱化为文字，校验阶段与根因不同。
+
+### 触发场景与根因
+
+分月费用已保存真实费用待付款 A 的 `payable_item_id`。A 被删除后，新记录 B 使用同收款方和相同 `source_reference`；旧核清只按收款方与文字汇总额度，遗漏 ID，导致指向 A 的旧关联重新有效。
+
+### 错误做法与正确做法
+
+不得以相同文字、名称或足额余额替换明确记录身份。正 ID 必须同时匹配当前集合内的真实 ID、费用应付类别、收款方和来源标识；额度用同一最新集合合计。没有提供 ID 的不完整文字资料仍可保存，但正未付金额必须明确关联真实来源 ID 才可核清，即使文字恰好匹配现有足额来源也不能代替选择。
+
+### 防线及验证边界
+
+- 自动化防线：`FinanceOpeningWorkflowTest::test_recreated_payable_with_same_reference_cannot_replace_a_deleted_link_identity`。修复前 `payableBlockers` 错误返回空数组；修复后阻挡旧 A ID，且保留原关联资料。
+- 独立 Spec 复核补强：`PreparationHttpWorkflowTest::test_deferred_matching_text_source_stays_incomplete_until_real_id_is_selected`。真实 HTTP 红例证明纯文字匹配足额来源仍错误核清；新约束要求明确正 ID，保留不完整保存能力。
+- 原逐月计划回归夹具同步为先保留文字未核实、再明确选择真实费用应付 ID；不以保留旧文字核清行为或兼容分支让旧测试通过。
+- `payableBlockers` 先按当前真实费用应付建立 ID 索引，再核对已声明 ID；没有扩表、自动改写其他分月记录或重复生成债务。
+- 测试限定既有隔离库。服务回归不能替代前端恢复、共享部署或真实客户端验证。
+
+### 发生记录
+
+| 日期 | 任务 | 原防线为何未阻止 |
+|---|---|---|
+| 2026-10-24 | `preparation-development-20261024-01:customer_refund:phase-a` | 保存时验证了正 ID，后继核清只按文字聚合；原测试只覆盖删除后无替代来源。 |
+
 ## PIT-0104：期初的独立核对与日期入口绕过准备状态生命周期
 
 日期：2026-10-19（Asia/Shanghai）
@@ -346,9 +421,13 @@ FinanceOpeningWorkflowTest 的 zero_first_physical_inventory 红测缺少阻断�
 
 复用 removeOpeningItem 的权限、版本、draft状态和审计；只清除同类别且 id 匹配的编辑，不清除其他未完成输入。新版按钮明确区别于放弃未完成输入。相关待摊义务仍保留并由关联检查阻断。
 
+2026-10-24 当前模板契约调整：用户要求删除后保留未保存原稿、原记录 ID 和冲突证据，只能明确放弃或另存为新记录。上述“自动清除匹配编辑”的旧处置已由新契约取代，不再作为当前要求。服务端暂存新增服务器确认的 `base_item`／`base_version`；重复暂存保留原基线，只有 `rebase_version` 显式匹配当前版本才重建。移除保留编辑，旧 ID 不能保存成记录；明确 `clear` 或本人成功保存才清除当前稿，未解决稿继续阻挡核清。不得把保留原稿理解为自动复活已删除记录。
+
 ### 防线及已验证的事实
 
 owner-review-removal-back-red.log 为 receivable 编辑仍存在；owner-review-note-removal-back-green.log 中2项25断言通过；新增边界用例另验证越权、已提交、待摊关联及汇总替换。 自动化防线位于 tests/unit/FinanceOpeningWorkflowTest.php；仅隔离测试数据库，未执行生产写入。
+
+当前防线更新为 `test_removing_saved_opening_preserves_its_editor_until_explicit_discard_or_save_as_new`、`test_editor_retains_server_baseline_across_other_actor_changes_and_explicitly_rebases` 及真实 HTTP 的 `test_remote_change_and_delete_preserve_original_draft_and_never_resurrect_deleted_item`。旧日志仅代表当时契约，不能当作当前恢复流程已验证。
 
 ### 发生记录
 
@@ -892,7 +971,7 @@ printData 先持久化 pending 日志；客户端仅在收到响应后保存 pri
 
 - 生成原因：工作流要求
 - 主工作流：Matt Pocock
-- 实际使用的 Skill：`Matt Pocock / diagnosing-bugs`、`Matt Pocock / tdd`、`用户级自定义 / prevent-repeat-pitfalls`（自动调用）。
+- 实际使用的 Skill：`Matt Pocock / diagnosing-bugs`、`Matt Pocock / tdd`、`用户级自定义 / prevent-repeat-pitfalls`、`Matt Pocock / code-review`（自动调用）。
 - 说明：微信小程序期初对象列表请求收到整份期初快照；通过路由层红—绿回归确认并防止同类静态前缀路由再次被较短规则抢占。
 
 - 状态：已防护
@@ -3499,11 +3578,21 @@ pending，权威明细和金额却已经发生了副作用。代码缺少“草�
 
 ## PIT-0027：跨版本业务计数降级为前端本机缓存
 
+日期：2026-11-02（保留2026-08-19原始记录及2026-10-25资格投影记录）
+
+### 报告来源
+
+- 生成原因：工作流要求。
+- 主工作流：Matt Pocock。
+- 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`用户级自定义 / prevent-repeat-pitfalls`、`Matt Pocock / diagnosing-bugs`、`Matt Pocock / code-review`（2026-10-25自动防护流程）。
+- 说明：本轮更新“人工租户字段掩盖真实响应”的相同防线失效模式，不把客户资格投影修复当作原打印问题整体完成。
+- 2026-11-02增补来源：`Matt Pocock / ask-matt`（用户指定）、`Matt Pocock / diagnosing-bugs`、`Matt Pocock / tdd`、`用户级自定义 / prevent-repeat-pitfalls`、`Matt Pocock / code-review`（工作流调用）；复用原记录的真实响应投影遗漏分支，完成P15后返回剩余页面验收。
+
 - 状态：防护中
 - 首次发生：2026-08-19
-- 最近发生：2026-08-19
-- 复发次数：0
-- 适用范围：客户销售单打印身份、跨版本累计计数与跨设备操作
+- 最近发生：2026-11-02
+- 复发次数：2
+- 适用范围：客户销售单打印身份、跨版本累计计数与跨设备操作；客户建档返回的租户资格投影；记账准备卡片的未处理事项声明投影
 - 相关问题：PIT-0001、PIT-0024
 
 ### 触发场景
@@ -3542,6 +3631,25 @@ pending，权威明细和金额却已经发生了副作用。代码缺少“草�
 | 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
 |---|---|---|---|
 | 2026-08-19 | BeiMi-ERP#11 | V1 打印后编辑成 V2 或换设备时重打次数归零 | 既有输出测试只检查某一次纸票标签，没有覆盖同一销售单跨版本、跨设备的权威累计；前端契约使用人工 tenant fixture 掩盖了真实详情响应。 |
+| 2026-10-25 | takeover-20261025-customer-refund-frontend-01 | 客户已建成功，但真实详情缺 tenant_id，原生资格检查拒绝回填 | 隔离前端夹具自行提供 tenant_id；既有HTTP只验证建档幂等，未把真实详情交给原生资格检查 |
+| 2026-11-02 | P15其他未处理事项逐页验收 | 声明有未处理事项后，真实review已有declared_has，但卡片漏字段，确认没有按钮仍可打开 | 既有防线未在真实HTTP回读上同时断言review与页面实际消费的card字段；服务端拒绝写入不能证明前端按钮已正确阻止 |
+
+### 2026-10-25资格投影复发与防线
+
+已验证根因：`CustomerLogic::formatItem()` 重建详情与建档结果时遗漏租户字段；真实原生 `finishOpeningCustomer()` 需要核对 `tenant_id`，合成夹具却自行补齐了该权威字段。首轮真实退款桥接在9次传输后稳定失败，固定诊断为资格“不可用”。不放宽前端校验，由后端返回已经过权限验证的当前 `$tenantId`，不用来源行中的不可信租户值。
+
+- 自动防线：`PreparationHttpWorkflowTest::test_customer_add_detail_and_creation_result_expose_current_tenant_without_cross_store_reads()`，实际 add／detail／结果回执的 ID 与租户一致，异店 detail 不可取、回执 unknown。与完整客户表单回归合计2项／63断言通过。
+- 接线防线：应退客户款 implementation 的真实HTTP client 装载原客户列表、完整建档弹窗、根页与字段 methods，直接使用真实 PHP 响应，不由适配器补租户字段。最终20/20项、100次传输通过，含原键查询、主客户资格及回填。
+- 边界：此客户投影分支已验证；原打印累计记录仍保持“防护中”，本轮未执行或重新宣称其打印机、跨设备及原生平台验收。
+
+### 2026-11-02未处理事项卡片投影复发与防线
+
+- 原任务锚点：P15真实HTTP验收在`excluded_declared_unresolved_cannot_none`失败；完成本次投影修复与防护后，继续P16至P18，不重做已完成页面。
+- 已验证根因：`FinanceOpeningGuide::cards()`重建卡片时漏掉实际`review.declared_has`。真实HTTP回读中`categoryInfo.review.declared_has`为`true`，页面消费的`currentCard.declared_has`却为`undefined`；`index.vue`依赖后者禁用确认没有按钮。修复仅投影已有布尔事实，并按查看权限屏蔽受限卡片，不改声明写入、接口或数据库结构。
+- 自动防线：`BeiMi-uniapp/docs/ui-previews/remaining-preparation-20261102/implementation/remaining-http-client.mjs`的固定P15检查，经真实Page→API→HTTP声明有未处理事项，再重新GET，同时断言`categoryInfo.review.declared_has === true`和`currentCard.declared_has === true`；直接尝试确认没有仍由真实服务端拒绝，回读保留原声明，未解决事项继续阻止完成。不在适配器补卡片字段，不用合成投影替代该公开接线。
+- 已验证事实：首轮真实HTTP保留6项通过、声明投影及随后未执行项失败的红证据；最小修复后固定8项核心及2项权限／租户补充通过，Standards与Spec两轴确定发现均为0。最终同源重验同时确认91张现有业务表及旧档案金额比较未变；新建档案业务金额为零，授权范围、schema、范围外对照和权限均恢复，自有HTTP已停止。
+- 证据：`../../../.scratch/p10-p18-acceptance-20261102/excluded/http-first-red.json`与`../../../.scratch/p10-p18-acceptance-20261102/excluded/http-result.json`。三张本机未安装的旧收付款表单独列于`missingLegacyTables`，不计作已执行；当前正式资金表已经实际比较。
+- 未验证边界：本次只确认P15投影分支；原打印累计分支仍保持本条“防护中”状态，不据此宣称打印机、跨设备或原生平台验收通过。
 
 ## PIT-0028：同一销售单身份在详情和批量入口各自选择来源
 
@@ -4256,3 +4364,301 @@ PHPUnit 启动保护只允许本机 3307 的 `beimi_test_*` 数据库，但退�
 | 日期 | 任务 | 原防线为何未阻止 |
 |---|---|---|
 | 2026-10-03 | 注销验收修复 | 静态 MAX 契约没有内容碰撞案例；首次内容编码未考虑 DECIMAL 的 HEX 语义，复审和小数红测捕获。 |
+
+## PIT-0107：前置核对失败后仍启动依赖执行
+
+日期：2026-10-25
+
+### 报告来源
+
+- 生成原因：工作流要求。
+- 主工作流：Matt Pocock。
+- 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`Matt Pocock / code-review`、`用户级自定义 / prevent-repeat-pitfalls`、`Matt Pocock / diagnosing-bugs`（自动防护流程）。
+- 说明：本条记录工具编排问题，不归因于业务API。
+
+- 状态：复发（防护中，尚无约束任意工具编排的自动化接缝）
+- 首次发生：2026-10-25
+- 最近发生：2026-10-27
+- 复发次数：1
+- 适用范围：来源冻结核对与真实隔离联合执行的依赖顺序
+- 相关问题：未找到相同控制流根因；与客户端wire别名断言分别记录。
+
+### 触发、根因与正确做法
+
+渲染来源使用file，运行来源使用path；临时核对器读取错误字段抛KeyError并退出1。后续工具编排仍继续await执行命令，忽略前一返回的exit_code。顺序await并不构成前置成功门禁。advance首尝试真实执行8次，1/15通过，不能改写成未执行或倒填后补核对为执行前证据。
+
+正确方式是前置独立调用、非零立即退出编排，确认通过后另发执行调用；显式接受受支持的file/path字段，其他schema失败关闭。保留首轮结果、退出码和新时点清理。
+
+### 防线与边界
+
+- 本轮已使用显式exit_code检查和独立调用；修正后88／10／24／46项来源匹配。本次08:51:10Z新清理证明scope／session0、锁释放、原64行不变。
+- 证据位于`.local/advance-source-binding-20261025`：attempt-01结果／退出码／cleanup、joint-sources-before.json；后者明示为首次执行后核对。真实KeyError、调用控制流和已执行结果直接支持根因，不再额外跑真实HTTP制造复现。
+- 仓库测试没有正确接缝约束代理任意工具编排；未用浅层单测声称自动防护，因此保持防护中。受控runner原子绑定核对与执行可作为后续建议，不在本次扩大driver/前端范围。
+- 原任务恢复位置：PHP与driver已停写。原作者修订并重新冻结后，第二次正式派发 `takeover-20261025-advance-joint-http-02` 已先独立完成来源及安全前置exit0，再单独执行真实联合；15项／67次请求／exit0，新的范围／会话／锁及进程清理均通过。首次失败证据继续保留。本条仍为防护中，不把本轮正确编排当作仓库自动门禁已建立。
+- 2026-10-27复发：新lease的冻结核对把同时属于runtime与related来源的测试夹具误当作禁止变化项，命令exit1；同一工具编排仍发起隐藏PHP启动。独立目录尚未建立，夹具在写基线时失败，未发布ready；最终结果文件也未能写入。随后独立核对进程0、scope／session0、锁释放、原64行与同实例配置保持，完整peer前后hash未保存，不宣称该项已验证。第二次启动改为独立调用，PowerShell设置`ErrorActionPreference=Stop`，先检查独立目录、精确冻结SHA和12+18实际来源再启动。上述修正已实际执行，但没有把人工正确编排当成自动防线；受控runner仍是后续建议，本服务保留期间不扩写运行源码。
+- 本次证据：`.local/final-runtime-backend-20261026/service-attempt-02-start-01-failure-observation.json`、`service-attempt-02-start-01-processes-after.json`、`service-attempt-02-start-01-scope-after.json`、`service-attempt-02-start-02-launch.json`及两轮stdout／stderr。恢复原任务位置：attempt-02已prepared，继续按精确就绪条件等待，不重跑业务HTTP。
+
+### 发生记录
+
+| 日期 | 任务 | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-10-25 | takeover-20261025-advance-joint-http-01 | 来源前置失败仍启动 | 数据库范围／协议guard生效，但来源校验在外部，非零退出码未门控后继调用 |
+| 2026-10-27 | takeover-20261027-native-lease-02 | 冻结核对失败后启动，缺少目录导致夹具退出 | 原防线仍是外部编排纪律，顺序await未检查非零；已独立清理并在重试命令内增加强制前置检查，自动runner未建立 |
+
+
+## PIT-0108：来源身份宽松整数转换把损坏快照判为可信
+
+日期：2026-10-25
+
+### 报告来源
+
+- 生成原因：自动防护工作流要求。
+- 主工作流：Matt Pocock。
+- 实际使用的 Skill：`Matt Pocock / implement`、`Matt Pocock / tdd`、`Matt Pocock / code-review`、`用户级自定义 / prevent-repeat-pitfalls`、`Matt Pocock / diagnosing-bugs`。
+- 说明：在供应商退款必要PHP实现中，以真实HTTP红绿证据确认相邻来源投影的类型误判并加固共用校验。
+
+- 状态：已防护
+- 首次发生／最近发生：2026-10-25
+- 复发次数：0
+- 适用范围：FinanceOpeningService的advance／supplier_refund来源投影及门店稿基线
+- 相关问题：PIT-0105的来源文字替代真实ID发生在业务关联门槛；本条是已选择真实来源后的数值类型强转，根因不同。
+
+### 触发、根因与正确做法
+
+真实来源存在时，将冻结source_snapshot.subject_id或id改成“原IDjunk”，新鲜读取仍被判为linked。原比较先执行(int)，尾随字符被丢弃，损坏值与当前记录意外相等；既有测试只覆盖租户矛盾，未覆盖类型损坏。
+
+共用sourceBindingId先检查正整数或规范十进制字符串及JavaScript安全整数上限，再比较租户、明细、类别、主体和人工reference。任何缺失或矛盾为nullunknown，不以宽松强转制造可信关系；数据库规范数字字符串可读取，但输出ID始终为number。
+
+### 自动防线及验证
+
+- tests/unit/PreparationHttpWorkflowTest.php的test_source_binding_confirmed_projection_and_fault_injected_identity_guards，按advance／supplier_refund参数化，真实确认生成来源，再注入tenant/category/subject/reference缺失或矛盾、ID尾随字符等损坏。
+- 门店稿base_item过时false和损坏来源也必须经新鲜GET派生为true或null，原form、base_version、reviews和confirmed_snapshot保持。
+- .local/supplier-refund-source-binding-20261025/backend-red.log记录原advance读取将损坏快照误报linked的失败；backend-green.log为5例／629断言通过，backend-http-regression.log为36例／2300断言通过，后者已包含专项，不相加。
+- 独立Standards／Spec只读复核无剩余确定问题；复核人员没有代跑测试。Codegraph最终同步证据随本阶段机器交接保存。
+- 原任务恢复位置：完成本阶段必要PHP交接并停写，等待前端冻结及协调正式联合派发，不执行变化中的前端客户端。
+
+### 发生记录
+
+| 日期 | 任务 | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-10-25 | takeover-20261025-supplier-refund-source-binding-php-01 | 冻结ID尾随字符仍返回linked | 关系匹配前先强转整数，既有用例缺少类型损坏边界 |
+
+
+## PIT-0109：代理只扫描压缩前文本时漏掉响应凭据
+
+- 状态：已防护
+- 首次发生：2026-10-26
+- 最近发生：2026-10-26
+- 复发次数：0
+- 适用范围：最终原生验收的本机隔离HTTP代理与同类响应凭据过滤
+- 相关问题：无
+
+### 触发场景
+
+上游把含会话凭据的JSON编码为gzip响应。代理若只在收到的字节中搜索明文凭据，就会把压缩内容当作无秘密的业务响应透传。此次由新增代理的本地fake-upstream反例确认，未发生真实业务凭据泄露。
+
+### 根因
+
+过滤层把传输编码后的字节视为明文语义。JSON转义与Content-Encoding都会改变待匹配表示，仅字节匹配不是完整的出口防线。gzip专项红测21项中2项失败（子项及父项计数）锁定该路径，不需要扩大生产调查。
+
+### 错误做法
+
+未验证Content-Encoding就透传响应；或只扫描原始UTF-8字节而不识别JSON转义后的值。
+
+### 正确做法
+
+固定上游Accept-Encoding为identity，并拒绝任何非identity Content-Encoding，返回固定错误并关闭本轮代理；对可接受JSON同时检查原字节、解析后的语义值及响应头。实际会话凭据始终只留后端stdin/内存，前端只获得独立短期代理能力。
+
+### 防线
+
+- 自动化防线：`tests/bridge/preparation-native-runtime-broker.test.mjs` 的压缩、转义及响应头泄漏反例；`tests/fixtures/preparation_native_runtime_broker.mjs` 的编码门槛、凭据出口过滤及停止逻辑。
+- 验证证据：`.local/final-runtime-backend-20261026/broker-compressed-response-red.log`、`broker-security-final-green-04.log`与对应exit；最终21/21通过。只使用内存合成凭据和本地fake-upstream，不访问数据库。
+- 架构防线：仅本机合成scope、固定方法/路径与lease；真实数据库会话不交付模拟器。
+
+### 发生记录
+
+| 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-10-26 | takeover-20261026-final-runtime-backend-01 | 新增测试代理gzip响应反例红后修复 | 首轮只做明文/JSON语义扫描，未约束传输编码；已加入编码门槛及自动化反例 |
+
+
+## PIT-0110：新增隔离会话入口遗漏原桥接的禁日志边界
+
+- 状态：已防护
+- 首次发生：2026-10-26
+- 最近发生：2026-10-26
+- 复发次数：0
+- 适用范围：最终原生隔离后端的父CLI、PHP请求router及Db查询缓存
+- 相关问题：PIT-0109（同为代理隐私，根因不同）
+
+### 触发场景
+
+复用原合成会话fixture新建长期服务CLI，却遗漏原bridge在创建会话前关闭日志的步骤。前两轮启停自检的两个专属父进程SQL日志各记录4个合成会话值。数据库会话已清除，已只对这两个确属本轮PID的日志去敏8个值；未接触真实窗口凭据，未发布正式服务。
+
+### 根因
+
+把去敏误认为HTTP router和stdout的局部职责，未覆盖创建会话的父进程SQL日志；默认文件缓存及DbManager已保留的旧文件driver还会绕过只替换全局cache的处理。
+
+### 错误做法
+
+在生成token之后才关日志；只给子请求换内存cache；认为正常退出或scope/session清零就证明凭据没有落盘。
+
+### 正确做法
+
+父CLI在造会话前、router在鉴权前统一调用PreparationNativeRuntimePrivacy::install：关闭日志、禁SQL记录、所有cache store使用内存，并重新绑定DbManager和已有mysql连接的查询缓存。最早记录父子runtime目录；启动ready前及独立finally中用进程内会话值检查本轮目录，异常也执行，检测失败则不发布ready。检查结果只输出布尔/计数，不输出凭据。
+
+### 防线
+
+- 自动化：`tests/bridge/PreparationNativeRuntimeSafetyTest.php` 覆盖全局及Db内部cache绑定、无鉴权意义canary文件反例、异常停机不可记成功；当前6例/55断言通过。
+- 架构：`tests/support/PreparationNativeRuntimePrivacy.php` 父子共享安装；Supervisor在ready前检查，fixture在停PHP之后独立finally检查后再clean/放锁。
+- 真实验证：`.local/final-runtime-backend-20261026/repaired-runtime-safety-gate.json`，attempt04完整启停exit0、启动/停机凭据文件检查0、独立scope/session0、锁释放、进程结束、64行及peer全字段恢复；前后source一致。早期缺陷和去敏事实保留在`parent-sql-logging-incident.json`，不改写为从未落盘。
+
+### 发生记录
+
+| 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-10-26 | takeover-20261026-final-runtime-backend-01 | 新父CLI两次合成会话自检SQL日志落盘 | 只复用SQLfixture，未继承原bridge父进程Log.close；已统一父子隐私边界、Db缓存与进程内落盘断言 |
+
+## PIT-0111：就绪文件结果路径另行相对解析导致证据漂移
+
+- 状态：已防护（统一入口与回归已验证，后续服务尚未运行）
+- 首次发生：2026-10-27
+- 最近发生：2026-10-27
+- 复发次数：0
+- 适用范围：原生隔离服务的公开就绪文件观察和结果记录
+- 相关问题：无
+
+### 触发场景
+
+watcher在项目族根目录使用前端相对路径；结束记录在PHP目录重新计算`Path('../BeiMi-uniapp/...').resolve()`。本机对这个不存在的文件返回了包含`BeiMi-PHP/BeiMi`的错误路径，使结果字段与原派发不一致。
+
+### 根因
+
+同一观察对象没有复用批准的绝对路径，记录阶段依赖另一cwd和一次新的物理路径解析。本机可重复复现`resolve/realpath`与正确`abspath`不一致；底层Windows／沙箱原因尚未验证，不作进一步归因。旧watch行没有记录cwd和实际路径，不能单靠这些行还原每次绝对路径。
+
+### 错误做法
+
+将错误路径的不存在解释为批准目标不存在；重新生成或覆盖旧结果掩盖差异；在错误目录补文件；用当前不存在证明历史持续不存在。
+
+### 正确做法
+
+检查和结果记录共用同一个批准绝对路径，拒绝相对路径、父级跳转和其他绝对目标；每次公开观察记录该路径、cwd、时间和存在性。保留原结果与日志，用独立更正审计界定历史证据的有效范围。路径支撑不读取ready内容或凭据，也不执行arm。
+
+### 防线
+
+- 自动化：`tests/bridge/test_preparation_native_consumer_evidence.py`通过实际CLI子进程覆盖根目录、PHP、前端和测试目录，及错误／相对目标的拒绝。
+- 统一入口：`tests/support/preparation_native_consumer_evidence.py`。后续watcher须调用该入口并保留其观察行，不再另行计算结果路径；本轮没有启动新watcher或服务。
+- 红绿：`.local/final-runtime-backend-20261026/consumer-path-02-red.log`为原表达式4个cwd失败；`consumer-path-04-green.log`为2例、8个子场景通过。
+- 独立Standards／Spec只读复核均无确定发现；未代跑。Codegraph已实际增量索引两个Python文件，1371文件、pending added／modified／removed均0。
+- 原任务恢复位置：保留已关闭lease状态，完成路径更正审计后，等待协调后续持久化派发；不重跑业务HTTP或数据库探针。
+
+### 发生记录
+
+| 日期 | 任务或 Issue | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-10-27 | takeover-20261027-native-expired-lease-review-01 | 到期结果的路径字段与批准目标不一致 | watcher与结束记录分别计算路径，日志只存存在性而没有路径／cwd |
+
+## PIT-0112：状态替换冲突触发静默退出，失败队列又阻断终态
+
+日期：2026-10-27
+
+### 报告来源
+
+- 生成原因：已确认可复发缺陷的自动防护流程。
+- 主工作流：Matt Pocock。
+- 实际使用的 Skill：`Matt Pocock / diagnosing-bugs`、`Matt Pocock / tdd`、`用户级自定义 / prevent-repeat-pitfalls`（自动调用）。
+- 说明：此条记录无数据库反例确认的缺陷，不把它写成03轮历史早退的唯一原因。
+
+- 状态：已防护（针对已复现缺陷；03历史触发仍未唯一证实）
+- 首次发生：2026-10-27
+- 最近发生：2026-10-27
+- 复发次数：0
+- 适用范围：原生验收测试代理的原子心跳、终态证据及父进程验收
+- 相关问题：PIT-0107为前置失败后仍启动，本条为运行期写入队列与退出验收缺口，根因不同。
+
+### 触发场景
+
+在隔离测试目录中，以Windows只读句柄短暂打开`state.json`且不共享删除。两次最小反例均得到rename `EPERM`：45分钟期限尚余44分钟以上、已claim的代理关闭，而正式文件仍为armed。测试只用本机假上游和惰性标记，不连接数据库。
+
+### 根因
+
+原子替换没有有界处理暂态共享错误；`stateWrites.then(...)`拒绝后未恢复，后续终态任务被跳过。`loadControl`把控制读取／验证和状态写入异常统一转成无原因close，close又吞终态持久化失败。父监督器只看已发布加exit0，无法辨认预期停止与异常退出。
+
+03轮遗留的正式文件accepted43、较新`.tmp` accepted44与此机制相容；当时没有错误码或stopReason，因此03轮实际触发原因仍未唯一证实。
+
+### 错误做法
+
+以exit0或旧心跳证明服务成功；重用已拒绝的写入Promise链；失败后不留终态；为避免异常关闭而放宽授权、EOF安全退出或45分钟期限。
+
+### 正确做法与防线
+
+- 原子rename仅对`EPERM/EACCES/EBUSY`最多8次、间隔20ms重试；期限在异步等待前后继续检查，持续失败仍关闸。
+- 后续终态写入恢复队列，并独立写`terminal.json`，记录固定stopReason、阶段／时间、脱敏I/O码和方法计数；等待已接入处理完成后才取最终计数，不写URL、正文、鉴权头或异常原文。
+- 父监督器必须核对本lease／pid／期限、完整终态与实际停止条件，缺失或异常终态不能因exit0通过；记录父关闭stdin时间及此前子进程是否已结束。
+- 自动化：`tests/bridge/preparation-native-runtime-broker.test.mjs`的Windows短／持续读锁、期限穿越、现有实际出口和方法计数；`tests/bridge/PreparationNativeRuntimeTerminalTest.php`的预期终态与真实PHP→Node管道；无DB探针为`tests/fixtures/preparation_native_lifecycle_probe.mjs`。
+- 红绿证据位于`.local/final-runtime-backend-20261026/native-early-exit-03`，保留两次最小红测、暂态绿色、持续失败终态红绿及父终态红绿。旧03原始文件不覆盖。
+- 双轴复核补强：到期按关闭触发时刻判断；异步状态写返回后及最终转发入口重新检查关闭状态，真实竞态反例由停机后1次GET降为0次；测试失败先释放读者主动关闭，不等待45分钟。相关问题与复现均在本轮交接分项记录，不用它们推定03唯一原因。
+- 最终无DB验证：Node 40/40、父终态／真实PHP→Node管道4例／53断言、既有退出／强停单例14断言通过。双轴确定发现均已关闭；Codegraph实际增量同步后1373文件，pending added／modified／removed均0。真实长期保活及新窗口业务验收没有由这些测试替代。
+- 原任务恢复位置：完成早退诊断交接和复核后停写；不启动第四真实lease，后续由协调明确派发。
+
+### 发生记录
+
+| 日期 | 任务 | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-10-27 | takeover-20261027-native-early-exit-03 | 无DB共享读句柄反例导致未到期代理关闭且磁盘仍armed | 原测试未覆盖Windows读者与原子rename冲突，队列拒绝后跳过终态，父只验exit0 |
+
+## PIT-0113：当前来源清单未进入仍绑定历史冻结的测试驱动
+
+日期：2026-11-01
+
+### 报告来源
+
+- 生成原因：已确认可复发缺陷的自动防护流程。
+- 主工作流：Matt Pocock。
+- 实际使用的 Skill：`Matt Pocock / diagnosing-bugs`、`用户级自定义 / prevent-repeat-pitfalls`、`Matt Pocock / tdd`、`Matt Pocock / code-review`（自动调用）。
+- 说明：初次修复 P04 供应商待退款，随后扩展 P05 工资待发、P06 员工垫付和 P07 费用待付款；本次 P08 分月费用同类阻塞继续扩展已授权测试来源准入及无数据库回归，不修改产品业务逻辑。完成后返回当前页正式 HTTP 验收。
+
+- 状态：已防护（P04/P05/P06/P07/P08 公开接缝红绿、无数据库边界回归及双轴复核通过）。
+- 首次发生：2026-10-31
+- 最近发生：2026-11-01
+- 复发次数：4
+- 适用范围：`tests/fixtures/preparation_http_bridge.php` 的 `supplier_refund`、`salary`、`reimbursement`、`expense_payable`、`deferred` 当前来源准入。
+- 相关问题：PIT-0107 是前置失败后仍启动执行；本项为已选当前清单未被外层固定来源门消费，根因不同。
+
+### 触发场景
+
+前端已经增加当前来源清单校验，调用方提供完整新清单和文件 SHA，外层 PHP 仍只校验 20261025 的供应商冻结交接。公开 `--target=supplier_refund --preflight` 稳定返回 `supplier-refund-frozen-sources=false`。历史交接本身 SHA 正确，其中 15 条来源已随已授权开发变化；不能覆写历史证据或删除来源门来换取执行。
+
+### 根因
+
+来源准入分属两层：前端客户端消费 `BEIMI_PREPARATION_HTTP_SOURCE_MANIFEST/SHA256`，PHP 的固定目标分支没有读取这对选择，继续把历史来源当作唯一当前来源。此前 advance 不属于该旧固定目标分支，其通过不能外推为供应商退款已支持当前清单。
+
+### 错误做法
+
+把前一页命令只替换 target 后视为可用；覆写旧交接、只改摘要或跳过外层来源门；当前选择无效时退回历史门；以零请求来源准入代替真实 HTTP 业务验收。
+
+### 正确做法
+
+仅已授权的 P04/P05/P06/P07/P08 在显式 current 选择存在时调用固定的 `current-http-freeze.mjs`，复用其 generation、对应固定 18/22/30/32 项及顺序、规范路径和全部 135 条实际来源 SHA 检查。缺少选择任一半或任何检查失败都关闭准入，不回退。未选择 current 时仍执行历史门；P08 的原交接、契约、来源清单及客户端 pin 均保留，旧客户端漂移仍拒绝执行。P08 六条外部组件工具链按固定历史 manifest 的 SHA、精确绝对路径及文件 SHA 独立核验，不加入项目模块来源。记录选中的文件 SHA 与完整来源指纹，并在实际执行结束后继续核对来源未变。
+
+### 防线
+
+- 自动化：`tests/bridge/PreparationCurrentHttpSourceTest.php` 经真实 PHP CLI 子进程对 P04/P05/P06/P07/P08 分别验证有效当前清单、缺项、错 SHA、来源漂移、重复或越界路径、错目标、缺 ID 或乱序、非本页依赖漂移均按契约准入或拒绝；并核对五页旧无选择路径。P07 无 current 选择保留历史 81 条白名单（74 条生产来源及 7 条客户端/支持来源）和原交接 SHA；P08 无选择时保留原 32 项顺序、三份文档 SHA 和六条工具链，旧客户端 SHA 不符则来源门拒绝且模块白名单为空。结构夹具为仓库内 `tests/fixtures/preparation_current_http_manifest.json`，SHA 零占位在运行时重算，不依赖历史 scratch，不作为验收证据。所有用例只运行预检，不加载应用、数据库或 HTTP。
+- 接线：`tests/support/PreparationCurrentHttpSource.php` 只调用仓库固定来源校验器，不从清单执行代码，不传认证、不输出原文错误，15 秒有界退出。驱动将该支持文件和选中清单纳入执行指纹。
+- 已验证事实：首个公开接缝红例为 1 test／9 assertions／1 failure；有效 current 的首绿为 1 test／13 assertions，最终边界回归 19 tests／218 assertions 通过。原协议回归排除全部 deferred 名称案例后为 63 tests／1014 assertions 通过。Standards／Spec 确定发现为 0；Standards 指出的历史 scratch 夹具依赖已改为仓库内结构夹具并复核关闭。受限沙箱 Node `realpath` 返回 EPERM，使用获准的同 Windows 用户本机上下文执行；没有放宽规范路径校验。
+- P05 已验证事实：同一前端严格来源门对当前 salary 清单返回 `sourceCount=135/requestCount=0`，PHP 公开预检仍仅 `salary-frozen-sources=false`，确认遗漏该目标接线。新增公开回归先得到 1 test／9 assertions／1 failure，最小修复后 1 test／15 assertions 通过；完整来源准入边界为 33 tests／372 assertions 通过，三个改动 PHP 文件语法检查通过。排除 deferred 名称的既有桥协议回归为 63 tests／1014 assertions 通过；本轮 Standards／Spec 复核确认缺陷均为 0。红绿、边界和协议原始日志见 `../../../.scratch/p05-acceptance-20261031/gate-red-test.txt`、`../../../.scratch/p05-acceptance-20261031/gate-green-test.txt`、`../../../.scratch/p05-acceptance-20261031/gate-tests.txt`、`../../../.scratch/p05-acceptance-20261031/gate-protocol-tests.txt`；这些零请求结果不替代本页真实 HTTP 验收。
+- P06 已验证事实：同一当前清单经前端严格门返回 `target=reimbursement/sourceCount=135/requestCount=0`，PHP 公开预检却仅 `reimbursement-frozen-sources=false`，确认仍未消费本页 current 选择。公开 CLI 回归先得到 1 test／9 assertions／1 failure，最小修复后 1 test／15 assertions 通过；完整边界为 47 tests／526 assertions，排除 deferred 名称的共享协议为 63 tests／1014 assertions，三个改动 PHP 文件语法检查通过。主执行者完成的 Standards／Spec 两轴复核对本轮 PHP 代码及 PIT 内容的确定缺陷均为 0。零请求红绿及原始日志见 `../../../.scratch/p06-acceptance-20261101/gate-red-preflight.json`、`../../../.scratch/p06-acceptance-20261101/gate-front-admission.json`、`../../../.scratch/p06-acceptance-20261101/gate-red-test.txt`、`../../../.scratch/p06-acceptance-20261101/gate-green-test.txt`、`../../../.scratch/p06-acceptance-20261101/gate-tests.txt`、`../../../.scratch/p06-acceptance-20261101/gate-protocol-tests.txt`；真实 HTTP 由本页主执行者继续，未据预检声明业务通过。
+- P07 已验证事实：主执行者的公开预检仅 `expense-payable-frozen-sources=false`；本页公开 CLI 回归先得到 1 test／9 assertions／1 failure，两处目标名单扩展后同一回归为 1 test／15 assertions 通过。完整来源准入边界为 61 tests／680 assertions，包含 P07 全部 13 类拒绝反例；排除 deferred 名称的共享协议为 63 tests／1014 assertions，三个改动 PHP 文件语法检查通过。原始日志见 `../../../.scratch/p07-acceptance-20261101/gate-red-preflight.json`、`../../../.scratch/p07-acceptance-20261101/gate-red-test.txt`、`../../../.scratch/p07-acceptance-20261101/gate-green-test.txt`、`../../../.scratch/p07-acceptance-20261101/gate-tests.txt`、`../../../.scratch/p07-acceptance-20261101/gate-protocol-tests.txt`、`../../../.scratch/p07-acceptance-20261101/gate-syntax.txt`。本轮 Standards／Spec 双轴复核及主执行者对本轮精确差分核对，确定缺陷均为 0；上述结果均为零请求验证，不证明本页真实 HTTP 业务通过。
+- P08 已验证事实：公开 CLI 回归先得到 1 test／9 assertions／1 failure，最小 current 接线和独立工具链核验后首绿为 1 test／29 assertions。完整来源边界为 75 tests／852 assertions，包含 P08 全部 13 类拒绝反例。保留两条旧 SHA 断言的全桥红证据为 70 tests／1070 assertions／2 failures；修正历史路径预期为原 pin 拒绝当前源码后，不排除任何 deferred 案例，70 tests／1134 assertions 全部通过。随后将 P08 回归与结构夹具加入执行指纹，聚焦回归为 1 test／31 assertions，四个改动 PHP 文件语法通过。原始日志见 `../../../.scratch/p08-acceptance-20261101/php-gate-red-test.txt`、`../../../.scratch/p08-acceptance-20261101/php-gate-green-test.txt`、`../../../.scratch/p08-acceptance-20261101/php-gate-tests.txt`、`../../../.scratch/p08-acceptance-20261101/php-protocol-red.txt`、`../../../.scratch/p08-acceptance-20261101/php-protocol-tests.txt`、`../../../.scratch/p08-acceptance-20261101/php-gate-final-test.txt`。独立 Standards／Spec 双轴复核的确定发现均为 0；未据零请求回归声明业务通过。
+- 未验证事项：上述零请求测试不证明真实 HTTP 或真机通过；本轮 P08 真实 HTTP 由主执行者继续。
+- 原任务恢复位置：本轮 P08 来源门诊断、红绿、全桥协议回归及独立双轴复核已完成；由主执行者确认 Codegraph 同步并冻结最终来源后，继续本轮固定 32 项真实 HTTP 执行。零请求回归不据此宣称 HTTP 已通过。
+
+### 发生记录
+
+| 日期 | 任务 | 场景 | 原防线为何未阻止 |
+|---|---|---|---|
+| 2026-10-31 | P04 供应商待退款逐页验收 | 当前 135 来源已准备，PHP 外层仍绑定过期 80 来源交接 | 前端新增当前清单校验后没有同步 PHP 固定目标接线；旧门正确阻止执行，但缺少新清单的公开准入回归 |
+| 2026-10-31 | P05 工资待发逐页验收 | 显式当前清单和 22 项 ID 均通过前端来源门，PHP 外层仍使用历史 81 来源 | 原防线按 P04 授权仅接入供应商退款，salary 被有意列为后续历史目标；本页放行后尚无对应 current 接线及通过/拒绝回归 |
+| 2026-11-01 | P06 员工垫付逐页验收 | 同一 current 清单前端 135 来源准入，PHP 外层忽略本页选择，继续校验历史 81 来源 | 原防线按 P04/P05 授权保留 P06 历史门；本页获准执行后尚未补对应 current 接线及公开准入/拒绝回归 |
+| 2026-11-01 | P07 费用待付款逐页验收 | 已选 current 清单，PHP 外层仍只认历史 81 来源，公开预检仅费用来源门失败 | 原防线按 P04/P05/P06 授权保留 P07 历史门；本页获准执行后尚未补对应 current 接线及完整 30 项顺序、通过/拒绝回归 |
+| 2026-11-01 | P08 分月费用逐页验收 | 已选 current 清单，PHP 仍以旧客户端 pin 拒绝且工具链核验被绑定于旧项目来源有效性 | 原防线按前页授权保留 P08 历史门；本页获准后未接入 current，也缺少独立外部工具链与完整 32 项顺序的公开回归 |

@@ -88,6 +88,38 @@ final class FinanceSetupLogic extends BaseLogic
         return self::guideAction('guide_card', $params);
     }
 
+    /** 仅保存事项说明；结论、核清依据、未完成输入与引导位置均由原操作负责。 */
+    public static function saveGuideEvidence(array $params): array|false
+    {
+        if (!self::authorize(false)) { return false; }
+        try {
+            if (!array_key_exists('evidence', $params)) { throw new \DomainException('请提供事项说明，清空时请传空字符串'); }
+            $data = ['category' => self::text($params['category'] ?? '', 32), 'evidence' => self::text($params['evidence'], 1000)];
+            if (!isset(FinanceOpeningGuide::CARDS[$data['category']])) { throw new \DomainException('请选择有效的准备事项'); }
+            $result = self::mutate('opening.guide_evidence', $params, $data, static function (int $version) use ($data): array {
+                $book = Db::name('finance_opening_book')->where('tenant_id', self::tenantId())->lock(true)->find();
+                if (!$book) { throw new \DomainException('请先选择接续已有经营并保存启用日期'); }
+                if ((int)$book['version'] !== $version) { throw new \DomainException('期初资料已更新，请重新加载后核对'); }
+                if ($book['status'] === 'active') { throw new \DomainException('期初已确认，不允许覆盖或删除历史'); }
+                if ($book['status'] !== 'draft') { throw new \DomainException('期初正在等待确认，请先退回草稿再修改'); }
+                $reviews = json_decode($book['reviews'], true, 512, JSON_THROW_ON_ERROR);
+                if (($reviews['_guide']['mode'] ?? '') !== 'carryover') { throw new \DomainException('请先选择接续已有经营并保存启用日期'); }
+                $service = new FinanceOpeningService(self::tenantId(), self::actor());
+                $before = $service->snapshot();
+                $reviews[$data['category']] = array_merge($reviews[$data['category']] ?? ['state' => 'unknown'], ['evidence' => $data['evidence']]);
+                Db::name('finance_opening_book')->where('tenant_id', self::tenantId())->update([
+                    'reviews' => self::json($reviews), 'version' => $version + 1,
+                    'last_modified_by' => self::json(self::actor()), 'update_time' => time(),
+                ]);
+                return [$before, $service->snapshot()];
+            }, static fn(?array $existing) => self::authorizeOpeningSalary('guide_evidence', $data, $existing));
+            return self::guideResult($result);
+        } catch (\DomainException $error) {
+            self::setError(self::salaryAccess()['view'] ? $error->getMessage() : FinanceOpeningCategory::restrictedError($error->getMessage()));
+            return false;
+        }
+    }
+
     private static function guideAction(string $action, array $params): array|false
     {
         try {
@@ -312,7 +344,7 @@ final class FinanceSetupLogic extends BaseLogic
     /** 在门店锁内校验原对象和旧幂等操作；不能用伪造类别或权限撤销后的重放绕过工资权限。 */
     private static function authorizeOpeningSalary(string $action, array $data, ?array $existing): void
     {
-        if (!in_array($action, ['item', 'editor', 'remove', 'review', 'guide_card'], true)) { return; }
+        if (!in_array($action, ['item', 'editor', 'remove', 'review', 'guide_card', 'guide_evidence'], true)) { return; }
         $category = is_string($data['category'] ?? null) ? trim($data['category']) : '';
         $salary = $category === 'salary';
         if (in_array($action, ['item', 'remove'], true)) {

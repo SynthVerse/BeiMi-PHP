@@ -337,6 +337,22 @@ final class WorkforceLogic extends BaseLogic
     /** @return array<string,mixed>|false */
     public static function saveEmployee(array $params): array|false
     {
+        if ((int)($params['id'] ?? 0) > 0 || (!array_key_exists('creation_key', $params) && !array_key_exists('idempotency_key', $params))) {
+            return self::saveEmployeeRecord($params);
+        }
+        self::clearError();
+        try {
+            return MasterCreationReceipt::run('employee', $params, static function () use ($params): array {
+                $params['creation_key'] = MasterCreationReceipt::storageKey('employee', $params);
+                $result = self::saveEmployeeRecord($params);
+                if ($result === false) { throw new \DomainException(self::getError()); }
+                return $result;
+            });
+        } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
+    }
+
+    private static function saveEmployeeRecord(array $params): array|false
+    {
         self::clearError();
         if (!self::requirePermission('employee.manage')) {
             return false;
@@ -373,13 +389,6 @@ final class WorkforceLogic extends BaseLogic
                     'is_enabled' => (int)($params['is_enabled'] ?? 1) === 1 ? 1 : 0,
                     'update_time' => $now,
                 ];
-                if (!$id && $creationKey !== '') {
-                    $old = Db::name('employee')->where('tenant_id', self::tenantId())->where('creation_key', $creationKey)->lock(true)->find();
-                    if ($old) {
-                        if ($old['name'] !== $name || $old['mobile'] !== $mobile) { throw new \DomainException('建档重试身份对应的人员资料不一致'); }
-                        $id = (int)$old['id']; return;
-                    }
-                }
                 if ($id > 0) {
                     $exists = Db::name('employee')->where('tenant_id', self::tenantId())->where('id', $id)->whereNull('delete_time')->lock(true)->find();
                     if (!$exists) {

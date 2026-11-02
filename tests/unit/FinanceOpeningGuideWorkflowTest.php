@@ -175,6 +175,64 @@ final class FinanceOpeningGuideWorkflowTest extends TestCase
         self::assertSame('active', FinanceSetupLogic::openingGuide()['start_status']);
     }
 
+    /** @dataProvider noneDraftRefusals */
+    public function test_none_rejects_same_category_drafts_without_mutating_any_preparation_state(bool $otherActor, bool $reviewEntry): void
+    {
+        $guide = $this->start();
+        if ($otherActor) {
+            request()->adminId = self::ADMIN_ID + 19;
+            request()->userId = self::ADMIN_ID + 19;
+            request()->adminInfo = array_replace((array)request()->adminInfo, ['admin_id' => self::ADMIN_ID + 19]);
+        }
+        $draft = FinanceSetupLogic::openingAction('editor', $this->command((int)$guide['opening']['version']) + [
+            'category' => 'customer_refund', 'form' => ['entry_contract' => 2, 'amount' => '123.45',
+                'details' => ['origin_reference' => 'PRIVATE-OTHER-DRAFT-REFERENCE']],
+        ]);
+        self::assertNotFalse($draft, FinanceSetupLogic::getError());
+        $this->prepareCustomerReportRequestContext();
+        $book = Db::name('finance_opening_book')->where('tenant_id', self::TENANT_ID)->find();
+        $preparation = Db::name('finance_preparation')->where('tenant_id', self::TENANT_ID)->find();
+        $actions = Db::name('finance_setup_action')->where('tenant_id', self::TENANT_ID)->count();
+        $command = $this->command((int)$book['version']) + ['category' => 'customer_refund'];
+        $result = $reviewEntry
+            ? FinanceSetupLogic::openingAction('review', $command + ['state' => 'none', 'evidence' => '核实没有'])
+            : FinanceSetupLogic::saveGuideCard($command + ['choice' => 'none']);
+        self::assertTrue($result === false, '有同事项未完成稿时必须拒绝确认没有');
+        self::assertSame('本项还有未完成输入，请先保存为准备资料或明确放弃', FinanceSetupLogic::getError());
+        self::assertStringNotContainsString('PRIVATE-OTHER-DRAFT-REFERENCE', FinanceSetupLogic::getError());
+        self::assertSame($book, Db::name('finance_opening_book')->where('tenant_id', self::TENANT_ID)->find());
+        self::assertSame($preparation, Db::name('finance_preparation')->where('tenant_id', self::TENANT_ID)->find());
+        self::assertSame($actions, Db::name('finance_setup_action')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
+    public static function noneDraftRefusals(): array
+    {
+        return ['本人稿/引导入口' => [false, false], '他人稿/引导入口' => [true, false],
+            '本人稿/核对入口' => [false, true], '他人稿/核对入口' => [true, true]];
+    }
+
+    /** @dataProvider noneAllowedDrafts */
+    public function test_none_accepts_a_real_empty_category_without_interfering_with_other_category_drafts(?string $draftCategory): void
+    {
+        $guide = $this->start();
+        if ($draftCategory !== null) {
+            $draft = FinanceSetupLogic::openingAction('editor', $this->command((int)$guide['opening']['version']) + [
+                'category' => $draftCategory, 'form' => ['entry_contract' => 2, 'amount' => '55.00', 'details' => []],
+            ]);
+            self::assertNotFalse($draft, FinanceSetupLogic::getError());
+        }
+        $before = FinanceSetupLogic::opening();
+        $saved = $this->card('customer_refund', 'none');
+        self::assertSame('none', array_column($saved['cards'], null, 'key')['customer_refund']['state']);
+        self::assertSame((int)$before['version'] + 1, (int)$saved['opening']['version']);
+        self::assertSame($before['editor_drafts'], $saved['opening']['editor_drafts']);
+    }
+
+    public static function noneAllowedDrafts(): array
+    {
+        return ['真正空态' => [null], '不同事项稿' => ['advance']];
+    }
+
     public function test_business_change_after_submission_blocks_confirmation_and_preserves_draft(): void
     {
         $this->start();
