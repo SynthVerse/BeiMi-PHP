@@ -180,7 +180,7 @@ class SupplierLogic extends BaseLogic
 
         $total = (clone $query)->count();
         $rows = $query
-            ->field('gs.id AS relation_id,gs.goods_id,gs.sku_id,gs.supplier_id,gs.is_primary,gs.is_preferred,gs.supplier_product_code,gs.supplier_goods_name,gs.purchase_price,gs.purchase_unit_id,gs.purchase_unit_name,gs.settlement_unit_id,gs.settlement_unit_name,gs.min_purchase_qty,gs.daily_capacity_qty,gs.lead_time_days,gs.last_purchase_price,gs.last_purchase_time,gs.status AS relation_status,gs.remark AS relation_remark,sku.sku_name,sku.quality_status,sku.quality_label,sku.base_unit_id,sku.base_unit_name,g.id,g.name,g.product_code,g.units,g.unit_id,g.price,g.cost,g.stock,g.category_id,g.primary_supplier_id,g.is_disabled,g.remark,g.create_time,g.update_time')
+            ->field('gs.id AS relation_id,gs.goods_id,gs.sku_id,gs.supplier_id,gs.is_primary,gs.is_preferred,gs.supplier_product_code,gs.supplier_goods_name,gs.purchase_unit_id,gs.purchase_unit_name,gs.settlement_unit_id,gs.settlement_unit_name,gs.last_purchase_price,gs.last_purchase_time,gs.status AS relation_status,gs.remark AS relation_remark,sku.sku_name,sku.quality_status,sku.quality_label,sku.base_unit_id,sku.base_unit_name,g.id,g.name,g.product_code,g.units,g.unit_id,g.price,g.cost,g.stock,g.category_id,g.primary_supplier_id,g.is_disabled,g.remark,g.create_time,g.update_time')
             ->order(['g.id' => 'desc', 'gs.sku_id' => 'asc', 'gs.is_preferred' => 'desc', 'gs.id' => 'desc'])
             ->limit($offset, $pageSize)
             ->select()
@@ -196,18 +196,12 @@ class SupplierLogic extends BaseLogic
             $item['is_preferred'] = (int)($row['is_preferred'] ?? $row['is_primary'] ?? 0);
             $item['supplier_product_code'] = (string)($row['supplier_product_code'] ?? '');
             $item['supplier_goods_name'] = (string)($row['supplier_goods_name'] ?? '');
-            $item['supplier_purchase_price'] = (string)($row['purchase_price'] ?? '0.00');
-            $item['purchase_price'] = (string)($row['purchase_price'] ?? '0.00');
-            $item['default_purchase_price'] = (string)($row['purchase_price'] ?? '0.00');
             $item['purchase_unit_id'] = (int)($row['purchase_unit_id'] ?? 0);
             $item['purchase_unit_name'] = (string)($row['purchase_unit_name'] ?? '');
             $item['purchase_unit'] = (string)($row['purchase_unit_name'] ?? '');
             $item['settlement_unit_id'] = (int)($row['settlement_unit_id'] ?? 0);
             $item['settlement_unit_name'] = (string)($row['settlement_unit_name'] ?? '');
             $item['settlement_unit'] = (string)($row['settlement_unit_name'] ?? '');
-            $item['min_purchase_qty'] = (string)($row['min_purchase_qty'] ?? '0.0000');
-            $item['daily_capacity_qty'] = (string)($row['daily_capacity_qty'] ?? '0.0000');
-            $item['lead_time_days'] = (int)($row['lead_time_days'] ?? 0);
             $item['last_purchase_price'] = (string)($row['last_purchase_price'] ?? '0.00');
             $item['last_purchase_time'] = (int)($row['last_purchase_time'] ?? 0);
             $item['relation_status'] = (int)($row['relation_status'] ?? 1);

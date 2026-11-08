@@ -450,9 +450,6 @@ class GoodsLogic extends BaseLogic
                 'supplier_id' => $primarySupplierId,
                 'is_primary' => 1,
                 'supplier_product_code' => '',
-                'purchase_price' => '0.00',
-                'min_purchase_qty' => '0.0000',
-                'lead_time_days' => 0,
                 'status' => 1,
                 'remark' => '',
             ];
@@ -553,7 +550,6 @@ class GoodsLogic extends BaseLogic
         $item['price'] = (string)($item['price'] ?? '0.00');
         $item['units_money'] = $item['price'];
         $item['cost'] = (string)($item['cost'] ?? '0.00');
-        $item['purchase_price'] = $item['cost'];
         $item['stock'] = (string)($item['stock'] ?? '0.00');
         $item['category_id'] = (int)($item['category_id'] ?? 0);
         $item['primary_supplier_id'] = (int)($item['primary_supplier_id'] ?? 0);
@@ -612,7 +608,7 @@ class GoodsLogic extends BaseLogic
             'units' => $units,
             'unit_id' => $unitId,
             'price' => self::normalizeDecimal($params['price'] ?? $params['units_money'] ?? ($current['price'] ?? 0)),
-            'cost' => self::normalizeDecimal($params['cost'] ?? $params['purchase_price'] ?? ($current['cost'] ?? 0)),
+            'cost' => self::normalizeDecimal($params['cost'] ?? ($current['cost'] ?? 0)),
             // 商品主数据不能初始化或覆盖库存权威；新商品从首笔指定仓库入库建立库存。
             'stock' => self::normalizeDecimal($current['stock'] ?? 0),
             'category_id' => (int)($params['category_id'] ?? ($current['category_id'] ?? 0)),
@@ -983,9 +979,6 @@ class GoodsLogic extends BaseLogic
                 'supplier_id' => $supplierId,
                 'is_primary' => (int)($row['is_primary'] ?? 0) === 1 ? 1 : 0,
                 'supplier_product_code' => trim((string)($row['supplier_product_code'] ?? '')),
-                'purchase_price' => self::normalizeDecimal($row['purchase_price'] ?? 0),
-                'min_purchase_qty' => number_format(max(0, (float)($row['min_purchase_qty'] ?? 0)), 4, '.', ''),
-                'lead_time_days' => max(0, (int)($row['lead_time_days'] ?? 0)),
                 'status' => (int)($row['status'] ?? 1) === 0 ? 0 : 1,
                 'remark' => trim((string)($row['remark'] ?? '')),
             ];
@@ -1025,14 +1018,10 @@ class GoodsLogic extends BaseLogic
                 'is_preferred' => (int)($row['is_preferred'] ?? $row['is_primary'] ?? 0),
                 'supplier_product_code' => (string)($row['supplier_product_code'] ?? ''),
                 'supplier_goods_name' => (string)($row['supplier_goods_name'] ?? ''),
-                'purchase_price' => (string)($row['purchase_price'] ?? '0.00'),
                 'purchase_unit_id' => (int)($row['purchase_unit_id'] ?? 0),
                 'purchase_unit_name' => (string)($row['purchase_unit_name'] ?? ''),
                 'settlement_unit_id' => (int)($row['settlement_unit_id'] ?? 0),
                 'settlement_unit_name' => (string)($row['settlement_unit_name'] ?? ''),
-                'min_purchase_qty' => (string)($row['min_purchase_qty'] ?? '0.0000'),
-                'daily_capacity_qty' => (string)($row['daily_capacity_qty'] ?? '0.0000'),
-                'lead_time_days' => (int)($row['lead_time_days'] ?? 0),
                 'last_purchase_price' => (string)($row['last_purchase_price'] ?? '0.00'),
                 'last_purchase_time' => (int)($row['last_purchase_time'] ?? 0),
                 'status' => (int)($row['status'] ?? 1),

@@ -657,7 +657,6 @@ class SupplyOrderLogic extends BaseLogic
             $conversionRate = '1.000000';
             $conversionSourceType = 'identity';
             $conversionEffectiveDate = null;
-            $defaultPrice = $goodsModel->cost ?: $goodsModel->price;
 
             try {
                 $sku = GoodsSkuSelectionService::forPurchase(
@@ -684,7 +683,6 @@ class SupplyOrderLogic extends BaseLogic
                 $supplierRelationId = (int)$relation->id;
                 $orderUnitId = $orderUnitId ?: (int)($relation->purchase_unit_id ?? 0);
                 $orderUnitName = $orderUnitName !== '' ? $orderUnitName : (string)($relation->purchase_unit_name ?? '');
-                $defaultPrice = $relation->purchase_price ?: $defaultPrice;
             }
             if ($orderUnitName === '') {
                 $orderUnitName = $baseUnitName;
@@ -720,7 +718,12 @@ class SupplyOrderLogic extends BaseLogic
             $lossRate = (float)$expectedBaseQty > 0 ? number_format((float)$lossBaseQty / (float)$expectedBaseQty, 6, '.', '') : '0.000000';
             $stockNumber = $actualBaseQty;
 
-            $price = self::money($item['price'] ?? $item['units_money'] ?? $defaultPrice);
+            $priceInput = $item['price'] ?? $item['units_money'] ?? null;
+            if (!is_numeric($priceInput) || !is_finite((float)$priceInput) || (float)$priceInput < 0) {
+                self::setError('请输入大于或等于0的商品单价');
+                return false;
+            }
+            $price = self::money($priceInput);
             $amount = self::money((float)$stockNumber * (float)$price);
             $rows[] = [
                 'tenant_id' => (int)(request()->tenantId ?? 0),

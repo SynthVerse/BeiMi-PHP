@@ -774,7 +774,7 @@ final class GoodsDimensionLogicTest extends TestCase
         self::assertSame(0, (int)Db::name('goods_sku')->where('id', (int)$staleSku['id'])->value('status'));
     }
 
-    public function test_persistent_business_references_keep_removed_generated_skus_and_supplier_history(): void
+    public function test_persistent_business_references_keep_removed_generated_skus_and_supplier_relations(): void
     {
         $origin = GoodsDimensionLogic::saveDefinition(['name' => '产地', 'code' => 'origin', 'dimension_type' => 'sku']);
         $goodsId = $this->createCustomerReportGoods('历史引用鲍鱼', 'BUSINESS-REFERENCE', '斤');
@@ -802,13 +802,11 @@ final class GoodsDimensionLogicTest extends TestCase
             'create_time' => time(),
             'update_time' => time(),
         ]);
-        Db::name('goods_supplier_price_history')->insert([
+        Db::name('order_goods')->insert([
             'tenant_id' => self::TENANT_ID,
-            'goods_supplier_id' => $relationId,
+            'supplier_relation_id' => $relationId,
             'goods_id' => $goodsId,
             'sku_id' => (int)$skusByOrigin['山东']['id'],
-            'supplier_id' => 900003,
-            'purchase_price' => '10.00',
             'create_time' => time(),
         ]);
         Db::name('customer_report_item')->insert([
@@ -836,7 +834,6 @@ final class GoodsDimensionLogicTest extends TestCase
             self::assertSame(0, (int)Db::name('goods_sku')->where('id', (int)$skusByOrigin[$originName]['id'])->value('status'));
         }
         self::assertSame(1, Db::name('goods_supplier')->where('id', $relationId)->count());
-        self::assertSame(1, Db::name('goods_supplier_price_history')->where('goods_supplier_id', $relationId)->count());
     }
 
     public function test_customer_report_line_keeps_the_selected_generic_sku_snapshot(): void

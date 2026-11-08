@@ -93,7 +93,7 @@ ALTER TABLE `{{prefix}}goods_supplier`
   ADD COLUMN `supplier_goods_name` varchar(200) NOT NULL DEFAULT '' COMMENT '供应商商品名' AFTER `supplier_product_code`;
 
 ALTER TABLE `{{prefix}}goods_supplier`
-  ADD COLUMN `purchase_unit_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '采购单位ID' AFTER `purchase_price`;
+  ADD COLUMN `purchase_unit_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '采购单位ID' AFTER `supplier_goods_name`;
 
 ALTER TABLE `{{prefix}}goods_supplier`
   ADD COLUMN `purchase_unit_name` varchar(50) NOT NULL DEFAULT '' COMMENT '采购单位名称' AFTER `purchase_unit_id`;
@@ -103,9 +103,6 @@ ALTER TABLE `{{prefix}}goods_supplier`
 
 ALTER TABLE `{{prefix}}goods_supplier`
   ADD COLUMN `settlement_unit_name` varchar(50) NOT NULL DEFAULT '' COMMENT '结算单位名称' AFTER `settlement_unit_id`;
-
-ALTER TABLE `{{prefix}}goods_supplier`
-  ADD COLUMN `daily_capacity_qty` decimal(12,4) NOT NULL DEFAULT 0.0000 COMMENT '日供货能力' AFTER `min_purchase_qty`;
 
 ALTER TABLE `{{prefix}}goods_supplier`
   ADD COLUMN `is_preferred` tinyint(1) NOT NULL DEFAULT 0 COMMENT '是否首选' AFTER `is_primary`;
@@ -130,22 +127,6 @@ ALTER TABLE `{{prefix}}goods_supplier`
 
 ALTER TABLE `{{prefix}}goods_supplier`
   ADD KEY `idx_tenant_supplier_sku` (`tenant_id`, `supplier_id`, `sku_id`, `status`);
-
-CREATE TABLE IF NOT EXISTS `{{prefix}}goods_supplier_price_history` (
-  `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '价格历史ID',
-  `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
-  `goods_supplier_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '供应商SKU关系ID',
-  `goods_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '商品ID',
-  `sku_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT 'SKU ID',
-  `supplier_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '供应商ID',
-  `purchase_price` decimal(12,2) NOT NULL DEFAULT 0.00 COMMENT '采购价',
-  `effective_date` date DEFAULT NULL COMMENT '生效日期',
-  `remark` varchar(500) NOT NULL DEFAULT '' COMMENT '备注',
-  `create_time` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建时间',
-  PRIMARY KEY (`id`),
-  KEY `idx_tenant_relation` (`tenant_id`, `goods_supplier_id`),
-  KEY `idx_tenant_supplier_sku_date` (`tenant_id`, `supplier_id`, `sku_id`, `effective_date`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='供应商SKU价格历史表';
 
 CREATE TABLE IF NOT EXISTS `{{prefix}}goods_unit_conversion_rule` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '换算规则ID',

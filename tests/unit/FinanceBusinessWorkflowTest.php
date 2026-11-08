@@ -100,7 +100,7 @@ final class FinanceBusinessWorkflowTest extends TestCase
         $goods = $this->createCustomerReportGoods('原采购衔接商品', 'ORIGINAL-PURCHASE'); $sku = $this->customerReportSkuId($goods);
         $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '原采购衔接供方']);
         Db::name('goods_supplier')->insert(['tenant_id' => self::TENANT_ID, 'goods_id' => $goods, 'sku_id' => $sku, 'supplier_id' => $vendor,
-            'purchase_price' => '2.00', 'status' => 1]);
+            'status' => 1]);
         $command = ['supplier_id' => $vendor, 'warehouse_id' => $warehouse, 'datetimesingle' => time(), 'order_sn' => 'FIN-NATIVE-' . uniqid(),
             'idempotent_key' => 'native-purchase-once', 'goods' => [['goods_id' => $goods, 'sku_id' => $sku, 'number' => '12', 'price' => '2']]];
         $order = \app\api\jxc\logic\SupplyOrderLogic::publish($command);
@@ -121,6 +121,31 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertNotFalse($return, FinanceBusinessLogic::getError());
         self::assertSame('', $return['confirmed_result']['source_reference']); self::assertNotEmpty($return['confirmed_result']['confirmed_by']);
         self::assertSame('11.0000', \app\api\jxc\logic\WarehouseSkuBalanceService::onHand($warehouse, $sku));
+    }
+
+    public function test_native_purchase_requires_explicit_price_and_accepts_zero_without_cost_or_sale_price_fallback(): void
+    {
+        $this->activate();
+        $warehouse = $this->createCustomerReportWarehouse('显式采购价仓');
+        $goods = $this->createCustomerReportGoods('显式采购价商品', 'EXPLICIT-PURCHASE', '斤');
+        $sku = $this->customerReportSkuId($goods);
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '显式采购价供方']);
+        Db::name('goods')->where('id', $goods)->update(['cost' => '12.50', 'price' => '20.00']);
+        Db::name('goods_supplier')->insert(['tenant_id' => self::TENANT_ID, 'goods_id' => $goods, 'sku_id' => $sku, 'supplier_id' => $vendor, 'status' => 1]);
+        $command = ['supplier_id' => $vendor, 'warehouse_id' => $warehouse, 'datetimesingle' => time(),
+            'goods' => [['goods_id' => $goods, 'sku_id' => $sku, 'number' => '2']]];
+        foreach ([null, '', 'not-a-price', '-1'] as $price) {
+            $attempt = $command;
+            if ($price !== null) { $attempt['goods'][0]['price'] = $price; }
+            self::assertFalse(\app\api\jxc\logic\SupplyOrderLogic::publish($attempt));
+            self::assertStringContainsString('单价', \app\api\jxc\logic\SupplyOrderLogic::getError());
+        }
+        $command['goods'][0]['price'] = '0.00';
+        $order = \app\api\jxc\logic\SupplyOrderLogic::publish($command);
+        self::assertNotFalse($order, \app\api\jxc\logic\SupplyOrderLogic::getError());
+        $detail = \app\api\jxc\logic\SupplyOrderLogic::detail(['id' => $order['id']]);
+        self::assertSame('0.00', $detail['order_money']);
+        self::assertSame('0.00', $detail['goods'][0]['price']);
     }
 
     public function test_historical_purchase_preserves_old_returns_and_opening_payable_without_receiving_stock_again(): void

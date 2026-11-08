@@ -6,7 +6,6 @@ use app\common\logic\BaseLogic;
 use app\common\model\jxc\Goods;
 use app\common\model\jxc\GoodsSku;
 use app\common\model\jxc\GoodsSupplier;
-use app\common\model\jxc\GoodsSupplierPriceHistory;
 use app\common\model\jxc\GoodsUnit;
 use app\common\model\jxc\OrderGoods;
 use app\common\model\jxc\Vendor;
@@ -95,7 +94,6 @@ class GoodsSupplierMatrixLogic extends BaseLogic
                     ->where('supplier_id', (int)$data['supplier_id'])
                     ->findOrEmpty();
 
-                $oldPrice = $model->isEmpty() ? null : (string)$model->purchase_price;
                 if ($model->isEmpty()) {
                     $data['tenant_id'] = self::tenantId();
                     $data['goods_id'] = $goodsId;
@@ -108,20 +106,6 @@ class GoodsSupplierMatrixLogic extends BaseLogic
                 }
                 $keptIds[] = (int)$model->id;
 
-                $oldPriceText = $oldPrice === null ? null : self::money($oldPrice);
-                if ($oldPriceText === null || $oldPriceText !== (string)$data['purchase_price']) {
-                    GoodsSupplierPriceHistory::create([
-                        'tenant_id' => self::tenantId(),
-                        'goods_supplier_id' => (int)$model->id,
-                        'goods_id' => $goodsId,
-                        'sku_id' => (int)$data['sku_id'],
-                        'supplier_id' => (int)$data['supplier_id'],
-                        'purchase_price' => $data['purchase_price'],
-                        'effective_date' => date('Y-m-d'),
-                        'remark' => '供应商SKU采购价更新',
-                        'create_time' => time(),
-                    ]);
-                }
             }
 
             self::deleteMissingRelations($goodsId, $keptIds);
@@ -193,17 +177,12 @@ class GoodsSupplierMatrixLogic extends BaseLogic
             'phone' => (string)($row['phone'] ?? ''),
             'supplier_product_code' => (string)($row['supplier_product_code'] ?? ''),
             'supplier_goods_name' => (string)($row['supplier_goods_name'] ?? ''),
-            'purchase_price' => (string)($row['purchase_price'] ?? '0.00'),
-            'default_purchase_price' => (string)($row['purchase_price'] ?? '0.00'),
             'purchase_unit_id' => (int)($row['purchase_unit_id'] ?? 0),
             'purchase_unit_name' => (string)($row['purchase_unit_name'] ?? ''),
             'purchase_unit' => (string)($row['purchase_unit_name'] ?? ''),
             'settlement_unit_id' => (int)($row['settlement_unit_id'] ?? 0),
             'settlement_unit_name' => (string)($row['settlement_unit_name'] ?? ''),
             'settlement_unit' => (string)($row['settlement_unit_name'] ?? ''),
-            'min_purchase_qty' => (string)($row['min_purchase_qty'] ?? '0.0000'),
-            'daily_capacity_qty' => (string)($row['daily_capacity_qty'] ?? '0.0000'),
-            'lead_time_days' => (int)($row['lead_time_days'] ?? 0),
             'is_preferred' => (int)($row['is_preferred'] ?? $row['is_primary'] ?? 0),
             'is_primary' => (int)($row['is_primary'] ?? $row['is_preferred'] ?? 0),
             'status' => (int)($row['status'] ?? 1),
@@ -257,14 +236,10 @@ class GoodsSupplierMatrixLogic extends BaseLogic
             'is_preferred' => (int)($row['is_preferred'] ?? $row['is_primary'] ?? 0) === 1 ? 1 : 0,
             'supplier_product_code' => trim((string)($row['supplier_product_code'] ?? '')),
             'supplier_goods_name' => trim((string)($row['supplier_goods_name'] ?? $row['supplier_product_name'] ?? '')),
-            'purchase_price' => self::money($row['purchase_price'] ?? $row['default_purchase_price'] ?? 0),
             'purchase_unit_id' => $purchaseUnitId,
             'purchase_unit_name' => $purchaseUnitName,
             'settlement_unit_id' => $settlementUnitId,
             'settlement_unit_name' => $settlementUnitName,
-            'min_purchase_qty' => self::decimal4($row['min_purchase_qty'] ?? 0),
-            'daily_capacity_qty' => self::decimal4($row['daily_capacity_qty'] ?? 0),
-            'lead_time_days' => max(0, (int)($row['lead_time_days'] ?? 0)),
             'status' => (int)($row['status'] ?? 1) === 0 ? 0 : 1,
             'remark' => trim((string)($row['remark'] ?? '')),
         ];
@@ -279,16 +254,6 @@ class GoodsSupplierMatrixLogic extends BaseLogic
             ->where('tenant_id', self::tenantId())
             ->findOrEmpty();
         return $unit->isEmpty() ? $fallback : (string)$unit->name;
-    }
-
-    protected static function money(mixed $value): string
-    {
-        return number_format(max(0, (float)$value), 2, '.', '');
-    }
-
-    protected static function decimal4(mixed $value): string
-    {
-        return number_format(max(0, (float)$value), 4, '.', '');
     }
 
     protected static function tenantId(): int

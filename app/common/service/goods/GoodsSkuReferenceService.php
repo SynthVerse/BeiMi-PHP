@@ -10,7 +10,6 @@ class GoodsSkuReferenceService
     {
         foreach ([
             'order_goods',
-            'goods_supplier_price_history',
             'goods_unit_conversion_rule',
             'stock_flow',
             'purchase_arrival_detail',
@@ -42,7 +41,6 @@ class GoodsSkuReferenceService
         }
         foreach ([
             ['table' => 'order_goods', 'column' => 'supplier_relation_id'],
-            ['table' => 'goods_supplier_price_history', 'column' => 'goods_supplier_id'],
         ] as $reference) {
             try {
                 if (Db::name($reference['table'])
