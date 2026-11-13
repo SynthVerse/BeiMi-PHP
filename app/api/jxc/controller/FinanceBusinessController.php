@@ -2,7 +2,7 @@
 
 namespace app\api\jxc\controller;
 
-use app\api\jxc\logic\{FinanceBusinessLogic, FinanceEvidence, FinanceValue};
+use app\api\jxc\logic\{FinanceBusinessLogic, FinanceBusinessException, FinanceEvidence, FinanceValue};
 
 class FinanceBusinessController extends BaseJxcController
 {
@@ -31,22 +31,22 @@ class FinanceBusinessController extends BaseJxcController
     private function salesOutputAction(string $method, array $params)
     {
         try { return $this->data(\app\api\jxc\logic\FinanceSalesOutput::$method($params)); }
-        catch (\DomainException $error) { return $this->fail($error->getMessage()); }
+        catch (\DomainException $error) { return $this->fail($error->getMessage(), $error instanceof FinanceBusinessException ? $error->details() : []); }
     }
     public function salesSources()
     {
         try { return $this->data(\app\api\jxc\logic\FinanceCustomers::salesSources($this->request->get())); }
-        catch (\DomainException $error) { return $this->fail($error->getMessage()); }
+        catch (\DomainException $error) { return $this->fail($error->getMessage(), $error instanceof FinanceBusinessException ? $error->details() : []); }
     }
     public function saveSalesTerms()
     {
         try { return $this->data(\app\api\jxc\logic\FinanceSalesRules::save($this->request->post())); }
-        catch (\DomainException $error) { return $this->fail($error->getMessage()); }
+        catch (\DomainException $error) { return $this->fail($error->getMessage(), $error instanceof FinanceBusinessException ? $error->details() : []); }
     }
     public function saveSalesPrecision()
     {
         try { return $this->data(\app\api\jxc\logic\FinanceSalesPrecision::save($this->request->post())); }
-        catch (\DomainException $error) { return $this->fail($error->getMessage()); }
+        catch (\DomainException $error) { return $this->fail($error->getMessage(), $error instanceof FinanceBusinessException ? $error->details() : []); }
     }
     public function action()
     {
@@ -59,7 +59,7 @@ class FinanceBusinessController extends BaseJxcController
     public function preview()
     {
         try { return $this->data(\app\api\jxc\logic\FinancePreview::calculate($this->request->post())); }
-        catch (\DomainException $error) { return $this->fail($error->getMessage()); }
+        catch (\DomainException $error) { return $this->fail($error->getMessage(), $error instanceof FinanceBusinessException ? $error->details() : []); }
     }
     public function customerBalances() { return $this->customerRead('lists'); }
     public function customerBalanceDetail() { return $this->customerRead('detail'); }
@@ -70,7 +70,7 @@ class FinanceBusinessController extends BaseJxcController
     private function supplierRead(string $method)
     {
         try { return $this->data(\app\api\jxc\logic\FinanceSupplierBalances::$method($this->request->get())); }
-        catch (\DomainException $error) { return $this->fail($error->getMessage()); }
+        catch (\DomainException $error) { return $this->fail($error->getMessage(), $error instanceof FinanceBusinessException ? $error->details() : []); }
     }
     public function statementDetail() { return $this->statementRead('detail'); }
     public function overdueTodos() { return $this->overdueRead('lists'); }
@@ -78,33 +78,33 @@ class FinanceBusinessController extends BaseJxcController
     private function overdueRead(string $method)
     {
         try { return $this->data(\app\api\jxc\logic\FinanceOverdue::$method($this->request->get())); }
-        catch (\DomainException $error) { return $this->fail($error->getMessage()); }
+        catch (\DomainException $error) { return $this->fail($error->getMessage(), $error instanceof FinanceBusinessException ? $error->details() : []); }
     }
     public function statementAction()
     {
         try { return $this->data(\app\api\jxc\logic\FinanceStatements::action((string)$this->request->post('action', ''), $this->request->post())); }
-        catch (\DomainException $error) { return $this->fail($error->getMessage()); }
+        catch (\DomainException $error) { return $this->fail($error->getMessage(), $error instanceof FinanceBusinessException ? $error->details() : []); }
     }
     private function statementRead(string $method)
     {
         try { return $this->data(\app\api\jxc\logic\FinanceStatements::$method($this->request->get())); }
-        catch (\DomainException $error) { return $this->fail($error->getMessage()); }
+        catch (\DomainException $error) { return $this->fail($error->getMessage(), $error instanceof FinanceBusinessException ? $error->details() : []); }
     }
     private function customerRead(string $method)
     {
         try { return $this->data(\app\api\jxc\logic\FinanceCustomerBalances::$method($this->request->get())); }
-        catch (\DomainException $error) { return $this->fail($error->getMessage()); }
+        catch (\DomainException $error) { return $this->fail($error->getMessage(), $error instanceof FinanceBusinessException ? $error->details() : []); }
     }
     public function evidence()
     {
         try {
             return $this->data(FinanceEvidence::save(FinanceValue::text($this->request->post('type', ''), 40), $this->request->file('file')));
-        } catch (\Exception $error) { return $this->fail($error->getMessage()); }
+        } catch (\Exception $error) { return $this->fail($error->getMessage(), $error instanceof FinanceBusinessException ? $error->details() : []); }
     }
     public function evidenceContent()
     {
         try { return $this->data(FinanceEvidence::content(FinanceValue::id($this->request->get('id', 0))))->header(['Cache-Control' => 'private, no-store', 'Pragma' => 'no-cache']); }
-        catch (\DomainException $error) { return $this->fail($error->getMessage()); }
+        catch (\DomainException $error) { return $this->fail($error->getMessage(), $error instanceof FinanceBusinessException ? $error->details() : []); }
     }
-    private function respond(array|false $result) { return $result === false ? $this->fail(FinanceBusinessLogic::getError()) : $this->data($result); }
+    private function respond(array|false $result) { return $result === false ? $this->fail(FinanceBusinessLogic::getError(), FinanceBusinessLogic::getReturnData() ?: []) : $this->data($result); }
 }

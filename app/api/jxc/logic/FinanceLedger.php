@@ -36,7 +36,7 @@ final class FinanceLedger
         if (!preg_match('/^([on]):([1-9][0-9]{0,17})$/D', $reference, $match)) { throw new \DomainException('未结来源标识无效'); }
         $opening = $match[1] === 'o';
         $row = Db::name($opening ? 'finance_opening_source' : 'finance_source')->where('tenant_id', $this->tenantId)->where('id', $match[2])->find();
-        if (!$row) { throw new \DomainException('未结来源不存在或不属于本门店'); }
+        if (!$row) { throw FinanceBusinessException::classified('未结来源不存在或不属于本门店，请重新核对来源', 'FINANCE_SOURCE_CONFLICT'); }
         $snapshot = FinanceValue::decode($row[$opening ? 'source_snapshot' : 'snapshot']);
         $change = (string)(Db::name('finance_entry')->where('tenant_id', $this->tenantId)->where('source_ref', $reference)->where('metric', 'balance')->sum('amount') ?: '0');
         $due = FinanceDueDates::forSources($this->tenantId, [$reference])[$reference] ?? null;
@@ -132,7 +132,7 @@ final class FinanceLedger
         if (bccomp($amount, '0', 2) === 0) { return; }
         if ($metric === 'balance') {
             $current = $this->source($source);
-            if (bccomp(bcadd($current['balance'], $amount, 2), '0', 2) < 0) { throw new \DomainException('所选来源余额已变化，本次金额超过当前未结余额'); }
+            if (bccomp(bcadd($current['balance'], $amount, 2), '0', 2) < 0) { throw FinanceBusinessException::classified('所选来源余额已变化，本次金额超过当前未结余额', 'FINANCE_SOURCE_CONFLICT', [['field' => 'allocations', 'source' => $source, 'message' => '本次金额超过当前来源未结余额，请重新核对']]); }
         }
         Db::name('finance_entry')->insert(['tenant_id' => $this->tenantId, 'document_id' => $documentId,
             'source_ref' => $source, 'metric' => $metric, 'purpose' => $purpose, 'subject_id' => $subjectId,

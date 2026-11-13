@@ -13,11 +13,12 @@ final class FinanceMoney
 
     public function record(int $documentId, string $type, array $payload, string $direction, string $date, string $amount, string $month, ?array $originalTransaction = null): array
     {
-        $account = $this->ledger->account(FinanceValue::id($payload['account_id'] ?? 0));
+        try { $account = $this->ledger->account(FinanceValue::id($payload['account_id'] ?? 0)); }
+        catch (\DomainException $error) { throw FinanceBusinessException::validation([['field' => 'account_id', 'code' => 'unavailable', 'message' => '资金账户无效、已停用或不属于本门店，请重新选择账户']]); }
         $evidence = $this->evidence($type, $payload, $account['account_type'] !== 'cash');
-        $number = FinanceValue::text($payload['transaction_no'] ?? '', 120, false);
-        $scope = FinanceValue::text($payload['transaction_scope'] ?? '', 160, false);
-        if ($number !== '' && $scope === '') { throw new \DomainException('填写交易号时须明确银行账户或收款商户范围'); }
+        $number = FinanceBusinessValidation::text('transaction_no', $payload['transaction_no'] ?? '', 120, false, '交易号');
+        $scope = FinanceBusinessValidation::text('transaction_scope', $payload['transaction_scope'] ?? '', 160, false, '交易所属渠道范围');
+        if ($number !== '' && $scope === '') { throw FinanceBusinessException::validation([['field' => 'transaction_scope', 'code' => 'required', 'message' => '填写交易号时须明确银行账户或收款商户范围']]); }
         $externalKey = $number === '' ? null : hash('sha256', FinanceValue::json([$account['account_type'], $scope, $number]));
         if ($originalTransaction) {
             $identity = FinanceValue::decode($originalTransaction['evidence']);
@@ -28,8 +29,8 @@ final class FinanceMoney
         $similar = Db::name('finance_money_transaction')->where('tenant_id', $this->tenantId)->where('account_id', $account['id'])
             ->where('direction', $direction)->where('amount', $amount)
             ->whereBetween('actual_date', [(new \DateTimeImmutable($date))->modify('-1 day')->format('Y-m-d'), (new \DateTimeImmutable($date))->modify('+1 day')->format('Y-m-d')])->count();
-        $riskReason = FinanceValue::text($payload['duplicate_risk_reason'] ?? '', 1000, false);
-        if (!$originalTransaction && $number === '' && $similar && $riskReason === '') { throw new \DomainException('相近时间有同账户、同方向、同金额记录；核实为不同交易后填写继续登记原因'); }
+        $riskReason = FinanceBusinessValidation::text('duplicate_risk_reason', $payload['duplicate_risk_reason'] ?? '', 1000, false, '相似交易继续登记原因');
+        if (!$originalTransaction && $number === '' && $similar && $riskReason === '') { throw FinanceBusinessException::validation([['field' => 'duplicate_risk_reason', 'code' => 'required', 'message' => '相近时间有同账户、同方向、同金额记录；核实为不同交易后填写继续登记原因']]); }
         $evidence += ['transaction_no' => $number, 'transaction_scope' => $scope, 'duplicate_risk_reason' => $riskReason];
         $transactionId = $originalTransaction ? (int)$originalTransaction['id'] : (int)Db::name('finance_money_transaction')->insertGetId(['tenant_id' => $this->tenantId, 'document_id' => $documentId,
             'account_id' => $account['id'], 'direction' => $direction, 'amount' => $amount, 'actual_date' => $date,
@@ -52,18 +53,18 @@ final class FinanceMoney
     private function evidence(string $type, array $payload, bool $electronic): array
     {
         $ids = $payload['evidence_ids'] ?? [];
-        if (!is_array($ids) || !array_is_list($ids) || count($ids) > 12) { throw new \DomainException('核验截图最多12张'); }
+        $errors = FinanceBusinessValidation::evidenceErrors($payload, $electronic, FinanceAccess::owner());
+        if ($errors) { throw FinanceBusinessException::validation($errors); }
         $screenshots = [];
         foreach ($ids as $id) {
-            $row = Db::name('finance_evidence')->where('tenant_id', $this->tenantId)->where('document_type', $type)->where('id', FinanceValue::id($id))->find();
-            if (!$row) { throw new \DomainException('截图不存在、不属于本门店或不属于当前业务类型'); }
+            try { $id = FinanceValue::id($id); }
+            catch (\DomainException $error) { throw FinanceBusinessException::validation([['field' => 'evidence_ids', 'code' => 'invalid', 'message' => '收付款截图标识无效，请移除后重新上传']]); }
+            $row = Db::name('finance_evidence')->where('tenant_id', $this->tenantId)->where('document_type', $type)->where('id', $id)->find();
+            if (!$row) { throw FinanceBusinessException::validation([['field' => 'evidence_ids', 'code' => 'unavailable', 'message' => '截图不存在、不属于本门店或不属于当前业务类型，请移除后重新上传']]); }
             $screenshots[] = FinanceEvidence::metadata($row);
         }
-        $exceptionReason = FinanceValue::text($payload['missing_evidence_reason'] ?? '', 1000, false);
-        if ($electronic && !$screenshots) {
-            if (!FinanceAccess::owner() || $exceptionReason === '' || trim((string)($payload['alternative_evidence'] ?? '')) === '') { throw new \DomainException('电子收付款须上传截图；永久无法取得时仅最高权限人员可凭其他资金依据例外确认'); }
-        }
+        $exceptionReason = trim($payload['missing_evidence_reason'] ?? '');
         return ['screenshots' => $screenshots, 'missing_screenshot' => $electronic && !$screenshots,
-            'exception_reason' => $exceptionReason, 'alternative_evidence' => FinanceValue::text($payload['alternative_evidence'] ?? '', 1000, false)];
+            'exception_reason' => $exceptionReason, 'alternative_evidence' => trim($payload['alternative_evidence'] ?? '')];
     }
 }

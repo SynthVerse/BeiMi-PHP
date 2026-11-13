@@ -29,7 +29,7 @@ final class FinanceDueDates
         if (!in_array($source['category'], $policy['sources'], true) || $source['subject_id'] !== FinanceValue::id($data['subject_id'] ?? 0)) { throw new \DomainException('请选择本对象的正式未结来源'); }
         if (bccomp($source['balance'], '0', 2) <= 0) { throw new \DomainException('已结清来源无需调整付款日'); }
         $revision = FinanceValue::id($data['expected_due_revision'] ?? 0, true);
-        if ($revision !== $source['due_revision']) { throw new \DomainException('付款日已有新调整，请核对最新日期再提交'); }
+        if ($revision !== $source['due_revision']) { throw FinanceBusinessException::classified('付款日已有新调整，请核对最新日期再提交', 'FINANCE_SOURCE_CONFLICT', [['field' => 'source', 'source' => $source['reference'], 'message' => '该来源付款日已有新调整，请核对最新日期']]); }
         if (!array_key_exists('new_due_date', $data)) { throw new \DomainException('请填写新付款日或明确选择未约定'); }
         $due = FinanceValue::date($data['new_due_date'], true); $reason = FinanceValue::text($data['reason'] ?? '', 1000);
         if ($due === $source['due_date']) { throw new \DomainException('新付款日与当前日期一致，无需调整'); }

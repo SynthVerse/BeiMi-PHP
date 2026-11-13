@@ -14,7 +14,7 @@ final class FinanceBusinessLogic extends BaseLogic
     {
         self::clearError();
         try { return Db::transaction(static fn(): array => FinancePurchaseLegacySources::options($params)); }
-        catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
+        catch (\DomainException $error) { FinanceBusinessException::capture($error); return false; }
     }
 
     public static function historyPurchaseConfirm(array $params): array|false
@@ -25,7 +25,7 @@ final class FinanceBusinessLogic extends BaseLogic
                 FinanceIntegration::lock();
                 return FinancePurchaseLegacySources::confirm($params);
             });
-        } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
+        } catch (\DomainException $error) { FinanceBusinessException::capture($error); return false; }
     }
 
     public static function periodAction(string $action, array $params): array|false
@@ -37,7 +37,7 @@ final class FinanceBusinessLogic extends BaseLogic
                 $ledger = new FinanceLedger(FinanceAccess::tenant()); $ledger->lockBook();
                 return FinancePeriods::execute($ledger, $action, $params);
             });
-        } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
+        } catch (\DomainException $error) { FinanceBusinessException::capture($error); return false; }
     }
 
     public static function monthlyReport(array $params): array|false
@@ -49,7 +49,7 @@ final class FinanceBusinessLogic extends BaseLogic
                 $ledger = new FinanceLedger(FinanceAccess::tenant()); $ledger->lockBook();
                 return FinanceReportPeriods::read($ledger, $params);
             });
-        } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
+        } catch (\DomainException $error) { FinanceBusinessException::capture($error); return false; }
     }
 
     public static function managedReport(array $params): array|false
@@ -58,7 +58,7 @@ final class FinanceBusinessLogic extends BaseLogic
         try {
             FinanceAccess::require('', true);
             return Db::transaction(static fn(): array => FinanceManagedReports::read($params));
-        } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
+        } catch (\DomainException $error) { FinanceBusinessException::capture($error); return false; }
     }
 
     public static function reportTrace(array $params): array|false
@@ -70,7 +70,7 @@ final class FinanceBusinessLogic extends BaseLogic
                 $ledger = new FinanceLedger(FinanceAccess::tenant()); $ledger->lockBook();
                 return FinanceReportTrace::read($ledger, $params);
             });
-        } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
+        } catch (\DomainException $error) { FinanceBusinessException::capture($error); return false; }
     }
 
     public static function reportExport(string $action, array $params): array|false
@@ -87,7 +87,7 @@ final class FinanceBusinessLogic extends BaseLogic
             // 失败发生在事务回滚之后，避免拒权或文件生成失败的审计一起被撤销。
             FinanceReportExports::auditAttempt($action, $params, null, $error instanceof \DomainException ? $error->getMessage() : '导出处理异常');
             if (!$error instanceof \DomainException) { throw $error; }
-            self::setError($error->getMessage()); return false;
+            FinanceBusinessException::capture($error); return false;
         }
     }
 
@@ -100,17 +100,17 @@ final class FinanceBusinessLogic extends BaseLogic
                 $ledger = new FinanceLedger(FinanceAccess::tenant()); $ledger->lockBook();
                 return FinancePeriodChecklist::collect($ledger, $params);
             });
-        } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
+        } catch (\DomainException $error) { FinanceBusinessException::capture($error); return false; }
     }
 
     public static function action(string $action, array $params): array|false
     {
         self::clearError();
         try {
-            if (!in_array($action, ['save', 'reminder_off', 'prepare', 'submit', 'reopen', 'confirm', 'record', 'correct', 'reverse_duplicate', 'reverse'], true)) { throw new \DomainException('不支持的单据动作'); }
+            if (!in_array($action, ['save', 'reminder_off', 'prepare', 'submit', 'reopen', 'confirm', 'record', 'correct', 'reverse_duplicate', 'reverse'], true)) { throw FinanceBusinessException::classified('不支持的单据动作', 'FINANCE_ACTION_FORBIDDEN'); }
             $tenantId = FinanceAccess::tenant();
-            if ($tenantId <= 0 || FinanceAccess::operator() <= 0) { throw new \DomainException('请先登录并选择门店'); }
-            if (FinanceValue::id($params['expected_tenant_id'] ?? 0) !== $tenantId) { throw new \DomainException('当前门店已变化，请重新进入'); }
+            if ($tenantId <= 0 || FinanceAccess::operator() <= 0) { throw FinanceBusinessException::classified('请先登录并选择门店', 'FINANCE_CONTEXT_CHANGED'); }
+            if (FinanceValue::id($params['expected_tenant_id'] ?? 0) !== $tenantId) { throw FinanceBusinessException::classified('当前门店已变化，请重新进入', 'FINANCE_CONTEXT_CHANGED'); }
             $id = FinanceValue::id($params['id'] ?? 0, true);
             $version = FinanceValue::id($params['expected_version'] ?? null, true);
             $key = FinanceValue::text($params['idempotency_key'] ?? '', 96);
@@ -138,7 +138,7 @@ final class FinanceBusinessLogic extends BaseLogic
                 $type = $document['type'] ?? FinanceValue::text($params['type'] ?? '', 40);
                 FinanceDocumentPolicy::authorize($type, in_array($action, ['confirm', 'record', 'correct', 'reverse_duplicate', 'reverse'], true));
                 if ($action === 'reminder_off' || ($action === 'save' && !empty($params['continue_later']))) { FinanceAccess::require(FinanceDocumentPolicy::TYPES[$type]['prepare']); }
-                if ($document && (int)$document['version'] !== $version) { throw new \DomainException('草稿已被修改，请核对最新版本'); }
+                if ($document && (int)$document['version'] !== $version) { throw FinanceBusinessException::classified('草稿已被修改，请核对最新版本', 'FINANCE_VERSION_CONFLICT'); }
                 if (!$document && ($version !== 0 || !in_array($action, ['save', 'prepare', 'record'], true))) { throw new \DomainException('请先保存有效草稿'); }
                 $original = in_array($action, ['correct', 'reverse_duplicate', 'reverse'], true) ? $document : null;
                 if ($original && $original['status'] !== 'confirmed') { throw new \DomainException('仅已确认记录可关联更正'); }
@@ -166,6 +166,7 @@ final class FinanceBusinessLogic extends BaseLogic
                     if ($document['status'] !== 'pending') { throw new \DomainException('只有待确认单据可以退回草稿'); }
                     $document['status'] = 'draft';
                 }
+                if (in_array($action, ['record', 'confirm', 'correct'], true)) { FinanceBusinessValidation::validate($type, $action, FinanceValue::decode($document['payload']), $tenantId); }
                 if (!$id || $original) { $document['id'] = (int)Db::name('finance_document')->insertGetId($document + ['version' => 1, 'last_modified_by' => FinanceValue::json(FinanceAccess::actor()), 'update_time' => time()]); }
                 FinanceInventoryCounts::prepare($document, $action);
                 if (in_array($action, ['confirm', 'record', 'correct', 'reverse_duplicate', 'reverse'], true)) {
@@ -202,7 +203,7 @@ final class FinanceBusinessLogic extends BaseLogic
                     'result' => FinanceValue::json($result), 'create_time' => time()]);
                 return $result;
             });
-        } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
+        } catch (\DomainException $error) { FinanceBusinessException::capture($error); return false; }
     }
 
     public static function detail(array $params): array|false
@@ -235,7 +236,7 @@ final class FinanceBusinessLogic extends BaseLogic
                 unset($payload);
             }
             return $presented + ['replacement_document_id' => (int)(Db::name('finance_correction')->where('tenant_id', FinanceAccess::tenant())->where('original_document_id', $document['id'])->value('replacement_document_id') ?: 0)];
-        } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
+        } catch (\DomainException $error) { FinanceBusinessException::capture($error); return false; }
     }
 
     public static function options(array $params): array|false
@@ -340,13 +341,14 @@ final class FinanceBusinessLogic extends BaseLogic
             $masterSubject = $policy['subject'] === 'account' ? 'finance_account' : $policy['subject'];
             return ['tenant_id' => FinanceAccess::tenant(), 'type' => $type, 'policy' => $policy,
                 'supports_continue_later' => true,
+                'validation_rules' => FinanceBusinessValidation::rules($type, FinanceAccess::owner()),
                 'master_create_kinds' => FinanceAccess::owner() ? array_values(array_unique(array_filter([$masterSubject, $policy['direction'] !== 'none' ? 'finance_account' : '', $type === 'purchase_arrival' ? 'goods' : '', $type === 'purchase_arrival' ? 'warehouse' : ''], static fn(string $kind): bool => in_array($kind, ['customer', 'vendor', 'employee', 'finance_account', 'goods', 'warehouse'], true)))) : [],
                 'active' => Db::name('finance_opening_book')->where('tenant_id', FinanceAccess::tenant())->value('status') === 'active',
                 'can_confirm' => FinanceAccess::owner() || (!$policy['owner'] && FinanceAccess::has($policy['confirm'])),
                 'can_prepare' => FinanceAccess::has($policy['prepare']),
                 'can_return_receipt' => $type === 'receipt' && FinanceAccess::has('finance.refund.prepare'),
                 'accounts' => $accounts] + $sources;
-        } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
+        } catch (\DomainException $error) { FinanceBusinessException::capture($error); return false; }
     }
 
     private static function present(array $document): array
@@ -382,7 +384,7 @@ final class FinanceBusinessLogic extends BaseLogic
             if (!empty($params['subject_id'])) { $query->whereRaw("CAST(JSON_UNQUOTE(JSON_EXTRACT(payload,'$.subject_id')) AS UNSIGNED)=?", [FinanceValue::id($params['subject_id'])]); }
             $rows = $query->order('id', 'desc')->page($page, 20)->select()->toArray();
             return ['tenant_id' => FinanceAccess::tenant(), 'lists' => array_map(self::present(...), $rows), 'page' => $page, 'has_more' => count($rows) === 20];
-        } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
+        } catch (\DomainException $error) { FinanceBusinessException::capture($error); return false; }
     }
 
     public static function subjects(array $params): array|false
@@ -402,6 +404,6 @@ final class FinanceBusinessLogic extends BaseLogic
             $page = FinanceValue::id($params['page'] ?? 1);
             $rows = $query->field('id,' . $column . ' AS name')->order('id')->page($page, 20)->select()->toArray();
             return ['tenant_id' => FinanceAccess::tenant(), 'lists' => $rows, 'has_more' => count($rows) === 20];
-        } catch (\DomainException $error) { self::setError($error->getMessage()); return false; }
+        } catch (\DomainException $error) { FinanceBusinessException::capture($error); return false; }
     }
 }

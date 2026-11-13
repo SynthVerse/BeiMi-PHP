@@ -17,7 +17,7 @@ final class FinancePreview
         Db::startTrans();
         try {
             $document = FinanceBusinessLogic::action($action, $params);
-            if ($document === false) { throw new \DomainException(FinanceBusinessLogic::getError()); }
+            if ($document === false) { throw new FinanceBusinessException(FinanceBusinessLogic::getError(), FinanceBusinessLogic::getReturnData() ?: []); }
             $tenant = FinanceAccess::tenant(); $ledger = new FinanceLedger($tenant);
             $entries = Db::name('finance_entry')->where('tenant_id', $tenant)->where('document_id', $document['id'])->select()->toArray();
             $created = Db::name('finance_source')->where('tenant_id', $tenant)->where('document_id', $document['id'])->select()->toArray();

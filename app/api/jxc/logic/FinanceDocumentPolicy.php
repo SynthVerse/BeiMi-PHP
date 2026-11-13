@@ -97,7 +97,10 @@ final class FinanceDocumentPolicy
     public static function authorize(string $type, bool $confirm = false): array
     {
         $policy = self::type($type);
-        if (in_array($type, ['salary_payment', 'salary_expense', 'salary_adjustment'], true)) { FinanceAccess::require('finance.salary.view'); }
+        if (in_array($type, ['salary_payment', 'salary_expense', 'salary_adjustment'], true)) {
+            try { FinanceAccess::require('finance.salary.view'); }
+            catch (\DomainException $error) { throw FinanceBusinessException::forRead($error); }
+        }
         if ($confirm) { FinanceAccess::require($policy['confirm'], $policy['owner']); }
         elseif (!FinanceAccess::has($policy['prepare']) && !($policy['confirm'] && FinanceAccess::has($policy['confirm']))) { FinanceAccess::require($policy['prepare']); }
         return $policy;
@@ -105,9 +108,11 @@ final class FinanceDocumentPolicy
 
     public static function read(string $type): array
     {
-        if (in_array($type, ['inventory_count_start', 'inventory_count_cancel'], true) && FinanceAccess::has('finance.inventory.confirm')) { return self::type($type); }
-        if (in_array($type, ['salary_expense', 'salary_payment', 'salary_adjustment'], true)) { FinanceAccess::require('finance.salary.view'); return self::type($type); }
-        if ($type === 'sales_batch' && FinanceAccess::has('settlement.view')) { return self::type($type); }
-        return self::authorize($type);
+        try {
+            if (in_array($type, ['inventory_count_start', 'inventory_count_cancel'], true) && FinanceAccess::has('finance.inventory.confirm')) { return self::type($type); }
+            if (in_array($type, ['salary_expense', 'salary_payment', 'salary_adjustment'], true)) { FinanceAccess::require('finance.salary.view'); return self::type($type); }
+            if ($type === 'sales_batch' && FinanceAccess::has('settlement.view')) { return self::type($type); }
+            return self::authorize($type);
+        } catch (\DomainException $error) { throw FinanceBusinessException::forRead($error); }
     }
 }

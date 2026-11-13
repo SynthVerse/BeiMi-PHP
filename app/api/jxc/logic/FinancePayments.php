@@ -94,7 +94,7 @@ final class FinancePayments
                 if (!is_array($line)) { throw new \DomainException('付款组成格式无效'); }
                 $reference = FinanceValue::text($line['source'] ?? '', 40); $source = $this->ledger->source($reference);
                 $available = bcsub($source['balance'], FinanceStatements::disputedAmount($reference), 2);
-                if (bccomp(FinanceValue::money($line['amount'] ?? null), $available, 2) > 0) { throw new \DomainException('本次付款超过无争议可付金额，请先核实争议并完成正式调整'); }
+                if (bccomp(FinanceValue::money($line['amount'] ?? null), $available, 2) > 0) { throw FinanceBusinessException::classified('本次付款超过无争议可付金额，请先核实争议并完成正式调整', 'FINANCE_SOURCE_CONFLICT', [['field' => 'allocations', 'source' => $source['reference'], 'message' => '本次付款超过该来源无争议可付金额']]); }
             }
         }
         $total = $this->ledger->allocate((int)$document['id'], $lines, $policy['sources'], $subjectId, $date, $month);

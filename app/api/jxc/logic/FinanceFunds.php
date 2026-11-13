@@ -51,7 +51,7 @@ final class FinanceFunds
                 if (!is_array($line)) { throw new \DomainException('预付款抵扣组成无效'); }
                 $ref = FinanceValue::text($line['source'] ?? '', 40); $payable = $ledger->source($ref);
                 $available = bcsub($payable['balance'], FinanceStatements::disputedAmount($ref), 2);
-                if (bccomp(FinanceValue::money($line['amount'] ?? null), $available, 2) > 0) { throw new \DomainException('应付存在争议或余量已变化，请重新核对'); }
+                if (bccomp(FinanceValue::money($line['amount'] ?? null), $available, 2) > 0) { throw FinanceBusinessException::classified('应付存在争议或余量已变化，请重新核对', 'FINANCE_SOURCE_CONFLICT', [['field' => 'allocations', 'source' => $ref, 'message' => '本次抵扣超过该来源无争议可付金额']]); }
             }
             $principal = $ledger->allocate($id, $lines, ['payable'], $subject, $date, $month);
             $allocatedEntries = Db::name('finance_entry')->where('tenant_id', $tenant)->where('document_id', $id)->where('purpose', 'allocation')->order('id')->select()->toArray();
@@ -97,7 +97,7 @@ final class FinanceFunds
                 $interestSubject = FinanceValue::id($data['interest_subject_id'] ?? 0);
                 if ($interestSource['category'] !== 'expense_payable' || $interestSource['subject_id'] !== $interestSubject || ($data['interest_payee_verified'] ?? 0) !== 1) { throw new \DomainException('请选择已确认的利息费用待付来源，并核实收款对象与原借款的关系'); }
                 if ($interestSource['business_date'] && $date < $interestSource['business_date']) { throw new \DomainException('结清利息不能早于原费用发生日'); }
-                if (bccomp($interest, bcsub($interestSource['balance'], FinanceStatements::disputedAmount($interestSource['reference']), 2), 2) > 0) { throw new \DomainException('利息支付超过原费用无争议待付余额'); }
+                if (bccomp($interest, bcsub($interestSource['balance'], FinanceStatements::disputedAmount($interestSource['reference']), 2), 2) > 0) { throw FinanceBusinessException::classified('利息支付超过原费用无争议待付余额', 'FINANCE_SOURCE_CONFLICT', [['field' => 'interest_source', 'source' => $interestSource['reference'], 'message' => '本次利息超过原费用无争议待付余额']]); }
                 $ledger->allocate($id, [['source' => $interestSource['reference'], 'amount' => $interest]], ['expense_payable'], $interestSubject, $date, $month);
             } elseif ($interestMode === 'new_expense') {
                 $benefitMonth = FinanceValue::text($data['interest_benefit_month'] ?? '', 7);

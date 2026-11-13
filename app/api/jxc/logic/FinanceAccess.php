@@ -31,8 +31,8 @@ final class FinanceAccess
     }
     public static function require(string $permission, bool $ownerOnly = false): void
     {
-        if (self::tenant() <= 0 || self::operator() <= 0) { throw new \DomainException('请先登录并选择门店'); }
-        if ($ownerOnly ? !self::owner() : !self::has($permission)) { throw new \DomainException($ownerOnly ? '此项确认仅限门店最高权限人员' : '没有对应财务业务权限'); }
+        if (self::tenant() <= 0 || self::operator() <= 0) { throw FinanceBusinessException::classified('请先登录并选择门店', 'FINANCE_CONTEXT_CHANGED'); }
+        if ($ownerOnly ? !self::owner() : !self::has($permission)) { throw FinanceBusinessException::classified($ownerOnly ? '此项确认仅限门店最高权限人员' : '没有对应财务业务权限', 'FINANCE_ACTION_FORBIDDEN'); }
     }
     public static function actor(): array
     {
