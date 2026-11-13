@@ -498,6 +498,44 @@ final class FinanceOpeningWorkflowTest extends TestCase
         self::assertStringContainsString('原应收凭据尚未核实', implode('；', $this->action('item', $data)['blockers']));
     }
 
+    public function test_recovery_incomplete_details_save_but_only_complete_once_both_review_fields_are_known(): void
+    {
+        $customer = $this->createCustomer('坏账追讨核对客户');
+        $started = FinanceSetupLogic::startOpening($this->command(0) + ['mode' => 'carryover', 'activation_date' => '2026-09-01']);
+        self::assertNotFalse($started, FinanceSetupLogic::getError());
+        $other = FinanceSetupLogic::saveGuideCard($this->command((int)FinanceSetupLogic::opening()['version']) + ['category' => 'equipment', 'choice' => 'none']);
+        self::assertNotFalse($other, FinanceSetupLogic::getError());
+        $id = 0;
+        foreach ([
+            [[], ['原应收凭据', '已作坏账的事项']],
+            [['receivable_reference' => '旧账本8月第53笔'], ['已作坏账的事项']],
+            [['business_description' => '8月货款已作坏账，继续追讨'], ['原应收凭据']],
+            [['receivable_reference' => "\u{3000}", 'business_description' => " \t\n"], ['原应收凭据', '已作坏账的事项']],
+            [['receivable_reference' => "\u{0085}", 'business_description' => "\u{FEFF}"], ['原应收凭据', '已作坏账的事项']],
+            [['receivable_reference' => '旧账本8月第53笔', 'business_description' => '8月货款已作坏账，继续追讨'], []],
+        ] as [$details, $missing]) {
+            $saved = $this->action('item', ['id' => $id, 'entry_contract' => 2, 'category' => 'recovery', 'subject_id' => $customer,
+                'amount' => '10000.00', 'details' => $details]);
+            $record = array_values(array_filter($saved['items'], static fn(array $row): bool => $row['category'] === 'recovery'))[0];
+            $id = (int)$record['id'];
+            self::assertSame('', $record['details']['origin_reference']);
+            $blockers = array_values(array_filter($saved['blocker_details'], static fn(array $row): bool => $row['category'] === 'recovery' && $row['entity_type'] === 'opening_item'));
+            self::assertCount(count($missing), $blockers, '每个缺项只产生一条阻断');
+            foreach ($missing as $index => $label) { self::assertStringContainsString($label, $blockers[$index]['message']); }
+            $result = FinanceSetupLogic::saveGuideCard($this->command((int)$saved['version']) + ['category' => 'recovery', 'choice' => 'complete']);
+            if ($missing) {
+                self::assertFalse($result);
+                self::assertStringContainsString($missing[0], FinanceSetupLogic::getError());
+                self::assertSame($saved['version'], FinanceSetupLogic::opening()['version'], '核清拒绝不升版');
+            } else {
+                self::assertNotFalse($result, FinanceSetupLogic::getError());
+                $cards = array_column($result['cards'], null, 'category');
+                self::assertSame('complete', $cards['recovery']['state']);
+                self::assertSame('none', $cards['equipment']['state']);
+            }
+        }
+    }
+
     public function test_general_preparer_cannot_read_write_review_or_spoof_salary_rows(): void
     {
         $employee = $this->openingEmployee(['finance.opening.prepare']);
@@ -577,7 +615,7 @@ final class FinanceOpeningWorkflowTest extends TestCase
     private function extendedItem(string $category, int $subject, string $amount): array
     {
         return $this->item($category, $subject, $amount) + ['details' => ['benefit_month' => '2026-08',
-            'origin_reference' => '原合法来源-' . $category, 'receivable_reference' => '原已核销应收']];
+            'origin_reference' => '原合法来源-' . $category, 'receivable_reference' => '原已核销应收'] + ($category === 'recovery' ? ['business_description' => '历史货款已作坏账，继续追讨'] : [])];
     }
 
     public function test_account_change_after_submit_requires_recheck_and_zero_balance_is_explicit(): void

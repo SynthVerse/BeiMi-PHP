@@ -120,7 +120,7 @@ final class FinanceOpeningAssets
         $errors = [];
         if ($category === 'inventory' && (int)$item['subject_id'] === 0 && FinanceOpeningInventory::isFirst($details) && ($details['quantity'] ?? '') !== '' && bccomp($details['quantity'], '0', 4) <= 0) { $errors[] = '首次实物数量须大于零；没有实物请移除这笔草稿并核对没有库存'; }
         if (($details['_capture']['contract'] ?? null) === 2) {
-            if (in_array($category, ['expense_payable', 'reimbursement', 'customer_refund', 'supplier_refund', 'expense_refund', 'equipment_refund', 'recovery'], true) && ($details['business_description'] ?? '') === '') { $errors[] = '请填写具体事项及必要期间，方便后续结清'; }
+            if (in_array($category, ['expense_payable', 'reimbursement', 'customer_refund', 'supplier_refund', 'expense_refund', 'equipment_refund'], true) && ($details['business_description'] ?? '') === '') { $errors[] = '请填写具体事项及必要期间，方便后续结清'; }
             if (in_array($category, ['customer_refund', 'supplier_refund', 'expense_refund', 'equipment_refund'], true) && ($details['refund_confirmed'] ?? '') !== 'confirmed') { $errors[] = '退款义务和金额尚未确认，请保留待核实'; }
         }
         if (in_array($category, ['transit', 'unclaimed'], true) && !$item['historical_date']) { $errors[] = '实际资金日期尚未核实'; }

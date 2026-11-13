@@ -7,6 +7,8 @@ namespace app\api\jxc\logic;
 /** 期初来源的对象、资料和后续处理口径，供校验和小程序共同使用。 */
 final class FinanceOpeningCategory
 {
+    // Unicode White_Space 加 BOM；与小程序核清规则使用相同的明确字符集合。
+    private const RECOVERY_BLANK_TEXT = '/^[\x{0009}-\x{000D}\x{0020}\x{0085}\x{00A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}]*$/u';
     private const SUBJECTS = [
         'account' => ['finance_account', 'name', '资金账户'],
         'receivable' => ['customer', 'customer_name', '主客户'],
@@ -83,10 +85,10 @@ final class FinanceOpeningCategory
         $fields = [];
         if (in_array($category, ['capital', 'loan'], true)) { $fields[] = ['key' => 'counterparty', 'label' => $category === 'capital' ? '投入人姓名' : '出借人姓名', 'type' => 'text']; }
         if (self::hasBenefitMonth($category)) { $fields[] = ['key' => 'benefit_month', 'label' => '原受益月份', 'type' => 'month']; }
-        if (isset(self::ORIGINS[$category])) { $fields[] = ['key' => 'origin_reference', 'label' => self::ORIGINS[$category], 'type' => 'text']; }
-        if ($category === 'recovery') { $fields[] = ['key' => 'receivable_reference', 'label' => '原应收凭据', 'type' => 'text']; }
+        if (isset(self::ORIGINS[$category])) { $fields[] = ['key' => 'origin_reference', 'label' => self::ORIGINS[$category], 'type' => 'text'] + ($category === 'recovery' ? ['required' => false] : []); }
+        if ($category === 'recovery') { $fields[] = ['key' => 'receivable_reference', 'label' => '原应收凭据', 'type' => 'text', 'required' => true]; }
         $descriptions = ['expense_payable' => '什么费用、所属期间', 'reimbursement' => '垫付什么费用', 'customer_refund' => '退款原因和对应事项', 'supplier_refund' => '对方同意退回什么款项', 'expense_refund' => '什么费用、谁同意退款', 'equipment_refund' => '什么设备、退款事项', 'recovery' => '已作坏账的事项'];
-        if (isset($descriptions[$category])) { $fields[] = ['key' => 'business_description', 'label' => $descriptions[$category], 'type' => 'text', 'required' => false]; }
+        if (isset($descriptions[$category])) { $fields[] = ['key' => 'business_description', 'label' => $descriptions[$category], 'type' => 'text', 'required' => $category === 'recovery']; }
         if (in_array($category, ['customer_refund', 'supplier_refund', 'expense_refund', 'equipment_refund'], true)) { $fields[] = ['key' => 'refund_confirmed', 'label' => '双方已确认退款义务，金额无争议', 'type' => 'acknowledgement', 'required' => false]; }
         $fields = array_merge($fields, FinanceOpeningAssets::fields($category));
         return [
@@ -116,6 +118,7 @@ final class FinanceOpeningCategory
         $result = [];
         foreach (self::metadata($category)['detail_fields'] as $field) {
             $value = $details[$field['key']] ?? '';
+            if ($category === 'recovery' && in_array($field['key'], ['receivable_reference', 'business_description'], true) && is_string($value) && preg_match(self::RECOVERY_BLANK_TEXT, $value)) { $value = ''; }
             $result[$field['key']] = FinanceOpeningAssets::normalize($field, $value);
             if ($field['key'] === 'counterparty' && mb_strlen($result[$field['key']]) > 100) { throw new \DomainException('资金对象姓名不能超过100字'); }
         }

@@ -6239,19 +6239,99 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertSame([], \app\api\jxc\logic\FinanceDeliveries::rows($this->customerId, date('Y-m-01'), date('Y-m-d')));
     }
 
+    public function test_quantity_sales_pricing_preference_reads_exact_confirmed_line_and_keeps_scope(): void
+    {
+        $this->activate(); $fixture = $this->quantitySale('8.7', '5', '条'); $first = $fixture['source'];
+        $delivery = Db::name('fulfillment_delivery_item')->where('id', $first['delivery_item_id'])->find(); unset($delivery['id']);
+        $delivery['delivery_group_key'] .= ':second'; $delivery['processing_group_id']++;
+        $secondId = (int)Db::name('fulfillment_delivery_item')->insertGetId($delivery);
+        $rows = \app\api\jxc\logic\FinanceDeliveries::rows($this->customerId, date('Y-m-01'), date('Y-m-d'));
+        $second = array_column($rows, null, 'delivery_item_id')[$secondId];
+        $payload = $this->quantitySaleInput($first, $fixture['count_unit'], '5', '35');
+        $payload['lines'][] = $this->quantitySaleInput($second, $fixture['count_unit'], '5', '42')['lines'][0];
+        $draft = FinanceBusinessLogic::action('save', $this->command(0) + ['type' => 'sales_batch', 'payload' => $payload]);
+        self::assertNotFalse($draft, FinanceBusinessLogic::getError());
+        $latest = fn() => \app\api\jxc\logic\FinanceSalesPricingPreference::latest($this->customerId, $first['goods_id'], $first['sku_id']);
+        self::assertNull($latest(), '草稿不能成为成交偏好');
+        $pending = FinanceBusinessLogic::action('submit', $this->command((int)$draft['version']) + ['id' => $draft['id']]);
+        self::assertNotFalse($pending, FinanceBusinessLogic::getError()); self::assertNull($latest(), '待确认单不能成为成交偏好');
+        $confirmed = FinanceBusinessLogic::action('confirm', $this->command((int)$pending['version']) + ['id' => $draft['id']]);
+        self::assertNotFalse($confirmed, FinanceBusinessLogic::getError());
+        $preference = $latest();
+        self::assertSame('42.00', $preference['price'], '同单同SKU多条成交不能误取首条价格');
+        self::assertSame($fixture['count_unit'], (int)$preference['price_unit_id']);
+        self::assertSame((int)$confirmed['id'], (int)$preference['source_document_id']);
+        self::assertArrayNotHasKey('confirmed_result', $preference);
+        self::assertArrayNotHasKey('delivery_item_id', $preference);
+        $detail = \app\api\jxc\logic\GoodsLogic::detail(['id' => $first['goods_id'], 'sku_id' => $first['sku_id'], 'main_customer_id' => $this->customerId]);
+        self::assertNotFalse($detail, \app\api\jxc\logic\GoodsLogic::getError());
+        self::assertSame($preference, $detail['pricing_preference']);
+        if (getenv('BEIMI_PRICING_CONTRACT_OUTPUT') === '1') {
+            echo "\nBEIMI_PRICING_PREFERENCE=" . json_encode($detail['pricing_preference'], JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE) . "\n";
+        }
+        self::assertNull(\app\api\jxc\logic\FinanceSalesPricingPreference::latest($this->customerId + 1, $first['goods_id'], $first['sku_id']));
+        self::assertNull(\app\api\jxc\logic\FinanceSalesPricingPreference::latest($this->customerId, $first['goods_id'] + 1, $first['sku_id']));
+        self::assertNull(\app\api\jxc\logic\FinanceSalesPricingPreference::latest($this->customerId, $first['goods_id'], $first['sku_id'] + 1));
+        $this->prepareCustomerReportRequestContext(self::OTHER_TENANT_ID); self::assertNull($latest()); $this->prepareCustomerReportRequestContext();
+        Db::name('goods_units_binding')->where('tenant_id', self::TENANT_ID)->where('goods_id', $first['goods_id'])->where('unit_id', $fixture['count_unit'])->update(['status' => 0]);
+        self::assertNull($latest(), '失效绑定不得沿用历史偏好');
+    }
+
+    public function test_quantity_sales_pricing_preference_missing_or_mismatched_snapshot_price_is_unknown(): void
+    {
+        $this->activate(); $fixture = $this->quantitySale('8.7', '5', '条'); $source = $fixture['source'];
+        $result = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'sales_batch',
+            'payload' => $this->quantitySaleInput($source, $fixture['count_unit'], '5', '35')]);
+        self::assertNotFalse($result, FinanceBusinessLogic::getError());
+        $snapshot = $result['confirmed_result']; $line = $snapshot['lines'][0];
+        $invalidLines = [array_diff_key($line, ['price' => true]), array_replace($line, ['price' => null]),
+            array_replace($line, ['price' => '35.001']), array_replace($line, ['price' => '-35.00'])];
+        foreach (['delivery_item_id', 'goods_id', 'sku_id', 'price_unit_id'] as $field) {
+            $invalidLines[] = array_replace($line, [$field => (int)$line[$field] + 1]);
+            $invalidLines[] = array_replace($line, [$field => $line[$field] . 'invalid']);
+        }
+        $invalidSnapshots = ['{invalid', '{}', json_encode(['lines' => [$line]]), json_encode(array_replace($snapshot, ['lines' => null]))];
+        foreach ($invalidLines as $invalid) { $invalidSnapshots[] = json_encode(array_replace($snapshot, ['lines' => [$invalid]])); }
+        foreach ($invalidSnapshots as $invalid) {
+            Db::name('finance_document')->where('id', $result['id'])->update(['confirmed_result' => $invalid]);
+            $preference = \app\api\jxc\logic\FinanceSalesPricingPreference::latest($this->customerId, $source['goods_id'], $source['sku_id']);
+            self::assertSame($fixture['count_unit'], (int)$preference['price_unit_id']);
+            self::assertNull($preference['price'], '不完整或错配快照不能冒充有效历史单价');
+        }
+    }
+
+    public function test_quantity_sales_zero_price_reference_still_requires_this_confirmation_reason(): void
+    {
+        $this->activate(); $fixture = $this->quantitySale(null, '3', '瓶'); $source = $fixture['source'];
+        $payload = $this->quantitySaleInput($source, $fixture['count_unit'], '3', '0.00');
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'sales_batch', 'payload' => $payload]));
+        self::assertNull(\app\api\jxc\logic\FinanceSalesPricingPreference::latest($this->customerId, $source['goods_id'], $source['sku_id']));
+        $payload['lines'][0]['zero_price_reason'] = '本次赠送，已与客户核实';
+        $result = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'sales_batch', 'payload' => $payload]);
+        self::assertNotFalse($result, FinanceBusinessLogic::getError());
+        self::assertSame('0.00', \app\api\jxc\logic\FinanceSalesPricingPreference::latest($this->customerId, $source['goods_id'], $source['sku_id'])['price']);
+    }
+
     public function test_quantity_sales_cross_unit_coverage_and_correction_keep_one_physical_group(): void
     {
         $this->activate(); $fixture = $this->quantitySale('8.7', '5', '条'); $source = $fixture['source'];
         $input = $this->quantitySaleInput($source, $fixture['count_unit'], '5', '35');
         $first = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'sales_batch', 'payload' => $input]);
         self::assertNotFalse($first, FinanceBusinessLogic::getError()); self::assertSame('175.00', $first['confirmed_result']['amount']);
+        $preference = \app\api\jxc\logic\FinanceSalesPricingPreference::latest($this->customerId, $source['goods_id'], $source['sku_id']);
+        self::assertSame('35.00', $preference['price'] ?? null, '历史价格必须来自本条正式成交明细');
+        self::assertSame((int)$first['id'], (int)$preference['source_document_id']);
+        self::assertGreaterThan(0, (int)$preference['confirmed_at']);
         $weight = $this->quantitySaleInput($source, $fixture['unit_id'], '8.7', '20');
         self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'sales_batch', 'payload' => $weight]));
         self::assertStringContainsString('重复覆盖', FinanceBusinessLogic::getError());
         $weight += ['credit_reviewed' => 1, 'credit_allocations' => []];
         $corrected = FinanceBusinessLogic::action('correct', $this->command(1) + ['id' => $first['id'], 'payload' => $weight, 'correction_reason' => '双方核实改按斤价']);
         self::assertNotFalse($corrected, FinanceBusinessLogic::getError()); self::assertSame('174.00', $corrected['confirmed_result']['amount']);
-        self::assertSame($fixture['unit_id'], (int)\app\api\jxc\logic\FinanceSalesPricingPreference::latest($this->customerId, $source['goods_id'], $source['sku_id'])['price_unit_id']);
+        $preference = \app\api\jxc\logic\FinanceSalesPricingPreference::latest($this->customerId, $source['goods_id'], $source['sku_id']);
+        self::assertSame($fixture['unit_id'], (int)$preference['price_unit_id']);
+        self::assertSame('20.00', $preference['price']);
+        self::assertSame((int)$corrected['id'], (int)$preference['source_document_id']);
         self::assertSame(1, Db::name('finance_sales_group_coverage')->where('tenant_id', self::TENANT_ID)->count());
         self::assertSame('条', \app\api\jxc\logic\FinanceSalesOutput::document(['id' => $first['id']])['lines'][0]['pricing_unit_name']);
         self::assertSame('斤', \app\api\jxc\logic\FinanceSalesOutput::document(['id' => $corrected['id']])['lines'][0]['pricing_unit_name']);
