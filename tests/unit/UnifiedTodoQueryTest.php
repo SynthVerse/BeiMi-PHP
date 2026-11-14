@@ -50,6 +50,105 @@ final class UnifiedTodoQueryTest extends TestCase
         $this->cleanTodoFixtures([self::TENANT_ID, self::OTHER_TENANT_ID]);
     }
 
+    public function test_task_categories_filter_all_pages_without_shrinking_summary_counts(): void
+    {
+        $reportId = (int)Db::name('customer_report')->insertGetId([
+            'tenant_id' => self::TENANT_ID, 'sn' => 'TODO-CATEGORIES', 'main_customer_id' => 1,
+            'main_customer_name' => '分类客户', 'status' => 'submitted_ready', 'delivery_date' => date('Y-m-d'),
+            'submitted_time' => time(), 'idempotency_key' => 'todo-categories',
+            'request_fingerprint' => hash('sha256', 'todo-categories'),
+        ]);
+        for ($index = 0; $index < 25; $index++) {
+            Db::name('fulfillment_task')->insert([
+                'tenant_id' => self::TENANT_ID, 'group_id' => 1, 'report_id' => $reportId,
+                'source_key' => 'category:print:' . $index, 'status' => 'printable', 'task_type' => 'process',
+                'goods_name' => '分类打印商品', 'create_time' => time(), 'update_time' => time(),
+            ]);
+        }
+        Db::name('fulfillment_task')->insert([
+            'tenant_id' => self::TENANT_ID, 'group_id' => 1, 'report_id' => $reportId,
+            'source_key' => 'category:exception', 'status' => 'unassigned', 'task_type' => 'exception',
+            'exception_code' => 'missing_remark', 'create_time' => time(), 'update_time' => time(),
+        ]);
+        $deliveryId = (int)Db::name('fulfillment_task')->insertGetId([
+            'tenant_id' => self::TENANT_ID, 'group_id' => 1, 'report_id' => $reportId,
+            'source_key' => 'category:delivery', 'status' => 'unassigned', 'task_type' => 'delivery',
+            'create_time' => time(), 'update_time' => time(),
+        ]);
+        Db::name('customer_report_item')->insert([
+            'tenant_id' => self::TENANT_ID, 'report_id' => $reportId, 'goods_name' => '配送商品',
+            'fulfillment_status' => 'final_weight_recorded', 'final_actual_weight' => '10.0000',
+            'final_weight_task_id' => $deliveryId, 'create_time' => time(), 'update_time' => time(),
+        ]);
+
+        $summary = TodoQueryLogic::summary();
+        self::assertNotFalse($summary, TodoQueryLogic::getError());
+        self::assertSame(28, $summary['branches']['task']['count']);
+        $categories = $summary['branches']['task']['categories'];
+        self::assertSame(['report', 'printing', 'exception', 'delivery'], array_column($categories, 'key'));
+        self::assertSame(['报货处理', '工票打印', '任务异常', '配送交付'], array_column($categories, 'label'));
+        self::assertSame([1, 25, 1, 1], array_column($categories, 'count'));
+        self::assertSame([1, 25, 1, 1], array_column($categories, 'known_count'));
+        self::assertSame([true, true, true, true], array_column($categories, 'complete'));
+        foreach (['report' => 1, 'printing' => 20, 'exception' => 1, 'delivery' => 1] as $category => $pageCount) {
+            $page = TodoQueryLogic::lists(['branch' => 'task', 'task_category' => $category, 'page_size' => 20]);
+            self::assertNotFalse($page, TodoQueryLogic::getError());
+            self::assertCount($pageCount, $page['items']);
+            self::assertSame([$category], array_values(array_unique(array_column($page['items'], 'task_category'))));
+            self::assertSame($summary['total_count'], $page['total_count']);
+            self::assertSame($summary['branches'], $page['branches']);
+        }
+        $first = TodoQueryLogic::lists(['branch' => 'task', 'task_category' => 'printing', 'page_size' => 20]);
+        self::assertTrue($first['has_more']);
+        $second = TodoQueryLogic::lists(['branch' => 'task', 'task_category' => 'printing', 'page_size' => 20, 'cursor' => $first['next_cursor']]);
+        self::assertNotFalse($second, TodoQueryLogic::getError());
+        self::assertCount(5, $second['items']);
+        self::assertFalse($second['has_more']);
+        self::assertSame($categories, $second['branches']['task']['categories']);
+        self::assertCount(25, array_unique(array_merge(array_column($first['items'], 'key'), array_column($second['items'], 'key'))));
+        self::assertFalse(TodoQueryLogic::lists(['branch' => 'task', 'task_category' => 'exception', 'cursor' => $first['next_cursor']]));
+        self::assertSame('待办列表上下文已变化，请刷新后重试', TodoQueryLogic::getError());
+        $all = TodoQueryLogic::lists(['branch' => 'all', 'page_size' => 100]);
+        self::assertNotFalse($all, TodoQueryLogic::getError());
+        self::assertCount(28, array_filter($all['items'], static fn(array $item): bool => isset($item['task_category'])));
+    }
+
+    public function test_task_category_parameters_reject_unknown_categories_and_other_branches(): void
+    {
+        foreach ([['task_category' => 'printing'], ['branch' => 'finance', 'task_category' => 'report'],
+            ['branch' => 'task', 'task_category' => 'unknown'], ['branch' => 'task', 'task_category' => ['report']],
+            ['branch' => 'task', 'task_category' => '']] as $params) {
+            self::assertFalse(TodoQueryLogic::lists($params));
+            self::assertSame('待办分类参数无效', TodoQueryLogic::getError());
+        }
+        $empty = TodoQueryLogic::lists(['branch' => 'task', 'task_category' => 'printing']);
+        self::assertNotFalse($empty, TodoQueryLogic::getError());
+        self::assertSame([], $empty['items']);
+        self::assertFalse($empty['has_more']);
+        self::assertSame([0, 0, 0, 0], array_column($empty['branches']['task']['categories'], 'count'));
+        self::assertSame([true, true, true, true], array_column($empty['branches']['task']['categories'], 'complete'));
+    }
+
+    public function test_a_task_source_failure_only_makes_its_category_unknown(): void
+    {
+        Db::execute('RENAME TABLE `la_customer_report` TO `la_customer_report_todo_test_missing`');
+        try {
+            $summary = TodoQueryLogic::summary();
+            self::assertNotFalse($summary, TodoQueryLogic::getError());
+            self::assertFalse($summary['branches']['task']['complete']);
+            self::assertNull($summary['branches']['task']['count']);
+            self::assertSame([null, 0, 0, 0], array_column($summary['branches']['task']['categories'], 'count'));
+            self::assertSame([false, true, true, true], array_column($summary['branches']['task']['categories'], 'complete'));
+            $printing = TodoQueryLogic::lists(['branch' => 'task', 'task_category' => 'printing']);
+            self::assertNotFalse($printing, TodoQueryLogic::getError());
+            self::assertSame([], $printing['items']);
+            self::assertFalse($printing['has_more']);
+            self::assertSame($summary['branches']['task']['categories'], $printing['branches']['task']['categories']);
+        } finally {
+            Db::execute('RENAME TABLE `la_customer_report_todo_test_missing` TO `la_customer_report`');
+        }
+    }
+
     public function test_only_an_explicit_continue_later_draft_creates_one_recoverable_todo(): void
     {
         $save = static fn(array $extra) => \app\api\jxc\logic\FinanceBusinessLogic::action('save', $extra + ['type' => 'receipt', 'id' => 0, 'expected_version' => 0,
@@ -224,6 +323,8 @@ final class UnifiedTodoQueryTest extends TestCase
             self::assertNull($summary['total_count']);
             self::assertFalse($summary['branches']['finance']['complete']);
             self::assertContains('S22', array_column($summary['unavailable_sources'], 'source'));
+            self::assertSame([0, 0, 0, 0], array_column($summary['branches']['task']['categories'], 'count'));
+            self::assertSame([true, true, true, true], array_column($summary['branches']['task']['categories'], 'complete'));
         } finally {
             Db::execute('RENAME TABLE `la_finance_sales_print_todo_test_missing` TO `la_finance_sales_print`');
         }
@@ -297,6 +398,7 @@ final class UnifiedTodoQueryTest extends TestCase
         $limited = TodoQueryLogic::lists(['branch' => 'task', 'page_size' => 100]);
         self::assertNotFalse($limited, TodoQueryLogic::getError());
         self::assertCount(1, $limited['items']);
+        self::assertSame([0, 0, 1, 0], array_column($limited['branches']['task']['categories'], 'count'));
         self::assertStringContainsString('generic_exception', $limited['items'][0]['reason']);
 
         Db::name('employee_permission')->insert(['tenant_id' => self::TENANT_ID, 'employee_id' => $employeeId,
@@ -304,6 +406,7 @@ final class UnifiedTodoQueryTest extends TestCase
         $remarkOnly = TodoQueryLogic::lists(['branch' => 'task', 'page_size' => 100]);
         self::assertNotFalse($remarkOnly, TodoQueryLogic::getError());
         self::assertCount(3, $remarkOnly['items']);
+        self::assertSame([0, 0, 3, 0], array_column($remarkOnly['branches']['task']['categories'], 'count'));
         self::assertStringContainsString('missing_remark', implode('|', array_column($remarkOnly['items'], 'reason')));
         self::assertStringContainsString('unrecognized_remark', implode('|', array_column($remarkOnly['items'], 'reason')));
         self::assertStringNotContainsString('missing_inventory_shortage_process', implode('|', array_column($remarkOnly['items'], 'reason')));
@@ -313,6 +416,7 @@ final class UnifiedTodoQueryTest extends TestCase
         $permitted = TodoQueryLogic::lists(['branch' => 'task', 'page_size' => 100]);
         self::assertNotFalse($permitted, TodoQueryLogic::getError());
         self::assertCount(4, $permitted['items']);
+        self::assertSame([0, 0, 4, 0], array_column($permitted['branches']['task']['categories'], 'count'));
         self::assertStringNotContainsString('generic_blocked', implode('|', array_column($permitted['items'], 'reason')));
     }
 

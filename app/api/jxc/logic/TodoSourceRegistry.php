@@ -39,6 +39,17 @@ final class TodoSourceRegistry
         ];
     }
 
+    /** 任务二级分类与来源的唯一映射；顺序同时用于界面展示。 @return array<string,array{key:string,label:string}> */
+    public static function taskCategories(): array
+    {
+        return [
+            'S01' => ['key' => 'report', 'label' => '报货处理'],
+            'S02' => ['key' => 'printing', 'label' => '工票打印'],
+            'S03' => ['key' => 'exception', 'label' => '任务异常'],
+            'S04' => ['key' => 'delivery', 'label' => '配送交付'],
+        ];
+    }
+
     /** @return array{title:string,provider:string,decision:string,inclusion:string,completion:string,permission:string,identity:string,date_rule:string,target:string} */
     private static function source(string $title, string $provider, string $inclusion, string $completion,
         string $permission, string $identity, string $dateRule, string $target, string $decision = '纳入统一查询'): array

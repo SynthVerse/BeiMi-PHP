@@ -13,9 +13,8 @@ use app\common\logic\BaseLogic;
  */
 final class TodoQueryLogic extends BaseLogic
 {
-    private const CURSOR_VERSION = 3;
+    private const CURSOR_VERSION = 4;
     private const MAX_IDENTITIES_PER_REQUEST = 200000;
-    private const TASK_SOURCES = ['S01', 'S02', 'S03', 'S04'];
 
     /** @return array<string,mixed>|false */
     public static function summary(): array|false
@@ -54,6 +53,15 @@ final class TodoQueryLogic extends BaseLogic
         $positions = $cursor['positions'] ?? [];
 
         $coverage = TodoSourceRegistry::coverage();
+        $taskCategories = TodoSourceRegistry::taskCategories();
+        $pageSources = [];
+        foreach ($coverage as $source => $definition) {
+            $sourceBranch = isset($taskCategories[$source]) ? 'task' : 'finance';
+            if (($branch === 'all' || $branch === $sourceBranch)
+                && ($filters['task_category'] === 'all' || ($taskCategories[$source]['key'] ?? '') === $filters['task_category'])) {
+                $pageSources[$source] = true;
+            }
+        }
         TodoQueryBudget::start();
         $results = []; $unavailable = []; $branchState = [
             'task' => ['identities' => [], 'complete' => true],
@@ -63,7 +71,7 @@ final class TodoQueryLogic extends BaseLogic
         $requestBudgetExhausted = false;
         foreach ($coverage as $source => $definition) {
             if ($source === 'S23') { continue; }
-            $sourceBranch = in_array($source, self::TASK_SOURCES, true) ? 'task' : 'finance';
+            $sourceBranch = isset($taskCategories[$source]) ? 'task' : 'finance';
             if ($knownIdentityCount >= self::MAX_IDENTITIES_PER_REQUEST) { $requestBudgetExhausted = true; }
             if ($requestBudgetExhausted) {
                 $branchState[$sourceBranch]['complete'] = false;
@@ -71,7 +79,7 @@ final class TodoQueryLogic extends BaseLogic
                 continue;
             }
             try {
-                $includedInPage = $branch === 'all' || $branch === $sourceBranch;
+                $includedInPage = isset($pageSources[$source]);
                 $after = $includedInPage && isset($positions[$source]) && is_array($positions[$source]) ? $positions[$source] : null;
                 $excludedIdentities = $source === 'S21'
                     ? $branchState['task']['identities'] + $branchState['finance']['identities'] : [];
@@ -99,9 +107,9 @@ final class TodoQueryLogic extends BaseLogic
 
         $candidates = []; $candidateGroups = [];
         foreach ($results as $source => $result) {
-            $sourceBranch = in_array($source, self::TASK_SOURCES, true) ? 'task' : 'finance';
-            if ($branch !== 'all' && $branch !== $sourceBranch) { continue; }
+            if (!isset($pageSources[$source])) { continue; }
             foreach ($result['items'] as $item) {
+                if (isset($taskCategories[$source])) { $item['task_category'] = $taskCategories[$source]['key']; }
                 if (!isset($candidates[$item['_identity']])) { $candidates[$item['_identity']] = $item; }
                 $candidateGroups[$item['_identity']][] = $item;
             }
@@ -119,8 +127,7 @@ final class TodoQueryLogic extends BaseLogic
 
         $hasMore = count($candidates) > count($items);
         foreach ($results as $source => $result) {
-            $sourceBranch = in_array($source, self::TASK_SOURCES, true) ? 'task' : 'finance';
-            if ($branch !== 'all' && $branch !== $sourceBranch) { continue; }
+            if (!isset($pageSources[$source])) { continue; }
             if ($result['after_count'] > ($consumedBySource[$source] ?? 0)) { $hasMore = true; }
         }
         $complete = $unavailable === [];
@@ -133,6 +140,13 @@ final class TodoQueryLogic extends BaseLogic
             $branches[$name] = ['count' => $state['complete'] ? $branchKnownCount : null,
                 'known_count' => $branchKnownCount, 'complete' => $state['complete'],
                 'entry_visible' => $name !== 'task' || (bool)$scope['owner'] || in_array('task.view', (array)$scope['permissions'], true)];
+        }
+        $branches['task']['categories'] = [];
+        foreach ($taskCategories as $source => $category) {
+            $categoryComplete = isset($results[$source]);
+            $categoryKnownCount = $categoryComplete ? $results[$source]['count'] : 0;
+            $branches['task']['categories'][] = $category + ['count' => $categoryComplete ? $categoryKnownCount : null,
+                'known_count' => $categoryKnownCount, 'complete' => $categoryComplete];
         }
         $response = [
             'tenant_id' => $scope['tenant_id'],
@@ -186,12 +200,18 @@ final class TodoQueryLogic extends BaseLogic
         return rtrim(strtr(base64_encode($json), '+/', '-_'), '=');
     }
 
-    /** @return array{kind:string,date_from:string,date_to:string}|false */
+    /** @return array{kind:string,date_from:string,date_to:string,task_category:string}|false */
     private static function filters(array $params): array|false
     {
+        $category = $params['task_category'] ?? 'all';
+        if (!is_string($category) || !in_array($category, array_merge(['all'], array_column(TodoSourceRegistry::taskCategories(), 'key')), true)
+            || ($category !== 'all' && ($params['branch'] ?? 'all') !== 'task')) {
+            self::setError('待办分类参数无效');
+            return false;
+        }
         $filters = ['kind' => trim((string)($params['kind'] ?? '')),
             'date_from' => trim((string)($params['date_from'] ?? '')),
-            'date_to' => trim((string)($params['date_to'] ?? ''))];
+            'date_to' => trim((string)($params['date_to'] ?? '')), 'task_category' => $category];
         if (($filters['kind'] !== '' && !preg_match('/^[a-z][a-z0-9_]{0,63}$/', $filters['kind']))
             || !self::validDate($filters['date_from']) || !self::validDate($filters['date_to'])
             || ($filters['date_from'] !== '' && $filters['date_to'] !== '' && $filters['date_from'] > $filters['date_to'])) {
