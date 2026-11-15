@@ -32,8 +32,9 @@ final class FinanceSalesOutput
                 'gross_sales_amount' => $line['gross_sales_amount'] ?? $line['amount'], 'return_amount' => $line['return_amount'] ?? '0.00', 'return_adjustments' => $line['return_adjustments'] ?? [],
                 'zero_price_reason' => $line['zero_price_reason'] ?? '', 'fact_version' => $line['fact_version'] ?? 1];
         }
-        return ['tenant_id' => $tenant, 'id' => $id, 'order_id' => $id, 'sales_id' => $root, 'order_sn' => 'FS' . $root, 'document_version' => (int)$row['version'],
-            'version' => $version, 'settlement_status' => 'formal', 'can_print' => true, 'can_share' => FinanceAccess::owner(),
+        $issued = Db::name('customer_report_sales_document')->where('tenant_id',$tenant)->where('finance_document_id',$root)->find();
+        return ['tenant_id' => $tenant, 'id' => $id, 'order_id' => $id, 'sales_id' => $root, 'order_sn' => $issued ? $issued['order_sn'] : 'FS' . $root, 'document_version' => (int)$row['version'],
+            'version' => $issued ? (int)$issued['version'] + $version - 1 : $version, 'settlement_status' => 'formal', 'can_print' => true, 'can_share' => FinanceAccess::owner(),
             'replacement_document_id' => $replacement, 'invalidation_notice' => $replacement ? '已被第 ' . $replacement . ' 号销售结算替代，本版已失效' : '',
             'customer_id' => $result['subject_id'], 'customer_name' => $result['subject_name'], 'lines' => $lines, 'goods' => $lines,
             'goods_amount' => $result['goods_amount'], 'rounding_amount' => $result['rounding_amount'], 'order_money' => $result['amount'],

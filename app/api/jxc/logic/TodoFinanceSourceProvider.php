@@ -14,6 +14,7 @@ final class TodoFinanceSourceProvider
     {
         $buffer = new TodoItemBuffer($source, 'finance', $limit, $after, $filters, $excludedIdentities);
         match ($source) {
+            'S26' => self::issuedSalesDocuments($buffer),
             'S25' => self::continuations($buffer),
             'S24' => self::fundFollowups($buffer),
             'S05' => self::documents($buffer),
@@ -105,7 +106,13 @@ final class TodoFinanceSourceProvider
     private static function salesSettlement(TodoItemBuffer $buffer): void
     {
         if (!FinanceAccess::has('settlement.bill') && !FinanceAccess::owner()) { return; }
+        $issuedReports = Db::name('customer_report_sales_document')->where('tenant_id', FinanceAccess::tenant())
+            ->field('report_id')->buildSql();
+        $closedReports = Db::name('customer_report')->where('tenant_id', FinanceAccess::tenant())->whereNull('delete_time')
+            ->whereIn('status', CustomerReportSalesDocument::CLOSED_REPORT_STATUSES)->field('id')->buildSql();
         self::chunks('sales_order', static fn($query) => $query->where('source_type', 'customer_report')
+            ->whereRaw('source_id NOT IN ' . $issuedReports)
+            ->whereRaw('source_id IN ' . $closedReports)
             ->whereIn('settlement_status', ['pending', 'pending_weight_review']), static function (array $row) use ($buffer): void {
                 if ((string)$row['settlement_status'] === 'pending_weight_review' && !FinanceAccess::owner()) { return; }
                 if ((string)$row['settlement_status'] === 'pending' && !FinanceAccess::has('settlement.bill')) { return; }
@@ -115,6 +122,30 @@ final class TodoFinanceSourceProvider
                     (string)$row['settlement_status'], '处理销售结算', 'sales_settlement',
                     ['order_id' => (int)$row['id'], 'customer_id' => (int)$row['customer_id']]));
             });
+    }
+
+    private static function issuedSalesDocuments(TodoItemBuffer $buffer): void
+    {
+        if (!FinanceAccess::has('settlement.bill')) { return; }
+        $last = 0;
+        do {
+            $rows = Db::name('customer_report_sales_document')->alias('d')
+                ->join('customer_report r', 'r.tenant_id=d.tenant_id AND r.id=d.report_id')
+                ->where('d.tenant_id', FinanceAccess::tenant())->where('d.status', 'issued')
+                ->whereIn('d.accounting_status', ['pending_amount', 'review_required', 'pending_posting'])
+                ->whereIn('r.status', CustomerReportSalesDocument::CLOSED_REPORT_STATUSES)
+                ->whereNull('r.delete_time')->where('d.id', '>', $last)
+                ->field('d.*,r.main_customer_name,r.delivery_date')->order('d.id')->limit(500)->select()->toArray();
+            foreach (TodoQueryBudget::candidates($rows) as $row) {
+                $last = (int)$row['id'];
+                $retry = (string)$row['accounting_status'] === 'pending_posting';
+                $buffer->add(self::item('sales-document:' . $last, 'customer_report_sales_document', $last,
+                    '销售单 ' . (string)$row['order_sn'] . ($retry ? ' · 待入账' : ' · 金额待核'),
+                    (string)$row['main_customer_name'], (string)$row['delivery_date'], null,
+                    trim((string)$row['blocked_reason']) ?: ($retry ? '交付已完成，财务入账尚未成功' : '交付已完成，销售金额仍需核实'),
+                    $retry ? '核实并重试入账' : '核对销售金额', 'report', ['id' => (int)$row['report_id']]));
+            }
+        } while (count($rows) === 500);
     }
 
     private static function purchaseSettlement(TodoItemBuffer $buffer): void

@@ -70,7 +70,7 @@ final class FinanceDeliveries
                     $defaultUnit = (int)($goods['default_pricing_unit_id'] ?: $row['inventory_base_unit_id']);
                 }
                 if (!in_array($defaultUnit, array_column($units, 'id'), true)) { $defaultUnit = 0; }
-                $source = ['delivery_item_id' => (int)$row['delivery_item_id'], 'order_id' => (int)$row['order_id'], 'order_sn' => $row['order_sn'], 'line_id' => (int)$row['line_id'], 'date' => $date,
+                $source = ['delivery_item_id' => (int)$row['delivery_item_id'], 'report_item_id' => (int)$row['report_item_id'], 'report_id' => (int)$row['report_id'], 'order_id' => (int)$row['order_id'], 'order_sn' => $row['order_sn'], 'line_id' => (int)$row['line_id'], 'date' => $date,
                     'fact_version' => 2, 'goods_id' => (int)$row['goods_id'], 'sku_id' => (int)$row['sku_id'], 'goods_name' => $row['name'], 'sku_name' => $row['sku_name'],
                     'delivery_customer_id' => (int)($row['delivery_customer_id'] ?: $customer), 'delivery_customer_name' => $row['delivery_customer_name'] ?: $row['customer_name'],
                     'actual_weight' => $actual, 'actual_delivery_weight' => $actual, 'covered_weight' => ($owner || $legacyCovered) ? $actual : ($actual === null ? null : '0.0000'),
@@ -92,7 +92,7 @@ final class FinanceDeliveries
             $date = date('Y-m-d', (int)$row['delivered_time']);
             $remaining = bcsub($actual, $covered, 4);
             if ($date < $from || (!$includeCovered && bccomp($remaining, '0', 4) <= 0)) { continue; }
-            $result[] = ['delivery_item_id' => (int)$row['delivery_item_id'], 'order_id' => (int)$row['order_id'], 'order_sn' => $row['order_sn'], 'line_id' => (int)$row['line_id'], 'date' => $date,
+            $result[] = ['delivery_item_id' => (int)$row['delivery_item_id'], 'report_item_id' => (int)$row['report_item_id'], 'report_id' => (int)$row['report_id'], 'order_id' => (int)$row['order_id'], 'order_sn' => $row['order_sn'], 'line_id' => (int)$row['line_id'], 'date' => $date,
                 'delivery_customer_id' => (int)($row['delivery_customer_id'] ?: $customer), 'delivery_customer_name' => $row['delivery_customer_name'] ?: $row['customer_name'],
                 'goods_name' => $row['name'], 'sku_name' => $row['sku_name'], 'actual_weight' => $actual, 'covered_weight' => $covered, 'pending_weight' => $remaining];
         }

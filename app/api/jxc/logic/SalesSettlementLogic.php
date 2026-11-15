@@ -299,6 +299,7 @@ final class SalesSettlementLogic extends BaseLogic
             )),
             'warehouse_id' => (int)$row['warehouse_id'],
             'source_report_id' => (int)($row['source_id'] ?? 0),
+            'issued_sales_document_id' => (int)Db::name('customer_report_sales_document')->where('tenant_id', self::tenantId())->where('report_id', (int)($row['source_id'] ?? 0))->value('id'),
             'settlement_status' => (string)($row['settlement_status'] ?? 'formal'),
             'version' => (int)($row['settlement_version'] ?? 0),
             'order_money' => self::money((string)$row['order_money']),
@@ -376,6 +377,7 @@ final class SalesSettlementLogic extends BaseLogic
                         self::setError('销售单不存在');
                         return false;
                     }
+                    CustomerReportSalesDocument::assertExternalSettlementAllowed((int)$order['source_id']);
                     $replayed = self::actionByKey($request['idempotency_key']);
                     if ($replayed) {
                         return self::replayAction($replayed, $fingerprint);
@@ -1304,6 +1306,9 @@ final class SalesSettlementLogic extends BaseLogic
             ->where('status', 'success')->count();
         return [
             'order_id' => (int)$order['id'],
+            'source_report_id' => (int)($order['source_id'] ?? 0),
+            'issued_sales_document' => CustomerReportSalesDocument::present((int)($order['source_id'] ?? 0)),
+            'issued_sales_document_id' => (int)Db::name('customer_report_sales_document')->where('tenant_id', self::tenantId())->where('report_id', (int)($order['source_id'] ?? 0))->value('id'),
             'order_sn' => (string)$order['order_sn'],
             'customer_id' => (int)$order['customer_id'],
             'customer_name' => (string)$order['customer_name'],

@@ -551,6 +551,10 @@ final class DeliveryInventoryLogic extends BaseLogic
                         return $committedReplay;
                     }
                 }
+                if (is_array($result) && !empty($result['report_id'])) {
+                    CustomerReportSalesDocument::afterReportChange((int)$result['report_id']);
+                    $result['sales_document'] = CustomerReportSalesDocument::present((int)$result['report_id']);
+                }
                 return $result;
             } catch (\Throwable $exception) {
                 $retryable = str_contains($exception->getMessage(), '1213')

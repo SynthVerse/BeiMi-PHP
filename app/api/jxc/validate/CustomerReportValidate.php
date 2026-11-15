@@ -32,6 +32,15 @@ class CustomerReportValidate extends BaseValidate
         'dimensions' => 'array',
         'combinations' => 'array',
         'groups' => 'require|array|min:1',
+        'lines' => 'require|array|min:1',
+        'rounding_amount' => 'max:20',
+        'due_date' => 'max:10',
+        'document_version' => 'integer|gt:0',
+        'revision_reason' => 'max:1000',
+        'precision_mode' => 'in:cents,integer',
+        'precision_rules' => 'array',
+        'precision_override_reason' => 'max:1000',
+        'overdue_acknowledged' => 'in:0,1',
     ];
 
     public function sceneRecognize() { return $this->only(['text']); }
@@ -43,7 +52,8 @@ class CustomerReportValidate extends BaseValidate
     public function sceneAvailability() { return $this->only(['warehouse_id','sku_id']); }
     public function sceneEdit() { return $this->only(['id','version','main_customer_id','items','remark']); }
     public function sceneRetry() { return $this->only(['id','version']); }
-    public function sceneConvert() { return $this->only(['id','version']); }
+    public function sceneConvert() { return $this->only(['id','version','idempotency_key','lines','rounding_amount','due_date','document_version','revision_reason','precision_mode','precision_rules','precision_override_reason','overdue_acknowledged']); }
+    public function sceneRetrySalesPosting() { return $this->only(['id','document_version']); }
     public function sceneCancel() { return $this->only(['id','version','reason']); }
     public function sceneSaveProcessingWeights() { return $this->only(['id','version','groups']); }
     public function sceneBatchStart() { return $this->only(['delivery_date','idempotency_key']); }

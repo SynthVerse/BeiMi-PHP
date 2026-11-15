@@ -68,21 +68,6 @@ final class CustomerReportRouteContractTest extends TestCase
         self::assertStringNotContainsString('PayableFlow::create(', $financeService);
     }
 
-    public function test_conversion_prelocks_goods_in_the_canonical_order_before_publishing_sales_orders(): void
-    {
-        $root = dirname(__DIR__, 2);
-        $logic = (string)file_get_contents($root . '/app/api/jxc/logic/CustomerReportLogic.php');
-
-        $lockPosition = strpos($logic, 'self::lockGoodsForConversion($items);');
-        $publishPosition = strpos($logic, 'SalesOrderLogic::publishReservedWithinTransaction([');
-
-        self::assertNotFalse($lockPosition, '客户报货转换必须显式预锁全部商品');
-        self::assertNotFalse($publishPosition, '客户报货转换必须发布标准销售单');
-        self::assertLessThan($publishPosition, $lockPosition, '商品预锁必须发生在任何销售单发布前');
-        self::assertStringContainsString("sort(\$goodsIds, SORT_NUMERIC);", $logic);
-        self::assertStringContainsString("->where('id', \$goodsId)->lock(true)->value('id')", $logic);
-    }
-
     public function test_fulfillment_change_idempotency_never_locks_an_absent_key_and_retries_deadlocks(): void
     {
         $root = dirname(__DIR__, 2);

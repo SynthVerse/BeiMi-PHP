@@ -721,12 +721,6 @@ final class FulfillmentWorkflowTest extends TestCase
         self::assertSame('请先完成现有纸票回收或作废控制', FulfillmentChangeLogic::getError());
         self::assertSame(1, Db::name('fulfillment_item_change')->where('report_item_id', $itemId)->count());
         self::assertTrue(FulfillmentTaskLogic::hasUnaccountedPaperForReport((int)$report['id']));
-        self::assertFalse(CustomerReportLogic::convert([
-            'id' => (int)$report['id'],
-            'version' => (int)Db::name('customer_report')->where('id', (int)$report['id'])->value('version'),
-        ]));
-        self::assertSame('仍有未回收或未完成作废控制的纸质工票，不能结算', CustomerReportLogic::getError());
-
         $bookkeeping = $this->legacyBookkeepingTask((int)$report['id']);
         self::assertFalse(FulfillmentTaskLogic::bill(['id' => (int)$bookkeeping['id']]));
         self::assertSame('仍有未回收或未完成作废控制的纸质工票，不能结算', FulfillmentTaskLogic::getError());
@@ -1368,8 +1362,6 @@ final class FulfillmentWorkflowTest extends TestCase
         $payload['items'][0]['sku_id'] = (int)$sku['id'];
         $report = CustomerReportLogic::submit($payload);
         self::assertNotFalse($report, CustomerReportLogic::getError());
-        self::assertFalse(CustomerReportLogic::convert(['id' => $report['id'], 'version' => $report['version']]));
-
         $this->finishSingleGroupProcessing($report, '1.00');
         $delivery = Db::name('fulfillment_task')->where('report_id', (int)$report['id'])->whereLike('source_key', '%:delivery')->find();
         $bookkeeping = $this->legacyBookkeepingTask((int)$report['id']);

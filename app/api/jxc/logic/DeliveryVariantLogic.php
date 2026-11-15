@@ -585,6 +585,10 @@ final class DeliveryVariantLogic extends BaseLogic
                         return $committed;
                     }
                 }
+                if (is_array($result) && !empty($result['report_id'])) {
+                    CustomerReportSalesDocument::afterReportChange((int)$result['report_id']);
+                    $result['sales_document'] = CustomerReportSalesDocument::present((int)$result['report_id']);
+                }
                 return $result;
             } catch (\Throwable $exception) {
                 if (self::isLockRetryable($exception) && $attempt < 2) {

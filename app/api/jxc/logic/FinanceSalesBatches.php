@@ -35,7 +35,22 @@ final class FinanceSalesBatches
 
     public static function confirm(FinanceLedger $ledger, array $document, ?array $original = null, string $correctionReason = ''): array
     {
-        FinanceDocumentPolicy::authorize('sales_batch', true);
+        return self::confirmInternal($ledger, $document, $original, $correctionReason, null);
+    }
+
+    /** 仅消费已锁定销售单的服务器审批快照，交付人员无需获得财务权限。 */
+    public static function confirmIssued(FinanceLedger $ledger, array $document, int $issuedId): array
+    {
+        $issued = Db::name('customer_report_sales_document')->where('tenant_id', FinanceAccess::tenant())->where('id', $issuedId)->lock(true)->find();
+        if (!$issued || $issued['status'] !== 'issued' || $issued['accounting_status'] !== 'pending_posting') { throw new \DomainException('销售单审批已失效'); }
+        $data = FinanceValue::decode($document['payload']);
+        if ((int)($data['issued_sales_document_id'] ?? 0) !== $issuedId) { throw new \DomainException('销售单审批来源不一致'); }
+        return self::confirmInternal($ledger, $document, null, '', ['document' => $issued, 'snapshot' => FinanceValue::decode($issued['snapshot'])]);
+    }
+
+    private static function confirmInternal(FinanceLedger $ledger, array $document, ?array $original, string $correctionReason, ?array $approval): array
+    {
+        if (!$approval) { FinanceDocumentPolicy::authorize('sales_batch', true); }
         $tenant = FinanceAccess::tenant(); $id = (int)$document['id']; $data = FinanceValue::decode($document['payload']);
         $customer = FinanceValue::id($data['subject_id'] ?? 0);
         $name = Db::name('customer')->where('tenant_id', $tenant)->where('id', $customer)->where('parent_id', 0)->value('customer_name');
@@ -50,7 +65,8 @@ final class FinanceSalesBatches
             if ((int)$previous['subject_id'] !== $customer) { throw new \DomainException('销售金额更正不能更换主客户'); }
             if (Db::name('finance_correction')->where('tenant_id', $tenant)->where('original_document_id', $original['id'])->count()) { throw new \DomainException('原销售结算已有后续更正，请打开最新版本'); }
         }
-        $precision = FinanceSalesPrecision::selection($customer, $data);
+        if ($approval && ((int)$approval['snapshot']['customer_id'] !== $customer || bccomp((string)($data['rounding_amount'] ?? '0'), $approval['snapshot']['rounding_amount'], 2) !== 0)) { throw new \DomainException('销售审批金额与客户不一致'); }
+        $precision = $approval ? $approval['snapshot']['precision'] : FinanceSalesPrecision::selection($customer, $data);
         $overdue = FinanceCustomers::overdue($customer);
         if (bccomp($overdue['amount'], '0', 2) > 0 && empty($data['overdue_acknowledged'])) { throw new \DomainException('客户存在逾期余额，请明确知晓后继续确认'); }
         $input = $data['lines'] ?? null;
@@ -63,6 +79,15 @@ final class FinanceSalesBatches
             $delivery = FinanceValue::id($item['delivery_item_id'] ?? 0);
             if (!isset($available[$delivery]) || isset($seen[$delivery])) { throw new \DomainException('交付来源不属于本客户或重复选择'); } $seen[$delivery] = true;
             $source = $available[$delivery]; $pricing = [];
+            if ($approval) {
+                if ((int)$source['report_id'] !== (int)$approval['document']['report_id']) { throw new \DomainException('交付来源不属于已审批报货'); }
+                $approvedLine = array_column($approval['snapshot']['lines'], null, 'report_item_id')[$source['report_item_id']] ?? null;
+                if (!$approvedLine || (int)$approvedLine['price_unit_id'] !== (int)($item['price_unit_id'] ?? 0)
+                    || bccomp($approvedLine['price'], (string)($item['price'] ?? '-1'), 2) !== 0
+                    || (string)($item['zero_price_reason'] ?? '') !== $approvedLine['zero_price_reason']
+                    || (string)($item['difference_reason'] ?? '') !== $approvedLine['difference_reason']) { throw new \DomainException('交付计价与销售审批不一致'); }
+            } elseif (!$original) { CustomerReportSalesDocument::assertExternalSettlementAllowed((int)$source['report_id']); }
+
             if (($source['fact_version'] ?? 1) >= 2) {
                 if (!empty($source['legacy_covered']) || ($source['coverage_document_id'] && (int)$source['coverage_document_id'] !== (int)($original['id'] ?? 0))) {
                     throw new \DomainException('该交付子组已确认金额，不能切换单位重复覆盖');
@@ -83,7 +108,7 @@ final class FinanceSalesBatches
                 $quantity = $weight; $difference = bcsub($weight, $covered, 4);
             }
             $differenceReason = '';
-            if (bccomp($difference, '0', 4) !== 0) { FinanceAccess::require('', true); $differenceReason = FinanceValue::text($item['difference_reason'] ?? '', 1000); }
+            if (bccomp($difference, '0', 4) !== 0) { if (!$approval) { FinanceAccess::require('', true); } $differenceReason = FinanceValue::text($item['difference_reason'] ?? '', 1000); }
             $price = FinanceValue::money($item['price'] ?? null, true);
             if (bccomp($quantity, '0', 4) === 0 && bccomp($price, '0', 2) > 0) { throw new \DomainException('免费、赠送或赔偿应明确零价及原因，不能用零计费重量代替'); }
             $zeroReason = bccomp($price, '0', 2) === 0 ? FinanceValue::text($item['zero_price_reason'] ?? '', 500) : '';
@@ -99,7 +124,7 @@ final class FinanceSalesBatches
                 $calculation = array_merge($calculation, $returns);
             }
             FinanceValue::money($calculation['amount'], true);
-            $terms = $before[$delivery]['terms'] ?? self::datedTerms($currentTerms, $source['date']);
+            $terms = $approval ? $approval['snapshot']['payment_terms'] : ($before[$delivery]['terms'] ?? self::datedTerms($currentTerms, $source['date']));
             if (isset($item['terms_version']) && FinanceValue::id($item['terms_version'], true) !== (int)$terms['version']) { throw new \DomainException('客户付款规则已变化，请重新核对'); }
             $due = isset($before[$delivery]) ? $before[$delivery]['due_date'] : $terms['default_due_date']; $dueReason = $before[$delivery]['due_override_reason'] ?? ''; $dueApplied = false;
             $receivableSources = $before[$delivery]['receivable_sources'] ?? [];
@@ -108,7 +133,7 @@ final class FinanceSalesBatches
                 $selected = FinanceValue::date($item['due_date'], true);
                 if (isset($before[$delivery]) && $selected !== $before[$delivery]['due_date']) { throw new \DomainException('原应收付款日应通过付款日调整处理'); }
                 if (!isset($before[$delivery])) {
-                    if ($selected !== $terms['default_due_date']) { FinanceAccess::require('finance.sales.due_override'); $dueReason = FinanceValue::text($item['due_override_reason'] ?? '', 1000); $dueApplied = true; }
+                    if ($selected !== $terms['default_due_date']) { if (!$approval) { FinanceAccess::require('finance.sales.due_override'); } $dueReason = FinanceValue::text($item['due_override_reason'] ?? '', 1000); $dueApplied = true; }
                     $due = $selected;
                 }
             }
@@ -119,8 +144,28 @@ final class FinanceSalesBatches
                 'terms' => $terms, 'due_date' => $due, 'due_override_reason' => $dueReason, 'due_override_applied' => $dueApplied, 'receivable_sources' => $receivableSources]);
             $goods = bcadd($goods, $calculation['amount'], 2); $automatic = bcadd($automatic, $calculation['automatic_rounding_difference'], 6);
         }
+        if ($approval) {
+            // 先开整行单据、后分批交付时，仅分摊已批准的金额分位差，不改任何实物事实。
+            $goods = '0.00';
+            foreach ($approval['snapshot']['lines'] as $approvedLine) {
+                $indices = []; $quantity = '0.0000';
+                foreach ($lines as $index => $line) if ((int)$line['report_item_id'] === (int)$approvedLine['report_item_id']) { $indices[] = $index; $quantity = bcadd($quantity, $line['settlement_quantity'], 4); }
+                if (!$indices || bccomp($quantity, $approvedLine['settlement_quantity'], 4) !== 0) { throw new \DomainException('交付计价数量与已审批销售单不一致'); }
+                $remainingAmount = $approvedLine['amount'];
+                foreach ($indices as $offset => $index) {
+                    $amount = $offset === count($indices) - 1 ? $remainingAmount : bcdiv(bcmul($approvedLine['amount'], $lines[$index]['settlement_quantity'], 6), $quantity, 2);
+                    $remainingAmount = bcsub($remainingAmount, $amount, 2);
+                    $lines[$index]['amount'] = $amount;
+                    $lines[$index]['gross_sales_amount'] = $amount;
+                    $lines[$index]['automatic_rounding_difference'] = bcsub($amount, $lines[$index]['raw_amount'], 6);
+                    $lines[$index]['issued_sales_document_id'] = (int)$approval['document']['id'];
+                    $lines[$index]['issued_sales_document_version'] = (int)$approval['document']['version'];
+                    $goods = bcadd($goods, $amount, 2);
+                }
+            }
+        }
         $rounding = FinanceValue::money($data['rounding_amount'] ?? '0', true);
-        if (bccomp($rounding, '0', 2) > 0) { FinanceAccess::require('finance.sales.rounding'); if (bccomp($rounding, $goods, 2) >= 0) { throw new \DomainException('人工抹零必须小于商品合计'); } }
+        if (bccomp($rounding, '0', 2) > 0) { if (!$approval) { FinanceAccess::require('finance.sales.rounding'); } if (bccomp($rounding, $goods, 2) >= 0) { throw new \DomainException('人工抹零必须小于商品合计'); } }
         $remaining = $rounding;
         foreach ($lines as &$line) {
             $line['rounding_share'] = bccomp($goods, '0', 2) > 0 ? bcdiv(bcmul($rounding, $line['amount'], 4), $goods, 2) : '0.00';
@@ -147,7 +192,7 @@ final class FinanceSalesBatches
             Db::name('finance_sales_coverage')->insert(['tenant_id' => $tenant, 'document_id' => $id, 'delivery_item_id' => $delivery, 'order_id' => $line['order_id'], 'covered_delta' => $coverage, 'create_time' => time()]);
             $delta = bcsub($new['net_amount'] ?? '0', $old['net_amount'] ?? '0', 2); $month = $ledger->postingMonth($line['date']); $months[] = $month;
             $details = $line + ['subject_name' => $name, 'source_reference' => '销售结算 #' . $id . ' / ' . $line['order_sn'], 'reason' => $reason,
-                'corrects_document_id' => (int)($original['id'] ?? 0), 'confirmed_by' => FinanceAccess::actor(), 'confirmed_at' => time()];
+                'corrects_document_id' => (int)($original['id'] ?? 0), 'confirmed_by' => $approval ? FinanceValue::decode($approval['document']['approval_actor']) : FinanceAccess::actor(), 'confirmed_at' => time()];
             if (bccomp($delta, '0', 2) > 0) {
                 $reference = $ledger->createSource($id, 'receivable', $customer, $delta, $line['date'], $line['due_date'], $details); $created[] = $reference;
                 $after[$delivery]['receivable_sources'][] = $reference;

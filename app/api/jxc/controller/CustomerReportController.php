@@ -35,6 +35,7 @@ class CustomerReportController extends BaseJxcController
     public function edit() { return $this->respond('edit'); }
     public function retry() { return $this->respond('retry'); }
     public function convert() { return $this->respond('convert'); }
+    public function retrySalesPosting() { return $this->respond('retrySalesPosting'); }
     public function cancel() { return $this->respond('cancel'); }
     public function processingWeights() { return $this->respond('saveProcessingWeights'); }
     public function batchStart() { return $this->respondBatch('start', 'batchStart'); }

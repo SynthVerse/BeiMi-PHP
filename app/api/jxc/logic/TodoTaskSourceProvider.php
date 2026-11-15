@@ -25,15 +25,7 @@ final class TodoTaskSourceProvider
 
     private static function reports(TodoItemBuffer $buffer): void
     {
-        if (!self::any(['report.edit', 'task.control'])) { return; }
-        self::chunks('customer_report', static fn($query) => $query
-            ->whereIn('status', ['submitted_ready', 'submitted_shortage'])->whereNull('delete_time'),
-            static function (array $row) use ($buffer): void {
-                $date = (string)($row['delivery_date'] ?? '');
-                $buffer->add(self::item('report:' . $row['id'], 'customer_report', (int)$row['id'],
-                    '报货单 ' . (string)$row['sn'] . ' 待继续处理', (string)$row['main_customer_name'],
-                    $date, $date, (string)$row['status'], '继续处理', 'report', ['id' => (int)$row['id']]));
-            });
+        // 已提交报货的主要履约提醒统一由 S04 按报货身份生成，避免与配送待办重复。
     }
 
     private static function printing(TodoItemBuffer $buffer): void
@@ -79,24 +71,8 @@ final class TodoTaskSourceProvider
 
     private static function deliveries(TodoItemBuffer $buffer): void
     {
-        if (!FinanceAccess::has('delivery.confirm') && !FinanceAccess::has('delivery.line.manage')) { return; }
-        if (FinanceAccess::has('delivery.confirm')) {
-            $tenant = FinanceAccess::tenant();
-            $itemState = Db::name('customer_report_item')->where('tenant_id', $tenant)->whereNull('delete_time')
-                ->field("report_id,SUM(CASE WHEN fulfillment_status IN ('final_weight_recorded','partially_delivered_pending') AND final_weight_task_id>0 AND final_actual_weight>(COALESCE(fulfilled_base_qty,0)+COALESCE(delivery_loss_total_qty,0)+COALESCE(undelivered_total_qty,0)) THEN 1 ELSE 0 END) AS actionable_count")
-                ->group('report_id')->buildSql();
-            self::taskChunks(static fn($query) => $query
-                ->leftJoin([$itemState => 'di'], 'di.report_id=t.report_id')
-                ->whereLike('t.source_key', '%:delivery')
-                ->whereNotIn('t.status', ['blocked', 'recovered', 'ready_to_bill', 'completed', 'cancelled'])
-                ->where('di.actionable_count', '>', 0),
-                static function (array $row) use ($buffer): void {
-                    $date = (string)($row['delivery_date'] ?? '') ?: self::dateFromTime((int)$row['create_time']);
-                    $buffer->add(self::item('delivery-task:' . $row['id'], 'fulfillment_task', (int)$row['id'],
-                        '配送待处理：' . self::taskName($row), (string)$row['customer_name'],
-                        $date, null, '实际交付或交接尚未确认', '处理配送', 'delivery',
-                        ['task_id' => (int)$row['id'], 'report_id' => (int)$row['report_id'], 'delivery_date' => $date]));
-                });
+        if (self::any(['report.edit', 'task.control', 'delivery.confirm'])) {
+            self::undeliveredReports($buffer);
         }
         if (!FinanceAccess::has('delivery.line.manage')) { return; }
         self::chunks('line_vehicle_trip', static fn($query) => $query
@@ -106,6 +82,45 @@ final class TodoTaskSourceProvider
                     (string)$row['trip_date'], (string)$row['status'], '处理送站', 'line_trip',
                     ['id' => (int)$row['id'], 'delivery_date' => (string)$row['trip_date']]));
             });
+    }
+
+    private static function undeliveredReports(TodoItemBuffer $buffer): void
+    {
+        $tenant = FinanceAccess::tenant();
+        $itemState = Db::name('customer_report_item')->where('tenant_id', $tenant)->whereNull('delete_time')
+            ->field("report_id,COUNT(*) AS item_count,"
+                . "SUM(CASE WHEN fulfillment_status NOT IN ('delivered','partially_delivered_completed','undelivered','delivery_exception_completed') THEN 1 ELSE 0 END) AS unresolved_count,"
+                . "SUM(CASE WHEN fulfillment_status='pending' THEN 1 ELSE 0 END) AS unmeasured_count,"
+                . "SUM(CASE WHEN shortage_base_qty>0 THEN 1 ELSE 0 END) AS shortage_count,"
+                . "SUM(CASE WHEN fulfilled_base_qty>0 THEN 1 ELSE 0 END) AS delivered_count")
+            ->group('report_id')->buildSql();
+        $last = 0;
+        do {
+            $rows = Db::name('customer_report')->alias('r')
+                ->leftJoin([$itemState => 'di'], 'di.report_id=r.id')
+                ->where('r.tenant_id', $tenant)->whereNull('r.delete_time')->where('r.submitted_time', '>', 0)
+                ->whereNotIn('r.status', array_merge(CustomerReportSalesDocument::CLOSED_REPORT_STATUSES,
+                    ['draft', 'cancelled', 'delivery_exception_completed']))
+                ->where(static fn($query) => $query->whereNull('di.item_count')->whereOr('di.unresolved_count', '>', 0))
+                ->where('r.id', '>', $last)->field('r.*,di.item_count,di.unmeasured_count,di.shortage_count,di.delivered_count')
+                ->order('r.id')->limit(500)->select()->toArray();
+            foreach (TodoQueryBudget::candidates($rows) as $row) {
+                $last = (int)$row['id'];
+                $reason = match (true) {
+                    (int)($row['delivered_count'] ?? 0) > 0 || (string)$row['status'] === 'partially_delivered_pending' => '部分交付',
+                    (int)($row['item_count'] ?? 0) === 0 || (int)($row['unmeasured_count'] ?? 0) > 0
+                        || (string)$row['status'] === 'submitted_pending_measurement' => '待称重',
+                    (int)($row['shortage_count'] ?? 0) > 0 || (string)$row['status'] === 'submitted_shortage' => '待补货',
+                    (string)($row['delivery_arrangement_status'] ?? '') !== 'ready' => '待完善送货安排',
+                    default => '待交付',
+                };
+                $date = (string)($row['delivery_date'] ?? '') ?: self::dateFromTime((int)$row['submitted_time']);
+                $action = $reason === '待交付' && FinanceAccess::has('delivery.confirm') ? '确认实际交付' : '查看报货';
+                $buffer->add(self::item('delivery-report:' . $last, 'customer_report', $last,
+                    '报货单 ' . (string)$row['sn'] . ' · ' . $reason, (string)$row['main_customer_name'],
+                    $date, $date, $reason, $action, 'report', ['id' => $last, 'focus' => 'delivery']));
+            }
+        } while (count($rows) === 500);
     }
 
     /** @param callable(object):object $scope @param callable(array):void $consume */

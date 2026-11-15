@@ -71,7 +71,7 @@ final class FulfillmentChangeLogic extends BaseLogic
             return $replay;
         }
         try {
-            return self::transactionWithRetry(static function () use ($itemId, $processingGroupId, $key, $target, $processed, $disposition, $inventoryAction, $reason, $fingerprint) {
+            $result = self::transactionWithRetry(static function () use ($itemId, $processingGroupId, $key, $target, $processed, $disposition, $inventoryAction, $reason, $fingerprint) {
                 if (($replay = self::replay($key, $fingerprint)) !== null) {
                     return $replay;
                 }
@@ -182,6 +182,8 @@ final class FulfillmentChangeLogic extends BaseLogic
                 );
                 return self::result($changeId, $controls);
             });
+            if (is_array($result) && !empty($result['item']['report_id'])) { CustomerReportSalesDocument::afterReportChange((int)$result['item']['report_id']); }
+            return $result;
         } catch (\Throwable) {
             if (($replay = self::replay($key, $fingerprint)) !== null) {
                 return $replay;
@@ -215,7 +217,7 @@ final class FulfillmentChangeLogic extends BaseLogic
             return $replay;
         }
         try {
-            return self::transactionWithRetry(static function () use ($itemId, $key, $reasonCode, $reason, $fingerprint) {
+            $result = self::transactionWithRetry(static function () use ($itemId, $key, $reasonCode, $reason, $fingerprint) {
                 if (($replay = self::replay($key, $fingerprint)) !== null) {
                     return $replay;
                 }
@@ -233,27 +235,58 @@ final class FulfillmentChangeLogic extends BaseLogic
                 $activeReserved = self::activeReserved($reservation);
                 self::applyReservationMovement($item, $reservation, $activeReserved, '0.00');
                 $before = $item;
+                $hasDelivered = bccomp((string)($item['fulfilled_base_qty'] ?? '0'), '0', 4) > 0;
+                $quantityFacts = TradeQuantityService::snapshot($item);
+                $basis = (string)($quantityFacts['inventory_base_quantity'] ?? $item['final_actual_weight'] ?? $item['expected_base_qty']);
+                $handled = bcadd((string)($item['fulfilled_base_qty'] ?? '0'), bcadd((string)($item['delivery_loss_total_qty'] ?? '0'), (string)($item['undelivered_total_qty'] ?? '0'), 4), 4);
+                $remaining = bcsub($basis, $handled, 4);
+                $pendingDemand = $quantityFacts && (!empty($quantityFacts['has_unmeasured_groups']) || bccomp((string)($quantityFacts['remaining_order_quantity'] ?? '0'),'0',4)>0);
+                if ($hasDelivered && bccomp($remaining, '0', 4) <= 0 && !$pendingDemand) { throw new \DomainException('该商品已无待交付剩余数量'); }
+                $closedFacts = (string)($item['quantity_facts_snapshot'] ?? '');
+                if ($hasDelivered && $pendingDemand) {
+                    // 取消的是报货需求，不把尚未称量的计划数量写成库存或交付重量。
+                    $cancelledOrder = (string)($quantityFacts['remaining_order_quantity'] ?? '0');
+                    if (bccomp($cancelledOrder,'0',4)<=0) {
+                        $cancelledOrder='0.0000';
+                        foreach (Db::name('customer_report_processing_group')->where('tenant_id',self::tenantId())->where('report_item_id',$itemId)->order('id')->lock(true)->select()->toArray() as $group) {
+                            $facts=TradeQuantityService::snapshot($group);
+                            if (!$facts || !isset($facts['inventory_base_quantity'])) $cancelledOrder=bcadd($cancelledOrder,(string)$group['planned_qty'],4);
+                        }
+                    }
+                    $quantityFacts['cancelled_order_quantity']=bcadd((string)($quantityFacts['cancelled_order_quantity'] ?? '0'),$cancelledOrder,4);
+                    $quantityFacts['cancelled_order_unit_id']=(int)$item['unit_id'];
+                    $quantityFacts['cancelled_order_unit_name']=$item['unit_name'];
+                    $quantityFacts['remaining_order_quantity']='0.0000';
+                    $quantityFacts['has_unmeasured_groups']=false;
+                    $quantityFacts['unmeasured_demand_closed']=true;
+                    $closedFacts=FinanceValue::json($quantityFacts);
+                }
                 $after = array_replace($item, [
                     'reserved_base_qty' => '0.00', 'shortage_base_qty' => '0.00',
-                    'final_actual_weight' => '0.00', 'final_weight_task_id' => 0,
-                    'fulfillment_status' => 'undelivered', 'undelivered_reason_code' => $reasonCode,
-                    'undelivered_reason' => $reason, 'status' => 'undelivered', 'update_time' => time(),
+                    'quantity_facts_snapshot' => $closedFacts,
+                    'final_actual_weight' => $hasDelivered ? $item['final_actual_weight'] : '0.00',
+                    'final_weight_task_id' => $hasDelivered ? $item['final_weight_task_id'] : 0,
+                    'undelivered_total_qty' => $hasDelivered ? bcadd((string)($item['undelivered_total_qty'] ?? '0'),$remaining,4) : ($item['undelivered_total_qty'] ?? '0'),
+                    'fulfillment_status' => $hasDelivered ? 'partially_delivered_complete' : 'undelivered', 'undelivered_reason_code' => $reasonCode,
+                    'undelivered_reason' => $reason, 'status' => $hasDelivered ? 'partial_pending_settlement' : 'undelivered', 'update_time' => time(),
                 ]);
                 Db::name('customer_report_item')->where('tenant_id', self::tenantId())->where('id', $itemId)->update([
                     'reserved_base_qty' => '0.00', 'shortage_base_qty' => '0.00',
-                    'final_actual_weight' => '0.00', 'final_weight_task_id' => 0,
-                    'fulfillment_status' => 'undelivered', 'undelivered_reason_code' => $reasonCode,
-                    'undelivered_reason' => $reason, 'status' => 'undelivered', 'update_time' => $after['update_time'],
+                    'quantity_facts_snapshot' => $after['quantity_facts_snapshot'],
+                    'final_actual_weight' => $after['final_actual_weight'], 'final_weight_task_id' => $after['final_weight_task_id'],
+                    'undelivered_total_qty' => $after['undelivered_total_qty'],
+                    'fulfillment_status' => $after['fulfillment_status'], 'undelivered_reason_code' => $reasonCode,
+                    'undelivered_reason' => $reason, 'status' => $after['status'], 'update_time' => $after['update_time'],
                 ]);
                 $changeId = self::insertChange([
                     'report_id' => (int)$report['id'], 'report_item_id' => $itemId, 'action_type' => 'undelivered',
                     'idempotency_key' => $key, 'request_fingerprint' => $fingerprint,
-                    'quantity' => (string)$item['expected_base_qty'], 'processed_quantity' => '0.00',
+                    'quantity' => $hasDelivered ? $remaining : (string)$item['expected_base_qty'], 'processed_quantity' => '0.00',
                     'disposition' => '', 'reason_code' => $reasonCode, 'reason' => $reason,
                     'before_data' => $before, 'after_data' => $after,
                 ]);
                 $controls = FulfillmentTaskLogic::invalidatePrintedItemTickets(
-                    $itemId, $changeId, 'void', $key, $reason, $before, $after, (string)$item['expected_base_qty']
+                    $itemId, $changeId, 'void', $key, $reason, $before, $after, $hasDelivered ? $remaining : (string)$item['expected_base_qty']
                 );
                 Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('report_item_id', $itemId)
                     ->whereNotIn('status', ['cancelled', 'completed'])->update(['status' => 'cancelled', 'update_time' => time()]);
@@ -274,6 +307,8 @@ final class FulfillmentChangeLogic extends BaseLogic
                 );
                 return self::result($changeId, $controls);
             });
+            if (is_array($result) && !empty($result['item']['report_id'])) { CustomerReportSalesDocument::afterReportChange((int)$result['item']['report_id']); }
+            return $result;
         } catch (\Throwable) {
             if (($replay = self::replay($key, $fingerprint)) !== null) {
                 return $replay;
@@ -378,9 +413,21 @@ final class FulfillmentChangeLogic extends BaseLogic
             $reserved = bcadd($reserved, (string)$item['reserved_base_qty'], self::SCALE);
             $shortage = bcadd($shortage, (string)$item['shortage_base_qty'], self::SCALE);
         }
+        $status = bccomp($shortage, '0.00', self::SCALE) > 0 ? 'submitted_shortage' : 'submitted_ready';
+        if (DeliveryInventoryLogic::hasCompletedDelivery($reportId)) {
+            $remaining = false;
+            foreach ($items as $item) {
+                if (($item['fulfillment_status'] ?? '') === 'undelivered') continue;
+                $facts = TradeQuantityService::snapshot($item);
+                $basis = (string)($facts['inventory_base_quantity'] ?? $item['final_actual_weight'] ?? $item['expected_base_qty'] ?? '0');
+                $handled = bcadd((string)($item['fulfilled_base_qty'] ?? '0'), bcadd((string)($item['delivery_loss_total_qty'] ?? '0'), (string)($item['undelivered_total_qty'] ?? '0'), 4), 4);
+                if (bccomp($basis, $handled, 4) > 0 || !empty($facts['has_unmeasured_groups']) || bccomp((string)($facts['remaining_order_quantity'] ?? '0'),'0',4)>0) $remaining=true;
+            }
+            $status = $remaining ? 'partially_delivered_pending' : 'partial_pending_settlement';
+        }
         Db::name('customer_report')->where('tenant_id', self::tenantId())->where('id', $reportId)->inc('version')->update([
             'total_base_qty' => $total, 'reserved_base_qty' => $reserved, 'shortage_base_qty' => $shortage,
-            'status' => bccomp($shortage, '0.00', self::SCALE) > 0 ? 'submitted_shortage' : 'submitted_ready',
+            'status' => $status,
             'update_time' => time(),
         ]);
     }

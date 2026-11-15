@@ -618,6 +618,8 @@ class SalesOrderLogic extends BaseLogic
             'source_type' => (string)($item['source_type'] ?? ''),
             'source_id' => (int)($item['source_id'] ?? 0),
             'source_version' => (int)($item['source_version'] ?? 0),
+            'source_report_id' => ($item['source_type'] ?? '') === 'customer_report' ? (int)($item['source_id'] ?? 0) : 0,
+            'issued_sales_document_id' => ($item['source_type'] ?? '') === 'customer_report' ? (int)Db::name('customer_report_sales_document')->where('tenant_id', $tenantId)->where('report_id', (int)($item['source_id'] ?? 0))->value('id') : 0,
             'document_kind' => self::salesDocumentKind($item),
             'settlement_status' => (string)($item['settlement_status'] ?? 'formal'),
             'cost_status' => (string)($item['cost_status'] ?? 'confirmed'),

@@ -11,10 +11,10 @@ final class TodoSourceRegistry
     public static function coverage(): array
     {
         return [
-            'S01' => self::source('待处理报货', 'task_reports', '已提交且仍需后续处理', '重试、转单、取消或完成后重算', 'report.edit 或 task.control', 'report:{id}', '交付日期', 'report'),
+            'S01' => self::source('待处理报货', 'task_reports', '已提交报货的主要履约提醒归并至 S04', '整单履约结束后重算', 'report.edit 或 task.control', 'delivery-report:{id}', '交付日期', 'report'),
             'S02' => self::source('工票待打印与打印失败', 'task_printing', '存在可执行打印或重试动作', '打印成功后消除本动作', 'task.print 或 task.reprint（按状态）', 'task-print:{id}', '交付日期', 'fulfillment_task'),
             'S03' => self::source('任务配置、异常与纸票控制', 'task_exceptions', '未解除异常且具备对应动作权限', '异常解除或任务结案', 'task.control 加异常专属权限', 'task:{id}', '交付日期', 'fulfillment_task'),
-            'S04' => self::source('配送、送站与交接未完事项', 'delivery_actions', '已进入可交付阶段且存在可执行动作', '交付事件或趟次完成', 'delivery.confirm 或 delivery.line.manage', 'delivery-task/line-trip:{id}', '交付/趟次日期', 'delivery 或 line_trip'),
+            'S04' => self::source('配送、送站与交接未完事项', 'delivery_actions', '所有已提交且仍有未交付余量的报货，含待称重、缺货和部分交付', '整单实际交付或剩余量明确处理，或趟次完成', 'report.edit、task.control、delivery.confirm 或 delivery.line.manage（按动作）', 'delivery-report/line-trip:{id}', '交付/趟次日期；跨天保留', 'report 或 line_trip'),
             'S05' => self::source('已提交财务单据', 'finance_documents', 'pending 且具备该类型确认权限', '确认或撤回后重算', 'FinanceDocumentPolicy 当前阶段权限', 'finance-document:{id}', '单据业务日期', 'finance_document'),
             'S06' => self::source('销售交付待结算与重量差', 'sales_settlement', '待结算或待重量差确认且可操作', '正式结算或差异结案', 'settlement.bill；重量差为最高权限', 'sales-settlement:{order_id}', '销售业务日期', 'sales_settlement'),
             'S07' => self::source('采购到货待结算与成本确认', 'purchase_settlement', '到货数量仍未被合法覆盖', '结算/退货覆盖剩余量', 'finance.purchase.prepare 或 confirm', 'purchase-arrival:{line_id}', '到货日期', 'purchase_settlement'),
@@ -36,6 +36,7 @@ final class TodoSourceRegistry
             'S23' => self::source('其他人工待处理来源审计', 'coverage_audit', '满足 R07 但未登记的候选', '完成控制器、状态与页面提示全量核查并登记结论', '按新增来源实际动作权限', 'coverage-audit:{candidate}', '按新增来源规则', '先登记再接入', '审计控制项本身不产生运行时待办'),
             'S24' => self::source('资金本金与退款后续处理', 'finance_funds_followups', '借款到期、有合法采购应付可抵预付，或已确认退款及员工待付未结', '按原来源结清后消除', '资金本金最高权限；退款及工资按业务类型权限', 'fund-followup:{source}', '真实业务日及到期日', 'finance_fund 或 finance_balance'),
             'S25' => self::source('主动稍后继续的财务草稿', 'finance_draft_continuations', 'draft 且显式 resume_requested=1', '提交、确认或撤销待续提醒', '该业务准备／编辑权限', 'finance-resume:{id}', '真实业务日期；未知为空', 'finance_document'),
+            'S26' => self::source('报货销售单整单交付后待核与待入账', 'issued_sales_documents', '整单履约结束且签发销售单仍待金额核实或入账重试', '有效金额入账或单据依法作废', 'settlement.bill', 'sales-document:{id}', '报货交付日期', 'report'),
         ];
     }
 
