@@ -285,6 +285,7 @@ Route::group('', function () {
     Route::post('jxc/delivery/self_confirm', 'jxc.DeliveryInventory/confirmSelf');
     Route::post('jxc/delivery/counter_pickup_confirm', 'jxc.DeliveryInventory/confirmCounterPickup');
     Route::post('jxc/delivery/customer_vehicle_confirm', 'jxc.DeliveryInventory/confirmCustomerVehicle');
+    Route::post('jxc/delivery/complete', 'jxc.DeliveryInventory/complete');
     Route::post('jxc/delivery/third_party_confirm', 'jxc.DeliveryInventory/confirmThirdParty');
     Route::get('jxc/delivery/third_party_drivers', 'jxc.DeliveryInventory/drivers');
     Route::post('jxc/delivery/third_party_driver_save', 'jxc.DeliveryInventory/driverSave');

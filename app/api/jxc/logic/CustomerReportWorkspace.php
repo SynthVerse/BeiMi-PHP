@@ -78,12 +78,14 @@ final class CustomerReportWorkspace
             if ($hasQuantities) {
                 $input['quantities'] = $params['quantities'];
                 $missing = array_values(array_filter($missing, static fn($field) => !str_starts_with($field['path'], 'quantities.')));
-                [$completeGroups, $quantityMissing, $groupPositions] = self::quantities($report, $params['quantities']);
+                $pricingUnits = [];
+                foreach (($params['sales']['lines'] ?? $input['sales']['lines'] ?? []) as $line) $pricingUnits[(int)$line['report_item_id']] = (int)$line['price_unit_id'];
+                [$completeGroups, $quantityMissing, $groupPositions] = self::quantities($report, $params['quantities'], $pricingUnits);
                 $missing = array_merge($missing, $quantityMissing);
                 if ($completeGroups) {
                     $savedIds = CustomerReportQuantityService::saveWithinTransaction(['id' => $reportId, 'version' => $version,
                         'idempotency_key' => 'workspace-quantity:' . hash('sha256', $key), 'groups' => $completeGroups,
-                        'specification_verifications' => $params['quantities']['specification_verifications'] ?? []]);
+                        'specification_verifications' => $params['quantities']['specification_verifications'] ?? [], 'pricing_unit_ids' => $pricingUnits]);
                     foreach ($savedIds as $position => $savedId) {
                         $originalPosition = $groupPositions[$position];
                         $input['quantities']['groups'][$originalPosition]['id'] = $savedId;
@@ -200,7 +202,7 @@ final class CustomerReportWorkspace
     }
 
     /** 未完整分组保留输入；已完整分组仍复用原数量事实服务的全部业务校验。 */
-    private static function quantities(array $report, array $input): array
+    private static function quantities(array $report, array $input, array $pricingUnits = []): array
     {
         $groups = $input['groups'] ?? null;
         if (!is_array($groups) || !array_is_list($groups) || count($groups) > 600) { throw new \DomainException('数量分组格式无效'); }
@@ -215,7 +217,9 @@ final class CustomerReportWorkspace
             $id = FinanceValue::id($entry['id'] ?? 0, true); $sourceId = $id ?: FinanceValue::id($entry['append_to_group_id'] ?? 0);
             if (!isset($known[$sourceId], $items[$known[$sourceId]['report_item_id']]) || ($id && isset($seen[$id]))) { throw new \DomainException('数量分组不属于本单或重复'); }
             if ($id) { $seen[$id] = true; }
-            $item = $items[$known[$sourceId]['report_item_id']]; $units = TradeQuantityService::boundUnits($item);
+            $item = $items[$known[$sourceId]['report_item_id']];
+            $item['pricing_unit_id'] = $pricingUnits[(int)$item['id']] ?? CustomerReportQuantityRequirements::pricingUnit($item);
+            $units = TradeQuantityService::boundUnits($item);
             $path = 'quantities.groups.' . $position;
             $fields = self::quantityMissing($entry, $item, $units, $path);
             if ($id && $fields) {
@@ -237,6 +241,7 @@ final class CustomerReportWorkspace
     private static function quantityMissing(array $entry, array $item, array $units, string $path): array
     {
         $missing = []; $counts = []; $weightAvailable = false;
+        $requiredIds = array_column(CustomerReportQuantityRequirements::forItem($item, $units)['required_count_units'], 'id');
         $rawCounts = $entry['quantity_facts'] ?? [];
         if (!is_array($rawCounts) || !array_is_list($rawCounts)) { throw new \DomainException('计数事实格式无效'); }
         foreach ($rawCounts as $i => $count) {
@@ -244,8 +249,8 @@ final class CustomerReportWorkspace
             $unitId = FinanceValue::id($count['unit_id'] ?? 0);
             if (!isset($units[$unitId]) || $units[$unitId]['measure_type'] !== 'count' || array_key_exists($unitId, $counts) || ($count['source'] ?? 'counted') !== 'counted') { throw new \DomainException('计数事实单位未绑定、重复或未经实际清点'); }
             $counts[$unitId] = !self::blank($count['quantity'] ?? null);
-            if (!$counts[$unitId]) { $missing[] = ['path' => $path . '.quantity_facts.' . $i . '.quantity', 'message' => '请补充实际清点数量']; }
-            else self::field($path . '.quantity_facts.' . $i . '.quantity', static fn() => TradeQuantityFacts::decimal($count['quantity'], (int)$units[$unitId]['quantity_precision']));
+            if (!$counts[$unitId] && in_array($unitId, $requiredIds, true)) { $missing[] = ['path' => $path . '.quantity_facts.' . $i . '.quantity', 'message' => '请补充实际清点数量']; }
+            elseif ($counts[$unitId]) self::field($path . '.quantity_facts.' . $i . '.quantity', static fn() => TradeQuantityFacts::decimal($count['quantity'], (int)$units[$unitId]['quantity_precision']));
         }
         if (isset($entry['packaging'])) {
             if (!is_array($entry['packaging']) || isset($entry['net_weight_input']) || isset($entry['gross_weight_input']) || !self::blank($entry['final_actual_weight'] ?? null)) { throw new \DomainException('完整包装与实际称量只能采用一种来源'); }
@@ -271,12 +276,10 @@ final class CustomerReportWorkspace
             if (bccomp($gross, $tare, 4) <= 0) { throw FinanceBusinessException::validation([['field' => $path . '.tare_weight_input.value', 'code' => 'invalid', 'message' => '皮重不能大于或等于毛重']]); }
         }
         if (!self::blank($entry['final_actual_weight'] ?? null)) { TradeQuantityFacts::decimal($entry['final_actual_weight']); $weightAvailable = true; }
-        foreach (array_unique([(int)$item['base_unit_id'], (int)$item['unit_id']]) as $unitId) {
-            $unit = $units[$unitId] ?? null;
-            if (!$unit) { throw new \DomainException('报货或库存单位配置缺失'); }
-            if ($unit['measure_type'] === 'count' && empty($counts[$unitId]) && !isset($entry['packaging'])) { $missing[] = ['path' => $path . '.quantity_facts', 'message' => '请补充' . $unit['unit_name'] . '的实际清点数量']; }
+        foreach (CustomerReportQuantityRequirements::forItem($item, $units)['required_count_units'] as $required) {
+            if (empty($counts[$required['id']]) && !isset($entry['packaging'])) { $missing[] = ['path' => $path . '.quantity_facts', 'message' => '请补充' . $required['name'] . '的实际清点数量']; }
         }
-        if ($units[(int)$item['base_unit_id']]['measure_type'] === 'weight' && !$weightAvailable) { $missing[] = ['path' => $path . '.net_weight_input.value', 'message' => '请补充交付净重']; }
+        if (CustomerReportQuantityRequirements::forItem($item, $units)['net_weight_required'] && !$weightAvailable) { $missing[] = ['path' => $path . '.net_weight_input.value', 'message' => '请补充交付净重']; }
         // 空白是未完成；已填的附加数字仍须合法，不能借其他字段空白绕过校验。
         foreach (['inventory_base_quantity', 'processing_loss_weight'] as $field) {
             if (array_key_exists($field, $entry) && !self::blank($entry[$field])) TradeQuantityFacts::decimal($entry[$field], 4, $field === 'processing_loss_weight');

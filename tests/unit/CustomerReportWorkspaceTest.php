@@ -95,6 +95,67 @@ final class CustomerReportWorkspaceTest extends TestCase
         return array_values(array_filter($list['items'], static fn($item) => ($item['target']['type'] ?? '') === 'report' && (int)($item['target']['params']['id'] ?? 0) === $reportId));
     }
 
+    private function weightDemandFixture(): array
+    {
+        $f = $this->fixture();
+        $count = $this->createCustomerReportUnit('条');
+        $item = $f['report']['items'][0];
+        Db::name('goods_units_binding')->insert(['tenant_id' => self::TENANT_ID, 'goods_id' => $item['goods_id'], 'unit_id' => $count, 'unit_name' => '条', 'is_base_unit' => 0, 'status' => 1]);
+        Db::name('customer_report_item')->where('id', $item['id'])->update(['unit_id' => $count, 'unit_name' => '条', 'pricing_unit_id' => $f['unit'], 'pricing_unit_name' => '斤']);
+        $f['report'] = CustomerReportLogic::detail(['id' => $f['report']['id']]);
+        return $f;
+    }
+
+    public static function weightTargets(): array { return ['unknown remaining weight' => [false], 'explicit ten jin target' => [true]]; }
+
+    /** @dataProvider weightTargets */
+    public function test_weight_delivery_can_continue_without_piece_count_then_finish_without_duplicate_posting(bool $explicitTarget): void
+    {
+        $f = $this->weightDemandFixture();
+        if ($explicitTarget) Db::name('customer_report_item')->where('id', $f['report']['items'][0]['id'])->update(['acceptable_base_qty_min' => '10', 'acceptable_base_qty_max' => '10']);
+        $params = $this->payload($f, 'weight-first-save');
+        $params['quantities']['groups'][0]['net_weight_input']['value'] = '6';
+        $params['sales']['lines'][0]['settlement_quantity'] = '6';
+        $saved = CustomerReportLogic::saveWorkspace($params);
+        self::assertNotFalse($saved, CustomerReportLogic::getError());
+        self::assertSame('complete', $saved['workspace']['state']);
+        self::assertSame([], $saved['items'][0]['quantity_requirements']['required_count_units']);
+        self::assertSame($explicitTarget ? '10.0000' : null, $saved['items'][0]['delivery_progress']['remaining_weight']);
+        if ($explicitTarget) {
+            $task = array_values(array_filter($saved['task_group']['tasks'], static fn($task) => $task['source_key'] === 'report:' . $saved['id'] . ':delivery'))[0];
+            $group = $saved['items'][0]['processing_groups'][0];
+            self::assertFalse(DeliveryInventoryLogic::confirmSelfDelivery(['task_id' => $task['id'], 'event_type' => 'customer_handoff', 'idempotency_key' => 'weight-too-early',
+                'items' => [['report_item_id' => $saved['items'][0]['id'], 'delivery_group_ids' => [$group['id']], 'facts_version' => $group['version'], 'remaining_action' => 'none']]]));
+            self::assertSame('100.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
+        }
+        $this->deliverAll($saved, 'weight-partial-delivery', 'pending');
+        $continued = CustomerReportLogic::detail(['id' => $saved['id']]);
+        self::assertSame('partially_delivered_pending', $continued['status']);
+        self::assertSame('continuing', $continued['items'][0]['delivery_progress']['state']);
+        self::assertTrue($continued['items'][0]['delivery_progress']['can_append']);
+        self::assertSame('pending_delivery', $continued['sales_document']['accounting_status']);
+        self::assertSame('94.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
+
+        $params = ['id' => $continued['id'], 'version' => $continued['version'], 'workspace_version' => $continued['workspace']['version'], 'idempotency_key' => 'weight-next-save',
+            'quantities' => ['groups' => [['append_to_group_id' => $continued['items'][0]['processing_groups'][0]['id'], 'quantity_facts' => [], 'net_weight_input' => ['value' => '4', 'unit' => '斤']]]],
+            'sales' => ['document_version' => $continued['sales_document']['version'], 'lines' => [['report_item_id' => $continued['items'][0]['id'], 'price_unit_id' => $f['unit'], 'settlement_quantity' => '10', 'price' => '20']], 'rounding_amount' => '0', 'revision_reason' => '补交重量核对']];
+        $next = CustomerReportLogic::saveWorkspace($params);
+        self::assertNotFalse($next, CustomerReportLogic::getError());
+        self::assertSame('partially_delivered_pending', $next['status']);
+        $groups = $next['items'][0]['processing_groups']; $group = end($groups);
+        $task = array_values(array_filter($next['task_group']['tasks'], static fn($task) => $task['source_key'] === 'report:' . $next['id'] . ':delivery'))[0];
+        $delivery = ['task_id' => $task['id'], 'idempotency_key' => 'weight-final-delivery', 'event_type' => 'customer_handoff', 'items' => [['report_item_id' => $next['items'][0]['id'], 'delivery_group_ids' => [$group['id']], 'facts_version' => $group['version'], 'remaining_action' => 'none']]];
+        self::assertNotFalse(DeliveryInventoryLogic::confirmSelfDelivery($delivery), DeliveryInventoryLogic::getError());
+        $final = CustomerReportLogic::detail(['id' => $next['id']]);
+        self::assertSame('posted', $final['sales_document']['accounting_status'], $final['sales_document']['blocked_reason']);
+        self::assertSame('200.00', $final['sales_document']['amount']);
+        self::assertSame('90.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
+        self::assertNotFalse(DeliveryInventoryLogic::confirmSelfDelivery($delivery), DeliveryInventoryLogic::getError());
+        $replayed = CustomerReportLogic::detail(['id' => $next['id']]);
+        self::assertSame($final['sales_document']['finance_document_id'], $replayed['sales_document']['finance_document_id']);
+        self::assertSame('90.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
+    }
+
     public function test_complete_save_persists_quantity_and_issues_sales_document_together(): void
     {
         $fixture = $this->fixture();

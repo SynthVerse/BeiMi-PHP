@@ -28,6 +28,28 @@ final class TradeQuantityFactsTest extends TestCase
         self::assertNull($facts['actual_delivery_weight']);
         self::assertSame('3.0000', $facts['inventory_base_quantity']);
     }
+    public function test_weight_stock_and_weight_price_do_not_invent_demand_count(): void
+    {
+        $facts = TradeQuantityFacts::normalize(['net_weight_input' => ['value' => '6', 'unit' => '斤']],
+            ['unit_id' => 2, 'base_unit_id' => 1, 'base_unit_name' => '斤', 'pricing_unit_id' => 1], $this->units());
+        self::assertSame('6.0000', $facts['inventory_base_quantity']);
+        self::assertSame([], $facts['quantity_facts']);
+    }
+
+    public function test_count_pricing_still_requires_the_actual_count(): void
+    {
+        $this->expectException(\DomainException::class);
+        TradeQuantityFacts::normalize(['net_weight_input' => ['value' => '6', 'unit' => '斤']],
+            ['unit_id' => 2, 'base_unit_id' => 1, 'base_unit_name' => '斤', 'pricing_unit_id' => 2], $this->units());
+    }
+
+    public function test_unneeded_blank_count_does_not_block_weight_delivery(): void
+    {
+        $facts = TradeQuantityFacts::normalize(['net_weight_input' => ['value' => '6', 'unit' => '斤'], 'quantity_facts' => [['unit_id' => 2, 'quantity' => '']]],
+            ['unit_id' => 2, 'base_unit_id' => 1, 'base_unit_name' => '斤', 'pricing_unit_id' => 1], $this->units());
+        self::assertSame('6.0000', $facts['inventory_base_quantity']);
+        self::assertSame([], $facts['quantity_facts']);
+    }
     public function test_processing_preserves_raw_input_delivery_and_actual_loss(): void
     {
         $facts = TradeQuantityFacts::normalize(['net_weight_input' => ['value' => '18', 'unit' => '斤'],

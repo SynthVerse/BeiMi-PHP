@@ -3,12 +3,22 @@
 namespace app\api\jxc\controller;
 
 use app\api\jxc\logic\DeliveryInventoryLogic;
+use app\api\jxc\logic\DeliveryCompletionService;
 use app\api\jxc\logic\NegativeInventoryLogic;
 use app\api\jxc\logic\ThirdPartyDriverLogic;
 use app\api\jxc\validate\DeliveryInventoryValidate;
 
 class DeliveryInventoryController extends BaseJxcController
 {
+    public function complete()
+    {
+        $params = (new DeliveryInventoryValidate())->post()->goCheck('complete');
+        $result = DeliveryCompletionService::complete($params);
+        return $result === false
+            ? $this->fail(DeliveryCompletionService::getError(), DeliveryCompletionService::getReturnData() ?: [])
+            : $this->success('已确认交完', $result, 1, 1);
+    }
+
     public function confirmCounterPickup()
     {
         $params = (new DeliveryInventoryValidate())->post()->goCheck('confirmCounterPickup');

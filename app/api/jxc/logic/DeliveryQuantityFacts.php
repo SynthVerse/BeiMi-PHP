@@ -26,6 +26,9 @@ final class DeliveryQuantityFacts
         foreach ($params['items'] as &$request) {
             $item = Db::name('customer_report_item')->where('tenant_id', $tenant)->where('id', (int)($request['report_item_id'] ?? 0))->whereNull('delete_time')->find();
             if (!$item || (int)($item['quantity_contract_version'] ?? 1) !== 2) { continue; }
+            if (CustomerReportQuantityRequirements::present($item)['weight_only_fulfillment'] && !in_array($request['remaining_action'] ?? '', ['pending', 'none'], true)) {
+                throw new \DomainException('请明确选择还需继续交付或已交完');
+            }
             if ((int)($request['facts_version'] ?? 0) <= 0) { throw new \DomainException('交付需要当前数量事实版本，请更新客户端并核对最新称重'); }
             $selectedIds = (array)($request['delivery_group_ids'] ?? []);
             if ($selectedIds === [] && trim((string)($params['idempotency_key'] ?? '')) !== '') {

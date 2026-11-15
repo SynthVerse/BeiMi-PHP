@@ -448,9 +448,10 @@ final class DeliveryVariantLogic extends BaseLogic
                             || bccomp($undelivered, '0.0000', self::SCALE) > 0
                             || bccomp((string)$item['fulfilled_base_qty'], '0.0000', self::SCALE) > 0;
                         $quantitySnapshot = TradeQuantityService::snapshot($item);
-                        $pendingDemand = $quantitySnapshot && (!empty($quantitySnapshot['has_unmeasured_groups'])
-                            || (($quantitySnapshot['remaining_order_quantity'] ?? null) !== null
-                                && bccomp($quantitySnapshot['remaining_order_quantity'], '0', 4) > 0));
+                        $weightOnly = CustomerReportQuantityRequirements::present($item)['weight_only_fulfillment'];
+                        $pendingDemand = ($weightOnly && $row['remaining_action'] === 'pending') || ($quantitySnapshot && (!empty($quantitySnapshot['has_unmeasured_groups'])
+                            || (!$weightOnly && ($quantitySnapshot['remaining_order_quantity'] ?? null) !== null
+                                && bccomp($quantitySnapshot['remaining_order_quantity'], '0', 4) > 0)));
                         $partial = $partial || $pendingDemand;
                         if ($pendingDemand || bccomp($remainingAfter, '0.0000', self::SCALE) > 0) {
                             $itemStatus = 'partially_delivered_pending';
@@ -460,6 +461,7 @@ final class DeliveryVariantLogic extends BaseLogic
                             && bccomp($nextUndelivered, '0.0000', self::SCALE) > 0) {
                             $itemStatus = 'undelivered';
                         } else {
+                            if ($weightOnly) CustomerReportQuantityRequirements::assertCompleteWeight($item);
                             $itemStatus = $partial ? 'partially_delivered_completed' : 'delivered';
                         }
                         $itemUpdate = [
@@ -489,13 +491,15 @@ final class DeliveryVariantLogic extends BaseLogic
                         ->where('report_id', (int)$report['id'])->whereNull('delete_time')->order('id')->select()->toArray();
                     $unresolved = false;
                     $hasPartial = Db::name('fulfillment_delivery_event')->where('tenant_id', self::tenantId())
-                        ->where('report_id', (int)$report['id'])->where('id', '<>', $eventId)->count() > 0;
+                        ->where('report_id', (int)$report['id'])->where('id', '<>', $eventId)->where('event_type', '<>', 'fulfillment_completed')->count() > 0;
                     $totalDelivered = '0.0000';
                     $totalLoss = '0.0000';
                     foreach ($freshItems as $fresh) {
+                        if (CustomerReportQuantityRequirements::continuing($fresh)) $unresolved = true;
                         $quantitySnapshot = TradeQuantityService::snapshot($fresh);
+                        $weightOnly = CustomerReportQuantityRequirements::present($fresh)['weight_only_fulfillment'];
                         if ($quantitySnapshot && (!empty($quantitySnapshot['has_unmeasured_groups'])
-                            || (($quantitySnapshot['remaining_order_quantity'] ?? null) !== null
+                            || (!$weightOnly && ($quantitySnapshot['remaining_order_quantity'] ?? null) !== null
                                 && bccomp($quantitySnapshot['remaining_order_quantity'], '0', 4) > 0))) { $unresolved = true; }
                         $totalDelivered = bcadd($totalDelivered, (string)$fresh['fulfilled_base_qty'], self::SCALE);
                         $totalLoss = bcadd($totalLoss, (string)($fresh['delivery_loss_total_qty'] ?? '0'), self::SCALE);
@@ -723,7 +727,8 @@ final class DeliveryVariantLogic extends BaseLogic
                 self::setError('未处理的剩余数量必须继续待配送或明确未交货');
                 return false;
             }
-            if ($action === 'pending' && bccomp($handled, $remaining, self::SCALE) >= 0) {
+            $weightOnly = (int)($item['quantity_contract_version'] ?? 1) === 2 && CustomerReportQuantityRequirements::present($item)['weight_only_fulfillment'];
+            if (!$weightOnly && $action === 'pending' && bccomp($handled, $remaining, self::SCALE) >= 0) {
                 self::setError('已全部处理的明细不能继续标记待配送');
                 return false;
             }

@@ -56,6 +56,7 @@ final class TradeQuantityFacts
     public static function normalize(array $input, array $item, array $units): array
     {
         $facts = [];
+        $requiredIds = array_column(CustomerReportQuantityRequirements::forItem($item, $units)['required_count_units'], 'id');
         foreach ((array)($input['quantity_facts'] ?? []) as $fact) {
             $id = (int)($fact['unit_id'] ?? 0);
             if (!isset($units[$id]) || isset($facts[$id]) || ($units[$id]['measure_type'] ?? '') !== 'count') {
@@ -64,6 +65,7 @@ final class TradeQuantityFacts
             if (($fact['source'] ?? 'counted') !== 'counted') {
                 throw new \DomainException('本次计数必须实际清点，不能按均重推算');
             }
+            if (trim((string)($fact['quantity'] ?? '')) === '' && !in_array($id, $requiredIds, true)) continue;
             $facts[$id] = ['unit_id' => $id, 'unit_name' => $units[$id]['unit_name'],
                 'quantity' => self::decimal($fact['quantity'] ?? null, (int)$units[$id]['quantity_precision']), 'source' => 'counted'];
         }
@@ -100,9 +102,8 @@ final class TradeQuantityFacts
                 throw new \DomainException('库存基础数量与实际清点数量不一致');
             }
         } else { throw new \DomainException('当前库存计量类型尚不支持此称重入口'); }
-        $orderUnit = (int)$item['unit_id'];
-        if (($units[$orderUnit]['measure_type'] ?? '') === 'count' && !isset($facts[$orderUnit])) {
-            throw new \DomainException('请实际清点并确认报货单位的交付数量');
+        foreach (CustomerReportQuantityRequirements::forItem($item, $units)['required_count_units'] as $required) {
+            if (!isset($facts[$required['id']])) throw new \DomainException('请实际清点并确认' . $required['name'] . '的交付数量');
         }
         $processing = $input['processing'] ?? null;
         $loss = '0.0000';

@@ -23,7 +23,7 @@ final class TradeQuantityWorkflowTest extends TestCase
     }
     protected function tearDown(): void { $this->cleanCustomerReportData(); }
 
-    private function fixture(string $baseName = '斤', string $opening = '100', string $method = 'self_delivery'): array
+    private function fixture(string $baseName = '斤', string $opening = '100', string $method = 'self_delivery', bool $countPricing = false): array
     {
         $base = $this->createCustomerReportUnit($baseName); $count = $baseName === '瓶' ? $base : $this->createCustomerReportUnit('把');
         $goods = $this->createCustomerReportGoods('独立数量商品', 'TRADE-V2', $baseName); $sku = $this->customerReportSkuId($goods);
@@ -39,7 +39,7 @@ final class TradeQuantityWorkflowTest extends TestCase
         $payload = ['quantity_contract_version' => 2, 'main_customer_id' => $this->createCustomer('数量客户'),
             'delivery_date' => date('Y-m-d'), 'delivery_arrangement' => ['delivery_method' => $method], 'idempotency_key' => uniqid('trade-'),
             'items' => [['goods_id' => $goods, 'sku_id' => $sku, 'warehouse_id' => $warehouse,
-                'unit_id' => $count, 'unit_name' => $baseName === '瓶' ? '瓶' : '把', 'order_qty' => '5', 'price_status' => 'unpriced',
+                'unit_id' => $count, 'unit_name' => $baseName === '瓶' ? '瓶' : '把', 'order_qty' => '5', 'price_status' => 'unpriced', 'pricing_unit_id' => $countPricing ? $count : $base,
                 'processing_groups' => [['group_key' => 'all', 'name' => '全部数量', 'planned_qty' => '5', 'process_ids' => [$process]]]]]];
         $report = CustomerReportLogic::submit($payload);
         self::assertNotFalse($report, CustomerReportLogic::getError());
@@ -291,7 +291,7 @@ final class TradeQuantityWorkflowTest extends TestCase
 
     public function test_two_then_three_use_new_physical_group_and_keep_original_delivery_immutable(): void
     {
-        $f = $this->fixture(); $report = $f['report']; $group = $report['items'][0]['processing_groups'][0]['id'];
+        $f = $this->fixture(countPricing: true); $report = $f['report']; $group = $report['items'][0]['processing_groups'][0]['id'];
         $first = CustomerReportLogic::saveProcessingWeights(['id' => $report['id'], 'version' => $report['version'], 'idempotency_key' => 'first-two',
             'groups' => [['id' => $group, 'quantity_facts' => [['unit_id' => $f['count'], 'quantity' => '2']], 'net_weight_input' => ['value' => '3.2', 'unit' => '斤']]]]);
         self::assertNotFalse($first, CustomerReportLogic::getError());

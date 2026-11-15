@@ -709,6 +709,8 @@ class CustomerReportLogic extends BaseLogic
             $item['pricing_units'] = CustomerReportSalesDocument::pricingUnits($item);
             $facts = TradeQuantityService::snapshot($item);
             if ($facts) { $item += $facts; $item['actual_delivery_weight'] = $facts['actual_delivery_weight']; }
+            $item['quantity_requirements'] = CustomerReportQuantityRequirements::present($item);
+            $item['delivery_progress'] = CustomerReportQuantityRequirements::progress($item, $item['processing_groups'], $item['quantity_requirements']);
             if (($item['estimate_status'] ?? '') === 'unknown') {
                 $item['expected_base_qty'] = null; $item['shortage_base_qty'] = null;
                 $item['reservation_status'] = 'pending_measurement';
@@ -729,6 +731,9 @@ class CustomerReportLogic extends BaseLogic
         ] : null;
         $data['task_group'] = FulfillmentTaskLogic::groupForReport($id);
         $data['actions'] = self::actionStates($id, $data, $data['items']);
+        $completable = array_values(array_map(static fn($item) => (int)$item['id'], array_filter($data['items'], static fn($item) => $item['delivery_progress']['can_complete'])));
+        if ($data['status'] === 'cancelled' || CustomerReportSalesDocument::closed($data)) $completable = [];
+        $data['actions']['complete_delivery'] = ['allowed' => WorkforceLogic::hasPermission('delivery.confirm') && (bool)$completable, 'item_ids' => $completable, 'blocked_reason' => $completable ? '' : '没有可确认交完的待续商品'];
         $data['procurement_sources'] = self::procurementSources($id);
         $data['older_open_reports'] = CustomerReport::where('tenant_id', self::tenantId())
             ->where('main_customer_id', (int)$data['main_customer_id'])->where('id', '<>', $id)

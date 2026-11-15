@@ -586,7 +586,7 @@ final class DeliveryInventoryLogic extends BaseLogic
     public static function hasCompletedDelivery(int $reportId): bool
     {
         return Db::name('fulfillment_delivery_event')->where('tenant_id', self::tenantId())
-            ->where('report_id', $reportId)->where('status', 'completed')->count() > 0;
+            ->where('report_id', $reportId)->where('status', 'completed')->where('event_type', '<>', 'fulfillment_completed')->count() > 0;
     }
 
     /** @return array<string,mixed>|false */

@@ -45,6 +45,7 @@ final class CustomerReportQuantityService
             if ($entries === []) { throw new \DomainException('请提交本次实际称量的分组'); }
             $allBase = '0.0000'; $allReserved = '0.0000'; $allShortage = '0.0000'; $hasUnknown = false;
             foreach ($items as $item) {
+                $item['pricing_unit_id'] = $params['pricing_unit_ids'][(int)$item['id']] ?? CustomerReportQuantityRequirements::pricingUnit($item);
                 if ((int)$item['quantity_contract_version'] !== 2) { throw new \DomainException('本次报货须统一使用数量事实 V2'); }
                 $groups = Db::name('customer_report_processing_group')->where('tenant_id', $tenant)->where('report_item_id', $item['id'])->order('id')->lock(true)->select()->toArray();
                 if (array_intersect(array_keys($entries), array_column($groups, 'id')) === []) {
@@ -80,6 +81,12 @@ final class CustomerReportQuantityService
                     }
                     if ((int)$group['processing_loss_flow_id'] > 0) { throw new \DomainException('加工损耗已正式处理，不能覆盖原事实；请走关联更正'); }
                     $entry = $entries[$id]; $package = null;
+                    $requiredIds = array_column(CustomerReportQuantityRequirements::forItem($item, $units)['required_count_units'], 'id');
+                    $entry['quantity_facts'] = array_values(array_filter($entry['quantity_facts'] ?? [], static fn($count) => trim((string)($count['quantity'] ?? '')) !== '' || in_array((int)$count['unit_id'], $requiredIds, true)));
+                    $providedUnits = array_map(static fn($count) => (int)$count['unit_id'], $entry['quantity_facts'] ?? []);
+                    foreach ($existing['quantity_facts'] ?? [] as $pastCount) {
+                        if (!in_array((int)$pastCount['unit_id'], $providedUnits, true)) $entry['quantity_facts'][] = $pastCount;
+                    }
                     if (isset($entry['packaging'])) {
                         if (isset($entry['net_weight_input']) || isset($entry['gross_weight_input']) || !empty($entry['final_actual_weight'])) {
                             throw new \DomainException('已有实称不能被包装默认覆盖，请选择保留实称或明确重新核实来源');
@@ -140,7 +147,8 @@ final class CustomerReportQuantityService
                     }
                     $normalized[$id] = $facts;
                 }
-                if (isset($countTotals[(int)$item['unit_id']]) && bccomp($countTotals[(int)$item['unit_id']], (string)$item['order_qty'], 4) > 0) {
+                $weightOnly = CustomerReportQuantityRequirements::forItem($item, $units)['weight_only_fulfillment'];
+                if (!$weightOnly && isset($countTotals[(int)$item['unit_id']]) && bccomp($countTotals[(int)$item['unit_id']], (string)$item['order_qty'], 4) > 0) {
                     throw new \DomainException('实际交付数量超过原需求，请先明确追加需求');
                 }
                 if ((int)$item['piece_weight_confirmed'] === 1 && $normalized !== [] && !empty($params['specification_verifications'][$item['id']])) {
@@ -153,10 +161,10 @@ final class CustomerReportQuantityService
                         }
                     }
                 }
-                $remainingCount = isset($countTotals[(int)$item['unit_id']]) ? bcsub((string)$item['order_qty'], $countTotals[(int)$item['unit_id']], 4) : null;
+                $remainingCount = !$weightOnly && isset($countTotals[(int)$item['unit_id']]) ? bcsub((string)$item['order_qty'], $countTotals[(int)$item['unit_id']], 4) : null;
                 $complete = $remainingCount === null ? !$unmeasured : bccomp($remainingCount, '0', 4) === 0;
                 if (bccomp((string)$item['acceptable_base_qty_max'], '0', 4) > 0 && $weightTotal !== null
-                    && (($complete && bccomp($weightTotal, (string)$item['acceptable_base_qty_min'], 4) < 0) || bccomp($weightTotal, (string)$item['acceptable_base_qty_max'], 4) > 0)) {
+                    && ((!$weightOnly && $complete && bccomp($weightTotal, (string)$item['acceptable_base_qty_min'], 4) < 0) || bccomp($weightTotal, (string)$item['acceptable_base_qty_max'], 4) > 0)) {
                     throw new \DomainException('实际总重不符合客户明确的总重范围');
                 }
                 $pendingBase = bcsub($baseTotal, (string)$item['fulfilled_base_qty'], 4);
@@ -195,7 +203,7 @@ final class CustomerReportQuantityService
                 Db::name('customer_report_item')->where('tenant_id', $tenant)->where('id', $item['id'])->update([
                     'quantity_facts_snapshot' => json_encode($snapshot, JSON_UNESCAPED_UNICODE), 'final_actual_weight' => $weightTotal,
                     'expected_base_qty' => $baseTotal, 'reserved_base_qty' => $reserved, 'shortage_base_qty' => $shortage,
-                    'estimate_status' => 'measured', 'estimate_source' => 'actual_facts', 'fulfillment_status' => 'final_weight_recorded',
+                    'estimate_status' => 'measured', 'estimate_source' => 'actual_facts', 'fulfillment_status' => CustomerReportQuantityRequirements::continuing($item) ? 'partially_delivered_pending' : 'final_weight_recorded',
                     'status' => bccomp($shortage, '0', 4) > 0 ? 'submitted_shortage' : 'submitted_ready', 'update_time' => time()]);
                 Db::name('customer_report_reservation')->where('tenant_id', $tenant)->where('report_item_id', $item['id'])->update([
                     'reserved_base_qty' => $reserved, 'status' => 'reserved', 'update_time' => time()]);
@@ -205,7 +213,7 @@ final class CustomerReportQuantityService
             Db::name('customer_report')->where('tenant_id', $tenant)->where('id', $report['id'])->update([
                 'version' => (int)$report['version'] + 1, 'total_base_qty' => $allBase, 'reserved_base_qty' => $allReserved,
                 'quantity_operation_key' => $key, 'quantity_operation_fingerprint' => $fingerprint,
-                'shortage_base_qty' => $allShortage, 'status' => $hasUnknown ? 'submitted_pending_measurement' : (bccomp($allShortage, '0', 4) > 0 ? 'submitted_shortage' : 'submitted_ready'), 'update_time' => time()]);
+                'shortage_base_qty' => $allShortage, 'status' => array_filter($items, [CustomerReportQuantityRequirements::class, 'continuing']) ? 'partially_delivered_pending' : ($hasUnknown ? 'submitted_pending_measurement' : (bccomp($allShortage, '0', 4) > 0 ? 'submitted_shortage' : 'submitted_ready')), 'update_time' => time()]);
             return $savedIds;
     }
 
