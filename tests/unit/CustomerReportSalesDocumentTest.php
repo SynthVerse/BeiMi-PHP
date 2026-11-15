@@ -32,14 +32,14 @@ final class CustomerReportSalesDocumentTest extends TestCase
     {
         foreach(['finance_customer_terms','finance_correction','finance_sales_pricing_fact','finance_sales_group_coverage','finance_sales_coverage','finance_entry','finance_source','finance_document','finance_command','finance_opening_source','finance_opening_book','finance_preparation'] as $table) Db::name($table)->where('tenant_id',self::TENANT_ID)->delete();
     }
-    private function fixture(bool $allMeasured=true): array
+    private function fixture(bool $allMeasured=true,string $stockQuantity='100'): array
     {
         $unit=$this->createCustomerReportUnit('斤'); $goods=$this->createCustomerReportGoods('提前开单商品','EARLY-SALE','斤');
         $sku=$this->customerReportSkuId($goods); $warehouse=$this->createCustomerReportWarehouse('开单仓');
         Db::name('goods')->where('id',$goods)->update(['unit_id'=>$unit]);
         Db::name('goods_sku')->where('id',$sku)->update(['base_unit_id'=>$unit,'base_unit_name'=>'斤']);
         Db::name('goods_units_binding')->insert(['tenant_id'=>self::TENANT_ID,'goods_id'=>$goods,'unit_id'=>$unit,'unit_name'=>'斤','is_base_unit'=>1,'status'=>1]);
-        WarehouseSkuBalanceService::inbound($warehouse,$sku,'100');
+        WarehouseSkuBalanceService::inbound($warehouse,$sku,$stockQuantity);
         $customer=$this->createCustomer('提前开单客户');
         $process=(int)Db::name('work_process')->where('tenant_id',self::TENANT_ID)->where('trigger_type','report_selection')->value('id');
         $report=CustomerReportLogic::submit(['quantity_contract_version'=>2,'main_customer_id'=>$customer,'delivery_date'=>date('Y-m-d'),'delivery_arrangement'=>['delivery_method'=>'self_delivery'],'idempotency_key'=>'early-report',
@@ -57,6 +57,56 @@ final class CustomerReportSalesDocumentTest extends TestCase
     {
         $r=$f['report'];
         return ['id'=>$r['id'],'version'=>$r['version'],'idempotency_key'=>$key,'lines'=>[['report_item_id'=>$r['items'][0]['id'],'price_unit_id'=>$f['unit'],'settlement_quantity'=>'10','price'=>'20.00']],'rounding_amount'=>'0'];
+    }
+    public function test_detail_exposes_weight_adjustment_permission_and_preserves_server_authority(): void
+    {
+        $f=$this->fixture();
+        $detail=CustomerReportLogic::detail(['id'=>$f['report']['id']]);
+        self::assertNotFalse($detail,CustomerReportLogic::getError());
+        self::assertTrue($detail['sales_options']['can_adjust_weight_quantity'] ?? false);
+
+        request()->todoPermissionSnapshot=['tenant_id'=>self::TENANT_ID,'operator_id'=>self::ADMIN_ID,'identity'=>'tenant_admin','owner'=>false,'permissions'=>['settlement.bill','settlement.view']];
+        $detail=CustomerReportLogic::detail(['id'=>$f['report']['id']]);
+        self::assertNotFalse($detail,CustomerReportLogic::getError());
+        self::assertTrue($detail['actions']['issue_sales_document']['allowed']);
+        self::assertFalse($detail['sales_options']['can_adjust_weight_quantity']);
+        $params=$this->issue($f,'unauthorized-weight-difference');
+        $params['lines'][0]['settlement_quantity']='9';
+        $params['lines'][0]['difference_reason']='客户约定按九斤收费';
+        self::assertFalse(CustomerReportLogic::convert($params));
+        self::assertStringContainsString('最高权限',CustomerReportLogic::getError());
+
+        request()->todoPermissionSnapshot=null;
+        $params['idempotency_key']='authorized-weight-difference';
+        $issued=CustomerReportLogic::convert($params);
+        self::assertNotFalse($issued,CustomerReportLogic::getError());
+        self::assertSame('180.00',$issued['sales_document']['amount']);
+        self::assertSame('10.0000',$issued['sales_document']['lines'][0]['actual_delivery_weight']);
+    }
+    public function test_shortage_detail_keeps_current_sales_contract_and_allows_pricing_before_delivery(): void
+    {
+        $f=$this->fixture(true,'5');
+        $detail=CustomerReportLogic::detail(['id'=>$f['report']['id']]);
+        self::assertNotFalse($detail,CustomerReportLogic::getError());
+        self::assertSame('submitted_shortage',$detail['status']);
+        self::assertArrayHasKey('sales_document',$detail);
+        self::assertNull($detail['sales_document']);
+        self::assertIsArray($detail['sales_options']);
+        self::assertArrayHasKey('confirm_delivery',$detail['actions']);
+        self::assertTrue($detail['actions']['issue_sales_document']['allowed']);
+        self::assertSame('',$detail['actions']['issue_sales_document']['blocked_reason']);
+        self::assertSame('weight',$detail['items'][0]['pricing_units'][0]['measure_type']);
+        $issued=CustomerReportLogic::convert($this->issue($f,'issue-with-stock-shortage'));
+        self::assertNotFalse($issued,CustomerReportLogic::getError());
+        self::assertSame('pending_delivery',$issued['sales_document']['accounting_status']);
+
+        request()->todoPermissionSnapshot=['tenant_id'=>self::TENANT_ID,'operator_id'=>self::ADMIN_ID,'identity'=>'tenant_admin','owner'=>false,'permissions'=>['settlement.view']];
+        $readonly=CustomerReportLogic::detail(['id'=>$f['report']['id']]);
+        self::assertNotFalse($readonly,CustomerReportLogic::getError());
+        self::assertArrayHasKey('sales_options',$readonly);
+        self::assertNull($readonly['sales_options']);
+        self::assertFalse($readonly['actions']['issue_sales_document']['allowed']);
+        self::assertSame('没有开销售单权限',$readonly['actions']['issue_sales_document']['blocked_reason']);
     }
     public function test_issue_before_unprinted_delivery_does_not_move_inventory_or_create_receivable(): void
     {

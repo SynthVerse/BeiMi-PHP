@@ -685,7 +685,15 @@ class CustomerReportLogic extends BaseLogic
         unset($item);
         $data['sales_orders'] = self::salesOrdersByReport($id);
         $data['sales_document'] = CustomerReportSalesDocument::present($id);
-        $data['sales_options'] = FinanceAccess::has('settlement.bill') ? ['overdue' => FinanceIntegration::active() ? FinanceCustomers::overdue((int)$data['main_customer_id']) : ['amount' => '0.00'], 'can_round' => FinanceAccess::has('finance.sales.rounding'), 'can_override_due' => FinanceAccess::has('finance.sales.due_override'), 'precision_mode' => FinanceIntegration::active() ? FinanceSalesPrecision::rules((int)$data['main_customer_id'])['default_mode'] : 'cents', 'precision_rules' => FinanceIntegration::active() ? FinanceSalesPrecision::rules((int)$data['main_customer_id']) : null, 'default_due_date' => FinanceIntegration::active() ? FinanceSalesRules::terms((int)$data['main_customer_id'],(string)$data['delivery_date'])['default_due_date'] : null] : null;
+        $data['sales_options'] = FinanceAccess::has('settlement.bill') ? [
+            'overdue' => FinanceIntegration::active() ? FinanceCustomers::overdue((int)$data['main_customer_id']) : ['amount' => '0.00'],
+            'can_round' => FinanceAccess::has('finance.sales.rounding'),
+            'can_override_due' => FinanceAccess::has('finance.sales.due_override'),
+            'can_adjust_weight_quantity' => FinanceAccess::owner(),
+            'precision_mode' => FinanceIntegration::active() ? FinanceSalesPrecision::rules((int)$data['main_customer_id'])['default_mode'] : 'cents',
+            'precision_rules' => FinanceIntegration::active() ? FinanceSalesPrecision::rules((int)$data['main_customer_id']) : null,
+            'default_due_date' => FinanceIntegration::active() ? FinanceSalesRules::terms((int)$data['main_customer_id'],(string)$data['delivery_date'])['default_due_date'] : null,
+        ] : null;
         $data['task_group'] = FulfillmentTaskLogic::groupForReport($id);
         $data['actions'] = self::actionStates($id, $data, $data['items']);
         $data['procurement_sources'] = self::procurementSources($id);
@@ -787,7 +795,7 @@ class CustomerReportLogic extends BaseLogic
     private static function actionStates(int $reportId, array $report, array $items): array
     {
         $canEditReport = WorkforceLogic::hasPermission('report.edit');
-        $canBill = WorkforceLogic::hasPermission('settlement.bill');
+        $canBill = FinanceAccess::has('settlement.bill');
         $canRecordWeight = WorkforceLogic::hasPermission('settlement.weight');
         $usesQuantityFacts = $items !== [] && count(array_filter($items, static fn(array $item): bool => (int)($item['quantity_contract_version'] ?? 1) === 2)) === count($items);
         $hasActivePurchasePlanSource = self::hasActivePurchasePlanSource($reportId);
