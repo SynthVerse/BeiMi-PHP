@@ -41,6 +41,10 @@ class CustomerReportValidate extends BaseValidate
         'precision_rules' => 'array',
         'precision_override_reason' => 'max:1000',
         'overdue_acknowledged' => 'in:0,1',
+        'workspace_version' => 'require|integer|egt:0',
+        'quantities' => 'array',
+        'sales' => 'array',
+        'notes' => 'array',
     ];
 
     public function sceneRecognize() { return $this->only(['text']); }
@@ -54,6 +58,8 @@ class CustomerReportValidate extends BaseValidate
     public function sceneRetry() { return $this->only(['id','version']); }
     public function sceneConvert() { return $this->only(['id','version','idempotency_key','lines','rounding_amount','due_date','document_version','revision_reason','precision_mode','precision_rules','precision_override_reason','overdue_acknowledged']); }
     public function sceneRetrySalesPosting() { return $this->only(['id','document_version']); }
+    public function sceneSaveWorkspace() { return $this->only(['id','version','workspace_version','idempotency_key','quantities','sales','notes']); }
+    public function sceneSupplementSalesNotes() { return $this->only(['id','idempotency_key','notes']); }
     public function sceneCancel() { return $this->only(['id','version','reason']); }
     public function sceneSaveProcessingWeights() { return $this->only(['id','version','groups']); }
     public function sceneBatchStart() { return $this->only(['delivery_date','idempotency_key']); }

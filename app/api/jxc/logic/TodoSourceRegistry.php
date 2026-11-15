@@ -37,6 +37,7 @@ final class TodoSourceRegistry
             'S24' => self::source('资金本金与退款后续处理', 'finance_funds_followups', '借款到期、有合法采购应付可抵预付，或已确认退款及员工待付未结', '按原来源结清后消除', '资金本金最高权限；退款及工资按业务类型权限', 'fund-followup:{source}', '真实业务日及到期日', 'finance_fund 或 finance_balance'),
             'S25' => self::source('主动稍后继续的财务草稿', 'finance_draft_continuations', 'draft 且显式 resume_requested=1', '提交、确认或撤销待续提醒', '该业务准备／编辑权限', 'finance-resume:{id}', '真实业务日期；未知为空', 'finance_document'),
             'S26' => self::source('报货销售单整单交付后待核与待入账', 'issued_sales_documents', '整单履约结束且签发销售单仍待金额核实或入账重试', '有效金额入账或单据依法作废', 'settlement.bill', 'sales-document:{id}', '报货交付日期', 'report'),
+            'S27' => self::source('报货销售输入与说明待完善', 'report_sales_followups', '统一保存的输入未完成或销售版本有可补充说明', '必要输入保存完整且适用说明全部补齐', 'settlement.weight 或 settlement.bill；差异说明为最高权限', 'report-sales-followup:{report_id}', '报货交付日期', 'report'),
         ];
     }
 

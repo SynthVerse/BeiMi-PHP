@@ -108,10 +108,10 @@ final class FinanceSalesBatches
                 $quantity = $weight; $difference = bcsub($weight, $covered, 4);
             }
             $differenceReason = '';
-            if (bccomp($difference, '0', 4) !== 0) { if (!$approval) { FinanceAccess::require('', true); } $differenceReason = FinanceValue::text($item['difference_reason'] ?? '', 1000); }
+            if (bccomp($difference, '0', 4) !== 0) { if (!$approval) { FinanceAccess::require('', true); } $differenceReason = FinanceValue::text($item['difference_reason'] ?? '', 1000, !$approval); }
             $price = FinanceValue::money($item['price'] ?? null, true);
             if (bccomp($quantity, '0', 4) === 0 && bccomp($price, '0', 2) > 0) { throw new \DomainException('免费、赠送或赔偿应明确零价及原因，不能用零计费重量代替'); }
-            $zeroReason = bccomp($price, '0', 2) === 0 ? FinanceValue::text($item['zero_price_reason'] ?? '', 500) : '';
+            $zeroReason = bccomp($price, '0', 2) === 0 ? FinanceValue::text($item['zero_price_reason'] ?? '', 500, !$approval) : '';
             $calculation = FinanceSalesPrecision::amount($quantity, $price, $precision['actual_mode']);
             if (($source['fact_version'] ?? 1) >= 2) {
                 $returns = FinanceCustomerReturnPricing::adjustment($source, $item, $before[$delivery] ?? null, $price, $quantity, $precision['actual_mode']);

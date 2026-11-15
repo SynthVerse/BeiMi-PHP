@@ -8,8 +8,13 @@ final class CustomerReportQuantityService
 {
     public static function save(array $params): void
     {
-        $tenant = (int)request()->tenantId;
-        Db::transaction(static function () use ($params, $tenant): void {
+        Db::transaction(static fn() => self::saveWithinTransaction($params));
+    }
+
+    /** 调用方持有整个保存事务；这里只写数量事实，不提交或确认交付。 */
+    public static function saveWithinTransaction(array $params): array
+    {
+            $tenant = (int)request()->tenantId;
             FinanceIntegration::lock();
             $report = Db::name('customer_report')->where('tenant_id', $tenant)->where('id', (int)$params['id'])->lock(true)->find();
             $key = trim((string)($params['idempotency_key'] ?? ''));
@@ -17,7 +22,7 @@ final class CustomerReportQuantityService
             if ($key === '' || strlen($key) > 96) { throw new \DomainException('数量保存须携带原操作编号以便超时核实'); }
             if ($report && ($report['quantity_operation_key'] ?? '') === $key) {
                 if (!hash_equals((string)$report['quantity_operation_fingerprint'], $fingerprint)) { throw new \DomainException('同一操作编号不能提交不同数量事实'); }
-                return;
+                return [];
             }
             if (!$report || (int)$report['version'] !== (int)($params['version'] ?? 0)) {
                 throw new \DomainException('另一人已修改，请保留草稿并核对最新版本');
@@ -27,14 +32,15 @@ final class CustomerReportQuantityService
             }
             $items = Db::name('customer_report_item')->where('tenant_id', $tenant)->where('report_id', $report['id'])
                 ->whereNull('delete_time')->order('warehouse_id,sku_id,id')->lock(true)->select()->toArray();
-            $entries = [];
-            foreach ((array)($params['groups'] ?? []) as $entry) {
+            $entries = []; $savedIds = [];
+            foreach ((array)($params['groups'] ?? []) as $position => $entry) {
                 $id = (int)($entry['id'] ?? 0);
                 if ($id === 0 && (int)($entry['append_to_group_id'] ?? 0) > 0) {
                     $id = self::appendGroup($entry, $items, $tenant);
                 }
                 if ($id <= 0 || isset($entries[$id])) { throw new \DomainException('交付分组身份缺失或重复'); }
                 $entries[$id] = $entry;
+                $savedIds[$position] = $id;
             }
             if ($entries === []) { throw new \DomainException('请提交本次实际称量的分组'); }
             $allBase = '0.0000'; $allReserved = '0.0000'; $allShortage = '0.0000'; $hasUnknown = false;
@@ -200,7 +206,7 @@ final class CustomerReportQuantityService
                 'version' => (int)$report['version'] + 1, 'total_base_qty' => $allBase, 'reserved_base_qty' => $allReserved,
                 'quantity_operation_key' => $key, 'quantity_operation_fingerprint' => $fingerprint,
                 'shortage_base_qty' => $allShortage, 'status' => $hasUnknown ? 'submitted_pending_measurement' : (bccomp($allShortage, '0', 4) > 0 ? 'submitted_shortage' : 'submitted_ready'), 'update_time' => time()]);
-        });
+            return $savedIds;
     }
 
     /** A delivered physical group remains immutable; a later batch gets a fresh identity. */

@@ -14,6 +14,7 @@ final class TodoFinanceSourceProvider
     {
         $buffer = new TodoItemBuffer($source, 'finance', $limit, $after, $filters, $excludedIdentities);
         match ($source) {
+            'S27' => self::reportSalesFollowups($buffer),
             'S26' => self::issuedSalesDocuments($buffer),
             'S25' => self::continuations($buffer),
             'S24' => self::fundFollowups($buffer),
@@ -114,6 +115,8 @@ final class TodoFinanceSourceProvider
             ->whereRaw('source_id NOT IN ' . $issuedReports)
             ->whereRaw('source_id IN ' . $closedReports)
             ->whereIn('settlement_status', ['pending', 'pending_weight_review']), static function (array $row) use ($buffer): void {
+                // 服务端已保存的未完成计价由 S27 唯一承接，避免同一报货出现两个金额入口。
+                if (CustomerReportWorkspace::hasIncomplete((int)$row['source_id'])) { return; }
                 if ((string)$row['settlement_status'] === 'pending_weight_review' && !FinanceAccess::owner()) { return; }
                 if ((string)$row['settlement_status'] === 'pending' && !FinanceAccess::has('settlement.bill')) { return; }
                 $date = !empty($row['datetimesingle']) ? date('Y-m-d', (int)$row['datetimesingle']) : null;
@@ -138,6 +141,7 @@ final class TodoFinanceSourceProvider
                 ->field('d.*,r.main_customer_name,r.delivery_date')->order('d.id')->limit(500)->select()->toArray();
             foreach (TodoQueryBudget::candidates($rows) as $row) {
                 $last = (int)$row['id'];
+                if (CustomerReportWorkspace::hasIncomplete((int)$row['report_id'])) { continue; }
                 $retry = (string)$row['accounting_status'] === 'pending_posting';
                 $buffer->add(self::item('sales-document:' . $last, 'customer_report_sales_document', $last,
                     '销售单 ' . (string)$row['order_sn'] . ($retry ? ' · 待入账' : ' · 金额待核'),
@@ -146,6 +150,39 @@ final class TodoFinanceSourceProvider
                     $retry ? '核实并重试入账' : '核对销售金额', 'report', ['id' => (int)$row['report_id']]));
             }
         } while (count($rows) === 500);
+    }
+
+    private static function reportSalesFollowups(TodoItemBuffer $buffer): void
+    {
+        $canSales = FinanceAccess::has('settlement.bill');
+        $canQuantities = WorkforceLogic::hasPermission('settlement.weight');
+        if (!$canSales && !$canQuantities) { return; }
+        $tenant = FinanceAccess::tenant();
+        $latestIds = Db::name('customer_report_workspace_save')->where('tenant_id', $tenant)->field('MAX(id)')->group('report_id')->buildSql();
+        $incompleteReports = Db::name('customer_report_workspace_save')->where('tenant_id', $tenant)
+            ->whereRaw('id IN ' . $latestIds)->where('state', 'incomplete')->field('report_id')->buildSql();
+        $issuedReports = Db::name('customer_report_sales_document')->where('tenant_id', $tenant)
+            ->where('status', 'issued')->field('report_id')->buildSql();
+        self::chunks('customer_report', static fn($query) => $query->whereNull('delete_time')->where('status', '<>', 'cancelled')
+            ->whereRaw('(id IN ' . $incompleteReports . ' OR id IN ' . $issuedReports . ')'),
+            static function (array $report) use ($buffer, $canSales, $canQuantities): void {
+                $id = (int)$report['id']; $latest = CustomerReportWorkspace::latest($id);
+                $incomplete = ($latest['state'] ?? '') === 'incomplete';
+                $fields = $incomplete ? FinanceValue::decode($latest['missing_fields']) : [];
+                $canComplete = count(array_filter($fields, static fn($field) =>
+                    str_starts_with($field['path'], 'sales.') ? $canSales : $canQuantities)) > 0;
+                $notes = array_values(array_filter(CustomerReportSalesNotes::pending($id), static fn($note) => $note['can_supplement']));
+                if (!$canComplete && !$notes) { return; }
+                // 同一报货的金额待核由 S26 承接，说明缺项在原详情内一并展示。
+                $document = Db::name('customer_report_sales_document')->where('tenant_id', FinanceAccess::tenant())->where('report_id', $id)->find();
+                if (!$incomplete && $canSales && CustomerReportSalesDocument::closed($report)
+                    && in_array($document['accounting_status'] ?? '', ['pending_amount', 'review_required', 'pending_posting'], true)) { return; }
+                $title = $incomplete ? '继续填写销售单' : '补充销售说明';
+                $reason = $incomplete ? '输入已保存，必要数量或计价信息仍待完善' : count($notes) . ' 项说明待补，不影响已确认金额及正常入账';
+                $buffer->add(self::item('report-sales-followup:' . $id, 'customer_report_workspace', $id, $title,
+                    (string)$report['main_customer_name'], (string)$report['delivery_date'], null, $reason,
+                    $incomplete ? '继续填写' : '补充说明', 'report', ['id' => $id, 'action' => $incomplete ? 'sales_workspace' : 'sales_notes']));
+            });
     }
 
     private static function purchaseSettlement(TodoItemBuffer $buffer): void

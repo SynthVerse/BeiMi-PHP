@@ -10,11 +10,17 @@ final class CustomerReportSalesDocument
     public const CLOSED_REPORT_STATUSES = ['delivered_pending_settlement','partial_pending_settlement','undelivered','fulfilled_undelivered','completed','settled'];
     public static function issue(array $params): void
     {
+        Db::transaction(static fn() => self::issueWithinTransaction($params));
+        self::afterReportChange((int)$params['id']);
+    }
+
+    /** 与工作区数量保存共享事务；自动入账必须在外层提交后执行。 */
+    public static function issueWithinTransaction(array $params): void
+    {
         FinanceDocumentPolicy::authorize('sales_batch', true);
         $tenant=FinanceAccess::tenant(); $reportId=FinanceValue::id($params['id']??0);
         $key=FinanceValue::text($params['idempotency_key']??'',96);
         $fingerprint=hash('sha256',FinanceValue::json([$params,FinanceAccess::actor()]));
-        Db::transaction(static function() use($tenant,$reportId,$key,$fingerprint,$params): void {
             FinanceIntegration::lock();
             $report=Db::name('customer_report')->where('tenant_id',$tenant)->where('id',$reportId)->whereNull('delete_time')->lock(true)->find();
             if(!$report) throw new \DomainException('报货单不存在');
@@ -28,7 +34,7 @@ final class CustomerReportSalesDocument
             if((int)$report['version']!==(int)($params['version']??0)) throw new \DomainException('报货数据已变化，请重新核对');
             if($doc && ($doc['accounting_status']==='posted' || $doc['status']==='voided')) throw new \DomainException('已入账或作废的销售单请使用正式更正流程');
             if($doc && (int)$doc['version']!==(int)($params['document_version']??0)) throw new \DomainException('销售单版本已变化，请重新核对');
-            $reason=$doc?FinanceValue::text($params['revision_reason']??'',1000):'首次生成销售单';
+            $reason=$doc?FinanceValue::text($params['revision_reason']??'',1000,false):'首次生成销售单';
             $items=Db::name('customer_report_item')->where('tenant_id',$tenant)->where('report_id',$reportId)->whereNull('delete_time')->order('sort,id')->lock(true)->select()->toArray();
             $snapshot=self::snapshot($report,$items,$params); $now=time(); $version=$doc?(int)$doc['version']+1:1;
             if(!$doc) {
@@ -50,37 +56,49 @@ final class CustomerReportSalesDocument
                 'accounting_status'=>'pending_delivery','blocked_reason'=>'','last_operation_key'=>$key,'last_operation_fingerprint'=>$fingerprint,'update_time'=>$now]);
             Db::name('customer_report_sales_revision')->insert(['tenant_id'=>$tenant,'document_id'=>$docId,'version'=>$version,'snapshot'=>FinanceValue::json($snapshot),
                 'reason'=>$reason,'actor'=>FinanceValue::json(FinanceAccess::actor()),'operation_key'=>$key,'fingerprint'=>$fingerprint,'create_time'=>$now]);
-        });
-        self::afterReportChange($reportId);
     }
 
-    private static function snapshot(array $report,array $items,array $params): array
+    public static function inspectWorkspace(array $report, array $params): array
+    {
+        $items = Db::name('customer_report_item')->where('tenant_id', FinanceAccess::tenant())->where('report_id', $report['id'])
+            ->whereNull('delete_time')->order('sort,id')->lock(true)->select()->toArray();
+        return self::snapshot($report, $items, $params, true);
+    }
+
+    private static function snapshot(array $report,array $items,array $params,bool $allowIncomplete=false): array
     {
         $requests=$params['lines']??null;
         if(!is_array($requests)||!array_is_list($requests)||count($requests)>200) throw new \DomainException('请核对商品计价明细');
-        $requestCount=count($requests); $requests=array_column($requests,null,'report_item_id');
-        if(count($requests)!==$requestCount) throw new \DomainException('商品计价明细不能重复'); $lines=[]; $goods='0.00';
+        foreach($requests as $request) { if(!is_array($request)) throw new \DomainException('商品计价明细格式无效'); FinanceValue::id($request['report_item_id']??0); }
+        $requestCount=count($requests); $positions=array_flip(array_column($requests,'report_item_id')); $requests=array_column($requests,null,'report_item_id');
+        if(count($requests)!==$requestCount) throw new \DomainException('商品计价明细不能重复'); $lines=[]; $goods='0.00'; $missing=[]; $ownerRequired=false;
         $precision=FinanceIntegration::active()?FinanceSalesPrecision::selection((int)$report['main_customer_id'],$params):['actual_mode'=>'cents'];
         foreach($items as $item) {
             if($item['fulfillment_status']==='undelivered') continue;
             $id=(int)$item['id']; $input=$requests[$id]??null;
             if(!$input) throw new \DomainException('每个有效商品都必须明确计价');
-            $units=self::pricingUnits($item); $unitId=FinanceValue::id($input['price_unit_id']??0); $unit=array_column($units,null,'id')[$unitId]??null;
-            if(!$unit) throw new \DomainException('计价单位不属于当前商品有效绑定');
-            $quantity=FinanceSalesQuantity::quantity($input['settlement_quantity']??null,(int)$unit['precision']);
-            $price=FinanceValue::money($input['price']??null,true);
-            $zero=bccomp($price,'0',2)===0?FinanceValue::text($input['zero_price_reason']??'',500):'';
+            $path='sales.lines.'.($positions[$id]??0); $units=self::pricingUnits($item);
+            $unitId=CustomerReportWorkspace::blank($input['price_unit_id']??null)?null:FinanceValue::id($input['price_unit_id']);
+            $unit=$unitId===null?null:(array_column($units,null,'id')[$unitId]??null);
+            if($unitId!==null && !$unit) throw new \DomainException('计价单位不属于当前商品有效绑定');
+            if(!$unit) $missing[]=['path'=>$path.'.price_unit_id','message'=>'请选择计价单位'];
+            $quantity=CustomerReportWorkspace::blank($input['settlement_quantity']??null)?null:CustomerReportWorkspace::field($path.'.settlement_quantity',static fn()=>FinanceSalesQuantity::quantity($input['settlement_quantity'],(int)($unit['precision']??4)));
+            $price=CustomerReportWorkspace::blank($input['price']??null)?null:CustomerReportWorkspace::field($path.'.price',static fn()=>FinanceValue::money($input['price'],true));
+            if($quantity===null) $missing[]=['path'=>$path.'.settlement_quantity','message'=>'请补充计价数量'];
+            if($price===null) $missing[]=['path'=>$path.'.price','message'=>'请补充单价'];
+            $zero=FinanceValue::text($input['zero_price_reason']??'',500,false);
+            $difference=FinanceValue::text($input['difference_reason']??'',1000,false);
             $groups=Db::name('customer_report_processing_group')->where('tenant_id',FinanceAccess::tenant())->where('report_item_id',$id)->order('id')->select()->toArray();
-            $facts=[]; $actual='0.0000'; $base='0.0000'; $hasWeight=true;
+            $facts=[]; $actual='0.0000'; $base='0.0000'; $hasWeight=true; $hasAllFacts=true;
             foreach($groups as $group) {
                 $fact=FinanceValue::decode($group['quantity_facts_snapshot']?:'{}');
-                if(!isset($fact['inventory_base_quantity']) || bccomp((string)$fact['inventory_base_quantity'],'0',4)<=0) { if(self::closed($report)) continue; throw new \DomainException('请先保存全部商品组的真实数量与称重'); }
+                if(!isset($fact['inventory_base_quantity']) || bccomp((string)$fact['inventory_base_quantity'],'0',4)<=0) { if(self::closed($report)) continue; $hasAllFacts=false; continue; }
                 $actual=$fact['actual_delivery_weight']===null?$actual:bcadd($actual,$fact['actual_delivery_weight'],4);
                 if($fact['actual_delivery_weight']===null) $hasWeight=false;
                 $base=bcadd($base,$fact['inventory_base_quantity'],4);
                 foreach($fact['quantity_facts']??[] as $q) $facts[(int)$q['unit_id']]=bcadd($facts[(int)$q['unit_id']]??'0',$q['quantity'],4);
             }
-            if(!$groups) throw new \DomainException('缺少真实数量组，不能生成销售单');
+            if(!$groups) $hasAllFacts=false;
             if(self::closed($report)) {
                 $delivered=Db::name('fulfillment_delivery_item')->where('tenant_id',FinanceAccess::tenant())->where('report_item_id',$id)->select()->toArray();
                 $actual='0.0000'; $base='0.0000'; $facts=[]; $hasWeight=true;
@@ -91,35 +109,42 @@ final class CustomerReportSalesDocument
                     foreach(FinanceValue::decode($part['quantity_facts']?:'[]') as $q) $facts[(int)$q['unit_id']]=bcadd($facts[(int)$q['unit_id']]??'0',$q['quantity'],4);
                 }
             }
-            $expected=$unit['measure_type']==='weight'?($hasWeight?TradeQuantityService::weightFromJin($actual,$unitId):null):($facts[$unitId]??((int)$item['base_unit_id']===$unitId?$base:null));
-            if($expected===null) throw new \DomainException('当前计价单位缺少真实数量依据');
-            $difference='';
-            if(bccomp($quantity,$expected,4)!==0) {
+            $expected=(!$unit || !$hasAllFacts)?null:($unit['measure_type']==='weight'?($hasWeight?TradeQuantityService::weightFromJin($actual,$unitId):null):($facts[$unitId]??((int)$item['base_unit_id']===$unitId?$base:null)));
+            if($expected===null) $missing[]=['path'=>$path.'.actual_quantity','message'=>'请补充当前商品的真实数量与称重'];
+            if($quantity!==null && $expected!==null && bccomp($quantity,$expected,4)!==0) {
                 if($unit['measure_type']!=='weight') throw new \DomainException('计件数量必须与已核实的完整数量一致');
-                FinanceAccess::require('',true); $difference=FinanceValue::text($input['difference_reason']??'',1000);
-            }
+                FinanceAccess::require('',true); $ownerRequired=true;
+            } else $difference='';
+            unset($requests[$id]);
+            if(!$unit || $quantity===null || $price===null || $expected===null) continue;
+            if(bccomp($price,'0',2)!==0) $zero='';
             $amount=FinanceSalesPrecision::amount($quantity,$price,$precision['actual_mode'])['amount']; $goods=bcadd($goods,$amount,2);
             $lines[]=['report_item_id'=>$id,'goods_id'=>(int)$item['goods_id'],'sku_id'=>(int)$item['sku_id'],'goods_name'=>$item['goods_name'],'sku_name'=>$item['sku_name'],
                 'base_unit_name'=>$item['base_unit_name'],'warehouse_id'=>(int)$item['warehouse_id'],'unit_name'=>$item['unit_name'],'price_unit_id'=>$unitId,'price_unit_name'=>$unit['name'],'settlement_quantity'=>$quantity,'price'=>$price,'amount'=>$amount,
-                'zero_price_reason'=>$zero,'difference_reason'=>$difference,'actual_delivery_weight'=>$hasWeight?$actual:null,'inventory_base_quantity'=>$base,
+                'zero_price_reason'=>$zero,'difference_reason'=>$difference,'has_quantity_difference'=>bccomp($quantity,$expected,4)!==0,'actual_delivery_weight'=>$hasWeight?$actual:null,'inventory_base_quantity'=>$base,
                 'quantity_facts'=>array_map(static fn($id,$qty)=>['unit_id'=>$id,'quantity'=>$qty],array_keys($facts),$facts),
                 'exception_fingerprint'=>self::exceptionFingerprint($item),'pricing_units'=>$units,'group_fingerprints'=>self::groupFingerprints($groups)];
-            unset($requests[$id]);
         }
-        if(!$lines || $requests) throw new \DomainException('商品计价明细与本报货不一致或存在重复');
-        $rounding=FinanceValue::money($params['rounding_amount']??'0',true);
-        if(bccomp($rounding,'0',2)>0) { FinanceAccess::require('finance.sales.rounding'); if(bccomp($rounding,$goods,2)>=0) throw new \DomainException('抹零必须小于商品合计'); }
+        if($requests || (!$lines && !$missing)) throw new \DomainException('商品计价明细与本报货不一致或存在重复');
+        $roundingInput=array_key_exists('rounding_amount',$params)?$params['rounding_amount']:'0';
+        if(CustomerReportWorkspace::blank($roundingInput)) { $missing[]=['path'=>'sales.rounding_amount','message'=>'请补充抹零金额，无抹零填写0']; $rounding='0.00'; }
+        else $rounding=CustomerReportWorkspace::field('sales.rounding_amount',static fn()=>FinanceValue::money($roundingInput,true));
+        if(bccomp($rounding,'0',2)>0) { FinanceAccess::require('finance.sales.rounding'); if(!$missing && bccomp($rounding,$goods,2)>=0) throw new \DomainException('抹零必须小于商品合计'); }
         $paymentTerms=FinanceIntegration::active()?FinanceSalesRules::terms((int)$report['main_customer_id'],(string)$report['delivery_date']):['default_due_date'=>null,'version'=>0,'mode'=>'unagreed','days'=>0];
         $defaultDue=$paymentTerms['default_due_date'];
         $due=array_key_exists('due_date',$params)?FinanceValue::date($params['due_date'],true):$defaultDue;
         $dueOverridden=$due!==$defaultDue;
         if($dueOverridden) FinanceAccess::require('finance.sales.due_override');
         $overdue=FinanceIntegration::active()?FinanceCustomers::overdue((int)$report['main_customer_id']):['amount'=>'0'];
-        if(bccomp($overdue['amount'],'0',2)>0 && empty($params['overdue_acknowledged'])) throw new \DomainException('客户存在逾期余额，请明确知晓后继续确认');
+        if(!$missing && bccomp($overdue['amount'],'0',2)>0 && empty($params['overdue_acknowledged'])) throw new \DomainException('客户存在逾期余额，请明确知晓后继续确认');
+        if($missing) {
+            if(!$allowIncomplete) throw new \DomainException($missing[0]['message']);
+            return ['missing_fields'=>$missing];
+        }
         return ['customer_id'=>(int)$report['main_customer_id'],'customer_name'=>$report['main_customer_name'],'report_sn'=>$report['sn'],
             'lines'=>$lines,'goods_amount'=>$goods,'rounding_amount'=>$rounding,'amount'=>bcsub($goods,$rounding,2),'due_date'=>$due,
             'precision'=>$precision,'payment_terms'=>$paymentTerms,'approval_permissions'=>array_values(array_filter(['settlement.bill',bccomp($rounding,'0',2)>0?'finance.sales.rounding':null,$dueOverridden?'finance.sales.due_override':null,!empty($precision['overridden'])?'finance.sales.precision_override':null])),
-            'approval_owner_required'=>count(array_filter($lines,static fn($l)=>$l['difference_reason']!==''))>0,'overdue_acknowledged'=>!empty($params['overdue_acknowledged']),'issued_at'=>time()];
+            'approval_owner_required'=>$ownerRequired,'overdue_acknowledged'=>!empty($params['overdue_acknowledged']),'issued_at'=>time()];
     }
 
     public static function pricingUnits(array $item): array
@@ -153,7 +178,7 @@ final class CustomerReportSalesDocument
         if(!$doc || (!FinanceAccess::has('settlement.view')&&!FinanceAccess::has('settlement.bill'))) return null;
         $snapshot=FinanceValue::decode($doc['snapshot']); $report=Db::name('customer_report')->where('tenant_id',FinanceAccess::tenant())->where('id',$reportId)->find();
         $delivered=Db::name('fulfillment_delivery_item')->where('tenant_id',FinanceAccess::tenant())->where('report_id',$reportId)->count()>0;
-        $closed=self::closed($report);
+        $closed=self::closed($report); $incomplete=CustomerReportWorkspace::hasIncomplete($reportId);
         $replacement=0; $latest=(int)$doc['finance_document_id']; $seen=[];
         while($latest && ($next=(int)Db::name('finance_correction')->where('tenant_id',FinanceAccess::tenant())->where('original_document_id',$latest)->value('replacement_document_id'))) {
             if(isset($seen[$next])) throw new \DomainException('销售金额更正链异常');
@@ -161,12 +186,13 @@ final class CustomerReportSalesDocument
         }
         return $snapshot+['id'=>(int)$doc['id'],'order_sn'=>$doc['order_sn'],'version'=>(int)$doc['version'],'status'=>$doc['status'],
             'delivery_status'=>$closed?'completed':($delivered?'partial':'undelivered'),'accounting_status'=>$doc['accounting_status'],
-            'can_print'=>$doc['status']==='issued'&&!$replacement,'can_share'=>$doc['status']==='issued'&&!$replacement&&FinanceAccess::owner(),
-            'can_retry_posting'=>$doc['accounting_status']==='pending_posting'&&FinanceAccess::has('settlement.bill'),
+            'can_print'=>$doc['status']==='issued'&&!$replacement&&!$incomplete,'can_share'=>$doc['status']==='issued'&&!$replacement&&!$incomplete&&FinanceAccess::owner(),
+            'workspace_incomplete'=>$incomplete,
+            'can_retry_posting'=>$doc['accounting_status']==='pending_posting'&&!$incomplete&&FinanceAccess::has('settlement.bill'),
             'can_revise'=>$doc['status']==='issued'&&$doc['accounting_status']!=='posted'&&FinanceAccess::has('settlement.bill'),
             'replacement_document_id'=>$replacement,'latest_finance_document_id'=>$latest,'invalidation_notice'=>$replacement?'本版金额已被后续更正替代，请查看最新销售金额记录':'',
             'blocked_reason'=>$doc['blocked_reason'],'finance_document_id'=>(int)$doc['finance_document_id'],
-            'revisions'=>array_map(static function($revision){ $old=FinanceValue::decode($revision['snapshot']); return ['version'=>(int)$revision['version'],'revision_reason'=>$revision['reason'],'reason'=>$revision['reason'],'issued_at'=>(int)$revision['create_time'],'amount'=>$old['amount'],'lines'=>$old['lines']]; },Db::name('customer_report_sales_revision')->where('tenant_id',FinanceAccess::tenant())->where('document_id',$doc['id'])->order('version desc')->select()->toArray())];
+            'revisions'=>array_map(static function($revision){ $old=FinanceValue::decode($revision['snapshot']); return ['id'=>(int)$revision['id'],'version'=>(int)$revision['version'],'revision_reason'=>$revision['reason'],'reason'=>$revision['reason'],'issued_at'=>(int)$revision['create_time'],'amount'=>$old['amount'],'lines'=>$old['lines'],'supplemental_notes'=>CustomerReportSalesNotes::forRevision((int)$revision['id'])]; },Db::name('customer_report_sales_revision')->where('tenant_id',FinanceAccess::tenant())->where('document_id',$doc['id'])->order('version desc')->select()->toArray())];
     }
 
     public static function closed(?array $report): bool
@@ -185,6 +211,7 @@ final class CustomerReportSalesDocument
         if($report['status']==='cancelled' || (self::closed($report) && !Db::name('fulfillment_delivery_item')->where('tenant_id',$tenant)->where('report_id',$reportId)->count())) {
             Db::name('customer_report_sales_document')->where('tenant_id',$tenant)->where('id',$doc['id'])->where('version',$doc['version'])->where('status','issued')->where('accounting_status','<>','posted')->update(['status'=>'voided','accounting_status'=>'voided','blocked_reason'=>'未发生实际交付，销售单已作废','update_time'=>time()]); return;
         }
+        if(CustomerReportWorkspace::hasIncomplete($reportId)) return;
         if(!self::closed($report)) return;
         Db::name('customer_report_sales_document')->where('tenant_id',$tenant)->where('id',$doc['id'])->whereNotIn('accounting_status',['posted','voided'])->where('version',$doc['version'])->update(['accounting_status'=>'pending_posting','update_time'=>time()]);
         try {
@@ -194,6 +221,7 @@ final class CustomerReportSalesDocument
                 $report=Db::name('customer_report')->where('tenant_id',$tenant)->where('id',$reportId)->lock(true)->find();
                 $doc=Db::name('customer_report_sales_document')->where('tenant_id',$tenant)->where('report_id',$reportId)->lock(true)->find();
                 if((int)$doc['version']!==$expectedVersion || $doc['status']!=='issued' || $doc['accounting_status']==='posted') return;
+                if(CustomerReportWorkspace::hasIncomplete($reportId,true)) return;
                 if(!self::closed($report)) throw new \DomainException('整单交付尚未完成');
                 $snapshot=FinanceValue::decode($doc['snapshot']);
                 $items=Db::name('customer_report_item')->where('tenant_id',$tenant)->where('report_id',$reportId)->whereNull('delete_time')->select()->toArray();

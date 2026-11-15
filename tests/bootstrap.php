@@ -33,5 +33,20 @@ if (!\tests\support\IsolatedDatabaseGuard::acceptsEnvironment($testingEnv)) {
 }
 
 // Select .env.testing before initialize; do not load the root .env fallback.
+// Frontend protocol tests also launch PHPUnit. Share one workspace lock across
+// Windows user/sandbox TEMP directories, before any fixture can be cleaned.
+try {
+    $databaseLease = \tests\support\IsolatedDatabaseGuard::acquireLease(
+        (string)$testingEnv['DATABASE']['DATABASE'], $rootPath . '.scratch/phpunit-leases',
+        getenv('BEIMI_PHPUNIT_LEASE_KEY') ?: null, $databaseLeaseToken
+    );
+    if (is_resource($databaseLease)) {
+        putenv('BEIMI_PHPUNIT_LEASE_KEY=' . $databaseLeaseToken);
+        $_SERVER['BEIMI_PHPUNIT_LEASE_KEY'] = $databaseLeaseToken;
+    }
+} catch (\RuntimeException $error) {
+    fwrite(STDERR, $error->getMessage() . "\n");
+    exit(1);
+}
 $app = (new \think\App($rootPath))->setEnvName('testing');
 $app->initialize();

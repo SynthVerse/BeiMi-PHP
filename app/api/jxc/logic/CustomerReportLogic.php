@@ -143,6 +143,38 @@ class CustomerReportLogic extends BaseLogic
         }
     }
 
+    public static function saveWorkspace(array $params): array|false
+    {
+        self::clearError(); $committed = false;
+        try {
+            $saved = CustomerReportWorkspace::save($params);
+            $committed = true; $detail = self::detailById((int)$params['id']);
+            if ($detail === false) { throw new \RuntimeException('workspace_saved_detail_unavailable'); }
+            return $detail + ['save_result' => $saved];
+        } catch (\Throwable $error) {
+            $rejected = !$committed && $error instanceof \DomainException;
+            self::setError($rejected ? $error->getMessage() : '尚未核实保存结果，请保留输入并按原操作重试');
+            self::setReturnData(($error instanceof FinanceBusinessException ? $error->details() : []) + ['command_outcome' => $rejected ? 'rejected' : 'unknown']);
+            return false;
+        }
+    }
+
+    public static function supplementSalesNotes(array $params): array|false
+    {
+        self::clearError(); $committed = false;
+        try {
+            CustomerReportSalesNotes::supplement($params);
+            $committed = true; $detail = self::detailById((int)$params['id']);
+            if ($detail === false) { throw new \RuntimeException('sales_notes_saved_detail_unavailable'); }
+            return $detail;
+        } catch (\Throwable $error) {
+            $rejected = !$committed && $error instanceof \DomainException;
+            self::setError($rejected ? $error->getMessage() : '尚未核实说明保存结果，请按原操作重试');
+            self::setReturnData(($error instanceof FinanceBusinessException ? $error->details() : []) + ['command_outcome' => $rejected ? 'rejected' : 'unknown']);
+            return false;
+        }
+    }
+
     /** @return array<string,mixed>|false */
     public static function retrySalesPosting(array $params): array|false
     {
@@ -685,6 +717,7 @@ class CustomerReportLogic extends BaseLogic
         unset($item);
         $data['sales_orders'] = self::salesOrdersByReport($id);
         $data['sales_document'] = CustomerReportSalesDocument::present($id);
+        $data['workspace'] = CustomerReportWorkspace::present($id, $data);
         $data['sales_options'] = FinanceAccess::has('settlement.bill') ? [
             'overdue' => FinanceIntegration::active() ? FinanceCustomers::overdue((int)$data['main_customer_id']) : ['amount' => '0.00'],
             'can_round' => FinanceAccess::has('finance.sales.rounding'),

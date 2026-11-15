@@ -243,6 +243,8 @@ Route::group('', function () {
     Route::post('jxc/customer_report/edit', 'jxc.CustomerReport/edit');
     Route::post('jxc/customer_report/retry', 'jxc.CustomerReport/retry');
     Route::post('jxc/customer_report/convert', 'jxc.CustomerReport/convert');
+    Route::post('jxc/customer_report/save_workspace', 'jxc.CustomerReport/saveWorkspace');
+    Route::post('jxc/customer_report/supplement_sales_notes', 'jxc.CustomerReport/supplementSalesNotes');
     Route::post('jxc/customer_report/retry_sales_posting', 'jxc.CustomerReport/retrySalesPosting');
     Route::post('jxc/customer_report/cancel', 'jxc.CustomerReport/cancel');
     Route::post('jxc/customer_report/batch_start', 'jxc.CustomerReport/batchStart');

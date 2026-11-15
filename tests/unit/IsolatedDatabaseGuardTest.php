@@ -9,6 +9,29 @@ use tests\support\IsolatedDatabaseGuard;
 
 final class IsolatedDatabaseGuardTest extends TestCase
 {
+    public function testSameDatabaseCannotBeUsedByTwoTestRunnersAtOnce(): void
+    {
+        $directory = sys_get_temp_dir() . '/beimi-lease-' . bin2hex(random_bytes(8));
+        mkdir($directory);
+        $lease = IsolatedDatabaseGuard::acquireLease('beimi_test_guard', $directory, null, $token);
+        try {
+            self::assertFalse(IsolatedDatabaseGuard::acquireLease('beimi_test_guard', $directory, $token), '同一套件的受控子进程共享父进程持锁');
+            try {
+                IsolatedDatabaseGuard::acquireLease('beimi_test_guard', $directory);
+                self::fail('同一个隔离库的第二个测试执行者必须在初始化前被拒绝');
+            } catch (\RuntimeException $error) {
+                self::assertStringContainsString('already in use', $error->getMessage());
+            }
+        } finally {
+            fclose($lease);
+        }
+        $next = IsolatedDatabaseGuard::acquireLease('beimi_test_guard', $directory);
+        self::assertIsResource($next);
+        fclose($next);
+        foreach (glob($directory . '/*') as $file) { unlink($file); }
+        rmdir($directory);
+    }
+
     public function testEnvironmentAndRuntimeUseTheSameSafeDatabaseContract(): void
     {
         $environment = [
