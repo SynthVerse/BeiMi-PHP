@@ -15,6 +15,19 @@ final class DeliveryVariantLogic extends BaseLogic
     /** @return array<string,mixed>|false */
     public static function confirm(array $params, string $deliveryMethod, string $requiredEventType): array|false
     {
+        return self::execute($params, $deliveryMethod, $requiredEventType, true);
+    }
+
+    /** 调用者持有事务；任何拒绝都必须回滚外层保存。 */
+    public static function confirmWithinTransaction(array $params, string $method, string $event): array
+    {
+        $result = self::execute($params, $method, $event, false);
+        if ($result === false) { throw new \DomainException(self::getError() ?: '交付失败'); }
+        return $result;
+    }
+
+    private static function execute(array $params, string $deliveryMethod, string $requiredEventType, bool $ownsTransaction): array|false
+    {
         self::clearError();
         if (!WorkforceLogic::requirePermission('delivery.confirm')) {
             self::setError(WorkforceLogic::getError());
@@ -116,7 +129,7 @@ final class DeliveryVariantLogic extends BaseLogic
 
         for ($attempt = 0; $attempt < 3; $attempt++) {
             try {
-                $result = Db::transaction(static function () use (
+                $operation = static function () use (
                     $taskId, $tripReportId, $driverId, $deliveryMethod, $eventType, $actualPackages,
                     $handoffTime, $handoffNote, $exceptionReason, $secondConfirmed,
                     $earlyDeliveryReason, $earlyDeliveryConfirmed,
@@ -242,6 +255,19 @@ final class DeliveryVariantLogic extends BaseLogic
                         return false;
                     }
 
+                    if (count(array_filter($allItems, static fn($item) => (int)($item['quantity_contract_version'] ?? 1) === 2)) > 0) {
+                        if (count($items) !== count($allItems) || array_filter($items, static fn($item) => $item['remaining_action'] !== 'none')) {
+                            throw new \DomainException('第一版一单一次交完，请在报货详情保存并交付；分次送货请分别建单');
+                        }
+                        if (Db::name('fulfillment_delivery_event')->where('tenant_id', self::tenantId())->where('report_id', $report['id'])->count()) {
+                            throw new \DomainException('本单已经交付，不能再次出库');
+                        }
+                        foreach ($allItems as $item) {
+                            $requested = array_values(array_filter($items, static fn($row) => (int)$row['report_item_id'] === (int)$item['id']));
+                            $groupCount = Db::name('customer_report_processing_group')->where('tenant_id', self::tenantId())->where('report_item_id', $item['id'])->count();
+                            if (!$requested || count($requested[0]['delivery_group_ids']) !== $groupCount) { throw new \DomainException('请一次交付本单全部有效分组'); }
+                        }
+                    }
                     $work = self::buildWorkItems($allItems, $items);
                     if ($work === false) {
                         return false;
@@ -449,9 +475,7 @@ final class DeliveryVariantLogic extends BaseLogic
                             || bccomp((string)$item['fulfilled_base_qty'], '0.0000', self::SCALE) > 0;
                         $quantitySnapshot = TradeQuantityService::snapshot($item);
                         $weightOnly = CustomerReportQuantityRequirements::present($item)['weight_only_fulfillment'];
-                        $pendingDemand = ($weightOnly && $row['remaining_action'] === 'pending') || ($quantitySnapshot && (!empty($quantitySnapshot['has_unmeasured_groups'])
-                            || (!$weightOnly && ($quantitySnapshot['remaining_order_quantity'] ?? null) !== null
-                                && bccomp($quantitySnapshot['remaining_order_quantity'], '0', 4) > 0)));
+                        $pendingDemand = ($weightOnly && $row['remaining_action'] === 'pending') || ($quantitySnapshot && (!empty($quantitySnapshot['has_unmeasured_groups'])));
                         $partial = $partial || $pendingDemand;
                         if ($pendingDemand || bccomp($remainingAfter, '0.0000', self::SCALE) > 0) {
                             $itemStatus = 'partially_delivered_pending';
@@ -498,9 +522,7 @@ final class DeliveryVariantLogic extends BaseLogic
                         if (CustomerReportQuantityRequirements::continuing($fresh)) $unresolved = true;
                         $quantitySnapshot = TradeQuantityService::snapshot($fresh);
                         $weightOnly = CustomerReportQuantityRequirements::present($fresh)['weight_only_fulfillment'];
-                        if ($quantitySnapshot && (!empty($quantitySnapshot['has_unmeasured_groups'])
-                            || (!$weightOnly && ($quantitySnapshot['remaining_order_quantity'] ?? null) !== null
-                                && bccomp($quantitySnapshot['remaining_order_quantity'], '0', 4) > 0))) { $unresolved = true; }
+                        if ($quantitySnapshot && (!empty($quantitySnapshot['has_unmeasured_groups']))) { $unresolved = true; }
                         $totalDelivered = bcadd($totalDelivered, (string)$fresh['fulfilled_base_qty'], self::SCALE);
                         $totalLoss = bcadd($totalLoss, (string)($fresh['delivery_loss_total_qty'] ?? '0'), self::SCALE);
                         $remaining = bcsub(
@@ -522,6 +544,9 @@ final class DeliveryVariantLogic extends BaseLogic
                     $outcome = !$hasActualDelivery
                         ? 'handled_without_delivery'
                         : ($unresolved ? 'partial' : ($hasPartial ? 'partial_completed' : 'complete'));
+                    if ($unresolved && count(array_filter($allItems, static fn($item) => (int)($item['quantity_contract_version'] ?? 1) === 2)) > 0) {
+                        throw new \DomainException('请核实全部实际数量后整单交付；分次送货请分别建单');
+                    }
                     Db::name('fulfillment_delivery_event')->where('tenant_id', self::tenantId())->where('id', $eventId)
                         ->update(['delivery_outcome' => $outcome, 'update_time' => $now]);
                     Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('id', $resolvedTaskId)->update([
@@ -581,7 +606,9 @@ final class DeliveryVariantLogic extends BaseLogic
                     );
                     FulfillmentTaskLogic::refreshGroupForItem((int)$work[0]['item']['id']);
                     return self::detailEvent($eventId);
-                });
+                };
+                $result = $ownsTransaction ? Db::transaction($operation) : $operation();
+                if (!$ownsTransaction) { return $result; }
                 if ($result === false) {
                     $committed = self::replayAfterCommit($idempotencyKey, $fingerprint);
                     if ($committed !== false) {
@@ -595,6 +622,7 @@ final class DeliveryVariantLogic extends BaseLogic
                 }
                 return $result;
             } catch (\Throwable $exception) {
+                if (!$ownsTransaction) { throw new \DomainException(self::hasError() ? self::getError() : $exception->getMessage(), 0, $exception); }
                 if (self::isLockRetryable($exception) && $attempt < 2) {
                     self::clearError();
                     usleep(20_000 * ($attempt + 1));

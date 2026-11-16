@@ -37,7 +37,6 @@ final class DeliveryInventoryValidate extends BaseValidate
     ];
 
     public function sceneConfirmSelf() { return $this->only(['task_id', 'event_type', 'items', 'handoff_note', 'exception_reason', 'second_confirmed', 'idempotency_key']); }
-    public function sceneComplete() { return $this->only(['report_id', 'version', 'item_ids', 'idempotency_key'])->append('version', 'require'); }
     public function sceneConfirmCounterPickup() { return $this->only(['task_id', 'items', 'handoff_note', 'exception_reason', 'second_confirmed', 'idempotency_key']); }
     public function sceneConfirmCustomerVehicle() { return $this->only(['task_id', 'actual_handoff_time', 'early_delivery_reason', 'early_delivery_confirmed', 'items', 'handoff_note', 'exception_reason', 'second_confirmed', 'idempotency_key']); }
     public function sceneConfirmThirdParty() { return $this->only(['task_id', 'driver_id', 'actual_handoff_time', 'items', 'handoff_note', 'exception_reason', 'second_confirmed', 'idempotency_key']); }

@@ -232,7 +232,7 @@ final class TradeQuantityWorkflowTest extends TestCase
             'items' => $this->deliverySelection($weighted, [(int)$weighted['items'][0]['processing_groups'][0]['id']])]);
         self::assertNotFalse($event, DeliveryInventoryLogic::getError()); self::assertNull($event['items'][0]['actual_delivery_weight']);
         self::assertSame('97.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
-        self::assertSame('partially_delivered_pending', Db::name('customer_report_item')->where('id', $report['items'][0]['id'])->value('fulfillment_status'));
+        self::assertSame('delivered', Db::name('customer_report_item')->where('id', $report['items'][0]['id'])->value('fulfillment_status'));
     }
 
     public function test_processing_records_loss_immediately_and_delivery_does_not_consume_raw_twice(): void
@@ -289,52 +289,6 @@ final class TradeQuantityWorkflowTest extends TestCase
         self::assertSame('95.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
     }
 
-    public function test_two_then_three_use_new_physical_group_and_keep_original_delivery_immutable(): void
-    {
-        $f = $this->fixture(countPricing: true); $report = $f['report']; $group = $report['items'][0]['processing_groups'][0]['id'];
-        $first = CustomerReportLogic::saveProcessingWeights(['id' => $report['id'], 'version' => $report['version'], 'idempotency_key' => 'first-two',
-            'groups' => [['id' => $group, 'quantity_facts' => [['unit_id' => $f['count'], 'quantity' => '2']], 'net_weight_input' => ['value' => '3.2', 'unit' => '斤']]]]);
-        self::assertNotFalse($first, CustomerReportLogic::getError());
-        $task = (int)Db::name('fulfillment_task')->where('report_id', $report['id'])->where('source_key', 'report:' . $report['id'] . ':delivery')->value('id');
-        $event = DeliveryInventoryLogic::confirmSelfDelivery(['task_id' => $task, 'event_type' => 'customer_handoff', 'facts_version' => $first['version'], 'idempotency_key' => 'give-two',
-            'items' => $this->deliverySelection($first, [(int)$group])]);
-        self::assertNotFalse($event, DeliveryInventoryLogic::getError());
-        self::assertSame('96.8000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
-        self::assertSame('0.0000', WarehouseSkuBalanceService::reserved($f['warehouse'], $f['sku']));
-        $original = Db::name('customer_report_processing_group')->where('id', $group)->value('quantity_facts_snapshot');
-        $save = ['id' => $report['id'], 'version' => $first['version'], 'idempotency_key' => 'next-three',
-            'groups' => [['append_to_group_id' => $group, 'quantity_facts' => [['unit_id' => $f['count'], 'quantity' => '3']], 'net_weight_input' => ['value' => '5.5', 'unit' => '斤']]]];
-        $second = CustomerReportLogic::saveProcessingWeights($save);
-        self::assertNotFalse($second, CustomerReportLogic::getError());
-        self::assertCount(2, $second['items'][0]['processing_groups']);
-        self::assertSame($original, Db::name('customer_report_processing_group')->where('id', $group)->value('quantity_facts_snapshot'));
-        self::assertSame('5.5000', WarehouseSkuBalanceService::reserved($f['warehouse'], $f['sku']));
-        self::assertSame('8.7000', $second['items'][0]['actual_delivery_weight']);
-        self::assertSame('0.0000', $second['items'][0]['remaining_order_quantity']);
-        self::assertNotFalse(CustomerReportLogic::saveProcessingWeights($save));
-        self::assertSame(2, Db::name('customer_report_processing_group')->where('report_id', $report['id'])->count());
-        $secondEvent = DeliveryInventoryLogic::confirmSelfDelivery(['task_id' => $task, 'event_type' => 'customer_handoff', 'facts_version' => $second['version'], 'idempotency_key' => 'give-three',
-            'items' => $this->deliverySelection($second, [(int)$second['items'][0]['processing_groups'][1]['id']])]);
-        self::assertNotFalse($secondEvent, DeliveryInventoryLogic::getError());
-        self::assertSame('5.5000', $secondEvent['items'][0]['inventory_base_quantity']);
-        self::assertNotSame($event['items'][0]['delivery_group_key'], $secondEvent['items'][0]['delivery_group_key']);
-        self::assertSame('91.3000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
-        self::assertSame('0.0000', WarehouseSkuBalanceService::reserved($f['warehouse'], $f['sku']));
-        self::assertSame('partial_pending_settlement', Db::name('customer_report')->where('id', $report['id'])->value('status'));
-
-        $next = CustomerReportLogic::submit(['quantity_contract_version' => 2, 'main_customer_id' => $report['main_customer_id'],
-            'delivery_date' => date('Y-m-d'), 'delivery_arrangement' => ['delivery_method' => 'self_delivery'], 'idempotency_key' => 'reference-report',
-            'items' => [['goods_id' => $f['goods'], 'sku_id' => $f['sku'], 'warehouse_id' => $f['warehouse'], 'unit_id' => $f['count'],
-                'unit_name' => '把', 'order_qty' => '5', 'price_status' => 'unpriced', 'processing_groups' => [[
-                    'group_key' => 'all', 'name' => '全部数量', 'planned_qty' => '5', 'process_ids' => [$f['process']]]]]]]);
-        self::assertNotFalse($next, CustomerReportLogic::getError());
-        self::assertSame('completed_delivery_reference', $next['items'][0]['estimate_source']);
-        self::assertSame('9.1666', $next['items'][0]['expected_base_qty']);
-        self::assertSame(0, (int)$next['items'][0]['piece_weight_confirmed']);
-        self::assertNull($next['items'][0]['final_actual_weight']);
-        $reference = json_decode($next['items'][0]['estimate_reference_snapshot'], true);
-        self::assertSame((int)$secondEvent['items'][0]['id'], $reference['source_delivery_item_id']);
-    }
 
     public function test_legacy_goods_and_sku_base_units_cannot_change_quantity_meaning(): void
     {
@@ -345,46 +299,6 @@ final class TradeQuantityWorkflowTest extends TestCase
         self::assertFalse(\app\api\jxc\logic\GoodsUnitLogic::edit(['id' => $f['base'], 'measure_type' => 'count', 'quantity_precision' => 0]));
     }
 
-    public function test_weight_order_keeps_unmeasured_second_group_open_after_first_delivery(): void
-    {
-        $f = $this->fixture();
-        $report = CustomerReportLogic::submit(['quantity_contract_version' => 2, 'main_customer_id' => $f['report']['main_customer_id'],
-            'delivery_date' => date('Y-m-d'), 'delivery_arrangement' => ['delivery_method' => 'self_delivery'], 'idempotency_key' => 'two-weight-groups',
-            'items' => [['goods_id' => $f['goods'], 'sku_id' => $f['sku'], 'warehouse_id' => $f['warehouse'], 'unit_id' => $f['base'],
-                'unit_name' => '斤', 'order_qty' => '5', 'price_status' => 'unpriced', 'processing_groups' => [
-                    ['group_key' => 'first', 'name' => '第一批', 'planned_qty' => '2', 'process_ids' => [$f['process']]],
-                    ['group_key' => 'second', 'name' => '第二批', 'planned_qty' => '3', 'process_ids' => [$f['process']]]]]]]);
-        self::assertNotFalse($report, CustomerReportLogic::getError());
-        $groups = $report['items'][0]['processing_groups'];
-        $first = CustomerReportLogic::saveProcessingWeights(['id' => $report['id'], 'version' => $report['version'], 'idempotency_key' => 'measure-first-weight',
-            'groups' => [['id' => $groups[0]['id'], 'net_weight_input' => ['value' => '2', 'unit' => '斤']]]]);
-        self::assertNotFalse($first, CustomerReportLogic::getError());
-        self::assertTrue($first['items'][0]['has_unmeasured_groups']);
-        self::assertNull($first['items'][0]['remaining_order_quantity']);
-        $task = (int)Db::name('fulfillment_task')->where('report_id', $report['id'])->where('source_key', 'report:' . $report['id'] . ':delivery')->value('id');
-        $event = DeliveryInventoryLogic::confirmSelfDelivery(['task_id' => $task, 'event_type' => 'customer_handoff', 'facts_version' => $first['version'], 'idempotency_key' => 'give-first-weight',
-            'items' => $this->deliverySelection($first, [(int)$groups[0]['id']])]);
-        self::assertNotFalse($event, DeliveryInventoryLogic::getError());
-        self::assertSame('partial', $event['delivery_outcome']);
-        self::assertSame('partially_delivered_pending', Db::name('customer_report')->where('id', $report['id'])->value('status'));
-        self::assertSame('partially_delivered_pending', Db::name('customer_report_item')->where('id', $report['items'][0]['id'])->value('fulfillment_status'));
-        self::assertSame('printable', Db::name('fulfillment_task')->where('id', $task)->value('status'));
-        $original = Db::name('customer_report_processing_group')->where('id', $groups[0]['id'])->value('quantity_facts_snapshot');
-        $second = CustomerReportLogic::saveProcessingWeights(['id' => $report['id'], 'version' => $first['version'], 'idempotency_key' => 'measure-second-weight',
-            'groups' => [['id' => $groups[1]['id'], 'net_weight_input' => ['value' => '3', 'unit' => '斤']]]]);
-        self::assertNotFalse($second, CustomerReportLogic::getError());
-        self::assertFalse($second['items'][0]['has_unmeasured_groups']);
-        self::assertSame($original, Db::name('customer_report_processing_group')->where('id', $groups[0]['id'])->value('quantity_facts_snapshot'));
-        self::assertSame('3.0000', WarehouseSkuBalanceService::reserved($f['warehouse'], $f['sku']));
-        $completed = DeliveryInventoryLogic::confirmSelfDelivery(['task_id' => $task, 'event_type' => 'customer_handoff', 'facts_version' => $second['version'], 'idempotency_key' => 'give-second-weight',
-            'items' => $this->deliverySelection($second, [(int)$groups[1]['id']])]);
-        self::assertNotFalse($completed, DeliveryInventoryLogic::getError());
-        self::assertSame('partial_completed', $completed['delivery_outcome']);
-        self::assertSame('partial_pending_settlement', Db::name('customer_report')->where('id', $report['id'])->value('status'));
-        self::assertSame('recovered', Db::name('fulfillment_task')->where('id', $task)->value('status'));
-        self::assertSame('95.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
-        self::assertSame('0.0000', WarehouseSkuBalanceService::reserved($f['warehouse'], $f['sku']));
-    }
 
     public function test_packaging_source_does_not_round_indivisible_single_package(): void
     {

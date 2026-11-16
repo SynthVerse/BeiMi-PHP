@@ -130,19 +130,6 @@ class CustomerReportLogic extends BaseLogic
         ];
     }
 
-    /** 将无缺货且已计价的报货单按仓库转为标准销售单。 */
-    public static function convert(array $params): array|false
-    {
-        self::clearError();
-        try {
-            CustomerReportSalesDocument::issue($params);
-            return self::detailById((int)$params['id']);
-        } catch (\Throwable $error) {
-            self::setError($error instanceof \DomainException ? $error->getMessage() : '销售单生成失败，请按原操作重试');
-            return false;
-        }
-    }
-
     public static function saveWorkspace(array $params): array|false
     {
         self::clearError(); $committed = false;
@@ -197,7 +184,8 @@ class CustomerReportLogic extends BaseLogic
         }
         $reportId = (int)($params['id'] ?? 0);
         $version = (int)($params['version'] ?? 0);
-        $items = CustomerReportLineService::normalizeItems((array)($params['items'] ?? []), (int)($params['main_customer_id'] ?? 0));
+        $inputItems = array_map(static fn(array $item): array => array_replace($item, ['quantity_contract_version' => 2]), (array)($params['items'] ?? []));
+        $items = CustomerReportLineService::normalizeItems($inputItems, (int)($params['main_customer_id'] ?? 0));
         if ($items === false) { self::setError(CustomerReportLineService::getError()); return false; }
         try {
             return self::transactionWithRetry(static function () use ($reportId, $version, $params, $items) {
@@ -731,9 +719,6 @@ class CustomerReportLogic extends BaseLogic
         ] : null;
         $data['task_group'] = FulfillmentTaskLogic::groupForReport($id);
         $data['actions'] = self::actionStates($id, $data, $data['items']);
-        $completable = array_values(array_map(static fn($item) => (int)$item['id'], array_filter($data['items'], static fn($item) => $item['delivery_progress']['can_complete'])));
-        if ($data['status'] === 'cancelled' || CustomerReportSalesDocument::closed($data)) $completable = [];
-        $data['actions']['complete_delivery'] = ['allowed' => WorkforceLogic::hasPermission('delivery.confirm') && (bool)$completable, 'item_ids' => $completable, 'blocked_reason' => $completable ? '' : '没有可确认交完的待续商品'];
         $data['procurement_sources'] = self::procurementSources($id);
         $data['older_open_reports'] = CustomerReport::where('tenant_id', self::tenantId())
             ->where('main_customer_id', (int)$data['main_customer_id'])->where('id', '<>', $id)
@@ -861,10 +846,6 @@ class CustomerReportLogic extends BaseLogic
             'issue_sales_document' => $conversion,
             'confirm_delivery' => ['allowed' => (bool)$deliveryAllowed,'task_id' => (int)($deliveryTask['id'] ?? 0),
                 'blocked_reason' => $deliveryAllowed ? '' : (!WorkforceLogic::hasPermission('delivery.confirm') ? '没有确认交付权限' : '当前没有可交付任务')],
-            'convert' => [
-                'allowed' => $conversion['allowed'],
-                'blocked_reason' => $conversion['blocked_reason'],
-            ],
             'record_processing_weights' => [
                 'allowed' => $canRecordWeight
                     && (in_array((string)($report['status'] ?? ''), self::SUBMITTED, true) || ($usesQuantityFacts && ($report['status'] ?? '') === 'partially_delivered_pending'))
@@ -982,9 +963,7 @@ class CustomerReportLogic extends BaseLogic
         $batchId = (int)($params['batch_id'] ?? 0);
         $supplementForReportId = (int)($params['supplement_for_report_id'] ?? 0);
         $inputItems = (array)($params['items'] ?? []);
-        if ((int)($params['quantity_contract_version'] ?? 1) === 2) {
-            $inputItems = array_map(static fn(array $item): array => $item + ['quantity_contract_version' => 2], $inputItems);
-        }
+        $inputItems = array_map(static fn(array $item): array => array_replace($item, ['quantity_contract_version' => 2]), $inputItems);
         $items = CustomerReportLineService::normalizeItems($inputItems, (int)($params['main_customer_id'] ?? 0));
         if ($items === false) {
             self::setError(CustomerReportLineService::getError());

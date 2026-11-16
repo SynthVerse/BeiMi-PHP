@@ -44,6 +44,8 @@ class CustomerReportValidate extends BaseValidate
         'workspace_version' => 'require|integer|egt:0',
         'quantities' => 'array',
         'sales' => 'array',
+        'intent' => 'in:save,save_and_deliver',
+        'delivery' => 'array',
         'notes' => 'array',
     ];
 
@@ -56,9 +58,8 @@ class CustomerReportValidate extends BaseValidate
     public function sceneAvailability() { return $this->only(['warehouse_id','sku_id']); }
     public function sceneEdit() { return $this->only(['id','version','main_customer_id','items','remark']); }
     public function sceneRetry() { return $this->only(['id','version']); }
-    public function sceneConvert() { return $this->only(['id','version','idempotency_key','lines','rounding_amount','due_date','document_version','revision_reason','precision_mode','precision_rules','precision_override_reason','overdue_acknowledged']); }
     public function sceneRetrySalesPosting() { return $this->only(['id','document_version']); }
-    public function sceneSaveWorkspace() { return $this->only(['id','version','workspace_version','idempotency_key','quantities','sales','notes']); }
+    public function sceneSaveWorkspace() { return $this->only(['id','version','workspace_version','idempotency_key','quantities','sales','notes','intent','delivery']); }
     public function sceneSupplementSalesNotes() { return $this->only(['id','idempotency_key','notes']); }
     public function sceneCancel() { return $this->only(['id','version','reason']); }
     public function sceneSaveProcessingWeights() { return $this->only(['id','version','groups']); }

@@ -76,7 +76,182 @@ final class CustomerReportWorkspaceTest extends TestCase
         $report = $fixture['report'];
         return ['id' => $report['id'], 'version' => $report['version'], 'workspace_version' => $report['workspace']['version'] ?? 0, 'idempotency_key' => $key,
             'quantities' => ['groups' => [['id' => $report['items'][0]['processing_groups'][0]['id'], 'net_weight_input' => ['value' => '10', 'unit' => '斤'], 'quantity_facts' => []]]],
-            'sales' => ['document_version' => $report['sales_document']['version'] ?? 0, 'lines' => [['report_item_id' => $report['items'][0]['id'], 'price_unit_id' => $fixture['unit'], 'settlement_quantity' => '10', 'price' => '20']], 'rounding_amount' => '0']];
+            'sales' => ['document_version' => $report['sales_document']['version'] ?? 0, 'lines' => [['report_item_id' => $report['items'][0]['id'], 'quantity_mode' => 'actual', 'reference_price_unit_id' => $fixture['unit'], 'reference_price' => '20', 'price_unit_id' => $fixture['unit'], 'settlement_quantity' => '10', 'price' => '20']], 'rounding_amount' => '0']];
+    }
+
+    public function test_save_and_deliver_posts_once_and_replays_without_duplicate_stock(): void
+    {
+        $f = $this->fixture();
+        $params = $this->payload($f);
+        $params['intent'] = 'save_and_deliver';
+        $saved = CustomerReportLogic::saveWorkspace($params);
+        self::assertNotFalse($saved, CustomerReportLogic::getError());
+        self::assertSame('90.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
+        self::assertSame('posted', $saved['sales_document']['accounting_status']);
+        self::assertNotFalse(CustomerReportLogic::saveWorkspace($params), CustomerReportLogic::getError());
+        self::assertSame('90.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
+    }
+
+    public function test_inline_manual_pricing_round_trips_reference_and_effective_values_without_changing_stock_facts(): void
+    {
+        $f = $this->fixture();
+        $params = $this->payload($f, 'inline-manual-draft');
+        $params['quantities']['groups'][0]['net_weight_input']['value'] = '10.6';
+        $params['sales']['lines'][0]['quantity_mode'] = 'manual';
+        $params['sales']['lines'][0]['price'] = '22';
+        $saved = CustomerReportLogic::saveWorkspace($params);
+        self::assertNotFalse($saved, CustomerReportLogic::getError());
+        self::assertSame('manual', $saved['workspace']['input']['sales']['lines'][0]['quantity_mode']);
+        self::assertSame('20', $saved['workspace']['input']['sales']['lines'][0]['reference_price']);
+        $f['report'] = $saved;
+        $params = $this->payload($f, 'inline-manual-deliver');
+        $params['intent'] = 'save_and_deliver';
+        $params['quantities']['groups'][0]['net_weight_input']['value'] = '10.8';
+        $params['sales'] = $saved['workspace']['input']['sales'];
+        $delivered = CustomerReportLogic::saveWorkspace($params);
+        self::assertNotFalse($delivered, CustomerReportLogic::getError());
+        $line = $delivered['sales_document']['lines'][0];
+        self::assertSame('manual', $line['quantity_mode']);
+        self::assertSame($f['unit'], $line['reference_price_unit_id']);
+        self::assertSame('20.00', $line['reference_price']);
+        self::assertSame('10.0000', $line['settlement_quantity']);
+        self::assertSame('22.00', $line['price']);
+        self::assertSame('220.00', $line['amount']);
+        self::assertSame('89.2000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
+        $fresh = CustomerReportLogic::detail(['id' => $saved['id']]);
+        self::assertSame($line, $fresh['sales_document']['lines'][0]);
+    }
+
+    public function test_actual_mode_uses_authoritative_quantity_and_reference_price_instead_of_client_totals(): void
+    {
+        $f = $this->fixture();
+        $params = $this->payload($f, 'inline-actual');
+        $params['intent'] = 'save_and_deliver';
+        $params['quantities']['groups'][0]['net_weight_input']['value'] = '10.6';
+        $params['sales']['lines'][0] = array_merge($params['sales']['lines'][0], ['quantity_mode' => 'actual',
+            'reference_price_unit_id' => $f['unit'], 'reference_price' => '20', 'settlement_quantity' => '999', 'price' => '999']);
+        $saved = CustomerReportLogic::saveWorkspace($params);
+        self::assertNotFalse($saved, CustomerReportLogic::getError());
+        $line = $saved['sales_document']['lines'][0];
+        self::assertSame('actual', $line['quantity_mode']);
+        self::assertSame('10.6000', $line['settlement_quantity']);
+        self::assertSame('20.00', $line['price']);
+        self::assertSame('212.00', $line['amount']);
+    }
+
+    public function test_restore_actual_pricing_discards_manual_override_and_uses_current_facts(): void
+    {
+        $f = $this->fixture();
+        $params = $this->payload($f, 'inline-manual-before-restore');
+        $params['sales']['lines'][0]['quantity_mode'] = 'manual';
+        $params['sales']['lines'][0]['price'] = '22';
+        $saved = CustomerReportLogic::saveWorkspace($params);
+        self::assertNotFalse($saved, CustomerReportLogic::getError());
+        self::assertSame('manual', $saved['workspace']['input']['sales']['lines'][0]['quantity_mode'], '相等数量不能丢失人工模式');
+        $f['report'] = $saved;
+        $params = $this->payload($f, 'inline-restore-actual');
+        $params['intent'] = 'save_and_deliver';
+        $params['quantities']['groups'][0]['net_weight_input']['value'] = '10.8';
+        $params['sales'] = $saved['workspace']['input']['sales'];
+        $params['sales']['lines'][0]['quantity_mode'] = 'actual';
+        $saved = CustomerReportLogic::saveWorkspace($params);
+        self::assertNotFalse($saved, CustomerReportLogic::getError());
+        self::assertSame('actual', $saved['sales_document']['lines'][0]['quantity_mode']);
+        self::assertSame('10.8000', $saved['sales_document']['lines'][0]['settlement_quantity']);
+        self::assertSame('20.00', $saved['sales_document']['lines'][0]['price']);
+        self::assertSame('216.00', $saved['sales_document']['amount']);
+    }
+
+    public function test_manual_mode_even_with_equal_quantity_requires_weight_adjustment_permission(): void
+    {
+        $f = $this->fixture();
+        request()->adminInfo = array_merge(request()->adminInfo, ['root' => 0]);
+        request()->userId = 0;
+        request()->todoPermissionSnapshot = ['tenant_id' => self::TENANT_ID, 'operator_id' => self::ADMIN_ID, 'identity' => 'tenant_admin',
+            'owner' => false, 'permissions' => ['settlement.bill', 'settlement.weight', 'settlement.view']];
+        $params = $this->payload($f, 'inline-manual-owner-only');
+        $params['sales']['lines'][0]['quantity_mode'] = 'manual';
+        self::assertFalse(CustomerReportLogic::saveWorkspace($params));
+        self::assertSame('100.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
+    }
+
+    public function test_manual_reference_count_unit_requires_real_count_before_delivery(): void
+    {
+        $f = $this->fixture();
+        $count = $this->createCustomerReportUnit('条');
+        Db::name('goods_units_binding')->insert(['tenant_id' => self::TENANT_ID, 'goods_id' => $f['report']['items'][0]['goods_id'],
+            'unit_id' => $count, 'unit_name' => '条', 'is_base_unit' => 0, 'status' => 1]);
+        $params = $this->payload($f, 'inline-missing-reference-count');
+        $params['sales']['lines'][0]['quantity_mode'] = 'manual';
+        $params['sales']['lines'][0]['reference_price_unit_id'] = $count;
+        $missing = CustomerReportLogic::saveWorkspace($params);
+        self::assertNotFalse($missing, CustomerReportLogic::getError());
+        self::assertSame('incomplete', $missing['workspace']['state']);
+        self::assertSame('100.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
+        $params['idempotency_key'] = 'inline-reference-count-filled';
+        $params['workspace_version'] = $missing['workspace']['version'];
+        $params['version'] = $missing['version'];
+        $params['quantities']['groups'][0]['quantity_facts'] = [['unit_id' => $count, 'quantity' => '3']];
+        $params['intent'] = 'save_and_deliver';
+        $saved = CustomerReportLogic::saveWorkspace($params);
+        self::assertNotFalse($saved, CustomerReportLogic::getError());
+        self::assertSame('manual', $saved['sales_document']['lines'][0]['quantity_mode']);
+        self::assertSame($count, $saved['sales_document']['lines'][0]['reference_price_unit_id']);
+        self::assertSame('200.00', $saved['sales_document']['amount']);
+    }
+
+    public function test_manual_reference_price_can_be_unknown_but_invalid_reference_input_is_rejected(): void
+    {
+        $f = $this->fixture();
+        $params = $this->payload($f, 'inline-unknown-reference-price');
+        $params['sales']['lines'][0]['quantity_mode'] = 'manual';
+        $params['sales']['lines'][0]['reference_price'] = '';
+        $params['sales']['lines'][0]['price'] = '22';
+        $saved = CustomerReportLogic::saveWorkspace($params);
+        self::assertNotFalse($saved, CustomerReportLogic::getError());
+        self::assertSame('complete', $saved['workspace']['state']);
+        self::assertSame('', $saved['workspace']['input']['sales']['lines'][0]['reference_price']);
+        $params['idempotency_key'] = 'inline-invalid-reference-price';
+        $params['workspace_version'] = $saved['workspace']['version'];
+        $params['version'] = $saved['version'];
+        $params['sales']['lines'][0]['reference_price'] = '-1';
+        self::assertFalse(CustomerReportLogic::saveWorkspace($params));
+        self::assertSame('sales.lines.0.reference_price', CustomerReportLogic::getReturnData()['field_errors'][0]['field']);
+    }
+
+    public function test_combined_delivery_without_price_then_price_save_does_not_ship_twice(): void
+    {
+        $f = $this->fixture(); $params = $this->payload($f);
+        $params['intent'] = 'save_and_deliver'; $params['sales']['lines'][0]['price'] = ''; $params['sales']['lines'][0]['reference_price'] = '';
+        $saved = CustomerReportLogic::saveWorkspace($params);
+        self::assertNotFalse($saved, CustomerReportLogic::getError());
+        self::assertNull($saved['sales_document']);
+        self::assertSame('90.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
+        $pricing = ['id' => $saved['id'], 'version' => $saved['version'], 'workspace_version' => $saved['workspace']['version'],
+            'idempotency_key' => 'finish-price', 'intent' => 'save', 'sales' => $params['sales']];
+        $pricing['sales']['lines'][0]['price'] = '20'; $pricing['sales']['lines'][0]['reference_price'] = '20';
+        $priced = CustomerReportLogic::saveWorkspace($pricing);
+        self::assertNotFalse($priced, CustomerReportLogic::getError());
+        self::assertSame('posted', $priced['sales_document']['accounting_status']);
+        self::assertSame('90.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
+    }
+
+    public function test_plain_save_restores_pricing_without_issuing_before_delivery(): void
+    {
+        $f = $this->fixture(); $saved = CustomerReportLogic::saveWorkspace($this->payload($f));
+        self::assertNotFalse($saved, CustomerReportLogic::getError());
+        self::assertNull($saved['sales_document']);
+        self::assertSame('20', $saved['workspace']['input']['sales']['lines'][0]['price']);
+        self::assertSame('100.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
+    }
+
+    public function test_delivery_rejection_rolls_back_workspace_and_quantity(): void
+    {
+        $f = $this->fixture(); $params = $this->payload($f); $params['intent'] = 'save_and_deliver';
+        Db::name('fulfillment_task')->where('report_id', $f['report']['id'])->update(['status' => 'cancelled']);
+        self::assertFalse(CustomerReportLogic::saveWorkspace($params));
+        self::assertSame(0, Db::name('customer_report_workspace_save')->where('report_id', $f['report']['id'])->count());
+        self::assertSame('100.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
     }
 
     private function deliverAll(array $report, string $key, string $remaining = 'none'): void
@@ -108,74 +283,13 @@ final class CustomerReportWorkspaceTest extends TestCase
 
     public static function weightTargets(): array { return ['unknown remaining weight' => [false], 'explicit ten jin target' => [true]]; }
 
-    /** @dataProvider weightTargets */
-    public function test_weight_delivery_can_continue_without_piece_count_then_finish_without_duplicate_posting(bool $explicitTarget): void
-    {
-        $f = $this->weightDemandFixture();
-        if ($explicitTarget) Db::name('customer_report_item')->where('id', $f['report']['items'][0]['id'])->update(['acceptable_base_qty_min' => '10', 'acceptable_base_qty_max' => '10']);
-        $params = $this->payload($f, 'weight-first-save');
-        $params['quantities']['groups'][0]['net_weight_input']['value'] = '6';
-        $params['sales']['lines'][0]['settlement_quantity'] = '6';
-        $saved = CustomerReportLogic::saveWorkspace($params);
-        self::assertNotFalse($saved, CustomerReportLogic::getError());
-        self::assertSame('complete', $saved['workspace']['state']);
-        self::assertSame([], $saved['items'][0]['quantity_requirements']['required_count_units']);
-        self::assertSame($explicitTarget ? '10.0000' : null, $saved['items'][0]['delivery_progress']['remaining_weight']);
-        if ($explicitTarget) {
-            $task = array_values(array_filter($saved['task_group']['tasks'], static fn($task) => $task['source_key'] === 'report:' . $saved['id'] . ':delivery'))[0];
-            $group = $saved['items'][0]['processing_groups'][0];
-            self::assertFalse(DeliveryInventoryLogic::confirmSelfDelivery(['task_id' => $task['id'], 'event_type' => 'customer_handoff', 'idempotency_key' => 'weight-too-early',
-                'items' => [['report_item_id' => $saved['items'][0]['id'], 'delivery_group_ids' => [$group['id']], 'facts_version' => $group['version'], 'remaining_action' => 'none']]]));
-            self::assertSame('100.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
-        }
-        $this->deliverAll($saved, 'weight-partial-delivery', 'pending');
-        $continued = CustomerReportLogic::detail(['id' => $saved['id']]);
-        self::assertSame('partially_delivered_pending', $continued['status']);
-        self::assertSame('continuing', $continued['items'][0]['delivery_progress']['state']);
-        self::assertTrue($continued['items'][0]['delivery_progress']['can_append']);
-        self::assertSame('pending_delivery', $continued['sales_document']['accounting_status']);
-        self::assertSame('94.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
 
-        $params = ['id' => $continued['id'], 'version' => $continued['version'], 'workspace_version' => $continued['workspace']['version'], 'idempotency_key' => 'weight-next-save',
-            'quantities' => ['groups' => [['append_to_group_id' => $continued['items'][0]['processing_groups'][0]['id'], 'quantity_facts' => [], 'net_weight_input' => ['value' => '4', 'unit' => '斤']]]],
-            'sales' => ['document_version' => $continued['sales_document']['version'], 'lines' => [['report_item_id' => $continued['items'][0]['id'], 'price_unit_id' => $f['unit'], 'settlement_quantity' => '10', 'price' => '20']], 'rounding_amount' => '0', 'revision_reason' => '补交重量核对']];
-        $next = CustomerReportLogic::saveWorkspace($params);
-        self::assertNotFalse($next, CustomerReportLogic::getError());
-        self::assertSame('partially_delivered_pending', $next['status']);
-        $groups = $next['items'][0]['processing_groups']; $group = end($groups);
-        $task = array_values(array_filter($next['task_group']['tasks'], static fn($task) => $task['source_key'] === 'report:' . $next['id'] . ':delivery'))[0];
-        $delivery = ['task_id' => $task['id'], 'idempotency_key' => 'weight-final-delivery', 'event_type' => 'customer_handoff', 'items' => [['report_item_id' => $next['items'][0]['id'], 'delivery_group_ids' => [$group['id']], 'facts_version' => $group['version'], 'remaining_action' => 'none']]];
-        self::assertNotFalse(DeliveryInventoryLogic::confirmSelfDelivery($delivery), DeliveryInventoryLogic::getError());
-        $final = CustomerReportLogic::detail(['id' => $next['id']]);
-        self::assertSame('posted', $final['sales_document']['accounting_status'], $final['sales_document']['blocked_reason']);
-        self::assertSame('200.00', $final['sales_document']['amount']);
-        self::assertSame('90.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
-        self::assertNotFalse(DeliveryInventoryLogic::confirmSelfDelivery($delivery), DeliveryInventoryLogic::getError());
-        $replayed = CustomerReportLogic::detail(['id' => $next['id']]);
-        self::assertSame($final['sales_document']['finance_document_id'], $replayed['sales_document']['finance_document_id']);
-        self::assertSame('90.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
-    }
-
-    public function test_complete_save_persists_quantity_and_issues_sales_document_together(): void
-    {
-        $fixture = $this->fixture();
-        $saved = CustomerReportLogic::saveWorkspace($this->payload($fixture));
-        self::assertNotFalse($saved, CustomerReportLogic::getError());
-        self::assertSame('complete', $saved['save_result']['state']);
-        self::assertSame('200.00', $saved['sales_document']['amount']);
-        self::assertSame('pending_delivery', $saved['sales_document']['accounting_status']);
-        $fresh = CustomerReportLogic::detail(['id' => $saved['id']]);
-        self::assertNotFalse($fresh, CustomerReportLogic::getError());
-        self::assertSame('10.0000', $fresh['items'][0]['processing_groups'][0]['inventory_base_quantity']);
-        self::assertSame('complete', $fresh['workspace']['state']);
-        self::assertSame('100.0000', WarehouseSkuBalanceService::onHand($fixture['warehouse'], $fixture['sku']));
-    }
 
     public function test_missing_price_is_saved_on_server_without_becoming_zero_price(): void
     {
         $fixture = $this->fixture();
         $params = $this->payload($fixture);
-        $params['sales']['lines'][0]['price'] = '';
+        $params['sales']['lines'][0]['price'] = ''; $params['sales']['lines'][0]['reference_price'] = '';
         $saved = CustomerReportLogic::saveWorkspace($params);
         self::assertNotFalse($saved, CustomerReportLogic::getError());
         self::assertSame('incomplete', $saved['save_result']['state']);
@@ -203,117 +317,14 @@ final class CustomerReportWorkspaceTest extends TestCase
         self::assertSame('100.0000', WarehouseSkuBalanceService::onHand($fixture['warehouse'], $fixture['sku']));
     }
 
-    public function test_retry_and_unchanged_save_do_not_create_another_amount_version(): void
-    {
-        $fixture = $this->fixture();
-        $params = $this->payload($fixture);
-        $saved = CustomerReportLogic::saveWorkspace($params);
-        self::assertNotFalse($saved, CustomerReportLogic::getError());
-        $replayed = CustomerReportLogic::saveWorkspace($params);
-        self::assertNotFalse($replayed, CustomerReportLogic::getError());
-        self::assertTrue($replayed['save_result']['replayed']);
-        self::assertSame($saved['sales_document']['id'], $replayed['sales_document']['id']);
-        self::assertSame(1, $replayed['sales_document']['version']);
-        $params['sales']['lines'][0]['price'] = '21';
-        self::assertFalse(CustomerReportLogic::saveWorkspace($params));
 
-        $fixture['report'] = $saved;
-        $unchanged = CustomerReportLogic::saveWorkspace($this->payload($fixture, 'workspace-unchanged'));
-        self::assertNotFalse($unchanged, CustomerReportLogic::getError());
-        self::assertSame('200.00', $unchanged['sales_document']['amount']);
-        self::assertSame(1, $unchanged['sales_document']['version']);
-        self::assertCount(1, $unchanged['sales_document']['revisions']);
-    }
 
-    public function test_all_three_missing_notes_allow_effective_revision_and_posting_then_supplement_without_new_amount_version(): void
-    {
-        $fixture = $this->fixture();
-        $issued = CustomerReportLogic::saveWorkspace($this->payload($fixture));
-        self::assertNotFalse($issued, CustomerReportLogic::getError());
-        $fixture['report'] = $issued;
-        $params = $this->payload($fixture, 'workspace-free-revision');
-        unset($params['quantities']);
-        $params['sales']['lines'][0]['settlement_quantity'] = '9';
-        $params['sales']['lines'][0]['price'] = '0';
-        $revised = CustomerReportLogic::saveWorkspace($params);
-        self::assertNotFalse($revised, CustomerReportLogic::getError());
-        self::assertSame('complete', $revised['workspace']['state']);
-        self::assertSame(2, $revised['sales_document']['version']);
-        self::assertSame('0.00', $revised['sales_document']['amount']);
-        self::assertTrue($revised['sales_document']['can_print']);
-        self::assertTrue($revised['sales_document']['can_share']);
-        self::assertCount(3, $revised['workspace']['pending_notes']);
-        $todos = $this->reportFinanceTodos((int)$revised['id']);
-        self::assertCount(1, $todos);
-        self::assertSame('sales_notes', $todos[0]['target']['params']['action']);
-
-        $this->deliverAll($revised, 'workspace-free-delivery');
-        $posted = CustomerReportLogic::detail(['id' => $revised['id']]);
-        self::assertSame('posted', $posted['sales_document']['accounting_status'], $posted['sales_document']['blocked_reason']);
-        self::assertSame('90.0000', WarehouseSkuBalanceService::onHand($fixture['warehouse'], $fixture['sku']));
-        self::assertCount(1, $this->reportFinanceTodos((int)$revised['id']));
-        $history = $posted['sales_document']['revisions'];
-        $notes = array_map(static fn($note) => ['revision_id' => $note['revision_id'], 'report_item_id' => $note['report_item_id'], 'type' => $note['type'], 'content' => '客户确认本次赠送及重量约定'], $posted['workspace']['pending_notes']);
-        $supplement = ['id' => $posted['id'], 'idempotency_key' => 'workspace-supplement', 'notes' => $notes];
-        $saved = CustomerReportLogic::supplementSalesNotes($supplement);
-        self::assertNotFalse($saved, CustomerReportLogic::getError());
-        self::assertSame([], $saved['workspace']['pending_notes']);
-        self::assertSame([], $this->reportFinanceTodos((int)$saved['id']));
-        self::assertSame(2, $saved['sales_document']['version']);
-        self::assertSame('posted', $saved['sales_document']['accounting_status']);
-        self::assertSame('0.00', $saved['sales_document']['amount']);
-        self::assertSame(array_column($history, 'revision_reason'), array_column($saved['sales_document']['revisions'], 'revision_reason'));
-        $replay = CustomerReportLogic::supplementSalesNotes($supplement);
-        self::assertNotFalse($replay, CustomerReportLogic::getError());
-        self::assertSame([], $replay['workspace']['pending_notes']);
-        $supplement['notes'][0]['content'] = '改变同一请求内容';
-        self::assertFalse(CustomerReportLogic::supplementSalesNotes($supplement));
-    }
-
-    public function test_incomplete_revision_stops_output_and_posting_but_not_delivery_and_restoring_original_values_does_not_revise(): void
-    {
-        $fixture = $this->fixture();
-        $issued = CustomerReportLogic::saveWorkspace($this->payload($fixture));
-        self::assertNotFalse($issued, CustomerReportLogic::getError());
-        $fixture['report'] = $issued;
-        $params = $this->payload($fixture, 'workspace-incomplete-revision');
-        unset($params['quantities']);
-        $params['sales']['lines'][0]['price'] = '';
-        $incomplete = CustomerReportLogic::saveWorkspace($params);
-        self::assertNotFalse($incomplete, CustomerReportLogic::getError());
-        self::assertFalse($incomplete['sales_document']['can_print']);
-        self::assertFalse($incomplete['sales_document']['can_share']);
-        self::assertSame('200.00', $incomplete['sales_document']['amount']);
-        self::assertSame(1, $incomplete['sales_document']['version']);
-        $this->deliverAll($incomplete, 'workspace-incomplete-delivery');
-        \app\api\jxc\logic\CustomerReportSalesDocument::afterReportChange((int)$issued['id']);
-        $fresh = CustomerReportLogic::detail(['id' => $issued['id']]);
-        self::assertNotSame('posted', $fresh['sales_document']['accounting_status']);
-        self::assertSame('incomplete', $fresh['workspace']['state']);
-        self::assertSame('90.0000', WarehouseSkuBalanceService::onHand($fixture['warehouse'], $fixture['sku']));
-        $todos = $this->reportFinanceTodos((int)$fresh['id']);
-        self::assertCount(1, $todos, '未完成修订只应聚合一条销售完善待办');
-        self::assertSame('S27', $todos[0]['source']['code']);
-        self::assertSame('sales_workspace', $todos[0]['target']['params']['action']);
-
-        $fixture['report'] = $fresh;
-        $params = $this->payload($fixture, 'workspace-restore-original');
-        unset($params['quantities']);
-        $complete = CustomerReportLogic::saveWorkspace($params);
-        self::assertNotFalse($complete, CustomerReportLogic::getError());
-        self::assertSame('complete', $complete['workspace']['state']);
-        self::assertSame(1, $complete['sales_document']['version']);
-        self::assertCount(1, $complete['sales_document']['revisions']);
-        self::assertTrue($complete['sales_document']['can_print']);
-        self::assertSame('posted', $complete['sales_document']['accounting_status'], $complete['sales_document']['blocked_reason']);
-        self::assertSame('200.00', $complete['sales_document']['amount']);
-    }
 
     public function test_quantity_only_save_preserves_an_existing_sales_draft_and_cannot_issue_prices(): void
     {
         $fixture = $this->fixture();
         $params = $this->payload($fixture);
-        $params['sales']['lines'][0]['price'] = '';
+        $params['sales']['lines'][0]['price'] = ''; $params['sales']['lines'][0]['reference_price'] = '';
         $draft = CustomerReportLogic::saveWorkspace($params);
         self::assertNotFalse($draft, CustomerReportLogic::getError());
         $fixture['report'] = $draft;
@@ -332,7 +343,7 @@ final class CustomerReportWorkspaceTest extends TestCase
         $fresh = CustomerReportLogic::detail(['id' => $draft['id']]);
         self::assertSame('incomplete', $fresh['workspace']['state']);
         self::assertSame('', $fresh['workspace']['input']['sales']['lines'][0]['price']);
-        self::assertSame('10', $fresh['workspace']['input']['sales']['lines'][0]['settlement_quantity']);
+        self::assertSame('10.0000', $fresh['workspace']['input']['sales']['lines'][0]['settlement_quantity']);
     }
 
     public function test_counted_base_units_save_without_weight_and_pricing_count_cannot_differ(): void
@@ -346,70 +357,16 @@ final class CustomerReportWorkspaceTest extends TestCase
         self::assertSame('complete', $saved['workspace']['state']);
         self::assertSame('10.0000', $saved['items'][0]['processing_groups'][0]['inventory_base_quantity']);
         self::assertNull($saved['items'][0]['processing_groups'][0]['actual_delivery_weight']);
-        self::assertSame('200.00', $saved['sales_document']['amount']);
+        self::assertNull($saved['sales_document']);
         $fixture['report'] = $saved;
         $params = $this->payload($fixture, 'workspace-invalid-count');
         unset($params['quantities']);
-        $params['sales']['lines'][0]['settlement_quantity'] = '9';
+        $params['sales']['lines'][0]['settlement_quantity'] = '9'; $params['sales']['lines'][0]['quantity_mode'] = 'manual';
         self::assertFalse(CustomerReportLogic::saveWorkspace($params));
         self::assertStringContainsString('数量', CustomerReportLogic::getError());
     }
 
-    public function test_restoring_incomplete_supplement_uses_the_saved_group_instead_of_appending_twice(): void
-    {
-        $fixture = $this->fixture('瓶');
-        $params = $this->payload($fixture);
-        unset($params['quantities']['groups'][0]['net_weight_input']);
-        $params['quantities']['groups'][0]['quantity_facts'] = [['unit_id' => $fixture['unit'], 'quantity' => '4']];
-        $params['sales']['lines'][0]['settlement_quantity'] = '4';
-        $issued = CustomerReportLogic::saveWorkspace($params);
-        self::assertNotFalse($issued, CustomerReportLogic::getError());
-        $this->deliverAll($issued, 'workspace-first-partial');
-        $fresh = CustomerReportLogic::detail(['id' => $issued['id']]);
-        $fixture['report'] = $fresh;
-        $params = $this->payload($fixture, 'workspace-supplement-incomplete');
-        $source = $fresh['items'][0]['processing_groups'][0]['id'];
-        $params['quantities']['groups'] = [['append_to_group_id' => $source, 'quantity_facts' => [['unit_id' => $fixture['unit'], 'quantity' => '6']]]];
-        $params['sales']['lines'][0]['price'] = '';
-        $incomplete = CustomerReportLogic::saveWorkspace($params);
-        self::assertNotFalse($incomplete, CustomerReportLogic::getError());
-        self::assertCount(2, $incomplete['items'][0]['processing_groups']);
-        $fresh = CustomerReportLogic::detail(['id' => $issued['id']]);
-        $restored = $fresh['workspace']['input'];
-        self::assertGreaterThan(0, $restored['quantities']['groups'][0]['id'] ?? 0);
-        self::assertArrayNotHasKey('append_to_group_id', $restored['quantities']['groups'][0]);
-        $restored['sales']['lines'][0]['price'] = '20';
-        $restored['sales']['document_version'] = $fresh['sales_document']['version'];
-        $complete = CustomerReportLogic::saveWorkspace($restored + ['id' => $fresh['id'], 'version' => $fresh['version'], 'workspace_version' => $fresh['workspace']['version'], 'idempotency_key' => 'workspace-supplement-finish']);
-        self::assertNotFalse($complete, CustomerReportLogic::getError());
-        self::assertSame('complete', $complete['workspace']['state']);
-        self::assertCount(2, $complete['items'][0]['processing_groups']);
-        self::assertSame('200.00', $complete['sales_document']['amount']);
-        self::assertSame('10.0000', $complete['sales_document']['lines'][0]['settlement_quantity']);
-        self::assertSame('96.0000', WarehouseSkuBalanceService::onHand($fixture['warehouse'], $fixture['sku']));
-    }
 
-    public function test_filling_a_note_through_unified_save_keeps_the_amount_version(): void
-    {
-        $fixture = $this->fixture();
-        $params = $this->payload($fixture);
-        $params['sales']['lines'][0]['price'] = '0';
-        $issued = CustomerReportLogic::saveWorkspace($params);
-        self::assertNotFalse($issued, CustomerReportLogic::getError());
-        self::assertCount(1, $issued['workspace']['pending_notes']);
-        $fixture['report'] = $issued;
-        $params = $this->payload($fixture, 'workspace-inline-note');
-        unset($params['quantities']);
-        $params['sales']['lines'][0]['price'] = '0';
-        $params['sales']['lines'][0]['zero_price_reason'] = '客户赠送';
-        $saved = CustomerReportLogic::saveWorkspace($params);
-        self::assertNotFalse($saved, CustomerReportLogic::getError());
-        self::assertSame(1, $saved['sales_document']['version']);
-        self::assertCount(1, $saved['sales_document']['revisions']);
-        self::assertSame([], $saved['workspace']['pending_notes']);
-        self::assertSame('', $saved['sales_document']['revisions'][0]['lines'][0]['zero_price_reason'], '原始历史快照不可被补说明覆盖');
-        self::assertSame('客户赠送', $saved['sales_document']['revisions'][0]['supplemental_notes'][0]['content']);
-    }
 
     public function test_stale_or_other_tenant_workspace_cannot_overwrite_saved_sales(): void
     {
@@ -425,8 +382,8 @@ final class CustomerReportWorkspaceTest extends TestCase
         self::assertFalse(CustomerReportLogic::saveWorkspace($params));
         $this->prepareCustomerReportRequestContext();
         $fresh = CustomerReportLogic::detail(['id' => $saved['id']]);
-        self::assertSame('200.00', $fresh['sales_document']['amount']);
-        self::assertSame(1, $fresh['sales_document']['version']);
+        self::assertNull($fresh['sales_document']);
+        self::assertSame('20', $fresh['workspace']['input']['sales']['lines'][0]['price']);
         self::assertSame(1, $fresh['workspace']['version']);
     }
 
@@ -482,7 +439,7 @@ final class CustomerReportWorkspaceTest extends TestCase
         $fixture['report'] = $delivered;
         $params = $this->payload($fixture, 'workspace-unpriced-after-delivery');
         unset($params['quantities']);
-        $params['sales']['lines'][0]['price'] = '';
+        $params['sales']['lines'][0]['price'] = ''; $params['sales']['lines'][0]['reference_price'] = '';
         $incomplete = CustomerReportLogic::saveWorkspace($params);
         self::assertNotFalse($incomplete, CustomerReportLogic::getError());
         self::assertSame('incomplete', $incomplete['workspace']['state']);

@@ -27,7 +27,7 @@ final class CustomerReportWorkspace
     {
         $latest = self::latest($reportId); $state = $latest['state'] ?? 'empty';
         $canQuantities = WorkforceLogic::hasPermission('settlement.weight'); $canSales = FinanceAccess::has('settlement.bill');
-        $input = $state === 'incomplete' ? FinanceValue::decode($latest['input']) : null;
+        $input = $latest && (!$report['sales_document'] || $state === 'incomplete') ? FinanceValue::decode($latest['input']) : null;
         if ($input !== null) {
             if (!$canSales) { unset($input['sales']); }
             if (!$canQuantities) { unset($input['quantities']); }
@@ -37,24 +37,27 @@ final class CustomerReportWorkspace
             'missing_fields' => $state === 'incomplete' ? array_values(array_filter(FinanceValue::decode($latest['missing_fields']), static fn($field) => str_starts_with($field['path'], 'sales.') ? $canSales : $canQuantities)) : [],
             'pending_notes' => ($canSales || FinanceAccess::has('settlement.view')) ? CustomerReportSalesNotes::pending($reportId) : [],
             'can_save_quantities' => $canQuantities && in_array($report['status'], ['submitted_ready','submitted_shortage','submitted_pending_measurement','partially_delivered_pending'], true),
+            'can_deliver' => WorkforceLogic::hasPermission('delivery.confirm'),
             'can_save_sales' => $canSales && $report['status'] !== 'cancelled' && (!$document || !empty($document['can_revise']))];
     }
 
     public static function save(array $params): array
     {
+        $intent = $params['intent'] ?? 'save';
+        if (!in_array($intent, ['save', 'save_and_deliver'], true)) { throw new \DomainException('保存意图无效'); }
         $reportId = FinanceValue::id($params['id'] ?? 0); $version = FinanceValue::id($params['version'] ?? 0);
         $workspaceVersion = FinanceValue::id($params['workspace_version'] ?? null, true);
         $key = FinanceValue::text($params['idempotency_key'] ?? '', 96); $tenant = FinanceAccess::tenant();
         $fingerprint = hash('sha256', FinanceValue::json([$params, FinanceAccess::actor()]));
         $hasQuantities = array_key_exists('quantities', $params); $hasSales = array_key_exists('sales', $params);
-        if (!$hasQuantities && !$hasSales) { throw new \DomainException('请提交本次需要保存的数量或计价'); }
+        if (!$hasQuantities && !$hasSales && $intent !== 'save_and_deliver') { throw new \DomainException('请提交本次需要保存的数量或计价'); }
         if ($hasQuantities && !WorkforceLogic::hasPermission('settlement.weight')) { throw new \DomainException('没有保存数量权限'); }
         if ($hasSales) { FinanceAccess::require('settlement.bill'); }
         foreach (['quantities', 'sales'] as $section) {
             if (array_key_exists($section, $params) && !is_array($params[$section])) { throw new \DomainException('保存内容格式无效'); }
         }
         if (strlen(FinanceValue::json($params)) > 1048576) { throw new \DomainException('本次保存内容超过容量限制'); }
-        $result = Db::transaction(static function () use ($params, $reportId, $version, $workspaceVersion, $key, $tenant, $fingerprint, $hasQuantities, $hasSales): array {
+        $result = Db::transaction(static function () use ($params, $reportId, $version, $workspaceVersion, $key, $tenant, $fingerprint, $hasQuantities, $hasSales, $intent): array {
             FinanceIntegration::lock();
             $report = Db::name('customer_report')->where('tenant_id', $tenant)->where('id', $reportId)->whereNull('delete_time')->lock(true)->find();
             if (!$report) { throw new \DomainException('报货单不存在或不属于当前门店'); }
@@ -73,14 +76,28 @@ final class CustomerReportWorkspace
                 if ((int)($document['version'] ?? 0) !== $documentVersion) { throw new \DomainException('销售单版本已变化，请保留输入并核对最新版本'); }
                 if ($document && ($document['accounting_status'] === 'posted' || $document['status'] === 'voided')) { throw new \DomainException('已入账或作废的销售单请使用正式更正流程'); }
             }
-            $input = ($latest['state'] ?? '') === 'incomplete' ? FinanceValue::decode($latest['input']) : [];
+            $input = $latest ? FinanceValue::decode($latest['input']) : [];
             $missing = ($latest['state'] ?? '') === 'incomplete' ? FinanceValue::decode($latest['missing_fields']) : [];
+            if ($hasSales) {
+                if (!is_array($params['sales']['lines'] ?? null) || !array_is_list($params['sales']['lines']) || count($params['sales']['lines']) > 200) throw new \DomainException('请核对商品计价明细');
+                $previousLines = array_column($input['sales']['lines'] ?? [], null, 'report_item_id');
+                foreach ($params['sales']['lines'] as $position => $line) {
+                    if (!is_array($line)) throw new \DomainException('商品计价明细格式无效');
+                    $previous = $previousLines[$line['report_item_id'] ?? 0] ?? [];
+                    foreach (['quantity_mode', 'reference_price_unit_id', 'reference_price'] as $field) {
+                        if (!array_key_exists($field, $line) && array_key_exists($field, $previous)) $params['sales']['lines'][$position][$field] = $previous[$field];
+                    }
+                }
+            }
             if ($hasQuantities) {
                 $input['quantities'] = $params['quantities'];
                 $missing = array_values(array_filter($missing, static fn($field) => !str_starts_with($field['path'], 'quantities.')));
-                $pricingUnits = [];
-                foreach (($params['sales']['lines'] ?? $input['sales']['lines'] ?? []) as $line) $pricingUnits[(int)$line['report_item_id']] = (int)$line['price_unit_id'];
-                [$completeGroups, $quantityMissing, $groupPositions] = self::quantities($report, $params['quantities'], $pricingUnits);
+                $pricingUnits = []; $referenceUnits = [];
+                foreach (($params['sales']['lines'] ?? $input['sales']['lines'] ?? []) as $line) {
+                    $pricingUnits[(int)$line['report_item_id']] = (int)$line['price_unit_id'];
+                    $referenceUnits[(int)$line['report_item_id']] = (int)($line['reference_price_unit_id'] ?? $line['price_unit_id']);
+                }
+                [$completeGroups, $quantityMissing, $groupPositions] = self::quantities($report, $params['quantities'], $pricingUnits, $referenceUnits);
                 $missing = array_merge($missing, $quantityMissing);
                 if ($completeGroups) {
                     $savedIds = CustomerReportQuantityService::saveWithinTransaction(['id' => $reportId, 'version' => $version,
@@ -94,22 +111,28 @@ final class CustomerReportWorkspace
                     $report = Db::name('customer_report')->where('tenant_id', $tenant)->where('id', $reportId)->find();
                 }
             }
+            if ($intent === 'save_and_deliver') {
+                if (array_filter($missing, static fn($field) => str_starts_with($field['path'], 'quantities.'))) { throw new \DomainException('实际数量尚未完善，请先保存待完善'); }
+                self::deliverWholeReport($report, $params['delivery'] ?? [], $key);
+                $report = Db::name('customer_report')->where('tenant_id', $tenant)->where('id', $reportId)->find();
+            }
             $notes = $params['notes'] ?? [];
             if (!is_array($notes) || !array_is_list($notes)) { throw new \DomainException('说明格式无效'); }
             // 尚未补写的可选说明继续留待办，不能反过来阻止本次数字保存。
             $notes = array_values(array_filter($notes, static fn($note) => !is_array($note) || !self::blank($note['content'] ?? null)));
             if ($hasSales) {
-                $input['sales'] = $params['sales'];
                 $missing = array_values(array_filter($missing, static fn($field) => !str_starts_with($field['path'], 'sales.')));
                 FinanceValue::text($params['sales']['revision_reason'] ?? '', 1000, false);
                 $snapshot = CustomerReportSalesDocument::inspectWorkspace($report, $params['sales']);
+                $input['sales'] = $snapshot['workspace_input'];
+                unset($snapshot['workspace_input']);
                 $missing = array_merge($missing, $snapshot['missing_fields'] ?? []);
                 if (empty($snapshot['missing_fields'])) {
                     // 再次保存完整计价即核对页面上已锁定的交付事实；只解除这些分组的旧输入缺项。
                     // 不重新保存数量，也不替未交付分组补造称量。
                     [$input, $missing] = self::useDeliveredFacts($reportId, $input, $missing);
                 }
-                if (!$missing) {
+                if (!$missing && in_array($report['status'], ['delivered_pending_settlement', 'settled', 'completed'], true)) {
                     if (!$document || $document['accounting_status'] === 'review_required' || !self::sameApproval(FinanceValue::decode($document['snapshot']), $snapshot)) {
                         CustomerReportSalesDocument::issueWithinTransaction(array_merge($params['sales'], ['id' => $reportId, 'version' => (int)$report['version'], 'idempotency_key' => 'workspace-sale:' . hash('sha256', $key)]));
                         $document = Db::name('customer_report_sales_document')->where('tenant_id', $tenant)->where('report_id', $reportId)->find();
@@ -133,6 +156,32 @@ final class CustomerReportWorkspace
         try { CustomerReportSalesDocument::afterReportChange($reportId); }
         catch (\Throwable $error) { throw new \RuntimeException('保存已提交，后续状态尚未读取完成', 0, $error); }
         return $result;
+    }
+
+    private static function deliverWholeReport(array $report, array $delivery, string $key): void
+    {
+        $tenant = FinanceAccess::tenant(); $id = (int)$report['id'];
+        if (Db::name('fulfillment_delivery_event')->where('tenant_id', $tenant)->where('report_id', $id)->count()) { throw new \DomainException('本单已有交付记录，不能再次交付'); }
+        $arrangement = CustomerReportDeliveryArrangementService::fromRow($report);
+        $method = $arrangement['delivery_method'];
+        $event = match ($method) {
+            'self_delivery' => 'customer_handoff', 'counter_pickup' => 'counter_customer_handoff',
+            'customer_vehicle' => 'customer_vehicle_handoff', 'third_party' => 'third_party_driver_handoff',
+            default => throw new \DomainException('请先完善本单送货安排'),
+        };
+        $items = Db::name('customer_report_item')->where('tenant_id', $tenant)->where('report_id', $id)->whereNull('delete_time')->lock(true)->select()->toArray();
+        $rows = [];
+        foreach ($items as $item) {
+            $groups = Db::name('customer_report_processing_group')->where('tenant_id', $tenant)->where('report_item_id', $item['id'])->lock(true)->select()->toArray();
+            if (!$groups) { throw new \DomainException('本单缺少实际数量分组'); }
+            foreach ($groups as $group) {
+                if (!TradeQuantityService::snapshot($group)) { throw new \DomainException('请核实本单全部商品的实际数量'); }
+            }
+            $rows[] = ['report_item_id' => $item['id'], 'delivery_group_ids' => array_column($groups, 'id'), 'facts_version' => (int)TradeQuantityService::snapshot($groups[0])['version'], 'remaining_action' => 'none'];
+        }
+        $taskId = Db::name('fulfillment_task')->where('tenant_id', $tenant)->where('source_key', 'report:' . $id . ':delivery')->value('id');
+        DeliveryVariantLogic::confirmWithinTransaction(array_merge($delivery, ['task_id' => (int)$taskId, 'event_type' => $event,
+            'idempotency_key' => 'ws-delivery:' . hash('sha1', $key), 'items' => $rows]), $method, $event);
     }
 
     private static function useDeliveredFacts(int $reportId, array $input, array $missing): array
@@ -202,7 +251,7 @@ final class CustomerReportWorkspace
     }
 
     /** 未完整分组保留输入；已完整分组仍复用原数量事实服务的全部业务校验。 */
-    private static function quantities(array $report, array $input, array $pricingUnits = []): array
+    private static function quantities(array $report, array $input, array $pricingUnits = [], array $referenceUnits = []): array
     {
         $groups = $input['groups'] ?? null;
         if (!is_array($groups) || !array_is_list($groups) || count($groups) > 600) { throw new \DomainException('数量分组格式无效'); }
@@ -221,7 +270,7 @@ final class CustomerReportWorkspace
             $item['pricing_unit_id'] = $pricingUnits[(int)$item['id']] ?? CustomerReportQuantityRequirements::pricingUnit($item);
             $units = TradeQuantityService::boundUnits($item);
             $path = 'quantities.groups.' . $position;
-            $fields = self::quantityMissing($entry, $item, $units, $path);
+            $fields = self::quantityMissing($entry, $item, $units, $path, $referenceUnits[(int)$item['id']] ?? 0);
             if ($id && $fields) {
                 $existing = TradeQuantityService::snapshot($known[$id]);
                 if ($existing && Db::name('fulfillment_delivery_item')->where('tenant_id', $tenant)->where('delivery_group_key', $existing['delivery_group_key'])->count()) { throw new \DomainException('已交付分组不能覆盖，请新增剩余补交分组'); }
@@ -238,10 +287,12 @@ final class CustomerReportWorkspace
         return [$complete, $missing, $positions];
     }
 
-    private static function quantityMissing(array $entry, array $item, array $units, string $path): array
+    private static function quantityMissing(array $entry, array $item, array $units, string $path, int $referenceUnitId = 0): array
     {
         $missing = []; $counts = []; $weightAvailable = false;
-        $requiredIds = array_column(CustomerReportQuantityRequirements::forItem($item, $units)['required_count_units'], 'id');
+        $requiredCounts = CustomerReportQuantityRequirements::forItem($item, $units)['required_count_units'];
+        if (($units[$referenceUnitId]['measure_type'] ?? '') === 'count' && !in_array($referenceUnitId, array_column($requiredCounts, 'id'), true)) $requiredCounts[] = ['id' => $referenceUnitId, 'name' => $units[$referenceUnitId]['unit_name']];
+        $requiredIds = array_column($requiredCounts, 'id');
         $rawCounts = $entry['quantity_facts'] ?? [];
         if (!is_array($rawCounts) || !array_is_list($rawCounts)) { throw new \DomainException('计数事实格式无效'); }
         foreach ($rawCounts as $i => $count) {
@@ -276,7 +327,7 @@ final class CustomerReportWorkspace
             if (bccomp($gross, $tare, 4) <= 0) { throw FinanceBusinessException::validation([['field' => $path . '.tare_weight_input.value', 'code' => 'invalid', 'message' => '皮重不能大于或等于毛重']]); }
         }
         if (!self::blank($entry['final_actual_weight'] ?? null)) { TradeQuantityFacts::decimal($entry['final_actual_weight']); $weightAvailable = true; }
-        foreach (CustomerReportQuantityRequirements::forItem($item, $units)['required_count_units'] as $required) {
+        foreach ($requiredCounts as $required) {
             if (empty($counts[$required['id']]) && !isset($entry['packaging'])) { $missing[] = ['path' => $path . '.quantity_facts', 'message' => '请补充' . $required['name'] . '的实际清点数量']; }
         }
         if (CustomerReportQuantityRequirements::forItem($item, $units)['net_weight_required'] && !$weightAvailable) { $missing[] = ['path' => $path . '.net_weight_input.value', 'message' => '请补充交付净重']; }

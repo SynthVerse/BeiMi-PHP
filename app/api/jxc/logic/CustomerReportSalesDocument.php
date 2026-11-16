@@ -4,16 +4,10 @@ namespace app\api\jxc\logic;
 
 use think\facade\Db;
 
-/** 销售单签发与真实交付独立；只有整张报货履约结束才消费已批准金额。 */
+/** 整单交付后签发销售单，并按已批准金额入账。 */
 final class CustomerReportSalesDocument
 {
     public const CLOSED_REPORT_STATUSES = ['delivered_pending_settlement','partial_pending_settlement','undelivered','fulfilled_undelivered','completed','settled'];
-    public static function issue(array $params): void
-    {
-        Db::transaction(static fn() => self::issueWithinTransaction($params));
-        self::afterReportChange((int)$params['id']);
-    }
-
     /** 与工作区数量保存共享事务；自动入账必须在外层提交后执行。 */
     public static function issueWithinTransaction(array $params): void
     {
@@ -24,6 +18,7 @@ final class CustomerReportSalesDocument
             FinanceIntegration::lock();
             $report=Db::name('customer_report')->where('tenant_id',$tenant)->where('id',$reportId)->whereNull('delete_time')->lock(true)->find();
             if(!$report) throw new \DomainException('报货单不存在');
+            if (!in_array($report['status'], ['delivered_pending_settlement', 'settled', 'completed'], true)) throw new \DomainException('请先整单交付，再生成销售单');
             $doc=Db::name('customer_report_sales_document')->where('tenant_id',$tenant)->where('report_id',$reportId)->lock(true)->find();
             $replay=Db::name('customer_report_sales_revision')->where('tenant_id',$tenant)->where('operation_key',$key)->find();
             if($replay) {
@@ -47,13 +42,13 @@ final class CustomerReportSalesDocument
                     $orders[$item['warehouse_id']]=$order;
                 }
                 $docId=(int)Db::name('customer_report_sales_document')->insertGetId(['tenant_id'=>$tenant,'report_id'=>$reportId,
-                    'order_sn'=>reset($orders)['order_sn'],'version'=>$version,'status'=>'issued','accounting_status'=>'pending_delivery',
+                    'order_sn'=>reset($orders)['order_sn'],'version'=>$version,'status'=>'issued','accounting_status'=>'pending_posting',
                     'snapshot'=>FinanceValue::json($snapshot),'approval_actor'=>FinanceValue::json(FinanceAccess::actor()),'create_time'=>$now,'update_time'=>$now]);
             } else $docId=(int)$doc['id'];
             Db::name('sales_order')->where('tenant_id',$tenant)->where('source_type','customer_report')->where('source_id',$reportId)->where('settlement_status','pending')->update(['customer_id'=>(int)$report['main_customer_id'],'customer_name'=>$report['main_customer_name'],'update_time'=>$now]);
             Db::name('customer_report_sales_document')->where('tenant_id',$tenant)->where('id',$docId)->update([
                 'version'=>$version,'snapshot'=>FinanceValue::json($snapshot),'approval_actor'=>FinanceValue::json(FinanceAccess::actor()),
-                'accounting_status'=>'pending_delivery','blocked_reason'=>'','last_operation_key'=>$key,'last_operation_fingerprint'=>$fingerprint,'update_time'=>$now]);
+                'accounting_status'=>'pending_posting','blocked_reason'=>'','last_operation_key'=>$key,'last_operation_fingerprint'=>$fingerprint,'update_time'=>$now]);
             Db::name('customer_report_sales_revision')->insert(['tenant_id'=>$tenant,'document_id'=>$docId,'version'=>$version,'snapshot'=>FinanceValue::json($snapshot),
                 'reason'=>$reason,'actor'=>FinanceValue::json(FinanceAccess::actor()),'operation_key'=>$key,'fingerprint'=>$fingerprint,'create_time'=>$now]);
     }
@@ -73,6 +68,7 @@ final class CustomerReportSalesDocument
         $requestCount=count($requests); $positions=array_flip(array_column($requests,'report_item_id')); $requests=array_column($requests,null,'report_item_id');
         if(count($requests)!==$requestCount) throw new \DomainException('商品计价明细不能重复'); $lines=[]; $goods='0.00'; $missing=[]; $ownerRequired=false;
         $precision=FinanceIntegration::active()?FinanceSalesPrecision::selection((int)$report['main_customer_id'],$params):['actual_mode'=>'cents'];
+        $normalizedInput = $params;
         foreach($items as $item) {
             if($item['fulfillment_status']==='undelivered') continue;
             $id=(int)$item['id']; $input=$requests[$id]??null;
@@ -82,34 +78,53 @@ final class CustomerReportSalesDocument
             $unit=$unitId===null?null:(array_column($units,null,'id')[$unitId]??null);
             if($unitId!==null && !$unit) throw new \DomainException('计价单位不属于当前商品有效绑定');
             if(!$unit) $missing[]=['path'=>$path.'.price_unit_id','message'=>'请选择计价单位'];
+            $mode = $input['quantity_mode'] ?? 'actual';
+            if (!in_array($mode, ['actual', 'manual'], true)) throw new \DomainException('计价模式无效');
+            $referenceUnitId = CustomerReportWorkspace::blank($input['reference_price_unit_id'] ?? $unitId) ? null : FinanceValue::id($input['reference_price_unit_id'] ?? $unitId);
+            $referenceUnit = $referenceUnitId === null ? null : (array_column($units, null, 'id')[$referenceUnitId] ?? null);
+            if ($referenceUnitId !== null && !$referenceUnit) throw new \DomainException('原计价单位不属于当前商品有效绑定');
+            if (!$referenceUnit) $missing[] = ['path' => $path . '.reference_price_unit_id', 'message' => '请选择原计价单位'];
+            $referencePriceInput = array_key_exists('reference_price', $input) ? $input['reference_price'] : ($input['price'] ?? null);
+            $referencePrice = CustomerReportWorkspace::blank($referencePriceInput) ? null : CustomerReportWorkspace::field($path . '.reference_price', static fn() => FinanceValue::money($referencePriceInput, true));
+            if ($mode === 'actual') { $unitId = $referenceUnitId; $unit = $referenceUnit; }
+            if ($mode === 'manual') {
+                if (!$unit || $unit['measure_type'] !== 'weight') throw new \DomainException('仅重量计价允许调整计价数量');
+                FinanceAccess::require('', true); $ownerRequired = true;
+            }
             $quantity=CustomerReportWorkspace::blank($input['settlement_quantity']??null)?null:CustomerReportWorkspace::field($path.'.settlement_quantity',static fn()=>FinanceSalesQuantity::quantity($input['settlement_quantity'],(int)($unit['precision']??4)));
             $price=CustomerReportWorkspace::blank($input['price']??null)?null:CustomerReportWorkspace::field($path.'.price',static fn()=>FinanceValue::money($input['price'],true));
-            if($quantity===null) $missing[]=['path'=>$path.'.settlement_quantity','message'=>'请补充计价数量'];
-            if($price===null) $missing[]=['path'=>$path.'.price','message'=>'请补充单价'];
             $zero=FinanceValue::text($input['zero_price_reason']??'',500,false);
             $difference=FinanceValue::text($input['difference_reason']??'',1000,false);
             $groups=Db::name('customer_report_processing_group')->where('tenant_id',FinanceAccess::tenant())->where('report_item_id',$id)->order('id')->select()->toArray();
-            $facts=[]; $actual='0.0000'; $base='0.0000'; $hasWeight=true; $hasAllFacts=true;
+            $facts=[]; $coverage=[]; $factCount=count($groups); $actual='0.0000'; $base='0.0000'; $hasWeight=true; $hasAllFacts=true;
             foreach($groups as $group) {
                 $fact=FinanceValue::decode($group['quantity_facts_snapshot']?:'{}');
                 if(!isset($fact['inventory_base_quantity']) || bccomp((string)$fact['inventory_base_quantity'],'0',4)<=0) { if(self::closed($report)) continue; $hasAllFacts=false; continue; }
                 $actual=$fact['actual_delivery_weight']===null?$actual:bcadd($actual,$fact['actual_delivery_weight'],4);
                 if($fact['actual_delivery_weight']===null) $hasWeight=false;
                 $base=bcadd($base,$fact['inventory_base_quantity'],4);
-                foreach($fact['quantity_facts']??[] as $q) $facts[(int)$q['unit_id']]=bcadd($facts[(int)$q['unit_id']]??'0',$q['quantity'],4);
+                foreach($fact['quantity_facts']??[] as $q) { $facts[(int)$q['unit_id']]=bcadd($facts[(int)$q['unit_id']]??'0',$q['quantity'],4); $coverage[(int)$q['unit_id']]=($coverage[(int)$q['unit_id']]??0)+1; }
             }
             if(!$groups) $hasAllFacts=false;
             if(self::closed($report)) {
                 $delivered=Db::name('fulfillment_delivery_item')->where('tenant_id',FinanceAccess::tenant())->where('report_item_id',$id)->select()->toArray();
-                $actual='0.0000'; $base='0.0000'; $facts=[]; $hasWeight=true;
+                $actual='0.0000'; $base='0.0000'; $facts=[]; $coverage=[]; $factCount=count($delivered); $hasWeight=true;
                 foreach($delivered as $part) {
                     if($part['actual_delivery_weight']===null) $hasWeight=false;
                     else $actual=bcadd($actual,$part['actual_delivery_weight'],4);
                     $base=bcadd($base,(string)($part['inventory_base_quantity']??$part['actual_delivery_weight']??'0'),4);
-                    foreach(FinanceValue::decode($part['quantity_facts']?:'[]') as $q) $facts[(int)$q['unit_id']]=bcadd($facts[(int)$q['unit_id']]??'0',$q['quantity'],4);
+                    foreach(FinanceValue::decode($part['quantity_facts']?:'[]') as $q) { $facts[(int)$q['unit_id']]=bcadd($facts[(int)$q['unit_id']]??'0',$q['quantity'],4); $coverage[(int)$q['unit_id']]=($coverage[(int)$q['unit_id']]??0)+1; }
                 }
             }
-            $expected=(!$unit || !$hasAllFacts)?null:($unit['measure_type']==='weight'?($hasWeight?TradeQuantityService::weightFromJin($actual,$unitId):null):($facts[$unitId]??((int)$item['base_unit_id']===$unitId?$base:null)));
+            $expected=(!$unit || !$hasAllFacts)?null:($unit['measure_type']==='weight'?($hasWeight?TradeQuantityService::weightFromJin($actual,$unitId):null):((int)$item['base_unit_id']===$unitId?$base:(($coverage[$unitId]??0)===$factCount?($facts[$unitId]??null):null)));
+            if ($mode === 'actual') { $quantity = $expected; $price = $referencePrice; }
+            if ($referenceUnit && $referenceUnit['measure_type'] === 'count' && (($coverage[$referenceUnitId]??0) !== $factCount || $factCount === 0) && (int)$item['base_unit_id'] !== $referenceUnitId) $missing[] = ['path' => $path . '.reference_price_unit_id', 'message' => '请补充原计价单位的真实清点数量'];
+            $normalizedInput['lines'][$positions[$id]] = array_merge($input, ['quantity_mode' => $mode, 'reference_price_unit_id' => $referenceUnitId,
+                'reference_price' => $referencePriceInput, 'price_unit_id' => $unitId,
+                'settlement_quantity' => $mode === 'actual' ? ($quantity ?? '') : ($input['settlement_quantity'] ?? ''),
+                'price' => $mode === 'actual' ? ($referencePriceInput ?? '') : ($input['price'] ?? '')]);
+            if($quantity===null) $missing[]=['path'=>$path.'.settlement_quantity','message'=>'请补充计价数量'];
+            if($price===null) $missing[]=['path'=>$path.'.price','message'=>'请补充单价'];
             if($expected===null) $missing[]=['path'=>$path.'.actual_quantity','message'=>'请补充当前商品的真实数量与称重'];
             if($quantity!==null && $expected!==null && bccomp($quantity,$expected,4)!==0) {
                 if($unit['measure_type']!=='weight') throw new \DomainException('计件数量必须与已核实的完整数量一致');
@@ -121,6 +136,7 @@ final class CustomerReportSalesDocument
             $amount=FinanceSalesPrecision::amount($quantity,$price,$precision['actual_mode'])['amount']; $goods=bcadd($goods,$amount,2);
             $lines[]=['report_item_id'=>$id,'goods_id'=>(int)$item['goods_id'],'sku_id'=>(int)$item['sku_id'],'goods_name'=>$item['goods_name'],'sku_name'=>$item['sku_name'],
                 'base_unit_name'=>$item['base_unit_name'],'warehouse_id'=>(int)$item['warehouse_id'],'unit_name'=>$item['unit_name'],'price_unit_id'=>$unitId,'price_unit_name'=>$unit['name'],'settlement_quantity'=>$quantity,'price'=>$price,'amount'=>$amount,
+                'quantity_mode'=>$mode,'reference_price_unit_id'=>$referenceUnitId,'reference_price_unit_name'=>$referenceUnit['name']??'','reference_price'=>$referencePrice,
                 'zero_price_reason'=>$zero,'difference_reason'=>$difference,'has_quantity_difference'=>bccomp($quantity,$expected,4)!==0,'actual_delivery_weight'=>$hasWeight?$actual:null,'inventory_base_quantity'=>$base,
                 'quantity_facts'=>array_map(static fn($id,$qty)=>['unit_id'=>$id,'quantity'=>$qty],array_keys($facts),$facts),
                 'exception_fingerprint'=>self::exceptionFingerprint($item),'pricing_units'=>$units,'group_fingerprints'=>self::groupFingerprints($groups)];
@@ -139,12 +155,13 @@ final class CustomerReportSalesDocument
         if(!$missing && bccomp($overdue['amount'],'0',2)>0 && empty($params['overdue_acknowledged'])) throw new \DomainException('客户存在逾期余额，请明确知晓后继续确认');
         if($missing) {
             if(!$allowIncomplete) throw new \DomainException($missing[0]['message']);
-            return ['missing_fields'=>$missing];
+            return ['missing_fields'=>$missing, 'workspace_input' => $normalizedInput];
         }
         return ['customer_id'=>(int)$report['main_customer_id'],'customer_name'=>$report['main_customer_name'],'report_sn'=>$report['sn'],
             'lines'=>$lines,'goods_amount'=>$goods,'rounding_amount'=>$rounding,'amount'=>bcsub($goods,$rounding,2),'due_date'=>$due,
             'precision'=>$precision,'payment_terms'=>$paymentTerms,'approval_permissions'=>array_values(array_filter(['settlement.bill',bccomp($rounding,'0',2)>0?'finance.sales.rounding':null,$dueOverridden?'finance.sales.due_override':null,!empty($precision['overridden'])?'finance.sales.precision_override':null])),
-            'approval_owner_required'=>$ownerRequired,'overdue_acknowledged'=>!empty($params['overdue_acknowledged']),'issued_at'=>time()];
+            'approval_owner_required'=>$ownerRequired,'overdue_acknowledged'=>!empty($params['overdue_acknowledged']),'issued_at'=>time(),
+            ...($allowIncomplete ? ['workspace_input' => $normalizedInput] : [])];
     }
 
     public static function pricingUnits(array $item): array
