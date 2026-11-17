@@ -281,7 +281,7 @@ class GoodsDimensionLogic extends BaseLogic
 
     private static function normalizeProductDimensions(int $goodsId, mixed $rows): array|false
     {
-        if (!is_array($rows)) {
+        if (!is_array($rows) || !array_is_list($rows)) {
             self::setError('商品维度格式错误');
             return false;
         }
@@ -293,7 +293,8 @@ class GoodsDimensionLogic extends BaseLogic
         $seen = [];
         foreach (array_values($rows) as $dimensionIndex => $row) {
             if (!is_array($row)) {
-                continue;
+                self::setError('商品维度格式错误');
+                return false;
             }
             $dimensionId = (int)($row['dimension_id'] ?? $row['id'] ?? 0);
             if ($dimensionId <= 0 || isset($seen[$dimensionId])) {
@@ -504,8 +505,22 @@ class GoodsDimensionLogic extends BaseLogic
 
     private static function resolveCombinations(array $dimensions, mixed $requested): array|false
     {
+        if ($requested !== null && (!is_array($requested) || !array_is_list($requested))) {
+            self::setError('SKU组合必须为数组');
+            return false;
+        }
         if ($dimensions === []) {
-            return [[]];
+            if ($requested === null || $requested === []) {
+                return [self::combinationInput([], [])];
+            }
+            $row = $requested[0];
+            if (count($requested) !== 1 || !is_array($row)
+                || !in_array($row['enabled'] ?? 1, [1, '1', true], true)
+                || (array_key_exists('values', $row) && $row['values'] !== [])) {
+                self::setError('不分规格商品只能提交一个不含属性值的基准SKU组合');
+                return false;
+            }
+            return [self::combinationInput([], $row)];
         }
         $valueMaps = [];
         foreach ($dimensions as $dimension) {
@@ -515,7 +530,7 @@ class GoodsDimensionLogic extends BaseLogic
             }
         }
         if ($requested === null) {
-            return self::cartesian($dimensions);
+            return array_map(static fn(array $items): array => self::combinationInput($items, []), self::cartesian($dimensions));
         }
         if (!is_array($requested) || $requested === []) {
             self::setError('请至少启用一个SKU组合');
@@ -549,7 +564,7 @@ class GoodsDimensionLogic extends BaseLogic
             $key = implode('|', array_map(static fn(array $item): string => $item['dimension']['code'] . '=' . $item['value']['code'], $combination));
             if (!isset($seen[$key])) {
                 $seen[$key] = true;
-                $result[] = $combination;
+                $result[] = self::combinationInput($combination, $row);
             }
         }
         if ($result === []) {
@@ -557,6 +572,23 @@ class GoodsDimensionLogic extends BaseLogic
             return false;
         }
         return $result;
+    }
+
+    private static function combinationInput(array $items, array $row): array
+    {
+        $state = [];
+        foreach (['status', 'purchase_status', 'sale_status'] as $field) {
+            if (!array_key_exists($field, $row)) continue;
+            if (!in_array($row[$field], [0, 1, '0', '1'], true)) {
+                throw new \DomainException('SKU启停、采购和销售状态必须为0或1');
+            }
+            $state[$field] = (int)$row[$field];
+        }
+        $skuId = $row['sku_id'] ?? $row['id'] ?? 0;
+        if (filter_var($skuId, FILTER_VALIDATE_INT) === false || (int)$skuId < 0) {
+            throw new \DomainException('SKU身份无效');
+        }
+        return ['items' => $items, 'state' => $state, 'sku_id' => (int)$skuId];
     }
 
     private static function cartesian(array $dimensions): array
@@ -578,7 +610,8 @@ class GoodsDimensionLogic extends BaseLogic
     {
         $goodsId = (int)$goods['id'];
         $keptIds = [];
-        foreach ($combinations as $index => $combination) {
+        foreach ($combinations as $index => $input) {
+            $combination = $input['items'];
             if ($combination === []) {
                 $sku = GoodsBaseSkuService::ensure(
                     self::tenantId(),
@@ -588,6 +621,8 @@ class GoodsDimensionLogic extends BaseLogic
                     (string)($goods['units'] ?? '')
                 );
                 $skuId = (int)$sku->id;
+                self::assertCombinationSku($input['sku_id'], $skuId);
+                if ($input['state'] !== []) $sku->save($input['state'] + ['update_time' => time()]);
                 $keptIds[] = $skuId;
                 GoodsSkuSpecValue::where('tenant_id', self::tenantId())->where('sku_id', $skuId)->delete();
                 continue;
@@ -596,7 +631,7 @@ class GoodsDimensionLogic extends BaseLogic
             $identity = self::skuIdentity($combination);
             $skuCode = 'SKU-' . $goodsId . '-' . substr(sha1($identity), 0, 20);
             $legacy = self::legacyFields($combination);
-            $data = [
+            $data = $input['state'] + [
                 'sku_name' => self::buildSkuName((string)$goods['name'], $labels),
                 'sku_code' => $skuCode,
                 'quality_status' => $legacy['quality_status'],
@@ -613,6 +648,7 @@ class GoodsDimensionLogic extends BaseLogic
                 ->where('goods_id', $goodsId)
                 ->where('sku_code', $skuCode)
                 ->findOrEmpty();
+            self::assertCombinationSku($input['sku_id'], $sku->isEmpty() ? 0 : (int)$sku->id);
             if ($sku->isEmpty()) {
                 $sku = GoodsSku::create($data + [
                     'tenant_id' => self::tenantId(),
@@ -690,6 +726,13 @@ class GoodsDimensionLogic extends BaseLogic
                 ->delete();
             GoodsSkuSpecValue::where('tenant_id', self::tenantId())->where('sku_id', $skuId)->delete();
             GoodsSku::where('tenant_id', self::tenantId())->where('id', $skuId)->delete();
+        }
+    }
+
+    private static function assertCombinationSku(int $requestedId, int $actualId): void
+    {
+        if ($requestedId > 0 && $requestedId !== $actualId) {
+            throw new \DomainException('SKU与当前商品规格组合不一致，请重新读取后保存');
         }
     }
 

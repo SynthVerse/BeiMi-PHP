@@ -114,6 +114,10 @@ class GoodsLogic extends BaseLogic
 
     public static function edit(array $params): bool
     {
+        if (array_key_exists('combinations', $params) && !array_key_exists('dimensions', $params)) {
+            self::setError('修改SKU组合时必须同时提交商品维度');
+            return false;
+        }
         $tenantId = self::tenantId();
         if ($tenantId <= 0) {
             self::setError('商品租户上下文缺失，请重新登录');
@@ -156,7 +160,7 @@ class GoodsLogic extends BaseLogic
                 Db::rollback();
                 return false;
             }
-            self::applyBaseUnitToSaveData($saveData, $boundUnits);
+            self::applyBaseUnitToSaveData($saveData, $boundUnits, $boundUnits ?? self::boundUnitRows((int)$model->id));
             if (self::hasWarehouseBalance((int)$model->id)
                 && ($oldBaseUnitId !== (int)$saveData['unit_id'] || $oldBaseUnitName !== (string)$saveData['units'])
             ) {
@@ -206,6 +210,16 @@ class GoodsLogic extends BaseLogic
                 (int)$saveData['unit_id'],
                 (string)$saveData['units']
             );
+            if (array_key_exists('dimensions', $params)) {
+                $dimensionResult = GoodsDimensionLogic::saveProductDimensions([
+                    'goods_id' => (int)$model->id,
+                    'dimensions' => $params['dimensions'],
+                    'combinations' => $params['combinations'] ?? null,
+                ]);
+                if ($dimensionResult === false) {
+                    throw new \RuntimeException(GoodsDimensionLogic::getError());
+                }
+            }
             GoodsDimensionLogic::refreshGeneratedSkuNames((int)$model->id, (string)$saveData['name']);
             self::syncPrimarySupplierFlag((int)$model->id, (int)$saveData['primary_supplier_id']);
             Db::commit();
@@ -839,12 +853,17 @@ class GoodsLogic extends BaseLogic
         ]];
     }
 
-    protected static function applyBaseUnitToSaveData(array &$saveData, ?array $boundUnits): void
+    protected static function applyBaseUnitToSaveData(array &$saveData, ?array $boundUnits, array $existingUnits = []): void
     {
+        $enabledBindings = array_filter($boundUnits ?? $existingUnits, static fn(array $row): bool =>
+            (int)($row['status'] ?? 1) === 1 && (int)($row['delete_time'] ?? 0) === 0);
+        $enabledIds = array_map('intval', array_column($enabledBindings, 'unit_id'));
+        $availableIds = $enabledIds === [] ? [] : array_map('intval', GoodsUnit::where('tenant_id', self::tenantId())
+            ->whereIn('id', $enabledIds)->where('status', 1)->column('id'));
         foreach (['default_order_unit_id', 'default_pricing_unit_id'] as $field) {
             if (isset($saveData[$field]) && $saveData[$field] > 0
-                && !in_array($saveData[$field], array_map('intval', array_column($boundUnits ?? [], 'unit_id')), true)) {
-                throw new \DomainException('常用报货和收费单位必须从该商品已绑定单位选择');
+                && !in_array($saveData[$field], $availableIds, true)) {
+                throw new \DomainException('常用报货和收费单位必须从该商品已启用的绑定单位选择');
             }
         }
         if (!$boundUnits) {

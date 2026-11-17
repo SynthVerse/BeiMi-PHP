@@ -31,6 +31,8 @@ class GoodsValidate extends BaseValidate
         'relations' => 'array',
         'suppliers' => 'array',
         'bound_units' => 'array',
+        'default_order_unit_id' => 'integer|egt:0',
+        'default_pricing_unit_id' => 'integer|egt:0',
         'aliases' => 'array',
         'supplier_relation' => 'max:20',
         'stock_status' => 'max:20',
@@ -109,19 +111,28 @@ class GoodsValidate extends BaseValidate
             'category_id',
             'primary_supplier_id',
             'bound_units',
+            'default_order_unit_id',
+            'default_pricing_unit_id',
             'aliases',
             'is_disabled',
             'remark',
             'dimensions',
             'combinations',
-        ])->remove('dimensions', 'require')->append('dimensions', [static function ($value, array $data): bool|string {
-            if (!array_key_exists('dimensions', $data)) { return true; }
-            if (!is_array($value) || !array_is_list($value)) { return '商品维度必须为数组'; }
+        ])->remove('dimensions', 'require')
+            ->append('dimensions', [self::listPayloadRule('dimensions', '商品维度')])
+            ->append('combinations', [self::listPayloadRule('combinations', 'SKU组合', true)]);
+    }
+
+    private static function listPayloadRule(string $field, string $label, bool $nullable = false): \Closure
+    {
+        return static function ($value, array $data) use ($field, $label, $nullable): bool|string {
+            if (!array_key_exists($field, $data) || ($nullable && $value === null)) { return true; }
+            if (!is_array($value) || !array_is_list($value)) { return $label . '必须为数组'; }
             // JSON 对象会被框架解成关联数组；保留 [] 与 {} 的协议区别。
             $raw = json_decode(request()->getInput());
-            if (is_object($raw) && property_exists($raw, 'dimensions') && !is_array($raw->dimensions)) { return '商品维度必须为数组'; }
+            if (is_object($raw) && property_exists($raw, $field) && !is_array($raw->$field)) { return $label . '必须为数组'; }
             return true;
-        }]);
+        };
     }
 
     public function sceneEdit()
@@ -142,10 +153,16 @@ class GoodsValidate extends BaseValidate
             'category_id',
             'primary_supplier_id',
             'bound_units',
+            'default_order_unit_id',
+            'default_pricing_unit_id',
             'aliases',
             'is_disabled',
             'remark',
-        ]);
+            'dimensions',
+            'combinations',
+        ])->remove('dimensions', 'require')
+            ->append('dimensions', [self::listPayloadRule('dimensions', '商品维度')])
+            ->append('combinations', [self::listPayloadRule('combinations', 'SKU组合', true)]);
     }
 
     public function sceneDelete()

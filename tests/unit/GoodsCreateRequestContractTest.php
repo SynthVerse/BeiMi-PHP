@@ -57,6 +57,35 @@ final class GoodsCreateRequestContractTest extends TestCase
             'named object' => [(object)['wrong' => 'shape']], 'numeric keyed object' => [(object)['0' => ['dimension_id' => 8]]]];
     }
 
+    /** @dataProvider invalidDimensionValues */
+    public function test_edit_rejects_non_array_dimensions_before_the_domain_can_clear_configuration($value): void
+    {
+        $result = $this->submit(['id' => 101, 'dimensions' => $value], true, 'edit');
+
+        self::assertSame(0, $result['code']);
+    }
+
+    public function test_edit_accepts_explicit_empty_dimension_and_combination_lists(): void
+    {
+        $result = $this->submit(['id' => 101, 'dimensions' => [], 'combinations' => []], true, 'edit');
+
+        self::assertSame(1, $result['code'], $result['msg']);
+    }
+
+    /** @dataProvider invalidCombinationObjects */
+    public function test_edit_rejects_json_objects_as_combination_lists($value): void
+    {
+        $result = $this->submit(['id' => 101, 'dimensions' => [], 'combinations' => $value], true, 'edit');
+
+        self::assertSame(0, $result['code']);
+    }
+
+    public static function invalidCombinationObjects(): array
+    {
+        return ['empty object' => [(object)[]], 'named object' => [(object)['values' => []]],
+            'numeric keyed object' => [(object)['0' => ['values' => []]]]];
+    }
+
     /** @dataProvider legacyFormValues */
     public function test_legacy_form_request_preserves_the_dimension_array_contract(array $extra, bool $accepted): void
     {
@@ -87,7 +116,7 @@ final class GoodsCreateRequestContractTest extends TestCase
         ];
     }
 
-    private function submit(array $extra, bool $json = true): array
+    private function submit(array $extra, bool $json = true, string $action = 'add'): array
     {
         class_alias(GoodsCreateRequestDispatch::class, \app\api\jxc\logic\GoodsLogic::class);
         $payload = array_merge(['name' => ' 单规格商品 ', 'units' => ' 斤 ', 'units_id' => 19, 'category_id' => 5], $extra);
@@ -99,7 +128,7 @@ final class GoodsCreateRequestContractTest extends TestCase
         }
         $app = \think\Container::getInstance(); $app->instance('request', $request);
         $controller = new \app\api\controller\jxc\GoodsController($app);
-        try { return $controller->add()->getData(); }
+        try { return $controller->$action()->getData(); }
         catch (\think\exception\HttpResponseException $error) { return $error->getResponse()->getData(); }
     }
 }
@@ -107,4 +136,5 @@ final class GoodsCreateRequestContractTest extends TestCase
 final class GoodsCreateRequestDispatch
 {
     public static function add(array $params): array { return ['id' => 101, 'received' => $params]; }
+    public static function edit(array $params): bool { return true; }
 }

@@ -108,7 +108,10 @@ final class GoodsDimensionLogicTest extends TestCase
         ]);
         self::assertIsArray($skuConfig, GoodsDimensionLogic::getError());
         self::assertSame('sku', $skuConfig['dimensions'][0]['usage_mode']);
-        self::assertCount(2, $skuConfig['skus']);
+        // 有历史引用的基准 SKU 可合法保留为停用快照；此处比较实际经营的组合。
+        $currentSkus = array_values(array_filter($skuConfig['skus'], static fn(array $sku): bool => (int)$sku['status'] === 1));
+        self::assertCount(2, $currentSkus);
+        self::assertSame(['Role SKU Goods-Dalian', 'Role SKU Goods-Shandong'], array_column($currentSkus, 'sku_name'));
 
         $descriptiveGoodsId = $this->createCustomerReportGoods('Role Description Goods', 'ROLE-DESCRIPTION');
         $descriptiveConfig = GoodsDimensionLogic::saveProductDimensions([
@@ -145,6 +148,163 @@ final class GoodsDimensionLogicTest extends TestCase
         self::assertSame('Single SKU Goods', $config['skus'][0]['sku_name']);
         self::assertSame('SKU-' . (int)$created['id'] . '-BASE', $config['skus'][0]['sku_code']);
         self::assertSame(1, $config['skus'][0]['is_auto_generated']);
+    }
+
+    public function test_product_edit_saves_core_fields_and_dimensions_atomically_and_keeps_sku_identity(): void
+    {
+        $unitId = $this->createCustomerReportUnit('斤');
+        $created = GoodsLogic::add(['name' => '统一编辑鲈鱼', 'unit_id' => $unitId, 'units' => '斤']);
+        self::assertIsArray($created, GoodsLogic::getError());
+        $goodsId = (int)$created['id'];
+        $definition = GoodsDimensionLogic::saveDefinition(['name' => '保鲜状态', 'code' => 'unified_quality']);
+        self::assertIsArray($definition, GoodsDimensionLogic::getError());
+        $dimensions = [['dimension_id' => $definition['id'], 'usage_mode' => 'sku',
+            'values' => [['name' => '鲜活', 'code' => 'live'], ['name' => '冰鲜', 'code' => 'ice']]]];
+
+        self::assertTrue(GoodsLogic::edit(['id' => $goodsId, 'name' => '统一保存鲈鱼', 'aliases' => ['海鲈'],
+            'dimensions' => $dimensions, 'combinations' => [
+                ['values' => ['unified_quality' => 'live'], 'sale_status' => 0],
+                ['values' => ['unified_quality' => 'ice'], 'purchase_status' => 0],
+            ]]), GoodsLogic::getError());
+        $config = GoodsDimensionLogic::productDimensions(['goods_id' => $goodsId]);
+        $config['skus'] = array_values(array_filter($config['skus'], static fn(array $sku): bool => (int)$sku['dimension_disabled_snapshot'] === 0));
+        self::assertCount(2, $config['skus']);
+        self::assertSame(['海鲈'], GoodsLogic::detail(['id' => $goodsId])['aliases']);
+        $live = array_values(array_filter($config['skus'], static fn(array $sku): bool => str_ends_with($sku['sku_name'], '鲜活')))[0];
+        $ice = array_values(array_filter($config['skus'], static fn(array $sku): bool => str_ends_with($sku['sku_name'], '冰鲜')))[0];
+        self::assertSame(0, (int)$live['sale_status']);
+        self::assertSame(1, (int)$live['purchase_status']);
+        self::assertSame(0, (int)$ice['purchase_status']);
+        self::assertTrue(GoodsLogic::edit(['id' => $goodsId, 'dimensions' => $dimensions, 'combinations' => [
+            ['values' => ['unified_quality' => 'ice'], 'sku_id' => $ice['id']],
+            ['values' => ['unified_quality' => 'live'], 'sku_id' => $live['id']],
+        ]]), GoodsLogic::getError());
+        $saved = GoodsDimensionLogic::productDimensions(['goods_id' => $goodsId]);
+        $currentSkus = array_values(array_filter($saved['skus'], static fn(array $sku): bool => (int)$sku['dimension_disabled_snapshot'] === 0));
+        self::assertSame([$ice['id'], $live['id']], array_column($currentSkus, 'id'));
+        self::assertSame([0, 1], array_column($currentSkus, 'purchase_status'));
+        self::assertSame([1, 0], array_column($currentSkus, 'sale_status'));
+
+        self::assertFalse(GoodsLogic::edit(['id' => $goodsId, 'name' => '失败不能覆盖', 'aliases' => ['失败别名'],
+            'dimensions' => $dimensions, 'combinations' => [['values' => ['unified_quality' => 'missing']]]]));
+        self::assertSame('统一保存鲈鱼', GoodsLogic::detail(['id' => $goodsId])['name']);
+        self::assertSame(['海鲈'], GoodsLogic::detail(['id' => $goodsId])['aliases']);
+        self::assertSame($saved, GoodsDimensionLogic::productDimensions(['goods_id' => $goodsId]));
+    }
+
+    public function test_unified_edit_rejects_mismatched_sku_identity_and_keeps_base_sku_statuses(): void
+    {
+        $unitId = $this->createCustomerReportUnit('斤');
+        $created = GoodsLogic::add(['name' => '统一基准商品', 'unit_id' => $unitId, 'units' => '斤']);
+        self::assertIsArray($created, GoodsLogic::getError());
+        $goodsId = (int)$created['id'];
+        $sku = GoodsDimensionLogic::productDimensions(['goods_id' => $goodsId])['skus'][0];
+        self::assertTrue(GoodsLogic::edit(['id' => $goodsId, 'dimensions' => [], 'combinations' => [[
+            'values' => [], 'sku_id' => $sku['id'], 'status' => 0, 'purchase_status' => 1, 'sale_status' => 0,
+        ]]]), GoodsLogic::getError());
+        self::assertTrue(GoodsLogic::edit(['id' => $goodsId, 'dimensions' => []]), GoodsLogic::getError());
+        $saved = GoodsDimensionLogic::productDimensions(['goods_id' => $goodsId])['skus'][0];
+        self::assertSame($sku['id'], $saved['id']);
+        self::assertSame(0, (int)$saved['status']);
+        self::assertSame(1, (int)$saved['purchase_status']);
+        self::assertSame(0, (int)$saved['sale_status']);
+        self::assertFalse(GoodsLogic::edit(['id' => $goodsId, 'name' => '身份失败', 'dimensions' => [],
+            'combinations' => [['values' => [], 'sku_id' => (int)$sku['id'] + 999]]]));
+        self::assertSame('统一基准商品', GoodsLogic::detail(['id' => $goodsId])['name']);
+        self::assertFalse(GoodsLogic::edit(['id' => $goodsId, 'dimensions' => [],
+            'combinations' => [['values' => [], 'sale_status' => 'invalid']]]));
+        self::assertSame($saved, GoodsDimensionLogic::productDimensions(['goods_id' => $goodsId])['skus'][0]);
+        self::assertFalse(GoodsLogic::edit(['id' => $goodsId, 'name' => '格式失败', 'dimensions' => ['wrong' => 'shape']]));
+        self::assertSame('统一基准商品', GoodsLogic::detail(['id' => $goodsId])['name']);
+        self::assertTrue(GoodsLogic::edit(['id' => $goodsId, 'default_order_unit_id' => $unitId,
+            'default_pricing_unit_id' => $unitId]), GoodsLogic::getError());
+        $detail = GoodsLogic::detail(['id' => $goodsId]);
+        self::assertSame($unitId, (int)$detail['default_order_unit_id']);
+        self::assertSame($unitId, (int)$detail['default_pricing_unit_id']);
+    }
+
+    public function test_switching_specification_mode_keeps_each_stock_balance_on_its_original_sku(): void
+    {
+        $unitId = $this->createCustomerReportUnit('斤');
+        $created = GoodsLogic::add(['name' => '独立规格库存', 'unit_id' => $unitId, 'units' => '斤']);
+        self::assertIsArray($created, GoodsLogic::getError());
+        $goodsId = (int)$created['id'];
+        $base = GoodsDimensionLogic::productDimensions(['goods_id' => $goodsId])['skus'][0];
+        $warehouse = $this->createCustomerReportWarehouse('切换规格仓');
+        self::assertNotFalse(WarehouseSkuBalanceService::inbound($warehouse, $base['id'], '7'));
+        $definition = GoodsDimensionLogic::saveDefinition(['name' => '保鲜状态', 'code' => 'stock_quality']);
+        self::assertTrue(GoodsLogic::edit(['id' => $goodsId, 'dimensions' => [[
+            'dimension_id' => $definition['id'], 'values' => [['name' => '鲜活', 'code' => 'live']],
+        ]]]), GoodsLogic::getError());
+        $config = GoodsDimensionLogic::productDimensions(['goods_id' => $goodsId]);
+        $live = array_values(array_filter($config['skus'], static fn(array $sku): bool => $sku['dimensions'] !== []))[0];
+        self::assertSame('7.0000', WarehouseSkuBalanceService::onHand($warehouse, $base['id']));
+        self::assertSame('0.0000', WarehouseSkuBalanceService::onHand($warehouse, $live['id']));
+        self::assertNotFalse(WarehouseSkuBalanceService::inbound($warehouse, $live['id'], '3'));
+        self::assertTrue(GoodsLogic::edit(['id' => $goodsId, 'remark' => '只改备注']), GoodsLogic::getError());
+        self::assertSame($config, GoodsDimensionLogic::productDimensions(['goods_id' => $goodsId]));
+        self::assertFalse(GoodsLogic::edit(['id' => $goodsId, 'combinations' => [['sku_id' => $live['id'], 'status' => 0]]]));
+        self::assertSame($config, GoodsDimensionLogic::productDimensions(['goods_id' => $goodsId]));
+        self::assertTrue(GoodsLogic::edit(['id' => $goodsId, 'dimensions' => []]), GoodsLogic::getError());
+        self::assertSame('7.0000', WarehouseSkuBalanceService::onHand($warehouse, $base['id']));
+        self::assertSame('3.0000', WarehouseSkuBalanceService::onHand($warehouse, $live['id']));
+        $switched = GoodsDimensionLogic::productDimensions(['goods_id' => $goodsId]);
+        $kept = array_values(array_filter($switched['skus'], static fn(array $sku): bool => (int)$sku['id'] === (int)$live['id']))[0];
+        self::assertSame(0, (int)$kept['status']);
+        self::assertSame(0, (int)$kept['sale_status']);
+        self::assertGreaterThanOrEqual(8, (int)$kept['dimension_disabled_snapshot']);
+        $activeBase = array_values(array_filter($switched['skus'], static fn(array $sku): bool => (int)$sku['id'] === (int)$base['id']))[0];
+        self::assertSame(0, (int)$activeBase['dimension_disabled_snapshot']);
+        self::assertSame(1, (int)$activeBase['status']);
+    }
+
+    public function test_base_sku_rejects_malformed_explicit_combination_payloads_atomically(): void
+    {
+        $unitId = $this->createCustomerReportUnit('斤');
+        $created = GoodsLogic::add(['name' => '基准组合校验', 'unit_id' => $unitId, 'units' => '斤']);
+        self::assertIsArray($created, GoodsLogic::getError());
+        $goodsId = (int)$created['id'];
+        $before = GoodsDimensionLogic::productDimensions(['goods_id' => $goodsId]);
+        foreach ([
+            [['values' => [], 'sale_status' => 0], ['values' => [], 'sale_status' => 1]],
+            ['named' => ['values' => [], 'sale_status' => 0]],
+            ['not a combination'],
+            [['values' => ['quality' => 'live']]],
+            [['values' => [], 'enabled' => 0]],
+        ] as $combinations) {
+            self::assertFalse(GoodsLogic::edit(['id' => $goodsId, 'name' => '失败不应保存',
+                'dimensions' => [], 'combinations' => $combinations]));
+            self::assertSame('基准组合校验', GoodsLogic::detail(['id' => $goodsId])['name']);
+            self::assertSame($before, GoodsDimensionLogic::productDimensions(['goods_id' => $goodsId]));
+        }
+        foreach ([null, []] as $combinations) {
+            self::assertTrue(GoodsLogic::edit(['id' => $goodsId, 'dimensions' => [], 'combinations' => $combinations]), GoodsLogic::getError());
+            self::assertSame($before, GoodsDimensionLogic::productDimensions(['goods_id' => $goodsId]));
+        }
+    }
+
+    public function test_default_units_must_use_an_enabled_binding_for_full_and_defaults_only_edits(): void
+    {
+        $base = $this->createCustomerReportUnit('斤');
+        $disabled = $this->createCustomerReportUnit('条');
+        $bindings = [
+            ['unit_id' => $base, 'is_base_unit' => 1, 'status' => 1],
+            ['unit_id' => $disabled, 'is_base_unit' => 0, 'status' => 0],
+        ];
+        $created = GoodsLogic::add(['name' => '停用绑定不能默认', 'unit_id' => $base, 'units' => '斤', 'bound_units' => $bindings]);
+        self::assertIsArray($created, GoodsLogic::getError());
+        $goodsId = (int)$created['id'];
+        foreach (['default_order_unit_id', 'default_pricing_unit_id'] as $field) {
+            foreach ([[], ['bound_units' => $bindings]] as $extra) {
+                self::assertFalse(GoodsLogic::edit(['id' => $goodsId, 'name' => '失败不应保存', $field => $disabled] + $extra));
+                self::assertSame('停用绑定不能默认', GoodsLogic::detail(['id' => $goodsId])['name']);
+            }
+        }
+        self::assertTrue(GoodsLogic::edit(['id' => $goodsId, 'default_order_unit_id' => $base,
+            'default_pricing_unit_id' => $base]), GoodsLogic::getError());
+        Db::name('goods_unit')->where('tenant_id', self::TENANT_ID)->where('id', $base)->update(['status' => 0]);
+        self::assertFalse(GoodsLogic::edit(['id' => $goodsId, 'name' => '字典停用不应保存', 'default_order_unit_id' => $base]));
+        self::assertSame('停用绑定不能默认', GoodsLogic::detail(['id' => $goodsId])['name']);
     }
 
     public function test_reordering_product_dimensions_does_not_change_sku_identity(): void
