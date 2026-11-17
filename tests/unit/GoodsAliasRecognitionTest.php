@@ -54,7 +54,9 @@ final class GoodsAliasRecognitionTest extends TestCase
         self::assertSame($customerId, (int)$candidate['lines'][0]['customer']['selected']['id']);
         self::assertSame($goodsId, (int)$candidate['lines'][0]['goods']['selected']['id']);
         self::assertSame('桂鱼', $candidate['lines'][0]['goods']['selected']['name']);
-        self::assertSame('missing', $candidate['lines'][0]['quantity']['status']);
+        self::assertSame('unverified', $candidate['lines'][0]['quantity']['status']);
+        self::assertSame('2', $candidate['lines'][0]['quantity']['value']);
+        self::assertSame('斤', $candidate['lines'][0]['quantity']['unit']);
         self::assertSame('2斤', $candidate['lines'][0]['line_remark']);
     }
 
@@ -77,11 +79,13 @@ final class GoodsAliasRecognitionTest extends TestCase
 
         self::assertCount(3, $candidate['lines']);
         self::assertSame('needs_confirmation', $candidate['lines'][0]['status']);
-        self::assertSame('no_goods_candidate', $candidate['lines'][1]['status']);
-        self::assertSame('none', $candidate['lines'][1]['goods']['status']);
-        self::assertSame('桂花', $candidate['lines'][1]['suggested_goods_name']);
-        self::assertSame('no_goods_candidate', $candidate['lines'][2]['status']);
-        self::assertSame('none', $candidate['lines'][2]['goods']['status']);
+        self::assertSame('needs_confirmation', $candidate['lines'][1]['status']);
+        self::assertSame('unique', $candidate['lines'][1]['goods']['status']);
+        self::assertSame($goodsId, $candidate['lines'][1]['goods']['selected']['id']);
+        self::assertSame('prefix', $candidate['lines'][1]['goods']['match_type']);
+        self::assertNull($candidate['lines'][1]['suggested_goods_name']);
+        self::assertSame('needs_confirmation', $candidate['lines'][2]['status']);
+        self::assertSame('ambiguous', $candidate['lines'][2]['goods']['status']);
         self::assertNull($candidate['lines'][2]['goods']['selected']);
         self::assertSame('客户甲报货 桂花 20斤', $candidate['lines'][1]['source_text']);
     }

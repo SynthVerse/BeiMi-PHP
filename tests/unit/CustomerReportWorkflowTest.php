@@ -80,7 +80,7 @@ final class CustomerReportWorkflowTest extends TestCase
         self::assertSame('客户甲', $candidate['lines'][0]['customer']['selected']['main_customer']['name']);
         self::assertSame($childId, (int)$candidate['lines'][0]['customer']['selected']['delivery_customer']['id']);
         self::assertSame($goodsId, (int)$candidate['lines'][0]['goods']['selected']['id']);
-        self::assertNull($candidate['lines'][0]['attributes']['specification']);
+        self::assertSame('missing', $candidate['lines'][0]['attributes']['specification']['status']);
         self::assertSame([], $candidate['lines'][0]['attributes']['processing']);
         self::assertSame('missing', $candidate['lines'][0]['quantity']['status']);
         self::assertSame('2斤 8头 去鳞', $candidate['lines'][0]['line_remark']);
@@ -245,21 +245,21 @@ final class CustomerReportWorkflowTest extends TestCase
         $singleCharacterFuzzyGoodsId = $this->createCustomerReportGoods('草鱼', 'CR-SINGLE-FUZZY');
 
         $activeUnit = CustomerReportCandidateLogic::recognize('石斑鱼12箱加冰')['lines'][0];
-        self::assertSame('none', $activeUnit['goods']['status']);
+        self::assertSame('unique', $activeUnit['goods']['status']);
         self::assertContains(
             $fuzzyGoodsId,
             array_map(static fn(array $goods): int => (int)$goods['id'], $activeUnit['goods']['candidates'])
         );
-        self::assertSame('石斑鱼', $activeUnit['suggested_goods_name']);
+        self::assertNull($activeUnit['suggested_goods_name']);
         self::assertSame('12箱加冰', $activeUnit['line_remark']);
 
         $singleCharacter = CustomerReportCandidateLogic::recognize('鱼12箱')['lines'][0];
-        self::assertSame('none', $singleCharacter['goods']['status']);
+        self::assertSame('ambiguous', $singleCharacter['goods']['status']);
         self::assertContains(
             $singleCharacterFuzzyGoodsId,
             array_map(static fn(array $goods): int => (int)$goods['id'], $singleCharacter['goods']['candidates'])
         );
-        self::assertSame('鱼', $singleCharacter['suggested_goods_name']);
+        self::assertNull($singleCharacter['suggested_goods_name']);
 
         $disabledUnit = CustomerReportCandidateLogic::recognize('青斑12袋加冰')['lines'][0];
         self::assertSame('none', $disabledUnit['goods']['status']);
