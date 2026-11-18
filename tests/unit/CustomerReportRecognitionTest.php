@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace tests\unit;
 
 use app\api\jxc\logic\CustomerReportCandidateLogic;
+use app\api\jxc\logic\CustomerReportLogic;
 use app\api\jxc\logic\GoodsDimensionLogic;
 use PHPUnit\Framework\TestCase;
 use think\facade\Db;
@@ -68,6 +69,48 @@ final class CustomerReportRecognitionTest extends TestCase
         self::assertSame([1, 3, 5], array_column($report['lines'], 'segment_id'));
         self::assertNull($report['lines'][1]['customer']['selected']);
         self::assertNull($report['lines'][2]['customer']['selected']);
+    }
+
+    public function test_recognized_main_and_child_receivers_submit_as_three_reports(): void
+    {
+        $main = $this->createCustomer('主客户1');
+        $east = $this->createCustomer('东门', $main);
+        $west = $this->createCustomer('西门', $main);
+        $warehouse = $this->createCustomerReportWarehouse('分组测试仓');
+        $unit = (int)Db::name('goods_unit')->where('tenant_id', self::TENANT_ID)->where('name', '条')->value('id');
+        foreach (['桂鱼', '鲈鱼', '鲫鱼'] as $index => $name) {
+            $goods = $this->createCustomerReportGoods($name, 'SECTION-SUBMIT-' . $index, '条');
+            Db::name('goods')->where('id', $goods)->update(['unit_id' => $unit]);
+            Db::name('goods_sku')->where('id', $this->customerReportSkuId($goods))->update(['base_unit_id' => $unit]);
+            Db::name('goods_units_binding')->insert([
+                'tenant_id' => self::TENANT_ID, 'goods_id' => $goods, 'unit_id' => $unit,
+                'unit_name' => '条', 'is_base_unit' => 1, 'status' => 1,
+            ]);
+        }
+        $recognition = CustomerReportCandidateLogic::recognize("主客户1\n桂鱼100条\n东门\n鲈鱼100条\n西门\n鲫鱼50条");
+        self::assertCount(3, $recognition['lines']);
+
+        $groups = [];
+        foreach ($recognition['lines'] as $index => $line) {
+            $goods = (int)$line['goods']['selected']['id'];
+            $group = $this->fulfillmentPayload($main, $goods, $warehouse, 'section-submit-' . $index, $line['quantity']['value'], '');
+            $group['quantity_contract_version'] = 2;
+            $group['items'][0]['sku_id'] = $this->customerReportSkuId($goods);
+            $group['items'][0]['delivery_customer_id'] = $line['customer']['selected']['id'];
+            $group['items'][0]['unit_id'] = $unit;
+            $group['items'][0]['unit_name'] = '条';
+            $groups[] = $group;
+        }
+        $submitted = CustomerReportLogic::submitGrouped(['idempotency_key' => 'section-submit', 'groups' => $groups]);
+        self::assertNotFalse($submitted, CustomerReportLogic::getError());
+        self::assertSame([$main, $east, $west], array_map(
+            static fn(array $report): int => (int)$report['items'][0]['delivery_customer_id'],
+            $submitted['reports']
+        ));
+        self::assertSame(['桂鱼', '鲈鱼', '鲫鱼'], array_map(
+            static fn(array $report): string => $report['items'][0]['goods_name'],
+            $submitted['reports']
+        ));
     }
 
     public function test_customer_section_scope_excludes_unrelated_and_disabled_receivers_and_keeps_ambiguous_names_pending(): void
