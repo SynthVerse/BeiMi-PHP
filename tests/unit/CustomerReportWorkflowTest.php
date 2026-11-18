@@ -359,9 +359,9 @@ final class CustomerReportWorkflowTest extends TestCase
 
     public function test_candidate_does_not_override_an_explicit_ambiguous_customer_with_the_header_customer(): void
     {
-        $this->createCustomer('客户1');
-        $this->createCustomer('客户甲');
-        $this->createCustomer('客户乙');
+        $main = $this->createCustomer('客户1');
+        $this->createCustomer('客户甲', $main);
+        $this->createCustomer('客户乙', $main);
         $this->createCustomerReportGoods('桂鱼', 'CR-AMBIGUOUS-LINE-CUSTOMER');
 
         $candidate = CustomerReportCandidateLogic::recognize("客户1\n客户：客户 桂鱼20斤");

@@ -17,27 +17,47 @@ class CustomerReportCandidateLogic extends BaseLogic
     private const LIMIT = 20;
     private const LINE_LIMIT = 100;
 
-    /** @return array{header:?array<string,mixed>,lines:array<int,array<string,mixed>>} */
+    /** @return array<string,mixed> */
     public static function recognize(string $text): array
     {
         $sourceLines = self::sourceLines($text);
         $context = self::recognitionContext();
         $header = self::firstLineHeader($sourceLines, $context);
-        $headerCustomer = $header['customer']['selected'] ?? null;
+        $customer = $header['customer'] ?? null;
         if ($header !== null) {
             array_shift($sourceLines);
         }
         $totalLines = count($sourceLines);
         $sourceLines = array_slice($sourceLines, 0, self::LINE_LIMIT);
+        $context['main_customer_id'] = (int)($customer['selected']['main_customer']['id'] ?? 0);
+        $segmentId = null;
+        $lines = [];
+        $segments = [];
+        foreach ($sourceLines as $index => $source) {
+            $sourceIndex = $index + ($header !== null ? 1 : 0);
+            $boundary = self::recognitionBoundary($source, $context['unit_pattern']);
+            $goods = self::goodsCandidates($source, $boundary, $context);
+            $segment = self::sectionTitle($source, $sourceIndex, $goods, $context['main_customer_id'], $context['unit_pattern']);
+            if ($segment === null || $segment['kind'] === 'undecided') {
+                $line = self::line($source, $index, $customer, $segmentId, $boundary, $goods, $context, $segment !== null);
+                $line['source_index'] = $sourceIndex;
+                if ($segment === null) {
+                    $lines[] = $line;
+                    continue;
+                }
+                $segment['product_line'] = $line;
+            }
+            $customer = $segment['customer'];
+            if ($context['main_customer_id'] === 0 && $customer['selected'] !== null) {
+                $context['main_customer_id'] = (int)$customer['selected']['main_customer']['id'];
+            }
+            $segmentId = $segment['id'];
+            $segments[] = $segment;
+        }
         return [
             'header' => $header,
-            'lines' => array_map(
-                static function (string $line, int $index) use ($headerCustomer, &$context): array {
-                    return self::line($line, $index, $headerCustomer, $context);
-                },
-                $sourceLines,
-                array_keys($sourceLines)
-            ),
+            'segments' => $segments,
+            'lines' => $lines,
             'total_lines' => $totalLines,
             'processed_lines' => count($sourceLines),
             'line_limit' => self::LINE_LIMIT,
@@ -111,15 +131,18 @@ class CustomerReportCandidateLogic extends BaseLogic
     }
 
     /** @return array<string,mixed> */
-    private static function line(string $source, int $index, ?array $headerCustomer, array &$context): array
-    {
-        $boundary = self::recognitionBoundary($source, $context['unit_pattern']);
-        $goods = self::goodsCandidates($source, $boundary, $context);
+    private static function line(
+        string $source, int $index, ?array $defaultCustomer, ?int $segmentId,
+        array $boundary, array $goods, array &$context, bool $standaloneProduct
+    ): array {
         $quantity = self::quantity($source, $goods['selected'], $context);
         $specification = self::specification($source, $goods['selected'], $context);
-        $customers = self::customerCandidates($source, $goods['candidates'], $specification['customer_prefix'] ?? null);
-        if (($customers['status'] ?? '') === 'missing' && $headerCustomer !== null) {
-            $customers = ['status' => 'unique', 'selected' => $headerCustomer, 'candidates' => [$headerCustomer]];
+        $customers = $standaloneProduct
+            ? ['status' => 'missing', 'selected' => null, 'candidates' => []]
+            : self::customerCandidates($source, $goods['candidates'], $specification['customer_prefix'] ?? null, $context['main_customer_id']);
+        $inherits = $customers['status'] === 'missing';
+        if ($inherits && $defaultCustomer !== null) {
+            $customers = $defaultCustomer;
         }
         $selectedGoods = $goods['selected'];
         $preference = $selectedGoods && $customers['selected']
@@ -140,6 +163,7 @@ class CustomerReportCandidateLogic extends BaseLogic
         unset($specification['customer_prefix'], $specification['suffix_remaining']);
         return [
             'index' => $index, 'source_text' => $source,
+            ...($inherits && $segmentId !== null ? ['segment_id' => $segmentId] : []),
             'goods_needle' => $matchedName !== '' ? $matchedName : (string)($boundary['suggested_name'] ?? ''),
             'suggested_goods_name' => $suggestedGoodsName,
             'line_remark' => $lineRemark,
@@ -200,7 +224,7 @@ class CustomerReportCandidateLogic extends BaseLogic
             }
         };
         // A complete known customer name wins over words contained in that name.
-        $prefixCustomer = self::customerCandidatesForNeedle($prefix);
+        $prefixCustomer = self::customerCandidatesForNeedle($prefix, (int)($context['main_customer_id'] ?? 0));
         $exactCustomer = array_filter($prefixCustomer['candidates'], static fn(array $customer): bool => mb_strtolower($customer['name']) === mb_strtolower($prefix));
         if ($exactCustomer === []) $consume($prefix, true);
         $result['customer_prefix'] = $prefix;
@@ -277,6 +301,33 @@ class CustomerReportCandidateLogic extends BaseLogic
             return '';
         }
         return trim((string)$match[1]);
+    }
+
+    /** A quantity or an explicit inline addressee makes this a product row. */
+    private static function sectionTitle(string $source, int $sourceIndex, array $goods, int $mainId, ?string $unitPattern): ?array
+    {
+        if ($sourceIndex === 0 || self::hasQuantityBoundary($source, $unitPattern)) {
+            return null;
+        }
+        $customer = self::customerCandidatesForNeedle($source, $mainId);
+        $prefix = self::customerPrefix($source);
+        if ($prefix !== '' && $prefix !== $source) {
+            $exact = array_filter($customer['candidates'], static fn(array $candidate): bool => mb_strtolower($candidate['name']) === mb_strtolower($source));
+            if ($exact === []) {
+                return null;
+            }
+        }
+        $hasCustomer = $customer['candidates'] !== [];
+        $hasGoods = $goods['candidates'] !== [];
+        if ($hasGoods && !$hasCustomer) {
+            return null;
+        }
+        $kind = $hasCustomer && !$hasGoods ? 'customer' : 'undecided';
+        if ($kind === 'undecided' && $hasCustomer) {
+            $customer['status'] = 'ambiguous';
+            $customer['selected'] = null;
+        }
+        return ['id' => $sourceIndex, 'source_text' => $source, 'kind' => $kind, 'customer' => $customer];
     }
 
     /** @param array<int,string> $sourceLines @return ?array<string,mixed> */
@@ -431,11 +482,11 @@ class CustomerReportCandidateLogic extends BaseLogic
     /** @param array<int,array<string,mixed>> $goods
      * @return array{status:string,selected:?array<string,mixed>,candidates:array<int,array<string,mixed>>}
      */
-    private static function customerCandidates(string $text, array $goods, ?string $productPrefix = null): array
+    private static function customerCandidates(string $text, array $goods, ?string $productPrefix, int $mainId): array
     {
         $needle = '';
         if (preg_match('/(?:客户|客戶|给|給)\s*[:：]?\s*([^\s，,、；;]+?)(?:报货|報貨)?(?=\s|$)/u', $text, $m)) { $needle = trim($m[1]); }
-        if ($needle === '' && $productPrefix !== null) return self::customerCandidatesForNeedle($productPrefix);
+        if ($needle === '' && $productPrefix !== null) return self::customerCandidatesForNeedle($productPrefix, $mainId);
         if ($needle === '' && $goods !== []) {
             foreach ($goods as $goodsCandidate) {
                 $matchedName = (string)($goodsCandidate['matched_name'] ?? $goodsCandidate['name'] ?? '');
@@ -446,22 +497,36 @@ class CustomerReportCandidateLogic extends BaseLogic
                 }
             }
         }
-        return self::customerCandidatesForNeedle($needle);
+        return self::customerCandidatesForNeedle($needle, $mainId);
     }
 
     /** @return array{status:string,selected:?array<string,mixed>,candidates:array<int,array<string,mixed>>} */
-    private static function customerCandidatesForNeedle(string $needle): array
+    private static function customerCandidatesForNeedle(string $needle, int $mainId = 0): array
     {
         if (self::tenantId() <= 0 || $needle === '') { return ['status' => 'missing', 'selected' => null, 'candidates' => []]; }
-        $rows = Db::name('customer')->alias('delivery')
+        $query = Db::name('customer')->alias('delivery')
             ->leftJoin('customer main', 'main.id = delivery.parent_id AND main.tenant_id = delivery.tenant_id')
             ->where('delivery.tenant_id', self::tenantId())->where('delivery.is_disabled', 0)
-            ->whereLike('delivery.customer_name', '%' . $needle . '%')
+            ->where(function ($valid) {
+                $valid->where('delivery.parent_id', 0)->whereOr(function ($parent) {
+                    $parent->where('main.parent_id', 0)->where('main.is_disabled', 0);
+                });
+            })
+            ->whereRaw("delivery.customer_name LIKE ? ESCAPE '!'", [
+                '%' . strtr($needle, ['!' => '!!', '%' => '!%', '_' => '!_']) . '%',
+            ]);
+        if ($mainId > 0) {
+            $query->where(function ($scope) use ($mainId) {
+                $scope->where('delivery.id', $mainId)->whereOr('delivery.parent_id', $mainId);
+            });
+        }
+        $rows = $query
             ->field([
                 'delivery.id', 'delivery.customer_name', 'delivery.parent_id', 'delivery.phone', 'delivery.address',
                 'main.id' => 'main_id', 'main.customer_name' => 'main_name', 'main.phone' => 'main_phone',
                 'main.address' => 'main_address', 'main.is_disabled' => 'main_disabled',
-            ])->order('delivery.id asc')->limit(self::LIMIT)->select()->toArray();
+            ])->orderRaw('CASE WHEN delivery.customer_name = ? THEN 0 ELSE 1 END', [$needle])
+            ->order('delivery.id asc')->limit(self::LIMIT)->select()->toArray();
         $candidates = array_values(array_filter(array_map(static function (array $row): ?array {
             $deliveryId = (int)$row['id'];
             $parentId = (int)$row['parent_id'];
@@ -579,7 +644,7 @@ class CustomerReportCandidateLogic extends BaseLogic
         $goodsText = self::goodsSourceText($text);
         if ($goodsText === '' || $unitPattern === null
             || !preg_match(
-                '/^(.*?)(\d+(?:\.\d{1,2})?\s*(?:' . $unitPattern . '))(.*)$/iu',
+                '/^(.*?)(\d+(?:\.\d{1,4})?\s*(?:' . $unitPattern . '))(.*)$/iu',
                 $goodsText,
                 $match
             )
@@ -798,7 +863,7 @@ class CustomerReportCandidateLogic extends BaseLogic
     {
         return $unitPattern !== null
             && preg_match(
-                '/(?<![\d.])\d+(?:\.\d{1,2})?\s*(?:' . $unitPattern . ')/iu',
+                '/(?<![\d.])\d+(?:\.\d{1,4})?\s*(?:' . $unitPattern . ')/iu',
                 self::goodsSourceText($text)
             ) === 1;
     }

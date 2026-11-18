@@ -30,6 +30,122 @@ final class CustomerReportRecognitionTest extends TestCase
         $this->cleanCustomerReportData();
     }
 
+    public function test_customer_sections_assign_goods_to_each_receiver_without_creating_goods_for_titles(): void
+    {
+        $main = $this->createCustomer('主客户1');
+        $first = $this->createCustomer('子客户1', $main);
+        $second = $this->createCustomer('子客户2', $main);
+        $this->createCustomerReportGoods('桂鱼', 'SECTIONS-MANDARIN', '条');
+        $this->createCustomerReportGoods('鲈鱼', 'SECTIONS-BASS', '条');
+
+        $report = CustomerReportCandidateLogic::recognize("主客户1\n桂鱼100条\n子客户1\n鲈鱼100条\n客户：子客户2 桂鱼3条\n鲈鱼4条\n子客户2\n桂鱼20条");
+        self::assertSame(['桂鱼100条', '鲈鱼100条', '客户：子客户2 桂鱼3条', '鲈鱼4条', '桂鱼20条'], array_column($report['lines'], 'source_text'));
+        self::assertSame([2, 6], array_column($report['segments'], 'id'));
+        self::assertSame(['customer', 'customer'], array_column($report['segments'], 'kind'));
+        self::assertSame([1, 3, 4, 5, 7], array_column($report['lines'], 'source_index'));
+        self::assertSame([$main, $first, $second, $first, $second], array_map(static fn(array $row) => $row['customer']['selected']['id'], $report['lines']));
+        self::assertSame([null, 2, null, 2, 6], array_map(static fn(array $row) => $row['segment_id'] ?? null, $report['lines']));
+    }
+
+    public function test_unknown_labels_and_customer_goods_collisions_preserve_both_interpretations(): void
+    {
+        $main = $this->createCustomer('总店');
+        $first = $this->createCustomer('南门', $main);
+        $other = $this->createCustomer('桂鱼', $main);
+        $goods = $this->createCustomerReportGoods('桂鱼', 'OVERLAP', '条');
+        $this->createCustomerReportGoods('鲈鱼', 'BASS', '条');
+        $report = CustomerReportCandidateLogic::recognize("总店\n南门\n桂鱼2条\n桂鱼\n鲈鱼5条\n未建名称\n鲈鱼7条");
+        self::assertSame(['桂鱼2条', '鲈鱼5条', '鲈鱼7条'], array_column($report['lines'], 'source_text'));
+        [$known, $collision, $unknown] = $report['segments'];
+        self::assertSame(['customer', 'undecided', 'undecided'], array_column($report['segments'], 'kind'));
+        self::assertSame([$other], array_column($collision['customer']['candidates'], 'id'));
+        self::assertSame($goods, $collision['product_line']['goods']['selected']['id']);
+        self::assertSame($first, $collision['product_line']['customer']['selected']['id']);
+        self::assertSame($known['id'], $collision['product_line']['segment_id']);
+        self::assertSame('未建名称', $unknown['product_line']['source_text']);
+        self::assertSame('none', $unknown['product_line']['goods']['status']);
+        self::assertSame($collision['id'], $unknown['product_line']['segment_id']);
+        self::assertSame([1, 3, 5], array_column($report['lines'], 'segment_id'));
+        self::assertNull($report['lines'][1]['customer']['selected']);
+        self::assertNull($report['lines'][2]['customer']['selected']);
+    }
+
+    public function test_customer_section_scope_excludes_unrelated_and_disabled_receivers_and_keeps_ambiguous_names_pending(): void
+    {
+        $main = $this->createCustomer('主客户1');
+        $first = $this->createCustomer('子客户1', $main);
+        $second = $this->createCustomer('子客户2', $main);
+        $disabled = $this->createCustomer('子客户3', $main);
+        Db::name('customer')->where('id', $disabled)->update(['is_disabled' => 1]);
+        $unrelated = $this->createCustomer('另一个主客户');
+        $this->createCustomer('子客户1', $unrelated);
+        $this->createCustomer('子客户4', $first);
+        $this->createCustomerReportGoods('桂鱼', 'SCOPED-MANDARIN', '条');
+        $this->createCustomerReportGoods('鲈鱼', 'SCOPED-BASS', '条');
+
+        $report = CustomerReportCandidateLogic::recognize("主客户1\n桂鱼100条\n子客户\n鲈鱼100条\n子客户1\n鲈鱼\n主客户1\n桂鱼3条");
+        [$ambiguous, $exact, $backToMain] = $report['segments'];
+        self::assertSame('customer', $ambiguous['kind']);
+        self::assertSame('ambiguous', $ambiguous['customer']['status']);
+        self::assertSame([$first, $second], array_column($ambiguous['customer']['candidates'], 'id'));
+        self::assertNull($report['lines'][1]['customer']['selected']);
+        self::assertSame($first, $exact['customer']['selected']['id']);
+        self::assertSame($main, $backToMain['customer']['selected']['id']);
+        self::assertSame('鲈鱼', $report['lines'][2]['goods']['selected']['name']);
+        self::assertSame('missing', $report['lines'][2]['quantity']['status']);
+        $outOfScope = CustomerReportCandidateLogic::recognize("主客户1\n桂鱼100条\n另一个主客户\n鲈鱼100条\n子客户3\n桂鱼1条\n子客户4\n鲈鱼1条");
+        self::assertSame(['none', 'none', 'none'], array_map(static fn(array $segment) => $segment['customer']['status'], $outOfScope['segments']));
+        self::assertSame([$main, null, null, null], array_map(static fn(array $line) => $line['customer']['selected']['id'] ?? null, $outOfScope['lines']));
+    }
+
+    public function test_section_before_a_main_is_identified_only_suggests_valid_receivers(): void
+    {
+        $main = $this->createCustomer('总店');
+        $child = $this->createCustomer('一级', $main);
+        $this->createCustomer('三级外送点', $child);
+        $this->createCustomerReportGoods('鲈鱼', 'NO-HEADER', '条');
+        $report = CustomerReportCandidateLogic::recognize("鲈鱼2条\n三级外送点\n鲈鱼3条\n一级\n鲈鱼4条");
+        self::assertNull($report['header']);
+        self::assertSame('none', $report['segments'][0]['customer']['status']);
+        self::assertNull($report['lines'][1]['customer']['selected']);
+        self::assertSame($child, $report['lines'][2]['customer']['selected']['id']);
+    }
+
+    public function test_unknown_goods_with_a_decimal_quantity_stay_in_the_current_customer_section(): void
+    {
+        $main = $this->createCustomer('总店');
+        $receiver = $this->createCustomer('北门', $main);
+        $this->createCustomerReportGoods('鲈鱼', 'DECIMAL', '斤');
+        $report = CustomerReportCandidateLogic::recognize("总店\n北门\n未知货0.1234斤\n鲈鱼10斤");
+        self::assertSame(['北门'], array_column($report['segments'], 'source_text'));
+        self::assertSame('未知货0.1234斤', $report['lines'][0]['source_text']);
+        self::assertSame('0.1234', $report['lines'][0]['quantity']['value']);
+        self::assertSame($receiver, $report['lines'][0]['customer']['selected']['id']);
+    }
+
+    public function test_standalone_exact_customer_name_with_spaces_and_a_customer_marker_remains_a_section(): void
+    {
+        $main = $this->createCustomer('总店');
+        $receiver = $this->createCustomer('客户 广场 分店', $main);
+        $this->createCustomerReportGoods('鲈鱼', 'SPACES', '条');
+        $report = CustomerReportCandidateLogic::recognize("总店\n鲈鱼2条\n客户 广场 分店\n鲈鱼3条\n客户：不存在 鲈鱼5条");
+        self::assertSame(['客户 广场 分店'], array_column($report['segments'], 'source_text'));
+        self::assertSame($receiver, $report['lines'][1]['customer']['selected']['id']);
+        self::assertNull($report['lines'][2]['customer']['selected']);
+        self::assertArrayNotHasKey('segment_id', $report['lines'][2]);
+    }
+
+    public function test_punctuation_in_customer_section_names_matches_its_literal_characters(): void
+    {
+        $main = $this->createCustomer('总店');
+        $this->createCustomer('江南A店', $main);
+        $literal = $this->createCustomer('东区!_50%门店', $main);
+        $this->createCustomerReportGoods('鲈鱼', 'LITERAL', '条');
+        $report = CustomerReportCandidateLogic::recognize("总店\n鲈鱼1条\n江南_店\n鲈鱼2条\n江南%店\n鲈鱼3条\n!_50%\n鲈鱼4条");
+        self::assertSame([null, null, $literal], array_map(static fn(array $segment) => $segment['customer']['selected']['id'] ?? null, $report['segments']));
+        self::assertSame([$main, null, null, $literal], array_map(static fn(array $line) => $line['customer']['selected']['id'] ?? null, $report['lines']));
+    }
+
     public function test_unique_chinese_prefix_selects_the_existing_goods_without_creating_an_alias(): void
     {
         $goodsId = $this->createCustomerReportGoods('老虎斑', 'TIGER', '斤');
@@ -42,6 +158,28 @@ final class CustomerReportRecognitionTest extends TestCase
         self::assertSame('条', $line['quantity']['unit']);
         self::assertSame('unverified', $line['quantity']['status']);
         self::assertSame(0, Db::name('goods_alias')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
+    public function test_customer_section_considers_exact_names_before_limiting_visible_candidates(): void
+    {
+        $main = $this->createCustomer('总店');
+        for ($index = 1; $index <= 20; $index++) {
+            $this->createCustomer('分店' . $index, $main);
+        }
+        $exact = $this->createCustomer('分店', $main);
+        $this->createCustomerReportGoods('鲈鱼', 'MANY-CHILDREN', '条');
+        $source = "总店\n鲈鱼2条\n分店\n鲈鱼10条";
+        $report = CustomerReportCandidateLogic::recognize($source);
+        self::assertSame($exact, $report['segments'][0]['customer']['selected']['id'] ?? null);
+        self::assertSame($exact, $report['lines'][1]['customer']['selected']['id']);
+
+        $anotherExact = $this->createCustomer('分店', $main);
+        $report = CustomerReportCandidateLogic::recognize($source);
+        $candidates = $report['segments'][0]['customer'];
+        self::assertSame('ambiguous', $candidates['status']);
+        self::assertNull($report['lines'][1]['customer']['selected']);
+        self::assertContains($exact, array_column($candidates['candidates'], 'id'));
+        self::assertContains($anotherExact, array_column($candidates['candidates'], 'id'));
     }
 
     public function test_single_character_prefix_requires_uniqueness_across_containing_goods_names(): void
@@ -119,7 +257,7 @@ final class CustomerReportRecognitionTest extends TestCase
     public function test_customer_names_containing_live_word_and_explicit_unknown_customers_are_not_rewritten(): void
     {
         $header = $this->createCustomer('独立客户');
-        $shop = $this->createCustomer('活力商行');
+        $shop = $this->createCustomer('活力商行', $header);
         $goods = $this->createCustomerReportGoods('鲈鱼', 'CUSTOMER-LIVE', '斤');
         $this->configureDimensions($goods, ['保鲜状态' => ['鲜活', '冰鲜']]);
         $line = CustomerReportCandidateLogic::recognize("独立客户\n活鲈鱼10斤")['lines'][0];
@@ -130,6 +268,23 @@ final class CustomerReportRecognitionTest extends TestCase
         $unknown = CustomerReportCandidateLogic::recognize("独立客户\n客户：不存在 活鲈鱼10斤")['lines'][0];
         self::assertSame('none', $unknown['customer']['status']);
         self::assertNull($unknown['customer']['selected']);
+    }
+
+    public function test_inline_customer_uses_the_declared_main_and_cannot_override_the_following_receiver(): void
+    {
+        $main = $this->createCustomer('总店');
+        $north = $this->createCustomer('北门', $main);
+        $south = $this->createCustomer('南门', $main);
+        $other = $this->createCustomer('别家总店');
+        $this->createCustomer('北门', $other);
+        $this->createCustomer('外地分店', $other);
+        $this->createCustomerReportGoods('桂鱼', 'INLINE-SCOPE', '条');
+        $report = CustomerReportCandidateLogic::recognize("总店\n南门\n客户：北门 桂鱼1条\n客户：外地分店 桂鱼2条\n桂鱼3条");
+        self::assertSame([$north, null, $south], array_map(static fn(array $line) => $line['customer']['selected']['id'] ?? null, $report['lines']));
+        self::assertSame('none', $report['lines'][1]['customer']['status']);
+        self::assertSame([null, null, 1], array_map(static fn(array $line) => $line['segment_id'] ?? null, $report['lines']));
+        $noMain = CustomerReportCandidateLogic::recognize('客户：北门 桂鱼1条')['lines'][0];
+        self::assertSame('ambiguous', $noMain['customer']['status']);
     }
 
     public function test_partial_specification_has_candidates_and_unavailable_requirement_never_chooses_another_sku(): void

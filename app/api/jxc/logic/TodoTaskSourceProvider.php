@@ -17,15 +17,9 @@ final class TodoTaskSourceProvider
             'S01' => self::reports($buffer),
             'S02' => self::printing($buffer),
             'S03' => self::tasks($buffer),
-            'S04' => self::deliveries($buffer),
             default => null,
         };
         return $buffer->finish();
-    }
-
-    private static function reports(TodoItemBuffer $buffer): void
-    {
-        // 已提交报货的主要履约提醒统一由 S04 按报货身份生成，避免与配送待办重复。
     }
 
     private static function printing(TodoItemBuffer $buffer): void
@@ -69,7 +63,7 @@ final class TodoTaskSourceProvider
             });
     }
 
-    private static function deliveries(TodoItemBuffer $buffer): void
+    private static function reports(TodoItemBuffer $buffer): void
     {
         if (self::any(['report.edit', 'task.control', 'delivery.confirm'])) {
             self::undeliveredReports($buffer);
