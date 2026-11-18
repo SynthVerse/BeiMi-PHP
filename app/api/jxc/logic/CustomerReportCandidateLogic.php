@@ -323,13 +323,29 @@ class CustomerReportCandidateLogic extends BaseLogic
             return ['status' => 'none', 'selected' => null, 'candidates' => []];
         }
 
+        $exactSingleCharacterNames = [];
+        if ($exactBoundary && preg_match('/^\p{Han}$/u', $normalizedNeedle)) {
+            // A single-character name or alias takes priority over a coinciding product code.
+            $exactSingleCharacterNames = $context['name_index'][$normalizedNeedle] ?? [];
+            if ($exactSingleCharacterNames === []) {
+                $singleCharacterMatch = self::singleCharacterGoodsMatch($needle, $normalizedNeedle, $context);
+                if ($singleCharacterMatch !== null) {
+                    return $singleCharacterMatch;
+                }
+            }
+        }
+
         $matchingTokens = $exactBoundary
             ? self::normalizedSuffixes($normalizedNeedle, $context['max_token_length'])
             : self::normalizedPrefixes($normalizedNeedle, $context['max_token_length']);
         $matchedNames = [];
         foreach ($matchingTokens as $normalizedToken) {
             $matchedThisToken = false;
-            foreach ($context['token_index'][$normalizedToken] ?? [] as $goodsId => $displayName) {
+            $goodsNames = $context['token_index'][$normalizedToken] ?? [];
+            if ($exactSingleCharacterNames !== []) {
+                $goodsNames = array_intersect_key($goodsNames, $exactSingleCharacterNames);
+            }
+            foreach ($goodsNames as $goodsId => $displayName) {
                 $matchedThisToken = true;
                 if (!isset($matchedNames[$goodsId])
                     || mb_strlen($displayName) > mb_strlen($matchedNames[$goodsId])
@@ -484,6 +500,43 @@ class CustomerReportCandidateLogic extends BaseLogic
         return 'C' . str_pad((string)$customerId, 8, '0', STR_PAD_LEFT);
     }
 
+    /** @return ?array{status:string,selected:?array<string,mixed>,candidates:array<int,array<string,mixed>>,match_type:string} */
+    private static function singleCharacterGoodsMatch(string $needle, string $normalizedNeedle, array $context): ?array
+    {
+        $goodsIds = [];
+        $hasPrefix = false;
+        foreach (array_keys($context['fuzzy_index'][$normalizedNeedle] ?? []) as $token) {
+            $nameMatches = $context['name_index'][$token] ?? [];
+            if ($nameMatches === []) {
+                continue;
+            }
+            $goodsIds += $nameMatches;
+            $hasPrefix = $hasPrefix || str_starts_with($token, $normalizedNeedle);
+        }
+        if ($goodsIds === []) {
+            return null;
+        }
+
+        // Decide uniqueness across the eligible catalog before limiting the displayed candidates.
+        $goodsIds = array_keys($goodsIds);
+        sort($goodsIds, SORT_NUMERIC);
+        $candidates = array_map(
+            static fn(int $id): array => $context['goods_catalog'][$id]['goods'],
+            array_slice($goodsIds, 0, self::LIMIT)
+        );
+        $selected = null;
+        if ($hasPrefix && count($goodsIds) === 1) {
+            $selected = $candidates[0] + ['matched_name' => $needle, 'match_type' => 'prefix'];
+            $candidates = [$selected];
+        }
+        return [
+            'status' => $selected !== null ? 'unique' : 'ambiguous',
+            'selected' => $selected,
+            'candidates' => $candidates,
+            'match_type' => $selected['match_type'] ?? 'fuzzy',
+        ];
+    }
+
     /** @return array<int,array<string,mixed>> */
     private static function fuzzyGoodsCandidates(string $needle, array $context): array
     {
@@ -587,6 +640,7 @@ class CustomerReportCandidateLogic extends BaseLogic
      *   unit_pattern:?string,
      *   goods_catalog:array<int,array{goods:array<string,mixed>,tokens:array<string,string>}>,
      *   token_index:array<string,array<int,string>>,
+     *   name_index:array<string,array<int,true>>,
      *   fuzzy_index:array<string,array<string,true>>,
      *   max_token_length:int,
      *   can_manage_goods:bool
@@ -601,6 +655,7 @@ class CustomerReportCandidateLogic extends BaseLogic
                 'unit_ids' => [],
                 'goods_catalog' => [],
                 'token_index' => [],
+                'name_index' => [],
                 'fuzzy_index' => [],
                 'max_token_length' => 0,
                 'can_manage_goods' => false,
@@ -624,16 +679,22 @@ class CustomerReportCandidateLogic extends BaseLogic
             ->toArray();
 
         $catalog = [];
+        $nameIndex = [];
         foreach ($rows as $row) {
             $goods = self::goods($row);
+            $goodsId = (int)$goods['id'];
             $tokens = [];
-            foreach ([(string)$goods['name'], (string)$goods['product_code']] as $displayName) {
+            foreach (['name', 'product_code'] as $field) {
+                $displayName = (string)$goods[$field];
                 $normalized = GoodsAliasService::normalize($displayName);
                 if ($normalized !== '') {
                     $tokens[$normalized] = $displayName;
+                    if ($field === 'name') {
+                        $nameIndex[$normalized][$goodsId] = true;
+                    }
                 }
             }
-            $catalog[(int)$goods['id']] = ['goods' => $goods, 'tokens' => $tokens];
+            $catalog[$goodsId] = ['goods' => $goods, 'tokens' => $tokens];
         }
 
         if ($catalog !== []) {
@@ -650,6 +711,7 @@ class CustomerReportCandidateLogic extends BaseLogic
                 $normalized = GoodsAliasService::normalize($displayName);
                 if ($normalized !== '' && isset($catalog[$goodsId])) {
                     $catalog[$goodsId]['tokens'][$normalized] = $displayName;
+                    $nameIndex[$normalized][$goodsId] = true;
                 }
             }
         }
@@ -677,6 +739,7 @@ class CustomerReportCandidateLogic extends BaseLogic
             'unit_ids' => array_change_key_case(Db::name('goods_unit')->where('tenant_id', $tenantId)->where('status', 1)->column('id', 'name'), CASE_LOWER),
             'goods_catalog' => $catalog,
             'token_index' => $tokenIndex,
+            'name_index' => $nameIndex,
             'fuzzy_index' => $fuzzyIndex,
             'max_token_length' => $maxTokenLength,
             'can_manage_goods' => self::canManageGoods(),

@@ -44,6 +44,62 @@ final class CustomerReportRecognitionTest extends TestCase
         self::assertSame(0, Db::name('goods_alias')->where('tenant_id', self::TENANT_ID)->count());
     }
 
+    public function test_single_character_prefix_requires_uniqueness_across_containing_goods_names(): void
+    {
+        $customer = $this->createCustomer('鲈');
+        $tiger = $this->createCustomerReportGoods('老虎斑', 'TIGER', '条');
+        $this->createCustomerReportGoods('炮弹', 'TRIGGERFISH', '斤');
+        $bass = $this->createCustomerReportGoods('鲈鱼', 'BASS', '斤');
+        $this->createCustomerReportGoods('桂鱼', 'MANDARIN', '条');
+
+        $report = CustomerReportCandidateLogic::recognize("鲈\n鲈110斤\n老虎10条");
+        self::assertSame($customer, $report['header']['customer']['selected']['id']);
+        [$bassLine, $tigerLine] = $report['lines'];
+        self::assertSame($bass, $bassLine['goods']['selected']['id']);
+        self::assertSame('prefix', $bassLine['goods']['match_type']);
+        self::assertSame('鲈', $bassLine['goods_needle']);
+        self::assertSame('110', $bassLine['quantity']['value']);
+        self::assertSame('斤', $bassLine['quantity']['unit']);
+        self::assertSame($tiger, $tigerLine['goods']['selected']['id']);
+
+        $seaBass = $this->createCustomerReportGoods('海鲈鱼', 'SEA-BASS', '斤');
+        $ambiguous = CustomerReportCandidateLogic::recognize('鲈110斤')['lines'][0];
+        self::assertSame('ambiguous', $ambiguous['goods']['status']);
+        self::assertNull($ambiguous['goods']['selected']);
+        self::assertSame([$bass, $seaBass], array_column($ambiguous['goods']['candidates'], 'id'));
+        self::assertSame('110', $ambiguous['quantity']['value']);
+        self::assertSame('斤', $ambiguous['quantity']['unit']);
+    }
+
+    public function test_single_character_recognition_prefers_goods_names_and_aliases_to_an_exact_product_code(): void
+    {
+        $otherGoods = $this->createCustomerReportGoods('桂鱼', 'MANDARIN', '斤');
+        Db::name('goods')->where('tenant_id', self::TENANT_ID)->where('id', $otherGoods)->update(['product_code' => '鲈']);
+        $codeOnly = CustomerReportCandidateLogic::recognize('鲈110斤')['lines'][0];
+        self::assertSame($otherGoods, $codeOnly['goods']['selected']['id']);
+
+        $seaBass = $this->createCustomerReportGoods('海鲈鱼', 'SEA-BASS', '斤');
+        $manual = CustomerReportCandidateLogic::recognize('鲈110斤')['lines'][0];
+        self::assertNull($manual['goods']['selected']);
+        self::assertSame([$seaBass], array_column($manual['goods']['candidates'], 'id'));
+
+        $this->createCustomerReportAlias($seaBass, '鲈鱼');
+        $prefix = CustomerReportCandidateLogic::recognize('鲈110斤')['lines'][0];
+        self::assertSame($seaBass, $prefix['goods']['selected']['id']);
+        self::assertSame('prefix', $prefix['goods']['match_type']);
+
+        $literalName = $this->createCustomerReportGoods('鲈', 'LITERAL-BASS', '斤');
+        $canonical = CustomerReportCandidateLogic::recognize('鲈110斤')['lines'][0];
+        self::assertSame($literalName, $canonical['goods']['selected']['id']);
+        self::assertSame('canonical', $canonical['goods']['match_type']);
+        Db::name('goods')->where('tenant_id', self::TENANT_ID)->where('id', $literalName)->update(['is_disabled' => 1]);
+
+        $this->createCustomerReportAlias($seaBass, '鲈');
+        $exact = CustomerReportCandidateLogic::recognize('鲈110斤')['lines'][0];
+        self::assertSame($seaBass, $exact['goods']['selected']['id']);
+        self::assertSame('alias', $exact['goods']['match_type']);
+    }
+
     public function test_specification_words_inherit_header_customer_and_choose_the_real_sale_sku(): void
     {
         $customerId = $this->createCustomer('独立客户1');
