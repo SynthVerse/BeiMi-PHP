@@ -8,6 +8,7 @@ use think\facade\Db;
 final class CustomerReportSalesDocument
 {
     public const CLOSED_REPORT_STATUSES = ['delivered_pending_settlement','partial_pending_settlement','undelivered','fulfilled_undelivered','completed','settled'];
+    private const TICKET_GOODS_NAME_LIMIT = 200;
     /** 与工作区数量保存共享事务；自动入账必须在外层提交后执行。 */
     public static function issueWithinTransaction(array $params): void
     {
@@ -74,6 +75,8 @@ final class CustomerReportSalesDocument
             $id=(int)$item['id']; $input=$requests[$id]??null;
             if(!$input) throw new \DomainException('每个有效商品都必须明确计价');
             $path='sales.lines.'.($positions[$id]??0); $units=self::pricingUnits($item);
+            $ticketName = CustomerReportWorkspace::field($path . '.ticket_goods_name',
+                static fn() => self::ticketGoodsName($input['ticket_goods_name'] ?? '', $item['goods_name']));
             $unitId=CustomerReportWorkspace::blank($input['price_unit_id']??null)?null:FinanceValue::id($input['price_unit_id']);
             $unit=$unitId===null?null:(array_column($units,null,'id')[$unitId]??null);
             if($unitId!==null && !$unit) throw new \DomainException('计价单位不属于当前商品有效绑定');
@@ -120,6 +123,7 @@ final class CustomerReportSalesDocument
             if ($mode === 'actual') { $quantity = $expected; $price = $referencePrice; }
             if ($referenceUnit && $referenceUnit['measure_type'] === 'count' && (($coverage[$referenceUnitId]??0) !== $factCount || $factCount === 0) && (int)$item['base_unit_id'] !== $referenceUnitId) $missing[] = ['path' => $path . '.reference_price_unit_id', 'message' => '请补充原计价单位的真实清点数量'];
             $normalizedInput['lines'][$positions[$id]] = array_merge($input, ['quantity_mode' => $mode, 'reference_price_unit_id' => $referenceUnitId,
+                'ticket_goods_name' => $ticketName,
                 'reference_price' => $referencePriceInput, 'price_unit_id' => $unitId,
                 'settlement_quantity' => $mode === 'actual' ? ($quantity ?? '') : ($input['settlement_quantity'] ?? ''),
                 'price' => $mode === 'actual' ? ($referencePriceInput ?? '') : ($input['price'] ?? '')]);
@@ -139,7 +143,8 @@ final class CustomerReportSalesDocument
                 'quantity_mode'=>$mode,'reference_price_unit_id'=>$referenceUnitId,'reference_price_unit_name'=>$referenceUnit['name']??'','reference_price'=>$referencePrice,
                 'zero_price_reason'=>$zero,'difference_reason'=>$difference,'has_quantity_difference'=>bccomp($quantity,$expected,4)!==0,'actual_delivery_weight'=>$hasWeight?$actual:null,'inventory_base_quantity'=>$base,
                 'quantity_facts'=>array_map(static fn($id,$qty)=>['unit_id'=>$id,'quantity'=>$qty],array_keys($facts),$facts),
-                'exception_fingerprint'=>self::exceptionFingerprint($item),'pricing_units'=>$units,'group_fingerprints'=>self::groupFingerprints($groups)];
+                'exception_fingerprint'=>self::exceptionFingerprint($item),'pricing_units'=>$units,'group_fingerprints'=>self::groupFingerprints($groups),
+                ...($ticketName === '' ? [] : ['ticket_goods_name' => $ticketName])];
         }
         if($requests || (!$lines && !$missing)) throw new \DomainException('商品计价明细与本报货不一致或存在重复');
         $roundingInput=array_key_exists('rounding_amount',$params)?$params['rounding_amount']:'0';
@@ -162,6 +167,18 @@ final class CustomerReportSalesDocument
             'precision'=>$precision,'payment_terms'=>$paymentTerms,'approval_permissions'=>array_values(array_filter(['settlement.bill',bccomp($rounding,'0',2)>0?'finance.sales.rounding':null,$dueOverridden?'finance.sales.due_override':null,!empty($precision['overridden'])?'finance.sales.precision_override':null])),
             'approval_owner_required'=>$ownerRequired,'overdue_acknowledged'=>!empty($params['overdue_acknowledged']),'issued_at'=>time(),
             ...($allowIncomplete ? ['workspace_input' => $normalizedInput] : [])];
+    }
+
+    private static function ticketGoodsName(mixed $input, string $standardName): string
+    {
+        if (!is_string($input) || preg_match('/[\p{Cc}\p{Zl}\p{Zp}]/u', $input) !== 0) {
+            throw new \DomainException('票据品名须为一行文字，不能包含控制字符');
+        }
+        $name = preg_replace('/^[\p{Zs}\x{FEFF}]+|[\p{Zs}\x{FEFF}]+$/u', '', $input);
+        if (mb_strlen($name) > self::TICKET_GOODS_NAME_LIMIT) {
+            throw new \DomainException('票据品名最多 ' . self::TICKET_GOODS_NAME_LIMIT . ' 个字符');
+        }
+        return $name === $standardName ? '' : $name;
     }
 
     public static function pricingUnits(array $item): array

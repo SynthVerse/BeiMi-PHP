@@ -74,6 +74,7 @@ final class FinanceSalesBatches
         $available = array_column(FinanceDeliveries::rows($customer, '1900-01-01', date('Y-m-d'), true), null, 'delivery_item_id');
         $currentTerms = FinanceSalesRules::terms($customer, date('Y-m-d'));
         $before = array_column($previous['lines'] ?? [], null, 'delivery_item_id'); $lines = []; $seen = []; $goods = '0.00'; $automatic = '0.000000';
+        $approvedLines = array_column($approval['snapshot']['lines'] ?? [], null, 'report_item_id');
         foreach ($input as $item) {
             if (!is_array($item)) { throw new \DomainException('交付组成格式无效'); }
             $delivery = FinanceValue::id($item['delivery_item_id'] ?? 0);
@@ -81,12 +82,16 @@ final class FinanceSalesBatches
             $source = $available[$delivery]; $pricing = [];
             if ($approval) {
                 if ((int)$source['report_id'] !== (int)$approval['document']['report_id']) { throw new \DomainException('交付来源不属于已审批报货'); }
-                $approvedLine = array_column($approval['snapshot']['lines'], null, 'report_item_id')[$source['report_item_id']] ?? null;
+                $approvedLine = $approvedLines[$source['report_item_id']] ?? null;
                 if (!$approvedLine || (int)$approvedLine['price_unit_id'] !== (int)($item['price_unit_id'] ?? 0)
                     || bccomp($approvedLine['price'], (string)($item['price'] ?? '-1'), 2) !== 0
                     || (string)($item['zero_price_reason'] ?? '') !== $approvedLine['zero_price_reason']
                     || (string)($item['difference_reason'] ?? '') !== $approvedLine['difference_reason']) { throw new \DomainException('交付计价与销售审批不一致'); }
             } elseif (!$original) { CustomerReportSalesDocument::assertExternalSettlementAllowed((int)$source['report_id']); }
+            $ticketName = $approvedLines[$source['report_item_id']]['ticket_goods_name'] ?? $before[$delivery]['ticket_goods_name'] ?? null;
+            if ($ticketName !== null) {
+                $source['ticket_goods_name'] = $ticketName;
+            }
 
             if (($source['fact_version'] ?? 1) >= 2) {
                 if (!empty($source['legacy_covered']) || ($source['coverage_document_id'] && (int)$source['coverage_document_id'] !== (int)($original['id'] ?? 0))) {

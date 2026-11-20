@@ -5,6 +5,7 @@ namespace tests\unit;
 
 use app\api\jxc\logic\CustomerReportLogic;
 use app\api\jxc\logic\DeliveryInventoryLogic;
+use app\api\jxc\logic\FinanceSalesOutput;
 use app\api\jxc\logic\TodoQueryLogic;
 use app\api\jxc\logic\WarehouseSkuBalanceService;
 use app\api\jxc\logic\WorkforceLogic;
@@ -243,6 +244,100 @@ final class CustomerReportWorkspaceTest extends TestCase
         self::assertNull($saved['sales_document']);
         self::assertSame('20', $saved['workspace']['input']['sales']['lines'][0]['price']);
         self::assertSame('100.0000', WarehouseSkuBalanceService::onHand($f['warehouse'], $f['sku']));
+    }
+
+    public function test_ticket_goods_name_survives_incomplete_save_and_posts_into_the_customer_sales_output(): void
+    {
+        $fixture = $this->fixture();
+        $original = $fixture['report']['items'][0];
+        $params = $this->payload($fixture);
+        $params['sales']['lines'][0]['price'] = '';
+        $params['sales']['lines'][0]['reference_price'] = '';
+        $params['sales']['lines'][0]['ticket_goods_name'] = '　鲜活鳜鱼 ';
+        $saved = CustomerReportLogic::saveWorkspace($params);
+        self::assertNotFalse($saved, CustomerReportLogic::getError());
+        self::assertSame('incomplete', $saved['workspace']['state']);
+
+        $fresh = CustomerReportLogic::detail(['id' => $saved['id']]);
+        self::assertSame('鲜活鳜鱼', $fresh['workspace']['ticket_goods_names'][$original['id']] ?? null);
+        self::assertSame($original['goods_name'], $fresh['items'][0]['goods_name']);
+        self::assertSame($original['goods_id'], $fresh['items'][0]['goods_id']);
+        self::assertSame($original['sku_id'], $fresh['items'][0]['sku_id']);
+        self::assertSame('100.0000', WarehouseSkuBalanceService::onHand($fixture['warehouse'], $fixture['sku']));
+
+        $fixture['report'] = $fresh;
+        $delivery = $this->payload($fixture, 'workspace-deliver-ticket-name');
+        unset($delivery['quantities']);
+        $delivery['intent'] = 'save_and_deliver';
+        $invalid = $delivery;
+        $invalid['sales']['lines'][0]['ticket_goods_name'] = "鳜鱼\x1b@";
+        self::assertFalse(CustomerReportLogic::saveWorkspace($invalid));
+        self::assertStringContainsString('控制字符', CustomerReportLogic::getError());
+        self::assertSame('100.0000', WarehouseSkuBalanceService::onHand($fixture['warehouse'], $fixture['sku']));
+        $issued = CustomerReportLogic::saveWorkspace($delivery);
+        self::assertNotFalse($issued, CustomerReportLogic::getError());
+        $document = $issued['sales_document'];
+        self::assertSame('posted', $document['accounting_status'], $document['blocked_reason']);
+        self::assertSame('200.00', $document['amount']);
+        self::assertSame('鲜活鳜鱼', $document['lines'][0]['ticket_goods_name'] ?? null);
+        self::assertSame($original['goods_name'], $document['lines'][0]['goods_name']);
+        self::assertSame('90.0000', WarehouseSkuBalanceService::onHand($fixture['warehouse'], $fixture['sku']));
+        $output = FinanceSalesOutput::document(['id' => $document['finance_document_id']]);
+        self::assertSame($document['order_sn'], $output['order_sn']);
+        self::assertSame('鲜活鳜鱼', $output['lines'][0]['name']);
+        self::assertSame('200.00', $output['order_money']);
+    }
+
+    public function test_ticket_goods_name_alone_creates_a_revision_and_posting_locks_it(): void
+    {
+        $fixture = $this->fixture();
+        $delivery = $this->payload($fixture);
+        $delivery['intent'] = 'save_and_deliver';
+        $delivery['sales']['lines'][0]['price'] = '';
+        $delivery['sales']['lines'][0]['reference_price'] = '';
+        $delivered = CustomerReportLogic::saveWorkspace($delivery);
+        self::assertNotFalse($delivered, CustomerReportLogic::getError());
+        self::assertNull($delivered['sales_document']);
+
+        $fixture['report'] = $delivered;
+        $issue = $this->payload($fixture, 'issue-ticket-name');
+        unset($issue['quantities']);
+        $issue['sales']['lines'][0]['ticket_goods_name'] = '001';
+        Db::name('finance_preparation')->where('tenant_id', self::TENANT_ID)->update(['activation_date' => date('Y-m-d', strtotime('+1 day'))]);
+        $issued = CustomerReportLogic::saveWorkspace($issue);
+        self::assertNotFalse($issued, CustomerReportLogic::getError());
+        self::assertSame('review_required', $issued['sales_document']['accounting_status']);
+        $original = $issued['sales_document'];
+
+        // A saved version can still be awaiting a posting retry.
+        Db::name('customer_report_sales_document')->where('tenant_id', self::TENANT_ID)->where('id', $original['id'])
+            ->update(['accounting_status' => 'pending_posting']);
+        Db::name('finance_preparation')->where('tenant_id', self::TENANT_ID)->update(['activation_date' => date('Y-m-01')]);
+        $fixture['report'] = $issued;
+        $revision = $this->payload($fixture, 'revise-ticket-name');
+        unset($revision['quantities']);
+        $revision['sales']['lines'][0]['ticket_goods_name'] = '1';
+        $saved = CustomerReportLogic::saveWorkspace($revision);
+        self::assertNotFalse($saved, CustomerReportLogic::getError());
+        $document = $saved['sales_document'];
+        self::assertSame($original['order_sn'], $document['order_sn']);
+        self::assertSame($original['version'] + 1, $document['version']);
+        self::assertSame($original['amount'], $document['amount']);
+        self::assertSame('001', $document['revisions'][1]['lines'][0]['ticket_goods_name']);
+        self::assertSame('1', $document['lines'][0]['ticket_goods_name']);
+        self::assertSame('posted', $document['accounting_status'], $document['blocked_reason']);
+        self::assertFalse($saved['workspace']['can_save_sales']);
+
+        $revision['idempotency_key'] = 'stale-ticket-name';
+        $revision['sales']['lines'][0]['ticket_goods_name'] = '鳜鱼';
+        self::assertFalse(CustomerReportLogic::saveWorkspace($revision));
+        self::assertStringContainsString('版本', CustomerReportLogic::getError());
+        $revision['version'] = $saved['version'];
+        $revision['workspace_version'] = $saved['workspace']['version'];
+        $revision['sales']['document_version'] = $document['version'];
+        self::assertFalse(CustomerReportLogic::saveWorkspace($revision));
+        self::assertStringContainsString('已入账', CustomerReportLogic::getError());
+        self::assertSame('1', FinanceSalesOutput::document(['id' => $document['finance_document_id']])['lines'][0]['name']);
     }
 
     public function test_delivery_rejection_rolls_back_workspace_and_quantity(): void

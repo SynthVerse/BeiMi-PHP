@@ -23,7 +23,8 @@ final class FinanceSalesOutput
         if ($pending) { $pending['can_resolve'] = FinanceAccess::owner() || FinanceValue::decode($pending['actor']) === [FinanceAccess::actor()['id'], FinanceAccess::actor()['type']]; unset($pending['actor']); }
         $lines = [];
         foreach ($result['lines'] as $line) {
-            $lines[] = ['id' => $line['delivery_item_id'], 'name' => $line['goods_name'], 'sku_name' => $line['sku_name'],
+            $lines[] = ['id' => $line['delivery_item_id'], 'name' => $line['ticket_goods_name'] ?? $line['goods_name'],
+                'goods_name' => $line['goods_name'], 'sku_name' => $line['sku_name'], 'ticket_goods_name' => $line['ticket_goods_name'] ?? null,
                 'delivery_date' => $line['date'], 'delivery_customer_name' => $line['delivery_customer_name'], 'covered_weight' => $line['covered_weight'],
                 'actual_delivery_weight' => $line['actual_weight'], 'customer_settlement_weight' => $line['settlement_weight'],
                 'base_unit_name' => $line['inventory_base_unit_name'] ?? '斤', 'pricing_unit_name' => $line['price_unit_name'] ?? '斤',

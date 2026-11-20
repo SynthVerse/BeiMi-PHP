@@ -28,12 +28,14 @@ final class CustomerReportWorkspace
         $latest = self::latest($reportId); $state = $latest['state'] ?? 'empty';
         $canQuantities = WorkforceLogic::hasPermission('settlement.weight'); $canSales = FinanceAccess::has('settlement.bill');
         $input = $latest && (!$report['sales_document'] || $state === 'incomplete') ? FinanceValue::decode($latest['input']) : null;
+        $ticketNames = array_column($input['sales']['lines'] ?? $report['sales_document']['lines'] ?? [], 'ticket_goods_name', 'report_item_id');
         if ($input !== null) {
             if (!$canSales) { unset($input['sales']); }
             if (!$canQuantities) { unset($input['quantities']); }
         }
         $document = $report['sales_document'] ?? null;
         return ['version' => (int)($latest['version'] ?? 0), 'state' => $state, 'input' => $input,
+            'ticket_goods_names' => array_filter($ticketNames, static fn($name): bool => is_string($name) && $name !== ''),
             'missing_fields' => $state === 'incomplete' ? array_values(array_filter(FinanceValue::decode($latest['missing_fields']), static fn($field) => str_starts_with($field['path'], 'sales.') ? $canSales : $canQuantities)) : [],
             'pending_notes' => ($canSales || FinanceAccess::has('settlement.view')) ? CustomerReportSalesNotes::pending($reportId) : [],
             'can_save_quantities' => $canQuantities && in_array($report['status'], ['submitted_ready','submitted_shortage','submitted_pending_measurement','partially_delivered_pending'], true),
@@ -84,7 +86,7 @@ final class CustomerReportWorkspace
                 foreach ($params['sales']['lines'] as $position => $line) {
                     if (!is_array($line)) throw new \DomainException('商品计价明细格式无效');
                     $previous = $previousLines[$line['report_item_id'] ?? 0] ?? [];
-                    foreach (['quantity_mode', 'reference_price_unit_id', 'reference_price'] as $field) {
+                    foreach (['quantity_mode', 'reference_price_unit_id', 'reference_price', 'ticket_goods_name'] as $field) {
                         if (!array_key_exists($field, $line) && array_key_exists($field, $previous)) $params['sales']['lines'][$position][$field] = $previous[$field];
                     }
                 }
@@ -217,6 +219,9 @@ final class CustomerReportWorkspace
 
     private static function sameApproval(array $before, array $after): bool
     {
+        if (array_column($before['lines'], 'ticket_goods_name', 'report_item_id') !== array_column($after['lines'], 'ticket_goods_name', 'report_item_id')) {
+            return false;
+        }
         foreach (['issued_at', 'approval_permissions', 'approval_owner_required'] as $key) { unset($before[$key], $after[$key]); }
         foreach (['before', 'after'] as $name) {
             unset($$name['precision']['actor'], $$name['precision']['confirmed_at']);
