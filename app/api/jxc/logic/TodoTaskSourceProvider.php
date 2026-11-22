@@ -15,30 +15,11 @@ final class TodoTaskSourceProvider
         $buffer = new TodoItemBuffer($source, 'task', $limit, $after, $filters);
         match ($source) {
             'S01' => self::reports($buffer),
-            'S02' => self::printing($buffer),
             'S03' => self::tasks($buffer),
+            'S28' => self::pendingGoods($buffer),
             default => null,
         };
         return $buffer->finish();
-    }
-
-    private static function printing(TodoItemBuffer $buffer): void
-    {
-        $canPrint = FinanceAccess::has('task.print');
-        $canReprint = FinanceAccess::has('task.reprint');
-        if (!$canPrint && !$canReprint) { return; }
-        self::taskChunks(static fn($query) => $query
-            ->whereIn('t.status', ['printable', 'print_failed']), static function (array $row) use ($buffer, $canPrint, $canReprint): void {
-                $failed = (string)$row['status'] === 'print_failed';
-                if (($failed || (int)$row['print_count'] > 0) ? !$canReprint : !$canPrint) { return; }
-                $date = (string)($row['delivery_date'] ?? '') ?: self::dateFromTime((int)$row['create_time']);
-                $buffer->add(self::item('task-print:' . $row['id'], 'fulfillment_task', (int)$row['id'],
-                    ($failed ? '工票打印失败：' : '工票待打印：') . self::taskName($row),
-                    (string)$row['customer_name'], $date, null,
-                    $failed ? ((string)$row['last_print_error'] ?: '打印结果未成功') : '尚未完成工票打印',
-                    $failed ? '重试打印' : '打印工票', 'fulfillment_task', ['id' => (int)$row['id'],
-                        'report_id' => (int)$row['report_id'], 'delivery_date' => $date]));
-            });
     }
 
     private static function tasks(TodoItemBuffer $buffer): void
@@ -76,6 +57,72 @@ final class TodoTaskSourceProvider
                     (string)$row['trip_date'], (string)$row['status'], '处理送站', 'line_trip',
                     ['id' => (int)$row['id'], 'delivery_date' => (string)$row['trip_date']]));
             });
+    }
+
+    private static function pendingGoods(TodoItemBuffer $buffer): void
+    {
+        if (!FinanceAccess::has('purchase.plan.manage')) { return; }
+        $tenant = FinanceAccess::tenant();
+        $handoffs = Db::name('pending_goods_return')->where('tenant_id', $tenant)
+            ->where('status', 'planned')->where('remaining_qty', '>', 0)
+            ->field('pending_goods_id,SUM(remaining_qty) AS handoff_qty')->group('pending_goods_id')->buildSql();
+        $query = Db::name('pending_goods')->alias('p')->where('p.tenant_id', $tenant)
+            ->leftJoin([$handoffs => 'h'], 'h.pending_goods_id=p.id')
+            ->leftJoin('goods g', 'g.id=p.goods_id AND g.tenant_id=p.tenant_id')
+            ->leftJoin('goods_sku s', 's.id=p.sku_id AND s.tenant_id=p.tenant_id')
+            ->leftJoin('customer_report r', 'r.id=p.report_id AND r.tenant_id=p.tenant_id')
+            ->leftJoin('purchase_plan_allocation a', "a.tenant_id=p.tenant_id AND p.origin_key LIKE 'allocation:%' AND a.id=CAST(SUBSTRING_INDEX(p.origin_key, ':', -1) AS UNSIGNED)")
+            ->leftJoin('purchase_plan_source src', "src.tenant_id=p.tenant_id AND src.report_id=p.report_id AND src.id=CASE WHEN p.origin_key LIKE 'plan-arrival:%:source:%' THEN CAST(SUBSTRING_INDEX(p.origin_key, ':', -1) AS UNSIGNED) ELSE a.source_id END")
+            ->field("p.id,p.report_id,p.goods_id,p.create_time,p.pending_qty,h.handoff_qty,r.sn,r.main_customer_name,src.customer_name,"
+                . "COALESCE(NULLIF(src.goods_name,''),g.name) AS goods_name,COALESCE(NULLIF(src.sku_name,''),s.sku_name) AS sku_name,"
+                . "COALESCE(NULLIF(src.base_unit_name,''),s.base_unit_name) AS base_unit_name");
+        $includeNativeReturns = !FinanceIntegration::active();
+        if ($includeNativeReturns) {
+            // 财务退货明细及退款沿用各自的待办，只有未启用账套的原业务退货需要在这里接续。
+            $resolutions = Db::name('pending_goods_return_resolution')->where('tenant_id', $tenant)
+                ->field("fact_id,SUM(CASE WHEN kind IN ('accepted','returned','loss') THEN quantity ELSE 0 END) AS resolved_qty,"
+                    . "SUM(CASE WHEN kind='accepted' THEN amount WHEN kind IN ('offset','refund') THEN -amount ELSE 0 END) AS refund_balance")
+                ->group('fact_id')->buildSql();
+            $openFacts = Db::name('pending_goods_return_fact')->alias('f')
+                ->join('pending_goods_return pr', 'pr.tenant_id=f.tenant_id AND pr.id=f.pending_return_id')
+                ->leftJoin([$resolutions => 'x'], 'x.fact_id=f.id')
+                ->where('f.tenant_id', $tenant)->whereNull('f.finance_line_id')->where('f.closed', 0)
+                ->field('pr.pending_goods_id,SUM(f.quantity-COALESCE(x.resolved_qty,0)) AS supplier_qty,SUM(COALESCE(x.refund_balance,0)) AS refund_balance')
+                ->group('pr.pending_goods_id')->buildSql();
+            $query->leftJoin([$openFacts => 'f'], 'f.pending_goods_id=p.id')->field('f.supplier_qty,f.refund_balance');
+        }
+        $query->where(static function ($scope) use ($includeNativeReturns) {
+            $scope->where('p.pending_qty', '>', 0)->whereOr('h.handoff_qty', '>', 0);
+            if ($includeNativeReturns) { $scope->whereOr('f.pending_goods_id', '>', 0); }
+        });
+        $last = 0;
+        do {
+            $rows = (clone $query)->where('p.id', '>', $last)->order('p.id')->limit(500)->select()->toArray();
+            foreach (TodoQueryBudget::candidates($rows) as $row) {
+                $last = (int)$row['id'];
+                $quantities = [];
+                foreach (['pending_qty' => '待定', 'handoff_qty' => '待退离', 'supplier_qty' => '待供方确认'] as $field => $label) {
+                    if (bccomp((string)($row[$field] ?? '0'), '0', 4) > 0) {
+                        $unit = $row['base_unit_name'] ?: '（单位待核实）';
+                        $quantities[] = $label . ' ' . rtrim(rtrim((string)$row[$field], '0'), '.') . $unit;
+                    }
+                }
+                if (bccomp((string)($row['refund_balance'] ?? '0'), '0', 2) > 0) {
+                    $quantities[] = '待处理款项 ¥' . bcadd((string)$row['refund_balance'], '0', 2);
+                }
+                $goods = (string)$row['goods_name'] ?: '商品 #' . $row['goods_id'];
+                $sku = trim((string)$row['sku_name']);
+                $customer = $row['customer_name'] ?: $row['main_customer_name'];
+                $report = $row['sn'] ?: '报货单 #' . $row['report_id'];
+                $buffer->add(self::item('pending-goods:' . $last, 'pending_goods', $last,
+                    $sku !== '' && $sku !== $goods ? "$goods · $sku" : $goods,
+                    implode(' · ', array_filter([$customer, $report])),
+                    self::dateFromTime((int)$row['create_time']), null,
+                    $quantities ? implode(' · ', $quantities) : '退货后续待处理',
+                    bccomp((string)$row['pending_qty'], '0', 4) > 0 ? '处理余货' : '继续退货',
+                    'pending_goods', ['id' => $last, 'report_id' => (int)$row['report_id']]));
+            }
+        } while (count($rows) === 500);
     }
 
     private static function undeliveredReports(TodoItemBuffer $buffer): void

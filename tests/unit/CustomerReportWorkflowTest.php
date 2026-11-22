@@ -481,6 +481,57 @@ final class CustomerReportWorkflowTest extends TestCase
         self::assertContains($pending['lists'][0]['status'], ['submitted_ready', 'submitted_shortage']);
     }
 
+    public function test_pending_list_puts_the_selected_date_first_before_paginating_all_dates(): void
+    {
+        $query = [
+            'status_scope' => 'pending',
+            'priority_delivery_date' => '2026-11-19',
+            'page_size' => 20,
+        ];
+        $empty = CustomerReportLogic::lists($query);
+        self::assertSame(0, $empty['count']);
+        self::assertSame([], $empty['delivery_date_counts']);
+
+        $addReport = static fn(string $key, string $status, ?string $date, int $tenant = self::TENANT_ID, ?int $deletedAt = null): int =>
+            (int)Db::name('customer_report')->insertGetId([
+                'tenant_id' => $tenant,
+                'sn' => $key,
+                'idempotency_key' => $key,
+                'status' => $status,
+                'delivery_date' => $date,
+                'delete_time' => $deletedAt,
+            ]);
+
+        $selectedId = $addReport('pending-selected', 'submitted_pending_measurement', '2026-11-19');
+        for ($i = 0; $i < 24; $i++) {
+            $addReport('pending-other-' . $i, 'submitted_shortage', '2026-11-18');
+        }
+        $addReport('pending-other-tenant', 'submitted_ready', '2026-11-20', self::OTHER_TENANT_ID);
+        $addReport('pending-completed', 'completed', '2026-11-19');
+        $addReport('pending-cancelled', 'cancelled', '2026-11-18');
+        $addReport('pending-deleted', 'submitted_ready', '2026-11-18', self::TENANT_ID, time());
+
+        $first = CustomerReportLogic::lists($query);
+        $second = CustomerReportLogic::lists($query + ['page_no' => 2]);
+
+        self::assertSame(25, $first['count']);
+        self::assertSame([
+            ['delivery_date' => '2026-11-19', 'count' => 1],
+            ['delivery_date' => '2026-11-18', 'count' => 24],
+        ], $first['delivery_date_counts']);
+        self::assertSame($first['delivery_date_counts'], $second['delivery_date_counts']);
+        self::assertCount(20, $first['lists']);
+        self::assertSame($selectedId, (int)$first['lists'][0]['id']);
+        self::assertSame(array_fill(0, 5, '2026-11-18'), array_column($second['lists'], 'delivery_date'));
+        self::assertSame([], array_intersect(array_column($first['lists'], 'id'), array_column($second['lists'], 'id')));
+
+        Db::name('customer_report')->where('id', $selectedId)->update(['status' => 'completed']);
+        $addReport('pending-same-date', 'submitted_ready', '2026-11-18');
+        $sameDate = CustomerReportLogic::lists($query);
+        self::assertSame(25, $sameDate['count']);
+        self::assertSame([['delivery_date' => '2026-11-18', 'count' => 25]], $sameDate['delivery_date_counts']);
+    }
+
     public function test_edit_uses_new_version_and_releases_the_reservation_delta(): void
     {
         $customerId = $this->createCustomer('编辑客户');

@@ -52,6 +52,12 @@ final class PendingGoodsLogic extends BaseLogic
         self::createHold('batch:' . $batch['id'], $report, (int)$batch['id'], $plan, $quantity);
     }
 
+    /** 已取消来源的在途采购到货，保留现有锁定并转待定，不二次入库。 */
+    public static function capturePlanArrivalWithinTransaction(int $report,int $batch,int $arrivalLine,int $source,array $item,string $qty): void
+    {
+        self::createHold('plan-arrival:'.$arrivalLine.':source:'.$source,$report,$batch,$item,$qty);
+    }
+
     private static function createHold(string $origin, int $report, int $batch, array $item, string $quantity): void
     {
         if (self::query()->where('origin_key', $origin)->lock(true)->find()) {

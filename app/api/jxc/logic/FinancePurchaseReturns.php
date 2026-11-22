@@ -12,6 +12,10 @@ final class FinancePurchaseReturns
     public static function options(int $vendor, array $params): array
     {
         $tenant = FinanceAccess::tenant(); $page = FinanceValue::id($params['page'] ?? 1);
+        $originalSupply = FinanceValue::id($params['original_supply_order_id'] ?? 0, true);
+        $pendingReturn = FinanceValue::id($params['pending_return_id'] ?? 0, true);
+        $context = $pendingReturn ? PendingGoodsReturnService::sourceContext($pendingReturn, $vendor, $originalSupply) : null;
+        if ($context) { $originalSupply = $context['original_supply_order_id']; }
         $out = Db::name('finance_purchase_return_line')->where('tenant_id', $tenant)->field('arrival_line_id,quantity')->buildSql(false);
         $back = Db::name('finance_purchase_return_resolution')->where('tenant_id', $tenant)->where('kind', 'returned')->field('arrival_line_id,-quantity AS quantity')->buildSql(false);
         $returned = '(SELECT arrival_line_id,SUM(quantity) AS quantity FROM (' . $out . ' UNION ALL ' . $back . ') AS actual_returns GROUP BY arrival_line_id)';
@@ -20,19 +24,25 @@ final class FinancePurchaseReturns
         $historical = "CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(a.snapshot,'$.historical_returned_quantity')),0) AS DECIMAL(18,4))";
         if ((int)($params['arrival_line_id'] ?? 0) > 0) { $query->where('a.id', FinanceValue::id($params['arrival_line_id'])); }
         else { $query->whereRaw('a.actual_quantity>COALESCE(r.quantity,0)+' . $historical); }
-        if ((int)($params['original_supply_order_id'] ?? 0) > 0) {
-            $query->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(a.snapshot,'$.original_supply_order_id'))=?", [FinanceValue::id($params['original_supply_order_id'])]);
+        if ($originalSupply > 0) {
+            $query->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(a.snapshot,'$.original_supply_order_id'))=?", [$originalSupply]);
+        }
+        if ($context) {
+            $query->where('a.warehouse_id', $context['warehouse_id'])->where('a.sku_id', $context['sku_id'])
+                ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(a.snapshot,'$.base_unit_id'))=?", [$context['base_unit_id']]);
         }
         $keyword = FinanceValue::text($params['keyword'] ?? '', 60, false);
         if ($keyword !== '') { $query->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(a.snapshot,'$.goods_name')) LIKE ?", ['%' . addcslashes($keyword, '%_\\') . '%']); }
-        $size = !empty($params['original_supply_order_id']) ? 200 : 20;
+        $size = $originalSupply ? 200 : 20;
         $rows = $query->field('a.*,a.actual_quantity-COALESCE(r.quantity,0)-' . $historical . ' AS returnable_quantity')->order('a.business_date,a.id')->limit(($page - 1) * $size, $size + 1)->select()->toArray();
         $more = count($rows) > $size; $rows = array_slice($rows, 0, $size); $arrivals = [];
         foreach ($rows as $row) {
             $arrivals[] = array_merge(FinanceValue::decode($row['snapshot']), ['arrival_line_id' => (int)$row['id'], 'arrival_document_id' => (int)$row['document_id'],
-                'subject_id' => $vendor, 'actual_date' => $row['business_date'], 'returnable_quantity' => bcadd((string)$row['returnable_quantity'], '0', 4)]);
+                'subject_id' => $vendor, 'warehouse_id' => (int)$row['warehouse_id'], 'sku_id' => (int)$row['sku_id'],
+                'actual_date' => $row['business_date'], 'returnable_quantity' => bcadd((string)$row['returnable_quantity'], '0', 4)]);
         }
         return ['sources' => [], 'has_more' => false, 'arrivals' => $arrivals, 'arrival_has_more' => $more,
+            'pending_return_context' => $context,
             'warehouses' => Db::name('warehouse')->where('tenant_id', $tenant)->field('id,name')->order('id')->select()->toArray()];
     }
 

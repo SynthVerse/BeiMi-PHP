@@ -9,9 +9,16 @@ use think\facade\Db;
 /** 页面和 Word 共用的报货快照；数量只来自报货行，不累加工序任务。 */
 final class CustomerReportOverviewLogic extends BaseLogic
 {
-    private const STATUSES = ['submitted_ready', 'submitted_shortage', 'submitted_pending_measurement', 'completed'];
-    private const STATUS_LABELS = ['submitted_ready' => '已报货', 'submitted_shortage' => '有缺货',
-        'submitted_pending_measurement' => '待称重', 'completed' => '已完成', 'cancelled' => '已取消'];
+    private const PENDING = ['submitted_ready', 'submitted_shortage', 'submitted_pending_measurement', 'delivery_pending', 'partially_delivered_pending'];
+    private const DELIVERED = ['delivered_pending_settlement', 'settled', 'completed'];
+    private const CLOSED_EXCEPTIONS = ['partial_pending_settlement', 'undelivered', 'fulfilled_undelivered'];
+    private const STATUS_LABELS = [
+        'submitted_ready' => '待交付', 'submitted_shortage' => '有缺货', 'submitted_pending_measurement' => '待称重',
+        'delivery_pending' => '待交付', 'partially_delivered_pending' => '部分交付 · 待继续',
+        'delivered_pending_settlement' => '已交付', 'settled' => '已交付', 'completed' => '已交付',
+        'partial_pending_settlement' => '部分交付', 'undelivered' => '未送达', 'fulfilled_undelivered' => '未送达',
+        'cancelled' => '已取消',
+    ];
 
     public static function overview(array $params): array|false
     {
@@ -80,8 +87,8 @@ final class CustomerReportOverviewLogic extends BaseLogic
     private static function snapshot(int $tenantId, array $filters): array
     {
         $statuses = match ($filters['status']) {
-            'pending' => array_slice(self::STATUSES, 0, 3), 'completed' => ['completed'],
-            'cancelled' => ['cancelled'], default => self::STATUSES,
+            'pending' => self::PENDING, 'completed' => self::DELIVERED,
+            'cancelled' => ['cancelled'], default => [...self::PENDING, ...self::DELIVERED, ...self::CLOSED_EXCEPTIONS],
         };
         $query = Db::name('customer_report')->where('tenant_id', $tenantId)->whereNull('delete_time')
             ->where('delivery_date', $filters['delivery_date'])->whereIn('status', $statuses);
@@ -161,7 +168,83 @@ final class CustomerReportOverviewLogic extends BaseLogic
             'customers' => array_values($customers), 'goods_summary' => array_values($goods)];
         $data['snapshot_hash'] = hash('sha256', json_encode($data, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR));
         $data['generated_at'] = date('Y-m-d H:i:s');
+        // 收款可以在汇总查询后发生。只读标记不进入备货 Word 的快照口径。
+        $data['settlement_notices'] = self::settlementNotices($tenantId, $reports);
         return $data;
+    }
+
+    private static function settlementNotices(int $tenantId, array $reports): array
+    {
+        $statuses = array_column(array_filter($reports, static fn(array $report): bool => in_array($report['status'], self::DELIVERED, true)), 'status', 'id');
+        if (!$statuses) { return []; }
+        $canReadPrice = FinanceAccess::has('settlement.view') || FinanceAccess::has('settlement.bill');
+        $canReadDebt = FinanceAccess::has('finance.receivable.view');
+        if (!$canReadPrice && !$canReadDebt) { return []; }
+
+        $orders = Db::name('sales_order')->where('tenant_id', $tenantId)->where('source_type', 'customer_report')
+            ->whereIn('source_id', array_keys($statuses))->field('id,source_id,settlement_status')->select()->toArray();
+        $notices = [];
+        if ($canReadPrice) {
+            $documents = Db::name('customer_report_sales_document')->where('tenant_id', $tenantId)
+                ->whereIn('report_id', array_keys($statuses))->column('accounting_status', 'report_id');
+            $formal = array_column(array_filter($orders, static fn(array $order): bool => $order['settlement_status'] === 'formal'), 'id', 'source_id');
+            foreach ($statuses as $reportId => $status) {
+                $pricing = match ($documents[$reportId] ?? null) {
+                    'pending_amount' => '待补价',
+                    'pending_posting' => '待入账',
+                    'review_required' => '金额待复核',
+                    null => $status === 'delivered_pending_settlement' && !isset($formal[$reportId]) ? '待补价' : null,
+                    default => null,
+                };
+                if ($pricing !== null) { $notices[$reportId]['pricing'] = $pricing; }
+            }
+        }
+        if ($canReadDebt && $orders) {
+            foreach (self::reportsWithOpenReceivables($tenantId, array_column($orders, 'source_id', 'id')) as $reportId) {
+                $notices[$reportId]['receipt'] = '仍欠款';
+            }
+        }
+        return $notices;
+    }
+
+    private static function reportsWithOpenReceivables(int $tenantId, array $reportByOrder): array
+    {
+        $orderIds = array_keys($reportByOrder);
+        $refs = [];
+        $versions = Db::name('finance_sales_version')->where('tenant_id', $tenantId)->whereIn('order_id', $orderIds)
+            ->field('source_ref,order_id')->distinct(true)->select()->toArray();
+        foreach ($versions as $version) {
+            if (preg_match('/^n:[1-9][0-9]*$/D', $version['source_ref'])) {
+                $refs[$version['source_ref']] = $reportByOrder[$version['order_id']];
+            }
+        }
+
+        $documentIds = Db::name('finance_sales_coverage')->where('tenant_id', $tenantId)->whereIn('order_id', $orderIds)
+            ->distinct(true)->column('document_id');
+        if ($documentIds) {
+            $sources = Db::name('finance_source')->where('tenant_id', $tenantId)->where('category', 'receivable')
+                ->whereIn('document_id', $documentIds)->field('id,snapshot')->select()->toArray();
+            foreach ($sources as $source) {
+                // 合并结算可包含多张原单，只保留真正属于这些原单的应收来源。
+                $reportId = $reportByOrder[FinanceValue::decode($source['snapshot'])['order_id'] ?? 0] ?? null;
+                if ($reportId) { $refs['n:' . $source['id']] = $reportId; }
+            }
+        }
+        if (!$refs) { return []; }
+
+        $amounts = Db::name('finance_source')->where('tenant_id', $tenantId)->where('category', 'receivable')
+            ->whereIn('id', array_map(static fn(string $reference): string => substr($reference, 2), array_keys($refs)))->column('amount', 'id');
+        $changes = Db::name('finance_entry')->where('tenant_id', $tenantId)->where('metric', 'balance')
+            ->whereIn('source_ref', array_keys($refs))->group('source_ref')->field('source_ref,SUM(amount) AS delta')->select()->toArray();
+        $changesBySource = array_column($changes, 'delta', 'source_ref');
+        $openReports = [];
+        foreach ($amounts as $sourceId => $amount) {
+            $reference = 'n:' . $sourceId;
+            if (bccomp(bcadd((string)$amount, (string)($changesBySource[$reference] ?? '0'), 2), '0', 2) > 0) {
+                $openReports[$refs[$reference]] = true;
+            }
+        }
+        return array_keys($openReports);
     }
 
     private static function line(array $item, array $groups): array

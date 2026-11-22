@@ -257,12 +257,19 @@ Route::group('', function () {
     Route::get('jxc/pending_goods/recovery_preview', 'jxc.PendingGoods/recoveryPreview');
     Route::post('jxc/pending_goods/action', 'jxc.PendingGoods/action');
     Route::post('jxc/pending_goods/recover', 'jxc.PendingGoods/recover');
-    Route::get('jxc/purchase_plan/lists', 'jxc.PurchasePlan/lists');
-    Route::get('jxc/purchase_plan/detail', 'jxc.PurchasePlan/detail');
-    Route::get('jxc/purchase_plan/arrival_preview', 'jxc.PurchasePlan/arrivalPreview');
-    Route::post('jxc/purchase_plan/create', 'jxc.PurchasePlan/create');
-    Route::post('jxc/purchase_plan/attach_arrival', 'jxc.PurchasePlan/attachArrival');
-    Route::post('jxc/purchase_plan/terminate', 'jxc.PurchasePlan/terminate');
+    Route::get('jxc/purchase_plans/demands', 'jxc.PurchasePlan/demands');
+    Route::get('jxc/purchase_plans/buyers', 'jxc.PurchasePlan/buyers');
+    Route::get('jxc/purchase_plans/lists', 'jxc.PurchasePlan/lists');
+    Route::get('jxc/purchase_plans/detail', 'jxc.PurchasePlan/detail');
+    Route::get('jxc/purchase_plans/preview', 'jxc.PurchasePlan/preview');
+    Route::get('jxc/purchase_plans/arrival_preview', 'jxc.PurchasePlan/arrivalPreview');
+    Route::post('jxc/purchase_plans/verify_stock', 'jxc.PurchasePlan/verifyStock');
+    Route::post('jxc/purchase_plans/create', 'jxc.PurchasePlan/create');
+    Route::post('jxc/purchase_plans/prepare_print', 'jxc.PurchasePlan/preparePrint');
+    Route::post('jxc/purchase_plans/print_result', 'jxc.PurchasePlan/printResult');
+    Route::post('jxc/purchase_plans/record_bought', 'jxc.PurchasePlan/recordBought');
+    Route::post('jxc/purchase_plans/recall', 'jxc.PurchasePlan/recall');
+    Route::post('jxc/purchase_plans/attach_arrival', 'jxc.PurchasePlan/attachArrival');
 
     // === 任务调度、纸质工票与员工系统 ===
     Route::get('jxc/tasks/dashboard', 'jxc.FulfillmentTask/dashboard');

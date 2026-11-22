@@ -68,16 +68,22 @@ class CustomerReportLogic extends BaseLogic
         return self::detailById((int)($params['id'] ?? 0));
     }
 
-    /** @return array{lists:array<int,array<string,mixed>>,count:int,page_no:int,page_size:int} */
+    /** @return array{lists:array<int,array<string,mixed>>,count:int,page_no:int,page_size:int,tenant_id?:int,delivery_date_counts?:list<array{delivery_date:?string,count:int}>}|false */
     public static function lists(array $params): array|false
     {
         self::clearError();
         if (!WorkforceLogic::requirePermission('report.view')) {
             return false;
         }
+        if (array_key_exists('sn', $params)) {
+            return self::findByReportNumber($params);
+        }
         $pageNo = max(1, (int)($params['page_no'] ?? 1));
         $pageSize = min(100, max(1, (int)($params['page_size'] ?? 20)));
         $statusScope = (string)($params['status_scope'] ?? '');
+        if ($statusScope === 'pending') {
+            return self::pendingLists($pageNo, $pageSize, (string)($params['priority_delivery_date'] ?? ''));
+        }
         $count = self::listQuery($statusScope)->count();
         $order = $statusScope === 'cancelled' ? ['cancelled_time' => 'desc', 'id' => 'desc'] : ['id' => 'desc'];
         return [
@@ -86,6 +92,50 @@ class CustomerReportLogic extends BaseLogic
             'page_no' => $pageNo,
             'page_size' => $pageSize,
         ];
+    }
+
+    private static function findByReportNumber(array $params): array|false
+    {
+        $sn = $params['sn'];
+        if (!is_string($sn) || !preg_match('/^CR[0-9]{18}$/D', $sn)) {
+            self::setError('请输入完整报货单号');
+            return false;
+        }
+        $tenantId = self::tenantId();
+        $expectedTenantId = $params['expected_tenant_id'] ?? $tenantId;
+        if ($tenantId <= 0 || (!is_int($expectedTenantId) && !is_string($expectedTenantId)) || (string)$expectedTenantId !== (string)$tenantId) {
+            self::setError('门店已变化，请返回后重新查询');
+            return false;
+        }
+        $rows = CustomerReport::where('tenant_id', $tenantId)->where('sn', $sn)
+            ->field('id,tenant_id,sn,status,delivery_date')->limit(2)->select()->toArray();
+        return ['tenant_id' => $tenantId, 'lists' => $rows, 'count' => count($rows), 'page_no' => 1, 'page_size' => 2];
+    }
+
+    private static function pendingLists(int $pageNo, int $pageSize, string $priorityDate): array
+    {
+        return Db::transaction(static function () use ($pageNo, $pageSize, $priorityDate): array {
+            $query = self::listQuery('pending');
+            $dateCounts = (clone $query)->fieldRaw('delivery_date, COUNT(*) AS report_count')
+                ->group('delivery_date')->order('delivery_date', 'desc')->select()->toArray();
+            $dateCounts = array_map(static fn(array $row): array => [
+                'delivery_date' => $row['delivery_date'],
+                'count' => (int)$row['report_count'],
+            ], $dateCounts);
+
+            if ($priorityDate !== '') {
+                $query->orderRaw('CASE WHEN delivery_date = ? THEN 0 ELSE 1 END', [$priorityDate])
+                    ->order('delivery_date', 'desc');
+            }
+
+            return [
+                'lists' => $query->order('id', 'desc')->page($pageNo, $pageSize)->select()->toArray(),
+                'count' => array_sum(array_column($dateCounts, 'count')),
+                'page_no' => $pageNo,
+                'page_size' => $pageSize,
+                'delivery_date_counts' => $dateCounts,
+            ];
+        });
     }
 
     private static function listQuery(string $statusScope)
@@ -194,7 +244,7 @@ class CustomerReportLogic extends BaseLogic
                 $reportTasks = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('report_id', $reportId)
                     ->order('id asc')->lock(true)->field('id,status')->select()->toArray();
                 if (self::hasActivePurchasePlanSource($reportId, true)) {
-                    self::setError('报货缺货来源已归入活动采购计划，请先终止采购计划后再编辑');
+                    self::setError('报货缺货来源已有采购安排，请先收回采购指令并核清在途与实物去向后再编辑');
                     return false;
                 }
                 $startedTaskIds = [];
@@ -375,7 +425,7 @@ class CustomerReportLogic extends BaseLogic
                 CustomerReportSalesDocument::afterReportChange($reportId);
                 return self::detailById($reportId);
             });
-        } catch (\Throwable) { if (!self::hasError()) { self::setError('取消客户报货失败'); } return false; }
+        } catch (\Throwable $error) { if (!self::hasError()) { self::setError($error instanceof \DomainException ? $error->getMessage() : '取消客户报货失败'); } return false; }
     }
 
     /** @return array<string,mixed>|false */
@@ -654,6 +704,22 @@ class CustomerReportLogic extends BaseLogic
         FulfillmentTaskLogic::syncForReport((int)$report->id);
         return true;
     }
+    /** 采购预留已在同一事务内取得后，刷新报货汇总及工票，不制造估重事实。 */
+    public static function refreshProcurementWithinTransaction(int $reportId): void
+    {
+        $report=Db::name('customer_report')->where('tenant_id',self::tenantId())->where('id',$reportId)->lock(true)->find();
+        if(!$report||$report['status']==='cancelled'){return;}
+        $rows=Db::name('customer_report_item')->where('tenant_id',self::tenantId())->where('report_id',$reportId)->whereNull('delete_time')->select()->toArray();
+        foreach($rows as &$row){
+            if(in_array($row['status'],['cancelled','undelivered'])){continue;}
+            $status=($row['estimate_status']??'')==='unknown'?'submitted_pending_measurement':(bccomp($row['shortage_base_qty'],'0',4)===0?'submitted_ready':'submitted_shortage');
+            Db::name('customer_report_item')->where('tenant_id',self::tenantId())->where('id',$row['id'])->update(['status'=>$status]);$row['status']=$status;
+        }
+        unset($row);
+        Db::name('customer_report')->where('tenant_id',self::tenantId())->where('id',$reportId)->update(self::summary($rows)+['version'=>(int)$report['version']+1,'update_time'=>time()]);
+        FulfillmentTaskLogic::syncForReport($reportId);
+    }
+
     /** @param array<int,array<string,mixed>> $items */
     private static function lockGoodsForConversion(array $items): void
     {
@@ -888,7 +954,7 @@ class CustomerReportLogic extends BaseLogic
             ->where('s.tenant_id', self::tenantId())
             ->where('s.report_id', $reportId)
             ->where('s.status', '<>', 'released')
-            ->whereIn('p.status', ['pending', 'partial'])
+            ->whereRaw('s.planned_qty > 0')
             ->field('s.id');
         if ($lock) {
             $query->lock(true);

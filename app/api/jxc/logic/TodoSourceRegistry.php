@@ -12,7 +12,6 @@ final class TodoSourceRegistry
     {
         return [
             'S01' => self::source('报货处理', 'task_reports', '已提交且仍有未交付余量的报货，或未完成的送站趟次', '整单实际交付、剩余量明确处理，或趟次完成或关闭', '报货需 report.edit、task.control 或 delivery.confirm；趟次需 delivery.line.manage', 'delivery-report:{id} 或 line-trip:{id}', '交付或趟次日期；跨天保留', 'report 或 line_trip'),
-            'S02' => self::source('工票待打印与打印失败', 'task_printing', '存在可执行打印或重试动作', '打印成功后消除本动作', 'task.print 或 task.reprint（按状态）', 'task-print:{id}', '交付日期', 'fulfillment_task'),
             'S03' => self::source('任务配置、异常与纸票控制', 'task_exceptions', '未解除异常且具备对应动作权限', '异常解除或任务结案', 'task.control 加异常专属权限', 'task:{id}', '交付日期', 'fulfillment_task'),
             'S05' => self::source('已提交财务单据', 'finance_documents', 'pending 且具备该类型确认权限', '确认或撤回后重算', 'FinanceDocumentPolicy 当前阶段权限', 'finance-document:{id}', '单据业务日期', 'finance_document'),
             'S06' => self::source('销售交付待结算与重量差', 'sales_settlement', '待结算或待重量差确认且可操作', '正式结算或差异结案', 'settlement.bill；重量差为最高权限', 'sales-settlement:{order_id}', '销售业务日期', 'sales_settlement'),
@@ -37,6 +36,7 @@ final class TodoSourceRegistry
             'S25' => self::source('主动稍后继续的财务草稿', 'finance_draft_continuations', 'draft 且显式 resume_requested=1', '提交、确认或撤销待续提醒', '该业务准备／编辑权限', 'finance-resume:{id}', '真实业务日期；未知为空', 'finance_document'),
             'S26' => self::source('报货销售单整单交付后待核与待入账', 'issued_sales_documents', '整单履约结束且签发销售单仍待金额核实或入账重试', '有效金额入账或单据依法作废', 'settlement.bill', 'sales-document:{id}', '报货交付日期', 'report'),
             'S27' => self::source('报货销售输入与说明待完善', 'report_sales_followups', '统一保存的输入未完成或销售版本有可补充说明', '必要输入保存完整且适用说明全部补齐', 'settlement.weight 或 settlement.bill；差异说明为最高权限', 'report-sales-followup:{report_id}', '报货交付日期', 'report'),
+            'S28' => self::source('待定货物', 'pending_goods', '有待定余量、未退离安排或可处理的非财务退货后续', '可处理的实物与退货后续均已结案', 'purchase.plan.manage', 'pending-goods:{id}', '货物产生日期；跨天保留', 'pending_goods'),
         ];
     }
 
@@ -45,8 +45,8 @@ final class TodoSourceRegistry
     {
         return [
             'S01' => ['key' => 'report', 'label' => '报货处理'],
-            'S02' => ['key' => 'printing', 'label' => '工票打印'],
             'S03' => ['key' => 'exception', 'label' => '任务异常'],
+            'S28' => ['key' => 'pending_goods', 'label' => '待定货物'],
         ];
     }
 

@@ -354,6 +354,8 @@ final class FulfillmentChangeLogic extends BaseLogic
         if (!$report || !$item || !$hasReservation) {
             return '报货明细或库存预留不可用';
         }
+        $purchaseReason=PurchasePlanLogic::itemChangeBlockedReason((int)$item['id']);
+        if($purchaseReason!==''){return $purchaseReason;}
         if (in_array((string)($report['status'] ?? ''), ['cancelled', 'completed'], true)) {
             return '报货单当前不可变更';
         }

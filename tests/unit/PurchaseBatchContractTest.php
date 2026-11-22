@@ -35,10 +35,7 @@ final class PurchaseBatchContractTest extends TestCase
         self::assertStringContainsString('refreshSummaryWithinTransaction', $logic);
         self::assertStringContainsString('PurchasePlanLogic::holdArrivalWithinTransaction(', $logic);
 
-        $planLogic = $this->read('app/api/jxc/logic/PurchasePlanLogic.php');
-        self::assertStringContainsString('WarehouseSkuBalanceService::reserveUpToWithinTransaction(', $planLogic);
-        self::assertStringContainsString('allocateHeldPurchaseForItemWithinTransaction(', $planLogic);
-        self::assertStringContainsString("'plan_held_qty' => '0.0000'", $planLogic);
+        // 多单位计划锁库与分配通过 PurchaseArrangementTest 的公开行为验证。
 
         self::assertStringContainsString('public static function publishWithinTransaction(array $params, bool $auditWithinTransaction = true): array|false', $supply);
         self::assertStringContainsString('PurchaseArrivalService::rebuildForSupplyOrder(', $supply);

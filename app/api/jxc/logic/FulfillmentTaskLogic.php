@@ -315,7 +315,6 @@ final class FulfillmentTaskLogic extends BaseLogic
             'exception_count' => count($exceptions) + count($negativeTodos),
             'negative_inventory_todos' => array_slice($negativeTodos, 0, 20),
             'negative_inventory_count' => count($negativeTodos),
-            'pending_goods_count' => (int)Db::name('pending_goods')->where('tenant_id', self::tenantId())->whereRaw('(pending_qty>0 OR return_qty>0)')->count(),
             'tabs' => $counts,
             'process_groups' => $processGroups,
         ];
@@ -762,13 +761,8 @@ final class FulfillmentTaskLogic extends BaseLogic
                     return false;
                 }
                 // 旧版已打印工票也可能没有计划；已有计划历史则不因补打重启已终止计划。
-                if (preg_match('/^item:\d+:shortage$/', (string)$raw['source_key']) === 1
-                    && bccomp((string)(Db::name('customer_report_item')->where('tenant_id', self::tenantId())
-                        ->where('id', (int)$raw['report_item_id'])->value('shortage_base_qty') ?? '0'), '0.00', 2) > 0
-                    && !Db::name('purchase_plan_source')->where('tenant_id', self::tenantId())->where('task_id', $id)->find()
-                    && PurchasePlanLogic::ensureForPrint($id) === false) {
-                    self::setError(PurchasePlanLogic::getError());
-                    throw new \RuntimeException('purchase_plan_prepare_failed');
+                if (preg_match('/^item:\d+:(shortage|specification_shortage)/', (string)$raw['source_key']) === 1) {
+                    throw new \DomainException('采购需求请先确认采购安排，再从采购计划打印');
                 }
                 $now = time();
                 $logId = (int)Db::name('fulfillment_print_log')->insertGetId([
@@ -1970,7 +1964,7 @@ final class FulfillmentTaskLogic extends BaseLogic
             $task['purchase_plan_id'] = $task['is_purchase_task']
                 ? (int)Db::name('purchase_plan_source')->alias('s')
                     ->join('purchase_plan p', 'p.id=s.purchase_plan_id AND p.tenant_id=s.tenant_id')
-                    ->where('s.tenant_id', self::tenantId())->where('s.task_id', (int)$task['id'])
+                    ->where('s.tenant_id', self::tenantId())->where('s.report_item_id', (int)$task['report_item_id'])
                     ->whereIn('p.status', ['pending', 'partial', 'complete'])->order('s.id desc')->value('s.purchase_plan_id')
                 : 0;
             $processingGroup = (int)($task['processing_group_id'] ?? 0) > 0

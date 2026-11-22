@@ -10,8 +10,8 @@ use think\facade\Db;
 final class TodoPermissionScope
 {
     private const KEYS = [
-        'report.view', 'report.edit', 'report.remark', 'task.view', 'task.print', 'task.reprint', 'task.control',
-        'process.manage', 'settlement.view', 'settlement.weight', 'settlement.bill', 'delivery.line.manage', 'delivery.confirm',
+        'report.view', 'report.edit', 'report.remark', 'task.view', 'task.control',
+        'process.manage', 'purchase.plan.manage', 'settlement.view', 'settlement.weight', 'settlement.bill', 'delivery.line.manage', 'delivery.confirm',
         'inventory.negative.manage', 'finance.purchase.prepare', 'finance.purchase.receive',
         'finance.purchase.confirm', 'finance.inventory.prepare', 'finance.inventory.count',
         'finance.inventory.confirm', 'finance.receipt.prepare', 'finance.receipt.confirm',

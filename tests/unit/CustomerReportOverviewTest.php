@@ -69,6 +69,110 @@ final class CustomerReportOverviewTest extends TestCase
         self::assertStringContainsString('取消记录', CustomerReportOverviewLogic::getError());
     }
 
+    public function test_physical_delivery_is_visible_before_and_after_pricing(): void
+    {
+        $pending = $this->report('陈记饭店', '陈记饭店', '2', '条');
+        $delivered = $this->report('陈记饭店', '陈记饭店', '3', '条', ['status' => 'delivered_pending_settlement']);
+        $settled = $this->report('陈记饭店', '陈记饭店', '4', '条', ['status' => 'settled']);
+        $partial = $this->report('陈记饭店', '陈记饭店', '5', '条', ['status' => 'partial_pending_settlement']);
+        $this->report('陈记饭店', '陈记饭店', '99', '条', ['status' => 'cancelled']);
+        $query = ['delivery_date' => '2026-10-10', 'keyword' => '陈记'];
+
+        $all = CustomerReportOverviewLogic::overview($query);
+        self::assertSame([$pending, $delivered, $settled, $partial], array_column($all['customers'][0]['reports'], 'id'));
+        self::assertSame(4, $all['summary']['report_count']);
+        $completed = CustomerReportOverviewLogic::overview($query + ['status' => 'completed']);
+        self::assertSame([$delivered, $settled], array_column($completed['customers'][0]['reports'], 'id'));
+        self::assertSame(['已交付', '已交付'], array_column($completed['customers'][0]['reports'], 'status_label'));
+        self::assertSame('待补价', $completed['settlement_notices'][$delivered]['pricing']);
+        self::assertSame('7.0000', $completed['summary']['unit_totals']['条']);
+        $open = CustomerReportOverviewLogic::overview($query + ['status' => 'pending']);
+        self::assertSame([$pending], array_column($open['customers'][0]['reports'], 'id'));
+        self::assertNotFalse(CustomerReportOverviewLogic::exportWord($query + [
+            'status' => 'completed', 'expected_tenant_id' => self::TENANT_ID, 'snapshot_hash' => $completed['snapshot_hash'],
+        ]), CustomerReportOverviewLogic::getError());
+
+        $document = Db::name('customer_report_sales_document')->insertGetId([
+            'tenant_id' => self::TENANT_ID, 'report_id' => $delivered, 'order_sn' => 'QA-OVERVIEW-PRICE',
+            'accounting_status' => 'pending_amount', 'snapshot' => '{}', 'approval_actor' => '{}',
+            'create_time' => time(), 'update_time' => time(),
+        ]);
+        foreach (['pending_amount' => '待补价', 'review_required' => '金额待复核', 'pending_posting' => '待入账'] as $accounting => $label) {
+            Db::name('customer_report_sales_document')->where('id', $document)->update(['accounting_status' => $accounting]);
+            $result = CustomerReportOverviewLogic::overview($query + ['status' => 'completed']);
+            self::assertSame($label, $result['settlement_notices'][$delivered]['pricing']);
+            self::assertSame($completed['snapshot_hash'], $result['snapshot_hash']);
+        }
+    }
+
+    public function test_full_report_number_finds_a_cancelled_original_across_dates_only_in_its_store(): void
+    {
+        $sn = 'CR202611211942555007';
+        $report = $this->report('陈记饭店', '陈记饭店', '3', '条', [
+            'sn' => $sn, 'status' => 'cancelled', 'delivery_date' => '2026-11-21',
+        ]);
+        $this->report('另一客户', '另一客户', '5', '条', ['sn' => 'CR202611211942555008']);
+        $params = ['sn' => $sn, 'expected_tenant_id' => self::TENANT_ID];
+        $result = CustomerReportLogic::lists($params);
+        self::assertNotFalse($result, CustomerReportLogic::getError());
+        self::assertSame(1, $result['count']);
+        self::assertSame(self::TENANT_ID, $result['tenant_id']);
+        self::assertSame($report, (int)$result['lists'][0]['id']);
+        self::assertSame('cancelled', $result['lists'][0]['status']);
+        self::assertSame('2026-11-21', $result['lists'][0]['delivery_date']);
+        self::assertFalse(CustomerReportLogic::lists(['sn' => 'CR20261121%']));
+        $this->prepareCustomerReportRequestContext(self::OTHER_TENANT_ID);
+        self::assertFalse(CustomerReportLogic::lists($params));
+        self::assertSame(0, CustomerReportLogic::lists(['sn' => $sn])['count']);
+        $this->prepareCustomerReportRequestContext();
+        request()->adminInfo = []; request()->userId = 0; request()->adminId = 0;
+        self::assertFalse(CustomerReportLogic::lists($params));
+    }
+
+    public function test_receipt_badge_follows_actual_balance_without_changing_word_snapshot(): void
+    {
+        $migrations = dirname(__DIR__, 2) . '/database/migrations/';
+        foreach (['20260907_000004_finance_business.sql', '20260907_000005_finance_sales.sql', '20260907_000012_finance_sales_coverage.sql'] as $migration) {
+            $this->runStatements($this->prepareMigration((string)file_get_contents($migrations . $migration)));
+        }
+        $report = $this->report('陈记饭店', '陈记饭店', '3', '条', ['status' => 'delivered_pending_settlement']);
+        $customer = (int)Db::name('customer_report')->where('tenant_id', self::TENANT_ID)->where('id', $report)->value('main_customer_id');
+        $order = (int)Db::name('sales_order')->insertGetId([
+            'tenant_id' => self::TENANT_ID, 'order_sn' => uniqid('overview-sales-'), 'customer_id' => $customer,
+            'source_type' => 'customer_report', 'source_id' => $report, 'settlement_status' => 'formal',
+        ]);
+        $document = 6400000000 + $order;
+        Db::name('finance_sales_coverage')->insert([
+            'tenant_id' => self::TENANT_ID, 'document_id' => $document, 'delivery_item_id' => $order, 'order_id' => $order,
+            'covered_delta' => '5.6000', 'create_time' => time(),
+        ]);
+        $source = (int)Db::name('finance_source')->insertGetId([
+            'tenant_id' => self::TENANT_ID, 'document_id' => $document, 'category' => 'receivable', 'subject_id' => $customer,
+            'amount' => '112.00', 'snapshot' => json_encode(['order_id' => $order]), 'business_date' => '2026-10-10', 'create_time' => time(),
+        ]);
+        $reference = 'n:' . $source;
+        try {
+            $query = ['delivery_date' => '2026-10-10', 'status' => 'completed'];
+            $initial = CustomerReportOverviewLogic::overview($query);
+            self::assertSame(['receipt' => '仍欠款'], $initial['settlement_notices'][$report]);
+            foreach (['-80.00', '-32.00'] as $allocation) {
+                Db::name('finance_entry')->insert([
+                    'tenant_id' => self::TENANT_ID, 'document_id' => $document, 'source_ref' => $reference,
+                    'metric' => 'balance', 'purpose' => 'allocation', 'subject_id' => $customer, 'amount' => $allocation,
+                    'business_date' => '2026-10-10', 'posting_month' => '2026-10', 'details' => '{}', 'create_time' => time(),
+                ]);
+                $afterward = CustomerReportOverviewLogic::overview($query);
+                self::assertSame($initial['snapshot_hash'], $afterward['snapshot_hash']);
+                self::assertSame(1, $afterward['summary']['report_count']);
+                self::assertSame($allocation === '-80.00', isset($afterward['settlement_notices'][$report]['receipt']));
+            }
+        } finally {
+            Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('source_ref', $reference)->delete();
+            Db::name('finance_source')->where('tenant_id', self::TENANT_ID)->where('id', $source)->delete();
+            Db::name('finance_sales_coverage')->where('tenant_id', self::TENANT_ID)->where('document_id', $document)->delete();
+        }
+    }
+
     public function test_cancelled_history_lists_all_delivery_dates_in_cancellation_order(): void
     {
         $olderId = $this->report('旧单客户', '旧单客户', '2', '斤', [

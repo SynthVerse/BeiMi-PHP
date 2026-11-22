@@ -13,8 +13,29 @@ final class PendingGoodsReturnService
     public static function facts(int $return): array
     {
         $facts = self::q('pending_goods_return_fact')->where('pending_return_id', $return)->order('id')->select()->toArray();
-        foreach ($facts as &$fact) { $fact += self::state($fact); $fact['history'] = self::history($fact); }
+        foreach ($facts as &$fact) {
+            $fact += self::state($fact); $fact['history'] = self::history($fact);
+            $fact['return_document_id'] = $fact['finance_line_id'] ? (int)self::q('finance_purchase_return_line')->where('id', $fact['finance_line_id'])->value('document_id') : 0;
+        }
         return $facts;
+    }
+
+    /** 待退安排的权威范围用于候选读取与写入复验；候选唯一不代表实物已核对。 */
+    public static function sourceContext(int $pendingReturn, int $vendor, int $originalSupply = 0): array
+    {
+        if (!WorkforceLogic::requirePermission('purchase.plan.manage')) { throw new \DomainException('无权处理待定货物'); }
+        $return = self::q('pending_goods_return')->where('id', $pendingReturn)->find();
+        $pending = $return ? self::q('pending_goods')->where('id', $return['pending_goods_id'])->find() : null;
+        $supply = $return ? self::q('supply_order')->where('id', $return['supply_order_id'])->find() : null;
+        $sku = $pending ? self::q('goods_sku')->where('id', $pending['sku_id'])->find() : null;
+        if (!$pending || !$supply || !$sku || $return['status'] !== 'planned' || bccomp($return['remaining_qty'], '0', 4) <= 0
+            || (int)$supply['supplier_id'] !== $vendor || ($originalSupply > 0 && $originalSupply !== (int)$supply['id'])) {
+            throw new \DomainException('待退安排已变化或不属于本供应商与原采购单，请返回刷新');
+        }
+        return ['pending_return_id' => $pendingReturn, 'pending_goods_id' => (int)$pending['id'],
+            'original_supply_order_id' => (int)$supply['id'], 'warehouse_id' => (int)$pending['warehouse_id'],
+            'sku_id' => (int)$pending['sku_id'], 'base_unit_id' => (int)$sku['base_unit_id'],
+            'base_unit_name' => $sku['base_unit_name'], 'remaining_quantity' => $return['remaining_qty']];
     }
 
     private static function history(array $fact): array
@@ -126,6 +147,12 @@ final class PendingGoodsReturnService
             'return_qty' => bcsub($pending['return_qty'], $quantity, 4), 'version' => (int)$pending['version'] + 1, 'update_time' => time()]);
     }
 
+    /** 写入财务单据前与实物退离时都必须核对来源。 */
+    public static function requireSourceConfirmation(array $data): void
+    {
+        if (($data['pending_source_confirmed'] ?? 0) !== 1) { throw new \DomainException('请先在原到货中确认是本批货物'); }
+    }
+
     /** 财务实际退离调用：必须明确核对原来源；在扣实物前仅解除本次退离量的持有。 */
     public static function financeDeparture(int $pendingReturn, array $arrival, int $warehouse, string $quantity, int $line, array $data): void
     {
@@ -136,8 +163,16 @@ final class PendingGoodsReturnService
         $pending = $basis ? self::q('pending_goods')->where('id', $basis['id'])->lock(true)->find() : null;
         $return = self::q('pending_goods_return')->where('id', $pendingReturn)->lock(true)->find();
         $supply = $return ? self::q('supply_order')->where('id', $return['supply_order_id'])->find() : null;
+        $snapshot = FinanceValue::decode($arrival['snapshot']);
+        $sku = $pending ? self::q('goods_sku')->where('id', $pending['sku_id'])->find() : null;
         if (!$pending || !$supply || $return['status'] !== 'planned' || (int)$supply['supplier_id'] !== (int)$arrival['vendor_id'] || (int)$arrival['sku_id'] !== (int)$pending['sku_id']
-            || $warehouse !== (int)$pending['warehouse_id'] || (int)$arrival['warehouse_id'] !== $warehouse || ($data['pending_source_confirmed'] ?? 0) !== 1) { throw new \DomainException('请明确核对待退货物的供应商、仓库与原到货来源'); }
+            || $warehouse !== (int)$pending['warehouse_id'] || (int)$arrival['warehouse_id'] !== $warehouse
+            || (int)($snapshot['original_supply_order_id'] ?? 0) !== (int)$return['supply_order_id']
+            || !$sku || (int)($snapshot['base_unit_id'] ?? 0) !== (int)$sku['base_unit_id']
+            || ((int)($data['original_supply_order_id'] ?? 0) > 0 && (int)$data['original_supply_order_id'] !== (int)$return['supply_order_id'])) {
+            throw new \DomainException('原到货或待退安排已变化，请返回退货进度刷新后重新核对');
+        }
+        self::requireSourceConfirmation($data);
         if (bccomp($quantity, $return['remaining_qty'], 4) > 0) { throw new \DomainException('实际退离量超过待退数量'); }
         if (WarehouseSkuBalanceService::releaseWithinTransaction($warehouse, (int)$pending['sku_id'], $quantity) === false) { throw new \DomainException('待退锁定量不一致'); }
         $remaining = bcsub($return['remaining_qty'], $quantity, 4);

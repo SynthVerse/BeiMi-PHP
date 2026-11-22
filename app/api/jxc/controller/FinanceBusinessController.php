@@ -50,16 +50,24 @@ class FinanceBusinessController extends BaseJxcController
     }
     public function action()
     {
-        $params = $this->request->post();
-        $raw = $this->request->post(false);
-        // 保留 JSON 布尔值，由领域层继续拒绝字符串和数字等非布尔提醒选项。
-        if (array_key_exists('continue_later', $raw)) { $params['continue_later'] = $raw['continue_later']; }
+        $params = $this->businessPost();
         return $this->respond(FinanceBusinessLogic::action((string)$this->request->post('action', ''), $params));
     }
     public function preview()
     {
-        try { return $this->data(\app\api\jxc\logic\FinancePreview::calculate($this->request->post())); }
+        try { return $this->data(\app\api\jxc\logic\FinancePreview::calculate($this->businessPost())); }
         catch (\DomainException $error) { return $this->fail($error->getMessage(), $error instanceof FinanceBusinessException ? $error->details() : []); }
+    }
+    private function businessPost(): array
+    {
+        $params = $this->request->post();
+        $raw = $this->request->post(false);
+        // 保留需要严格校验的 JSON 标记，普通文本仍使用请求过滤器。
+        if (array_key_exists('continue_later', $raw)) { $params['continue_later'] = $raw['continue_later']; }
+        if (is_array($raw['payload'] ?? null) && array_key_exists('pending_source_confirmed', $raw['payload'])) {
+            $params['payload']['pending_source_confirmed'] = $raw['payload']['pending_source_confirmed'];
+        }
+        return $params;
     }
     public function customerBalances() { return $this->customerRead('lists'); }
     public function customerBalanceDetail() { return $this->customerRead('detail'); }

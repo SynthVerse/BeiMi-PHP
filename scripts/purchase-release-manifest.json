@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "title": "采购安排当前契约发布集合",
+  "purpose": "为审批固定本地代码及结构范围；不执行部署、不连接服务或数据库。",
+  "files": [
+    "app/api/route/jxc.php",
+    "app/api/jxc/controller/PurchasePlanController.php",
+    "app/api/jxc/logic/PurchasePlanLogic.php",
+    "app/api/jxc/logic/CustomerReportLogic.php",
+    "app/api/jxc/logic/FulfillmentChangeLogic.php",
+    "app/api/jxc/logic/FulfillmentTaskLogic.php",
+    "app/api/jxc/logic/PendingGoodsLogic.php",
+    "app/api/jxc/logic/PurchaseBatchLogic.php",
+    "database/migrations/20261117_000001_purchase_arrangements.sql"
+  ],
+  "remove": ["app/api/jxc/validate/PurchasePlanValidate.php"],
+  "dependencies": [
+    "app/api/controller/jxc/PurchasePlanController.php",
+    "database/migrations/20260827_000001_create_purchase_batch.sql",
+    "database/migrations/20260925_000002_processing_groups_and_purchase_plans.sql",
+    "database/migrations/20260930_000004_purchase_plan_delivery_priority.sql",
+    "database/migrations/20261004_000001_trade_quantity_facts.sql",
+    "database/migrations/20261114_000001_customer_report_sales_document.sql",
+    "database/migrations/20261115_000001_customer_report_workspace.sql"
+  ],
+  "routes": [
+    ["GET", "demands", "demands"],
+    ["GET", "buyers", "buyers"],
+    ["GET", "lists", "lists"],
+    ["GET", "detail", "detail"],
+    ["GET", "preview", "preview"],
+    ["GET", "arrival_preview", "arrivalPreview"],
+    ["POST", "verify_stock", "verifyStock"],
+    ["POST", "create", "create"],
+    ["POST", "prepare_print", "preparePrint"],
+    ["POST", "print_result", "printResult"],
+    ["POST", "record_bought", "recordBought"],
+    ["POST", "recall", "recall"],
+    ["POST", "attach_arrival", "attachArrival"]
+  ],
+  "databasePrerequisites": {
+    "requiredExistingTables": ["purchase_plan", "purchase_plan_source", "purchase_plan_arrival", "purchase_plan_allocation", "purchase_batch", "customer_report", "customer_report_item", "warehouse_sku_balance", "employee"],
+    "newTables": ["purchase_demand_coverage", "purchase_plan_sheet", "purchase_plan_hold", "purchase_plan_action"],
+    "newMigrationOperations": ["ALTER TABLE 添加当前契约字段及索引", "CREATE TABLE 创建四张当前业务表", "DROP INDEX 移除旧采购来源及分配唯一索引"],
+    "note": "依赖清单用于核对现有基础，不授权重放历史迁移。新迁移不是纯建表；仅在目标结构与批准范围确认后执行。"
+  },
+  "releaseSteps": [
+    "核对目标域名实际站点目录、执行版本及路由配置；旧单数 lists 可用不代表新复数接口已生效。",
+    "审核代码差异、删除项及目标结构；确认备份和本次获准的具体迁移集合。",
+    "先准备批准的配套结构，再同步启用完整后端集合；按目标环境机制刷新必要缓存。",
+    "通过原业务账号读取当前 demands、buyers、lists，确认 HTTP 200 与当前 JSON 契约后再验收小程序入口。"
+  ],
+  "limitations": [
+    "本地预检通过只证明清单、文件及路由静态契约完整，不能直接认定可上线。",
+    "不读取远端版本、站点目录、缓存或数据库；新复数接口未生效的具体机制仍待现场核对。",
+    "scripts/migrate.php --status 和 --dry-run 在分支前可能创建 migration_history，不能用于只读诊断。"
+  ]
+}

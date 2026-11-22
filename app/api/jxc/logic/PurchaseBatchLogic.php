@@ -78,25 +78,6 @@ class PurchaseBatchLogic extends BaseLogic
                     if ($supplierGroups === false) {
                         return false;
                     }
-                    if ($base['purchase_plan_id'] > 0) {
-                        $containsPlanSku = false;
-                        foreach ($supplierGroups as $supplierGroup) {
-                            foreach ($supplierGroup['goods'] as $goodsLine) {
-                                if ((int)$goodsLine['sku_id'] === $base['purchase_plan_sku_id']) {
-                                    $containsPlanSku = true;
-                                    break 2;
-                                }
-                            }
-                        }
-                        if (!$containsPlanSku) {
-                            self::fail('采购批次必须包含采购计划对应的 SKU', [[
-                                'client_line_id' => '', 'field' => 'items',
-                                'code' => 'PURCHASE_PLAN_SKU_REQUIRED', 'message' => '请保留至少一条采购计划对应的 SKU 明细',
-                            ]]);
-                            return false;
-                        }
-                    }
-
                     $now = time();
                     $batch = PurchaseBatch::create([
                         'tenant_id' => $tenantId,
@@ -332,7 +313,7 @@ class PurchaseBatchLogic extends BaseLogic
         ]);
     }
 
-    /** @return array{warehouse_id:int,warehouse_name:string,datetimesingle:int,remarks:string,purchase_plan_id:int,purchase_plan_sku_id:int}|false */
+    /** @return array{warehouse_id:int,warehouse_name:string,datetimesingle:int,remarks:string,purchase_plan_id:int}|false */
     private static function normalizeBase(array $params, int $tenantId): array|false
     {
         $warehouseId = (int)($params['warehouse_id'] ?? 0);
@@ -353,20 +334,14 @@ class PurchaseBatchLogic extends BaseLogic
             return false;
         }
         $purchasePlanId = (int)($params['purchase_plan_id'] ?? 0);
-        $purchasePlanSkuId = 0;
         if ($purchasePlanId > 0) {
-            $plan = Db::name('purchase_plan')->where('tenant_id', $tenantId)->where('id', $purchasePlanId)
-                ->whereIn('status', ['pending', 'partial'])->lock(true)
-                ->field('id,warehouse_id,sku_id,planned_qty,allocated_qty')->find();
-            if (!$plan || (int)$plan['warehouse_id'] !== $warehouseId
-                || bccomp((string)$plan['planned_qty'], (string)$plan['allocated_qty'], 4) <= 0) {
-                self::fail('采购计划不存在、已结束或入库仓库不一致', [[
-                    'client_line_id' => '', 'field' => 'purchase_plan_id',
-                    'code' => 'PURCHASE_PLAN_UNAVAILABLE', 'message' => '请从有效采购计划发起采购到货',
-                ]]);
+            $plan = Db::name('purchase_plan')->where('tenant_id', $tenantId)->where('id', $purchasePlanId)->lock(true)->find();
+            $outstanding = Db::name('purchase_plan_source')->where('tenant_id',$tenantId)->where('purchase_plan_id',$purchasePlanId)
+                ->whereRaw("planned_qty > fulfilled_qty")->count();
+            if (!$plan || (int)$plan['warehouse_id'] !== $warehouseId || !$outstanding) {
+                self::fail('采购计划不存在、没有待到货范围或入库仓库不一致');
                 return false;
             }
-            $purchasePlanSkuId = (int)$plan['sku_id'];
         }
         return [
             'warehouse_id' => $warehouseId,
@@ -374,7 +349,6 @@ class PurchaseBatchLogic extends BaseLogic
             'datetimesingle' => $datetimesingle,
             'remarks' => trim((string)($params['remarks'] ?? $params['remark'] ?? '')),
             'purchase_plan_id' => $purchasePlanId,
-            'purchase_plan_sku_id' => $purchasePlanSkuId,
         ];
     }
 

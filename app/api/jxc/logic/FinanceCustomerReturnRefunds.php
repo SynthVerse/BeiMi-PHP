@@ -76,7 +76,11 @@ final class FinanceCustomerReturnRefunds
             $history[] = ['document_id' => (int)$refund['id'], 'actual_date' => $result['money']['actual_date'], 'amount' => $result['money']['amount'],
                 'replacement_document_id' => (int)Db::name('finance_correction')->where('tenant_id', FinanceAccess::tenant())->where('original_document_id', $refund['id'])->value('replacement_document_id')];
         }
-        return ['return_context' => $return, 'return_credits' => $credits, 'return_credit_has_more' => count($rows) > 20, 'return_refunds' => $history, 'return_refund_has_more' => count($refunds) > 20];
+        $active = FinanceIntegration::active();
+        return ['return_context' => $return, 'return_credits' => $credits, 'return_credit_has_more' => count($rows) > 20,
+            'return_refunds' => $history, 'return_refund_has_more' => count($refunds) > 20,
+            'return_can_refund' => $active && FinanceAccess::has(FinanceDocumentPolicy::type('customer_refund')['prepare']),
+            'return_can_credit_allocate' => $active && FinanceAccess::has(FinanceDocumentPolicy::type('customer_credit_allocate')['prepare'])];
     }
 
     public static function validate(FinanceLedger $ledger, array $data): array

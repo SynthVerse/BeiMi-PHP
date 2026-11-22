@@ -39,7 +39,7 @@ final class CustomerReportWordDocument
     private static function document(array $data): string
     {
         $query = $data['query']; $summary = $data['summary'];
-        $scope = ['all' => '全部有效报货', 'pending' => '待处理报货', 'completed' => '已完成报货'][$query['status']];
+        $scope = ['all' => '全部有效报货', 'pending' => '待交付报货', 'completed' => '已交付报货'][$query['status']];
         $body = self::paragraph('报货汇总', 32, true, true, false, 60)
             . self::paragraph($data['store_name'] . '    送货日期 ' . $query['delivery_date'] . '    紧凑明细版', 21, false, true, false, 40)
             . self::paragraph('收货对象 ' . $summary['customer_count'] . ' 处    主客户 ' . $summary['main_customer_count'] . ' 位    报货单 ' . $summary['report_count'] . ' 张    明细 ' . $summary['line_count'] . ' 条    ' . $scope . '含补报', 21, false, true, false, 40)

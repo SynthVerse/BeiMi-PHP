@@ -124,6 +124,7 @@ final class FinanceBusinessLogic extends BaseLogic
                     $result = FinanceValue::decode($existing['result']);
                     FinanceDocumentPolicy::authorize($result['type'], in_array($action, ['confirm', 'record', 'correct', 'reverse_duplicate', 'reverse'], true));
                     if ($action === 'reminder_off' || ($action === 'save' && !empty($params['continue_later']))) { FinanceAccess::require(FinanceDocumentPolicy::TYPES[$result['type']]['prepare']); }
+                    self::requirePendingReturnSource($result['type'], $action, $params['payload'] ?? null);
                     FinanceUnclaimed::reauthorizeCorrection($result['confirmed_result']);
                     if ($result['type'] === 'sales_batch' && $result['status'] === 'confirmed') { FinanceSalesBatches::reauthorize($result['confirmed_result']); }
                     if ($result['type'] === 'purchase_settlement' && $result['status'] === 'confirmed') { FinancePurchaseBatches::reauthorize($result['confirmed_result']); }
@@ -152,6 +153,7 @@ final class FinanceBusinessLogic extends BaseLogic
                     $payload = in_array($action, ['reverse_duplicate', 'reverse'], true) ? FinanceValue::decode($original['payload']) : ($params['payload'] ?? null);
                     if (is_array($payload)) { $payload = FinanceCustomerReturnRefunds::input($type, FinanceCustomerReturns::input($type, FinanceInventoryCounts::input($type, $payload))); }
                     if (!is_array($payload) || strlen(FinanceValue::json($payload)) > 65536) { throw new \DomainException('草稿内容格式无效或超过容量限制'); }
+                    self::requirePendingReturnSource($type, $action, $payload);
                     FinanceAccountLifecycle::assertDraftAccounts($tenantId, $type, $payload);
                     $document = array_merge($document ?? ['tenant_id' => $tenantId, 'type' => $type, 'created_by' => FinanceValue::json(FinanceAccess::actor()),
                         'create_time' => time(), 'confirmed_at' => 0, 'confirmed_by' => '{}', 'confirmed_result' => '{}'],
@@ -161,6 +163,7 @@ final class FinanceBusinessLogic extends BaseLogic
                     $document['resume_requested'] = 0;
                 } elseif ($action === 'submit') {
                     if ($document['status'] !== 'draft') { throw new \DomainException('只有草稿可以提交'); }
+                    if ($type === 'purchase_return_actual') { self::requirePendingReturnSource($type, $action, FinanceValue::decode($document['payload'])); }
                     $document['status'] = 'pending';
                 } elseif ($action === 'reopen') {
                     if ($document['status'] !== 'pending') { throw new \DomainException('只有待确认单据可以退回草稿'); }
@@ -206,6 +209,15 @@ final class FinanceBusinessLogic extends BaseLogic
         } catch (\DomainException $error) { FinanceBusinessException::capture($error); return false; }
     }
 
+    private static function requirePendingReturnSource(string $type, string $action, mixed $payload): void
+    {
+        if ($type !== 'purchase_return_actual' || !is_array($payload) || (int)($payload['pending_return_id'] ?? 0) <= 0) { return; }
+        // 尚未核对的退货草稿仍可稍后继续填写。
+        if ($action === 'save' && ($payload['pending_source_confirmed'] ?? 0) === 0) { return; }
+        // 核对原始标记，避免 JSON 编码把 1.0 写成 1 或与已提交的请求等同。
+        PendingGoodsReturnService::requireSourceConfirmation($payload);
+    }
+
     public static function detail(array $params): array|false
     {
         self::clearError();
@@ -222,6 +234,9 @@ final class FinanceBusinessLogic extends BaseLogic
                 }
             }
             $presented = self::present($document);
+            if ($presented['type'] === 'purchase_return_actual' && $presented['status'] === 'confirmed') {
+                $presented['return_progress'] = FinanceReturnQuery::purchaseProgress((int)$presented['id']);
+            }
             if (in_array($presented['type'], ['account_transfer_out', 'account_transfer_arrival', 'account_transfer_return'], true)) {
                 $payload = &$presented['payload'];
                 $payload['evidence_files'] = FinanceEvidence::metadataForDocument($presented['type'], $payload['evidence_ids'] ?? []);
@@ -378,6 +393,7 @@ final class FinanceBusinessLogic extends BaseLogic
     {
         self::clearError();
         try {
+            if (isset($params['return_kind'])) { return FinanceReturnQuery::lists($params); }
             $type = FinanceValue::text($params['type'] ?? '', 40); FinanceDocumentPolicy::read($type);
             $page = FinanceValue::id($params['page'] ?? 1);
             $query = Db::name('finance_document')->where('tenant_id', FinanceAccess::tenant())->where('type', $type);

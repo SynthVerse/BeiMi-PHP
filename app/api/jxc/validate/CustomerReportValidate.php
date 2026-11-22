@@ -23,6 +23,9 @@ class CustomerReportValidate extends BaseValidate
         'page_no' => 'integer|egt:1',
         'page_size' => 'integer|between:1,100',
         'status_scope' => 'in:pending,completed,cancelled',
+        'priority_delivery_date' => 'string|dateFormat:Y-m-d',
+        'sn' => 'string|max:20',
+        'expected_tenant_id' => 'integer|gt:0',
         'delivery_date' => 'require|dateFormat:Y-m-d',
         'delivery_arrangement' => 'array',
         'is_supplement' => 'in:0,1',
@@ -54,7 +57,7 @@ class CustomerReportValidate extends BaseValidate
     public function sceneSubmit() { return $this->only(['main_customer_id','items','remark','idempotency_key','delivery_date','delivery_arrangement','is_supplement','batch_id','supplement_for_report_id']); }
     public function sceneSubmitGrouped() { return $this->only(['idempotency_key','groups']); }
     public function sceneDetail() { return $this->only(['id']); }
-    public function sceneLists() { return $this->only(['page_no','page_size','status_scope']); }
+    public function sceneLists() { return $this->only(['page_no','page_size','status_scope','priority_delivery_date','sn','expected_tenant_id']); }
     public function sceneAvailability() { return $this->only(['warehouse_id','sku_id']); }
     public function sceneEdit() { return $this->only(['id','version','main_customer_id','items','remark']); }
     public function sceneRetry() { return $this->only(['id','version']); }
