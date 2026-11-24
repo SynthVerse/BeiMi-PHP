@@ -45,6 +45,9 @@ try {
         $_SERVER['BEIMI_PHPUNIT_LEASE_KEY'] = $databaseLeaseToken;
     }
 } catch (\RuntimeException $error) {
+    if (PHP_SAPI === 'cli-server' && isset($goodsTrace)) {
+        throw $error;
+    }
     fwrite(STDERR, $error->getMessage() . "\n");
     exit(1);
 }
