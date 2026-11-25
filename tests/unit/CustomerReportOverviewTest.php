@@ -292,9 +292,9 @@ final class CustomerReportOverviewTest extends TestCase
         self::assertStringContainsString($snapshot['store_name'] . ' · 客户报货单 · 送货 2026-10-10', $header->textContent);
         self::assertStringContainsString('待交付', $header->textContent);
         self::assertStringContainsString('甲分', $header->textContent);
-        self::assertStringContainsString('客01 甲<&总店 / 甲分店', $this->paperText($doc));
+        self::assertStringContainsString('1. 甲<&总店 / 甲分店', $this->paperText($doc));
         self::assertStringContainsString('客户自提', $doc->textContent);
-        self::assertStringContainsString('□ 货01 鲈鱼 5 斤', $this->paperText($doc));
+        self::assertStringContainsString('□ ① 鲈鱼 5 斤', $this->paperText($doc));
         self::assertStringContainsString('缺 1 斤', $doc->textContent);
         self::assertSame(1, substr_count($doc->textContent, '鲈鱼'));
         foreach (['商品需求汇总', '备货人', '核对人', '导出时间', '备注', $snapshot['customers'][0]['reports'][0]['sn']] as $omitted) {
@@ -370,10 +370,10 @@ final class CustomerReportOverviewTest extends TestCase
         $customerText = $this->paperText($this->wordPart($customers, 'document'));
         foreach (['交给后厨', '补报 · 交接  第三方配送', '补报单独装', '05:10', '辽A12345', '东门二号位',
             '19900000000', '待补 车牌、地点', '待称重', '5 条 去鳞→去内脏', '3 条 打包（留头）',
-            '客01 海味饭店', '客02 渔家坊 / 老街分店', '货02 鲈鱼 4.5 斤', '货03 鲍鱼 7头', '货04 鲍鱼 8头'] as $expected) {
+            '1. 海味饭店', '2. 渔家坊 / 老街分店', '□ ① 鲈鱼 3 条', '□ ② 鲈鱼 2 条',
+            '□ ③ 鲍鱼 7头', '□ ④ 鲍鱼 8头', '□ ① 鲈鱼 8 条', '□ ② 鲈鱼 4.5 斤'] as $expected) {
             self::assertStringContainsString($expected, $customerText);
         }
-        self::assertSame(3, substr_count($customerText, '货01 鲈鱼'));
         self::assertSame(1, substr_count($customerText, '交给后厨'));
         self::assertSame(1, substr_count($customerText, '补报单独装'));
         self::assertStringContainsString("2 箱\u{FFFD}装", $customerText);
@@ -384,8 +384,8 @@ final class CustomerReportOverviewTest extends TestCase
         self::assertSame('商品分货单_2026-10-10.docx', $goods['filename']);
         self::assertSame($customers['snapshot_hash'], $goods['snapshot_hash']);
         $goodsText = $this->paperText($this->wordPart($goods, 'document'));
-        foreach (['货01 鲈鱼 合计 13 条', '客01 海味饭店 5 条', '客02 渔家坊 / 老街分店 8 条', '补报 2 条',
-            '货02 鲈鱼 合计 4.5 斤', '货03 鲍鱼 7头 合计 6 斤', '货04 鲍鱼 8头 合计 9 斤',
+        foreach (['① 鲈鱼 合计 13 条', '□ 1. 海味饭店 5 条', '□ 2. 渔家坊 / 老街分店 8 条', '补报 2 条',
+            '② 鲈鱼 合计 4.5 斤', '□ 2. 渔家坊 / 老街分店 4.5 斤', '③ 鲍鱼 7头 合计 6 斤', '④ 鲍鱼 8头 合计 9 斤',
             '5 条 去鳞→去内脏', '3 条 打包（留头）', '单体重量 1.5–1.7 斤', '待称重'] as $expected) {
             self::assertStringContainsString($expected, $goodsText);
         }
@@ -420,13 +420,18 @@ final class CustomerReportOverviewTest extends TestCase
         $path->registerNamespace('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main');
         self::assertGreaterThan(
             0,
-            $path->query('//w:p[w:r/w:br[@w:type="column"]]/following-sibling::w:p[1][w:pPr/w:shd][w:r/w:t=" 客01"]')->length
+            $path->query('//w:p[w:r/w:br[@w:type="column"]]/following-sibling::w:p[1][w:pPr/w:shd][w:r/w:t=" 1."]')->length
         );
         self::assertStringContainsString($receiver . '（续）', $path->document->textContent);
         $continued = $path->query('//w:p[w:r/w:br[@w:type="column"]]/following-sibling::w:p[not(w:pPr/w:shd)][1]');
         self::assertGreaterThan(0, count(array_filter(iterator_to_array($continued), static fn(\DOMNode $node) =>
             str_starts_with($node->textContent, '第 1 单（续）'))));
-        self::assertStringContainsString('货01 桂鱼 中号（续）', $path->document->textContent);
+        $resumedItems = $path->query('//w:body/w:p/w:r/w:t[contains(., "桂鱼 中号（续）")]');
+        self::assertGreaterThan(0, $resumedItems->length);
+        foreach ($resumedItems as $resumed) {
+            $lastMarker = $path->evaluate('string(preceding::w:p[w:r/w:t[starts-with(., "□ ")]][1]/w:r[1]/w:t)', $resumed);
+            self::assertSame(str_replace('□ ', '', $lastMarker) . ' 桂鱼 中号（续）', $resumed->textContent);
+        }
         self::assertStringContainsString('补报 · 交接  第三方配送', $path->document->textContent);
 
         $goods = CustomerReportOverviewLogic::exportWord($command + ['document_type' => 'goods']);
@@ -434,10 +439,36 @@ final class CustomerReportOverviewTest extends TestCase
         $path = new \DOMXPath($this->wordPart($goods, 'document'));
         $path->registerNamespace('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main');
         $headings = $path->query('//w:p[w:r/w:br[@w:type="column"]]/following-sibling::w:p[1]');
-        self::assertContains('货01 桂鱼 中号（续） 合计 63 条', array_map(fn(\DOMNode $node) => trim($this->paperText($node)), iterator_to_array($headings)));
+        self::assertContains('① 桂鱼 中号（续） 合计 63 条', array_map(fn(\DOMNode $node) => trim($this->paperText($node)), iterator_to_array($headings)));
         $continued = $path->query('//w:p[w:r/w:br[@w:type="column"]]/following-sibling::w:p[not(w:pPr/w:shd)][1]');
-        self::assertContains('客01 ' . $main . ' / ' . $receiver . '（续）', array_map(static fn(\DOMNode $node) => $node->textContent, iterator_to_array($continued)));
+        self::assertContains('1. ' . $main . ' / ' . $receiver . '（续）', array_map(static fn(\DOMNode $node) => $node->textContent, iterator_to_array($continued)));
         self::assertStringContainsString('末尾10', $path->document->textContent);
+    }
+
+    public function test_word_keeps_goods_numbers_circled_beyond_fifty_in_both_documents(): void
+    {
+        $id = $this->report('海味饭店', '海味饭店', '1', '条');
+        $item = Db::name('customer_report_item')->where('report_id', $id)->find();
+        unset($item['id']);
+        $items = [];
+        for ($position = 2; $position <= 100; $position++) {
+            $name = '样品' . $position;
+            $items[] = array_replace($item, [
+                'sort' => $position, 'goods_id' => 10000 + $position, 'sku_id' => 20000 + $position,
+                'goods_name' => $name, 'sku_name' => $name, 'specification_snapshot' => '',
+            ]);
+        }
+        Db::name('customer_report_item')->insertAll($items);
+        $query = ['delivery_date' => '2026-10-10', 'expected_tenant_id' => self::TENANT_ID];
+        $snapshot = CustomerReportOverviewLogic::overview($query);
+        foreach (['customers', 'goods'] as $type) {
+            $file = CustomerReportOverviewLogic::exportWord($query + ['document_type' => $type, 'snapshot_hash' => $snapshot['snapshot_hash']]);
+            self::assertNotFalse($file, CustomerReportOverviewLogic::getError());
+            $text = $this->paperText($this->wordPart($file, 'document'));
+            foreach ([11 => '⑪', 20 => '⑳', 21 => '㉑', 50 => '㊿', 51 => '◯51', 100 => '◯100'] as $position => $marker) {
+                self::assertStringContainsString($marker . ' 样品' . $position . ' ', $text);
+            }
+        }
     }
 
     private function paperText(\DOMNode $node): string

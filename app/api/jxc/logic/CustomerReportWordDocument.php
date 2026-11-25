@@ -15,7 +15,7 @@ final class CustomerReportWordDocument
     private const HEADER_LINE = 280;
     private const BODY_LINE = 285;
     private const HEADING_GAP = 135;
-    private const NAME_TAB = 960;
+    private const NAME_TAB = 780;
     private const QUANTITY_TAB = 4800;
     // 折行宽度以一个全宽字的四分之一计。
     private const BODY_WIDTH = 84;
@@ -28,10 +28,9 @@ final class CustomerReportWordDocument
         $title = self::TITLES[$documentType];
         $header = self::header($snapshot, $title);
         $topMargin = max(890, self::HEADER_DISTANCE + self::HEADER_LINE * count($header) + 220);
-        $goodsNumbers = self::goodsNumbers($snapshot['customers']);
         $blocks = $documentType === 'customers'
-            ? self::customerBlocks($snapshot, $goodsNumbers)
-            : self::goodsBlocks($snapshot, $goodsNumbers);
+            ? self::customerBlocks($snapshot)
+            : self::goodsBlocks($snapshot);
         $path = tempnam(sys_get_temp_dir(), 'beimi-report-');
         if ($path === false) { throw new \RuntimeException('Word 临时文件创建失败'); }
         $zip = new \ZipArchive();
@@ -81,11 +80,12 @@ final class CustomerReportWordDocument
         return $header;
     }
 
-    private static function customerBlocks(array $data, array $goodsNumbers): array
+    private static function customerBlocks(array $data): array
     {
         $blocks = [];
         foreach ($data['customers'] as $position => $customer) {
             $rows = [];
+            $itemPosition = 0;
             foreach ($customer['reports'] as $index => $report) {
                 $order = count($customer['reports']) > 1 ? '第 ' . ($index + 1) . ' 单' : '';
                 $label = self::reportLabel($report, $data['query']['status']);
@@ -95,13 +95,13 @@ final class CustomerReportWordDocument
                     'keep_next' => true, 'continuation' => $continuation,
                 ];
                 foreach ($report['items'] as $line) {
-                    $number = $goodsNumbers[self::goodsKey($line)];
+                    $number = self::goodsOrdinal(++$itemPosition);
                     $name = self::goodsName($line);
                     $rows[] = [
                         'entry' => [$number, $name, self::amount($line['quantity'], $line['unit_name'])],
                         'text' => implode(' · ', self::lineDetails($line)),
                         'continuation' => $continuation, 'repeat_before' => true,
-                        'split_context' => $number . ' ' . $name . '（续）',
+                        'repeat_item' => true,
                     ];
                 }
                 if (trim($report['remark']) !== '') {
@@ -113,9 +113,9 @@ final class CustomerReportWordDocument
         return $blocks;
     }
 
-    private static function goodsBlocks(array $data, array $goodsNumbers): array
+    private static function goodsBlocks(array $data): array
     {
-        $goods = [];
+        $products = [];
         foreach ($data['customers'] as $position => $customer) {
             $receiverKey = $customer['key'];
             $receiverEntry = self::receiverEntry($customer, $position + 1);
@@ -123,71 +123,64 @@ final class CustomerReportWordDocument
                 $label = self::reportLabel($report, $data['query']['status']);
                 foreach ($report['items'] as $line) {
                     $key = self::goodsKey($line);
-                    $goods[$key] ??= ['name' => self::goodsName($line), 'unit' => $line['unit_name'], 'quantity' => '0', 'receivers' => []];
-                    $goods[$key]['quantity'] = bcadd($goods[$key]['quantity'], $line['quantity'], 4);
-                    $goods[$key]['receivers'][$receiverKey] ??= ['entry' => $receiverEntry, 'quantity' => '0', 'items' => []];
-                    $receiver = &$goods[$key]['receivers'][$receiverKey];
+                    $good = &$products[$line['goods_id']][$key];
+                    $good ??= ['name' => self::goodsName($line), 'unit' => $line['unit_name'], 'quantity' => '0', 'receivers' => []];
+                    $good['quantity'] = bcadd($good['quantity'], $line['quantity'], 4);
+                    $receiver = &$good['receivers'][$receiverKey];
+                    $receiver ??= ['entry' => $receiverEntry, 'quantity' => '0', 'items' => []];
                     $receiver['quantity'] = bcadd($receiver['quantity'], $line['quantity'], 4);
                     $receiver['items'][] = [
                         'quantity' => $line['quantity'],
                         'label' => $label,
                         'details' => implode(' · ', self::lineDetails($line)),
                     ];
-                    unset($receiver);
+                    unset($receiver, $good);
                 }
             }
         }
 
         $blocks = [];
-        foreach ($goodsNumbers as $key => $number) {
-            $good = $goods[$key];
-            $rows = [];
-            foreach ($good['receivers'] as $receiver) {
-                $details = [];
-                if (count($receiver['items']) === 1) {
-                    $item = $receiver['items'][0];
-                    $details[] = implode(' · ', array_filter([$item['label'], $item['details']]));
-                } else {
-                    foreach ($receiver['items'] as $item) {
-                        if ($item['label'] !== '' || $item['details'] !== '') {
-                            $details[] = ($item['label'] !== '' ? $item['label'] . ' ' : '')
-                                . self::amount($item['quantity'], $good['unit'])
-                                . ($item['details'] !== '' ? '　' . $item['details'] : '');
-                        }
-                    }
-                }
-                $rows[] = [
-                    'entry' => [$receiver['entry'][0], $receiver['entry'][1], self::amount($receiver['quantity'], $good['unit'])],
-                    'text' => implode("\n", $details),
-                    'continuation' => implode(' ', $receiver['entry']) . '（续）',
-                ];
+        foreach ($products as $variants) {
+            foreach ($variants as $good) {
+                $blocks[] = self::goodsBlock($good, count($blocks) + 1);
             }
-            $blocks[] = [
-                'heading' => [$number, $good['name'], '合计 ' . self::amount($good['quantity'], $good['unit'])],
-                'rows' => $rows,
-            ];
         }
         return $blocks;
     }
 
-    private static function goodsNumbers(array $customers): array
+    private static function goodsBlock(array $good, int $position): array
     {
-        $keysByProduct = [];
-        foreach ($customers as $customer) {
-            foreach ($customer['reports'] as $report) {
-                foreach ($report['items'] as $line) {
-                    $keysByProduct[$line['goods_id']][self::goodsKey($line)] = true;
+        $rows = [];
+        foreach ($good['receivers'] as $receiver) {
+            $details = [];
+            if (count($receiver['items']) === 1) {
+                $item = $receiver['items'][0];
+                $details[] = implode(' · ', array_filter([$item['label'], $item['details']]));
+            } else {
+                foreach ($receiver['items'] as $item) {
+                    if ($item['label'] !== '' || $item['details'] !== '') {
+                        $details[] = ($item['label'] !== '' ? $item['label'] . ' ' : '')
+                            . self::amount($item['quantity'], $good['unit'])
+                            . ($item['details'] !== '' ? '　' . $item['details'] : '');
+                    }
                 }
             }
+            $rows[] = [
+                'entry' => [$receiver['entry'][0], $receiver['entry'][1], self::amount($receiver['quantity'], $good['unit'])],
+                'text' => implode("\n", $details),
+                'continuation' => implode(' ', $receiver['entry']) . '（续）',
+            ];
         }
+        return [
+            'heading' => [self::goodsOrdinal($position), $good['name'], '合计 ' . self::amount($good['quantity'], $good['unit'])],
+            'rows' => $rows,
+        ];
+    }
 
-        $numbers = [];
-        foreach ($keysByProduct as $variants) {
-            foreach (array_keys($variants) as $key) {
-                $numbers[$key] = sprintf('货%02d', count($numbers) + 1);
-            }
-        }
-        return $numbers;
+    private static function goodsOrdinal(int $position): string
+    {
+        $circles = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳㉑㉒㉓㉔㉕㉖㉗㉘㉙㉚㉛㉜㉝㉞㉟㊱㊲㊳㊴㊵㊶㊷㊸㊹㊺㊻㊼㊽㊾㊿';
+        return $position <= 50 ? mb_substr($circles, $position - 1, 1, 'UTF-8') : (string)$position;
     }
 
     private static function goodsKey(array $line): string
@@ -203,7 +196,7 @@ final class CustomerReportWordDocument
         $main = $customer['main_customer_name'];
         $receiver = $customer['delivery_customer_name'];
         $name = $receiver === '' || $receiver === $main ? $main : $main . ' / ' . $receiver;
-        return [sprintf('客%02d', $position), $name];
+        return [$position . '.', $name];
     }
 
     private static function goodsName(array $line): string
@@ -318,17 +311,13 @@ final class CustomerReportWordDocument
                 $started = false;
                 do {
                     $available = max(0, intdiv($capacity - $used, self::BODY_LINE));
-                    $context = ($started || !empty($row['repeat_before'])) && !empty($row['continuation'])
-                        ? self::wrapText($row['continuation'], self::BODY_WIDTH) : [];
-                    if ($started && isset($row['split_context'])) {
-                        $context = [...$context, ...self::wrapText($row['split_context'], self::BODY_WIDTH)];
-                    }
+                    $context = self::continuationRuns($row, $started);
                     $contextHeight = count($context) * self::BODY_LINE;
                     $freshLines = max(1, intdiv($capacity - $continuationHeight - $contextHeight, self::BODY_LINE));
                     if (!$available || ($index > 0 && $available < min($required, $freshLines))) {
                         $body .= self::COLUMN_BREAK . implode('', $continuation);
                         if ($context) {
-                            $body .= self::paragraph($context);
+                            $body .= self::paperLine(implode('<w:r><w:br/></w:r>', $context));
                         }
                         $used = $continuationHeight + $contextHeight;
                         $available = $freshLines;
@@ -347,6 +336,25 @@ final class CustomerReportWordDocument
             . ' w:header="' . self::HEADER_DISTANCE . '" w:footer="320" w:gutter="0"/>'
             . '<w:cols w:num="2" w:space="448"/></w:sectPr>';
         return self::wrap('document', '<w:body>' . $body . '</w:body>');
+    }
+
+    private static function continuationRuns(array $row, bool $started): array
+    {
+        $runs = [];
+        if (($started || !empty($row['repeat_before'])) && !empty($row['continuation'])) {
+            foreach (self::wrapText($row['continuation'], self::BODY_WIDTH) as $text) {
+                $runs[] = self::run($text, 22);
+            }
+        }
+        if ($started && !empty($row['repeat_item'])) {
+            [$number, $name] = $row['entry'];
+            foreach (self::wrapText($number . ' ' . $name . '（续）', self::BODY_WIDTH) as $index => $text) {
+                $runs[] = $index === 0
+                    ? self::ordinalRun($number, '', substr($text, strlen($number)), 22, '000000')
+                    : self::run($text, 22);
+            }
+        }
+        return $runs;
     }
 
     private static function balancedColumnBreak(array $blocks, int $capacity): ?int
@@ -416,7 +424,7 @@ final class CustomerReportWordDocument
         $tab = '<w:r><w:tab/></w:r>';
         $lines = [];
         foreach (self::wrapText($name, $nameWidth) as $index => $line) {
-            $runs = $index === 0 ? self::run(($heading ? ' ' : '□ ') . $number, 20, false, '424C55') : '';
+            $runs = $index === 0 ? self::ordinalRun($number, $heading ? ' ' : '□ ') : '';
             $runs .= $tab . self::run($line, $size, $boldName);
             if ($index === 0 && $amount !== '' && !$separateAmount) {
                 $runs .= $tab . self::run($amount, $size, true);
@@ -430,6 +438,22 @@ final class CustomerReportWordDocument
             }
         }
         return $lines;
+    }
+
+    private static function ordinalRun(string $number, string $prefix, string $suffix = '', int $size = 20, string $color = '424C55'): string
+    {
+        if (!ctype_digit($number)) {
+            return self::run($prefix . $number . $suffix, $size, false, $color);
+        }
+        // ㊿之后没有预组圈号，用普通文字叠印圆圈和数字，复制或搜索时仍能找到行号。
+        [$tracking, $scale] = match (strlen($number)) {
+            2 => [-204, 100],
+            3 => [-304, 142],
+            default => [-391, 180],
+        };
+        $ring = '<w:spacing w:val="' . $tracking . '"/><w:w w:val="' . $scale . '"/>';
+        return self::run($prefix, $size, false, $color) . self::run('◯', 24, false, $color, $ring)
+            . self::run($number, 14, false, $color, '<w:position w:val="3"/>') . self::run($suffix, $size, false, $color);
     }
 
     private static function wrapText(string $text, int $limit): array
@@ -479,9 +503,9 @@ final class CustomerReportWordDocument
         return self::paperLine(implode('<w:r><w:br/></w:r>', $runs), $lineHeight, $before);
     }
 
-    private static function run(string $line, int $size, bool $bold = false, string $color = '000000'): string
+    private static function run(string $line, int $size, bool $bold = false, string $color = '000000', string $format = ''): string
     {
-        return '<w:r><w:rPr>' . ($bold ? '<w:b/>' : '') . '<w:color w:val="' . $color . '"/><w:sz w:val="' . $size
+        return '<w:r><w:rPr>' . ($bold ? '<w:b/>' : '') . '<w:color w:val="' . $color . '"/>' . $format . '<w:sz w:val="' . $size
             . '"/><w:szCs w:val="' . $size . '"/></w:rPr><w:t xml:space="preserve">'
             . htmlspecialchars($line, ENT_XML1 | ENT_QUOTES | ENT_SUBSTITUTE | ENT_DISALLOWED, 'UTF-8') . '</w:t></w:r>';
     }
