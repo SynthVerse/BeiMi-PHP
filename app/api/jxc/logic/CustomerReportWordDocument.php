@@ -26,7 +26,10 @@ final class CustomerReportWordDocument
         $title = self::TITLES[$documentType];
         $header = self::header($snapshot, $title);
         $topMargin = max(890, self::HEADER_DISTANCE + self::HEADER_LINE * count($header) + 220);
-        $blocks = $documentType === 'customers' ? self::customerBlocks($snapshot) : self::goodsBlocks($snapshot);
+        $goodsNumbers = self::goodsNumbers($snapshot['customers']);
+        $blocks = $documentType === 'customers'
+            ? self::customerBlocks($snapshot, $goodsNumbers)
+            : self::goodsBlocks($snapshot, $goodsNumbers);
         $path = tempnam(sys_get_temp_dir(), 'beimi-report-');
         if ($path === false) { throw new \RuntimeException('Word 临时文件创建失败'); }
         $zip = new \ZipArchive();
@@ -76,10 +79,10 @@ final class CustomerReportWordDocument
         return $header;
     }
 
-    private static function customerBlocks(array $data): array
+    private static function customerBlocks(array $data, array $goodsNumbers): array
     {
         $blocks = [];
-        foreach ($data['customers'] as $customer) {
+        foreach ($data['customers'] as $position => $customer) {
             $rows = [];
             foreach ($customer['reports'] as $index => $report) {
                 $order = count($customer['reports']) > 1 ? '第 ' . ($index + 1) . ' 单' : '';
@@ -90,7 +93,8 @@ final class CustomerReportWordDocument
                     'keep_next' => true, 'continuation' => $continuation,
                 ];
                 foreach ($report['items'] as $line) {
-                    $item = '□ ' . self::goodsName($line) . '　' . self::amount($line['quantity'], $line['unit_name']);
+                    $item = '□ ' . $goodsNumbers[self::goodsKey($line)] . ' ' . self::goodsName($line)
+                        . '　' . self::amount($line['quantity'], $line['unit_name']);
                     $details = self::lineDetails($line);
                     $rows[] = [
                         'text' => $item . ($details ? '　' . implode(' · ', $details) : ''),
@@ -101,28 +105,24 @@ final class CustomerReportWordDocument
                     $rows[] = ['text' => '备注  ' . trim($report['remark']), 'continuation' => $continuation, 'repeat_before' => true];
                 }
             }
-            $blocks[] = ['heading' => self::receiverName($customer), 'rows' => $rows];
+            $blocks[] = ['heading' => self::receiverLabel($customer, $position + 1), 'rows' => $rows];
         }
         return $blocks;
     }
 
-    private static function goodsBlocks(array $data): array
+    private static function goodsBlocks(array $data, array $goodsNumbers): array
     {
         $goods = [];
-        $keysByProduct = [];
-        foreach ($data['customers'] as $customer) {
+        foreach ($data['customers'] as $position => $customer) {
             $receiverKey = $customer['key'];
-            $receiverName = self::receiverName($customer);
+            $receiverLabel = self::receiverLabel($customer, $position + 1);
             foreach ($customer['reports'] as $report) {
                 $label = self::reportLabel($report, $data['query']['status']);
                 foreach ($report['items'] as $line) {
-                    $key = json_encode([$line['goods_id'], $line['sku_id'], $line['spec_id'], $line['unit_id'], $line['unit_name']], JSON_THROW_ON_ERROR);
-                    if (!isset($goods[$key])) {
-                        $goods[$key] = ['name' => self::goodsName($line), 'unit' => $line['unit_name'], 'quantity' => '0', 'receivers' => []];
-                        $keysByProduct[$line['goods_id']][] = $key;
-                    }
+                    $key = self::goodsKey($line);
+                    $goods[$key] ??= ['name' => self::goodsName($line), 'unit' => $line['unit_name'], 'quantity' => '0', 'receivers' => []];
                     $goods[$key]['quantity'] = bcadd($goods[$key]['quantity'], $line['quantity'], 4);
-                    $goods[$key]['receivers'][$receiverKey] ??= ['name' => $receiverName, 'quantity' => '0', 'items' => []];
+                    $goods[$key]['receivers'][$receiverKey] ??= ['name' => $receiverLabel, 'quantity' => '0', 'items' => []];
                     $receiver = &$goods[$key]['receivers'][$receiverKey];
                     $receiver['quantity'] = bcadd($receiver['quantity'], $line['quantity'], 4);
                     $receiver['items'][] = [
@@ -136,7 +136,7 @@ final class CustomerReportWordDocument
         }
 
         $blocks = [];
-        foreach (array_merge(...array_values($keysByProduct)) as $key) {
+        foreach ($goodsNumbers as $key => $number) {
             $good = $goods[$key];
             $rows = [];
             foreach ($good['receivers'] as $receiver) {
@@ -156,16 +156,48 @@ final class CustomerReportWordDocument
                 }
                 $rows[] = ['text' => $text, 'continuation' => $receiver['name'] . '（续）'];
             }
-            $blocks[] = ['heading' => $good['name'] . '　' . self::amount($good['quantity'], $good['unit']), 'rows' => $rows];
+            $blocks[] = [
+                'heading' => $number . ' ' . $good['name'] . '　' . self::amount($good['quantity'], $good['unit']),
+                'rows' => $rows,
+            ];
         }
         return $blocks;
     }
 
-    private static function receiverName(array $customer): string
+    private static function goodsNumbers(array $customers): array
+    {
+        $keysByProduct = [];
+        foreach ($customers as $customer) {
+            foreach ($customer['reports'] as $report) {
+                foreach ($report['items'] as $line) {
+                    $keysByProduct[$line['goods_id']][self::goodsKey($line)] = true;
+                }
+            }
+        }
+
+        $numbers = [];
+        foreach ($keysByProduct as $variants) {
+            foreach (array_keys($variants) as $key) {
+                $numbers[$key] = sprintf('货%02d', count($numbers) + 1);
+            }
+        }
+        return $numbers;
+    }
+
+    private static function goodsKey(array $line): string
+    {
+        return json_encode(
+            [$line['goods_id'], $line['sku_id'], $line['spec_id'], $line['unit_id'], $line['unit_name']],
+            JSON_THROW_ON_ERROR
+        );
+    }
+
+    private static function receiverLabel(array $customer, int $position): string
     {
         $main = $customer['main_customer_name'];
         $receiver = $customer['delivery_customer_name'];
-        return $receiver === '' || $receiver === $main ? $main : $main . ' / ' . $receiver;
+        $name = $receiver === '' || $receiver === $main ? $main : $main . ' / ' . $receiver;
+        return sprintf('客%02d %s', $position, $name);
     }
 
     private static function goodsName(array $line): string
