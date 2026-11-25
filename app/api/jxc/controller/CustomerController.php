@@ -139,16 +139,6 @@ class CustomerController extends BaseJxcController
         return $this->success('解绑成功', $result, 1, 1);
     }
 
-    public function assignGroup()
-    {
-        $params = (new CustomerValidate())->post()->goCheck('assignGroup');
-        $result = CustomerLogic::assignGroup($params);
-        if ($result === false) {
-            return $this->fail(CustomerLogic::getError());
-        }
-        return $this->success('调整成功', $result, 1, 1);
-    }
-
     public function status()
     {
         $params = (new CustomerValidate())->post()->goCheck('status');

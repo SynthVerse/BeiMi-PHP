@@ -40,6 +40,7 @@ final class FinancePeriodChecklist
             } while ($transits['transfer_has_more']);
         }
         foreach (Db::name('finance_document')->where('tenant_id', $tenant)->whereIn('status', ['draft', 'pending'])->order('id')->select()->toArray() as $document) {
+            if (FinanceDocumentPolicy::employeeModuleDeferred($document['type'])) { continue; }
             $payload = FinanceValue::decode($document['payload']); $businessMonth = null;
             $monthKeys = $document['type'] === 'expense_recurring_plan_change' ? ['effective_month'] : ['month', 'benefit_month', 'actual_date', 'service_start'];
             foreach ($monthKeys as $key) {

@@ -171,7 +171,6 @@
 | `lk_vendor`                | 供应商表       |
 | `lk_goods`                 | 商品表         |
 | `lk_customer`              | 客户表         |
-| `lk_customer_group`        | 客户分组表     |
 | `lk_sales_order`           | 销售单表       |
 | `lk_order_goods`           | 单据商品明细表 |
 | `lk_stock_flow`            | 库存流水表     |

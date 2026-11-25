@@ -1544,6 +1544,34 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertSame('0.00', FinanceBusinessLogic::options(['type' => 'unclaimed_customer_claim', 'unclaimed_source' => $fund])['selected_fund']['balance']);
     }
 
+    public function test_claiming_a_single_unidentified_receipt_settles_the_customer_without_another_cash_entry(): void
+    {
+        $this->activate();
+        $ledger = new FinanceLedger(self::TENANT_ID);
+        $date = date('Y-m-d');
+        $debt = $ledger->createSource(0, 'receivable', $this->customerId, '100', $date, null, ['source_reference' => '隔离客户欠款']);
+        $receipt = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'unclaimed_receipt', 'payload' => [
+            'account_id' => $this->accountId, 'actual_date' => $date, 'amount' => '100',
+            'funds_verified' => 1, 'reason' => '已核实隔离样本到账，付款客户待查',
+        ]]);
+        self::assertNotFalse($receipt, FinanceBusinessLogic::getError());
+        $source = $receipt['confirmed_result']['created_sources'][0];
+        self::assertSame('5100.00', $ledger->account($this->accountId)['balance']);
+        self::assertSame('100.00', $ledger->source($source)['balance']);
+
+        $claim = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'unclaimed_customer_claim', 'payload' => [
+            'unclaimed_source' => $source, 'subject_id' => $this->customerId, 'amount' => '100', 'advance_amount' => '0',
+            'claim_verified' => 1, 'reason' => '已核实用于归还这笔欠款', 'allocations' => [['source' => $debt, 'amount' => '100']],
+        ]]);
+        self::assertNotFalse($claim, FinanceBusinessLogic::getError());
+        self::assertSame($source, FinanceBusinessLogic::detail(['id' => $claim['id']])['payload']['unclaimed_source']);
+        self::assertSame('0.00', $ledger->source($debt)['balance']);
+        self::assertSame('0.00', $ledger->source($source)['balance']);
+        self::assertSame('5100.00', $ledger->account($this->accountId)['balance']);
+        self::assertSame([(int)$receipt['id']], array_map('intval', Db::name('finance_money_transaction')
+            ->where('tenant_id', self::TENANT_ID)->column('document_id')));
+    }
+
     public function test_unclaimed_claims_enforce_destination_permissions_and_opening_money_is_never_received_twice(): void
     {
         $this->activate(); $ledger = new FinanceLedger(self::TENANT_ID);
@@ -4461,6 +4489,52 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertSame(2, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->count());
     }
 
+    public function test_purchase_settlement_options_are_supplier_scoped_and_only_payment_uses_cash(): void
+    {
+        $this->activate();
+        $warehouse = $this->createCustomerReportWarehouse('隔离采购结算仓');
+        $sku = $this->customerReportSkuId($this->createCustomerReportGoods('隔离采购商品', 'FIN-ARR-SCOPE'));
+        $date = date('Y-m-d');
+        $record = function (string $type, array $payload): array {
+            $result = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => $type, 'payload' => $payload]);
+            self::assertNotFalse($result, FinanceBusinessLogic::getError());
+            return $result;
+        };
+        $arrivalLines = [];
+        foreach (['12' => '隔离供应商甲', '8' => '隔离供应商乙'] as $quantity => $name) {
+            $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => $name]);
+            $arrival = $record('purchase_arrival', ['subject_id' => $vendor, 'warehouse_id' => $warehouse, 'actual_date' => $date,
+                'source_reference' => '隔离到货-' . $quantity, 'reason' => '按实收记录', 'lines' => [['sku_id' => $sku, 'actual_quantity' => (string)$quantity]]]);
+            $arrivalLines[$vendor] = $arrival['confirmed_result']['lines'][0]['arrival_line_id'];
+        }
+        foreach ($arrivalLines as $vendor => $line) {
+            $options = FinanceBusinessLogic::options(['type' => 'purchase_settlement', 'subject_id' => $vendor]);
+            self::assertNotFalse($options, FinanceBusinessLogic::getError());
+            self::assertSame([$line], array_column($options['arrivals'], 'arrival_line_id'));
+        }
+        $vendor = array_key_last($arrivalLines);
+        $ledger = new FinanceLedger(self::TENANT_ID);
+        $advance = $ledger->createSource(0, 'supplier_advance', $vendor, '80', $date, null, []);
+        $settlement = $record('purchase_settlement', ['subject_id' => $vendor, 'reason' => '按实收到货结算',
+            'supplier_confirmation' => '已核对供应商结算原单', 'supplier_confirmed' => 1, 'lines' => [[
+                'arrival_line_id' => $arrivalLines[$vendor], 'covered_quantity' => '8', 'settlement_quantity' => '8', 'price' => '25', 'terms_version' => 0,
+            ]]]);
+        $payable = $settlement['confirmed_result']['created_sources'][0];
+        self::assertSame('200.00', $ledger->source($payable)['balance']);
+        self::assertSame('5000.00', $ledger->account($this->accountId)['balance']);
+        $record('supplier_advance_allocate', ['subject_id' => $vendor, 'actual_date' => $date, 'fund_source' => $advance,
+            'reason' => '用这笔预付款抵同一供应商欠款', 'allocations' => [['source' => $payable, 'amount' => '80']]]);
+        self::assertSame('120.00', $ledger->source($payable)['balance']);
+        self::assertSame('5000.00', $ledger->account($this->accountId)['balance']);
+        $record('supplier_payment', ['subject_id' => $vendor, 'actual_date' => $date, 'account_id' => $this->accountId, 'amount' => '120',
+            'reason' => '支付结算剩余款', 'allocations' => [['source' => $payable, 'amount' => '120']]]);
+        self::assertSame('0.00', $ledger->source($payable)['balance']);
+        self::assertSame('4880.00', $ledger->account($this->accountId)['balance']);
+        $statement = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['subject_kind' => 'vendor', 'vendor_id' => $vendor]);
+        self::assertSame('0.00', $statement['snapshot']['balances']['payable']['closing']);
+        self::assertSame(1, Db::name('finance_money_transaction')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
     public function test_necessary_purchase_freight_remains_in_cost_after_formal_settlement_without_extra_stock_or_cash(): void
     {
         $this->activate(); $warehouse = $this->createCustomerReportWarehouse('采购运费仓');
@@ -5110,6 +5184,96 @@ final class FinanceBusinessWorkflowTest extends TestCase
         self::assertSame($result, FinanceBusinessLogic::detail(['id' => $confirmed['id']])['confirmed_result']);
     }
 
+    public function test_one_labor_expense_paid_in_two_installments_is_reported_once(): void
+    {
+        $this->activate();
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '隔离劳务方']);
+        $category = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_category', 'payload' => [
+            'category_id' => 0, 'expected_category_version' => 0, 'parent' => 'personnel', 'name' => '劳务费', 'is_enabled' => 1,
+        ]]);
+        self::assertNotFalse($category, FinanceBusinessLogic::getError());
+        $categoryId = $category['confirmed_result']['category']['id'];
+        $expense = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense', 'payload' => [
+            'subject_id' => $vendor, 'actual_date' => date('Y-m-d'), 'benefit_month' => date('Y-m'), 'amount' => '100',
+            'due_mode' => 'unspecified', 'source_reference' => '劳务-验收-100', 'reason' => '核实劳务费',
+            'material_status' => 'missing', 'missing_material_reason' => '隔离样本已核对', 'material_verified' => 1,
+            'lines' => [['category_id' => $categoryId, 'expected_category_version' => 1, 'amount' => '100', 'reason' => '本月劳务']],
+        ]]);
+        self::assertNotFalse($expense, FinanceBusinessLogic::getError());
+        $source = $expense['confirmed_result']['created_sources'][0];
+        $ledger = new FinanceLedger(self::TENANT_ID);
+        self::assertSame('100.00', $ledger->source($source)['balance']);
+        self::assertSame('5000.00', $ledger->account($this->accountId)['balance']);
+        foreach ([['40', '60.00'], ['60', '0.00']] as [$amount, $remaining]) {
+            $result = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'supplier_payment', 'payload' => [
+                'subject_id' => $vendor, 'account_id' => $this->accountId, 'actual_date' => date('Y-m-d'), 'amount' => $amount,
+                'reason' => '分次支付同一劳务原单', 'allocations' => [['source' => $source, 'amount' => $amount]],
+            ]]);
+            self::assertNotFalse($result, FinanceBusinessLogic::getError());
+            self::assertSame($remaining, $ledger->source($source)['balance']);
+        }
+        self::assertSame('4900.00', $ledger->account($this->accountId)['balance']);
+        self::assertSame(['40.00', '60.00'], Db::name('finance_money_transaction')->where('tenant_id', self::TENANT_ID)
+            ->where('direction', 'out')->order('id')->column('amount'));
+        $report = FinanceBusinessLogic::monthlyReport(['month' => date('Y-m'), 'report' => 'expense']);
+        self::assertNotFalse($report, FinanceBusinessLogic::getError());
+        self::assertSame('100.00', $report['data']['summary']['amount']);
+    }
+
+    public function test_immediate_labor_expense_without_vendor_posts_once_and_corrects_linked_payment(): void
+    {
+        $this->activate();
+        $ledger = new FinanceLedger(self::TENANT_ID);
+        $month = date('Y-m');
+        $category = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'expense_category', 'payload' => [
+            'category_id' => 0, 'expected_category_version' => 0, 'parent' => 'personnel', 'name' => '劳务费', 'is_enabled' => 1,
+        ]]);
+        self::assertNotFalse($category, FinanceBusinessLogic::getError());
+        $categoryId = $category['confirmed_result']['category']['id'];
+        $payload = [
+            'payment_state' => 'paid', 'account_id' => $this->accountId, 'actual_date' => date('Y-m-d'),
+            'benefit_month' => $month, 'amount' => '100', 'reason' => '确认已付劳务费',
+            'material_status' => 'missing', 'missing_material_reason' => '现金付款经门店核实', 'material_verified' => 1,
+            'lines' => [['category_id' => $categoryId, 'expected_category_version' => 1, 'amount' => '100', 'reason' => '本月劳务']],
+        ];
+        $command = $this->command(0) + ['type' => 'expense', 'payload' => $payload];
+        $preview = \app\api\jxc\logic\FinancePreview::calculate($command + ['action' => 'record']);
+        self::assertSame([], $preview['balances']);
+        self::assertContains(['metric' => 'expense', 'posting_month' => $month, 'amount' => '100.00'], $preview['impacts']);
+        self::assertContains(['metric' => 'cash', 'posting_month' => $month, 'amount' => '-100.00'], $preview['impacts']);
+        self::assertSame('5000.00', $ledger->account($this->accountId)['balance']);
+
+        $invalid = $this->command(0) + ['type' => 'expense', 'payload' => array_replace($payload, ['account_id' => 0])];
+        self::assertFalse(FinanceBusinessLogic::action('record', $invalid));
+        $posted = FinanceBusinessLogic::action('record', $command);
+        self::assertNotFalse($posted, FinanceBusinessLogic::getError());
+        self::assertSame($posted['id'], FinanceBusinessLogic::action('record', $command)['id']);
+        self::assertSame('', $posted['confirmed_result']['subject_name']);
+        self::assertSame([], $posted['confirmed_result']['created_sources']);
+        self::assertSame('4900.00', $ledger->account($this->accountId)['balance']);
+        self::assertSame([], $ledger->sources('expense_payable'));
+        $report = FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => 'expense']);
+        self::assertSame('100.00', $report['data']['summary']['amount']);
+
+        $toCorrect = array_replace($payload, ['amount' => '80', 'payee_name' => '临时劳务人员',
+            'lines' => [array_replace($payload['lines'][0], ['amount' => '80'])]]);
+        $correction = FinanceBusinessLogic::action('correct', $this->command($posted['version']) + [
+            'type' => 'expense', 'id' => $posted['id'], 'payload' => $toCorrect, 'correction_reason' => '核对原现金记录后更正实付金额',
+        ]);
+        self::assertNotFalse($correction, FinanceBusinessLogic::getError());
+        self::assertSame($posted['confirmed_result']['money']['transaction_id'], $correction['confirmed_result']['money']['transaction_id']);
+        self::assertSame('4920.00', $ledger->account($this->accountId)['balance']);
+        self::assertSame('80.00', FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => 'expense'])['data']['summary']['amount']);
+
+        $reverse = $this->command($correction['version']) + ['type' => 'expense', 'id' => $correction['id'], 'correction_reason' => '确认该笔为账面误录'];
+        $reversal = FinanceBusinessLogic::action('reverse', $reverse);
+        self::assertNotFalse($reversal, FinanceBusinessLogic::getError());
+        self::assertSame($reversal['id'], FinanceBusinessLogic::action('reverse', $reverse)['id']);
+        self::assertSame('5000.00', $ledger->account($this->accountId)['balance']);
+        self::assertSame('0.00', FinanceBusinessLogic::monthlyReport(['month' => $month, 'report' => 'expense'])['data']['summary']['amount']);
+        self::assertSame(1, (int)Db::name('finance_money_transaction')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
     public function test_supplier_combined_payment_reduces_two_sources_without_second_expense(): void
     {
         $this->activate();
@@ -5361,18 +5525,81 @@ final class FinanceBusinessWorkflowTest extends TestCase
     public function test_advance_refund_and_allocation_share_one_balance_without_new_cash(): void
     {
         $this->activate(); $ledger = new FinanceLedger(self::TENANT_ID);
-        $advance = $ledger->createSource(1000, 'advance', $this->customerId, '600', date('Y-m-d'), null, []);
-        $payload = ['subject_id' => $this->customerId, 'account_id' => $this->accountId, 'actual_date' => date('Y-m-d'), 'amount' => '200',
-            'reason' => '预收退款', 'allocations' => [['source' => $advance, 'amount' => '200']]];
-        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'advance_refund', 'payload' => $payload]));
+        $advance = $ledger->createSource(1000, 'advance', $this->customerId, '150', date('Y-m-d'), null, []);
+        $payload = ['subject_id' => $this->customerId, 'account_id' => $this->accountId, 'actual_date' => date('Y-m-d'), 'amount' => '100',
+            'reason' => '预收退款', 'allocations' => [['source' => $advance, 'amount' => '100']]];
+        $refund = $this->command(0) + ['type' => 'advance_refund', 'payload' => $payload];
+        $recorded = FinanceBusinessLogic::action('record', $refund);
+        self::assertNotFalse($recorded, FinanceBusinessLogic::getError());
+        self::assertSame($recorded['id'], FinanceBusinessLogic::action('record', $refund)['id']);
+        self::assertSame('50.00', $ledger->source($advance)['balance']);
+        self::assertSame('1000.00', $ledger->source($this->receivable)['balance']);
+        self::assertSame('4900.00', $ledger->account($this->accountId)['balance']);
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'advance_refund', 'payload' => $payload]));
+        self::assertSame('50.00', $ledger->source($advance)['balance']);
         $allocation = ['subject_id' => $this->customerId, 'advance_source' => $advance, 'reason' => '明确用剩余预收结清指定欠款',
-            'allocations' => [['source' => $this->receivable, 'amount' => '400']]];
+            'allocations' => [['source' => $this->receivable, 'amount' => '50']]];
         self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'advance_allocate', 'payload' => $allocation]), FinanceBusinessLogic::getError());
-        self::assertSame('4800.00', $ledger->account($this->accountId)['balance']);
-        self::assertSame('600.00', $ledger->source($this->receivable)['balance']);
+        self::assertSame('4900.00', $ledger->account($this->accountId)['balance']);
+        self::assertSame('950.00', $ledger->source($this->receivable)['balance']);
         self::assertSame('0.00', $ledger->source($advance)['balance']);
         self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'advance_refund', 'payload' => $payload]));
         self::assertSame(1, Db::name('finance_money_transaction')->where('tenant_id', self::TENANT_ID)->count());
+    }
+
+    public function test_same_supplier_advance_and_equipment_refunds_settle_only_the_selected_source(): void
+    {
+        $this->activate();
+        $vendor = (int)Db::name('vendor')->insertGetId(['tenant_id' => self::TENANT_ID, 'supplier_name' => '隔离退款商家']);
+        $date = date('Y-m-d');
+        $ledger = new FinanceLedger(self::TENANT_ID);
+        $money = ['subject_id' => $vendor, 'account_id' => $this->accountId, 'actual_date' => $date];
+        $record = function (string $type, array $payload): array {
+            $result = FinanceBusinessLogic::action('record', $this->command(0) + ['type' => $type, 'payload' => $payload]);
+            self::assertNotFalse($result, FinanceBusinessLogic::getError());
+            return $result;
+        };
+
+        $advance = $record('supplier_advance', $money + ['amount' => '500', 'reason' => '采购预付款 ADV-500']);
+        $advanceSource = $advance['confirmed_result']['created_sources'][0];
+        $equipment = $record('equipment_purchase', [
+            'subject_id' => $vendor, 'actual_date' => $date, 'amount' => '600', 'equipment_name' => '保鲜柜', 'source_reference' => 'SB-600',
+            'equipment_verified' => 1, 'reason' => '购置保鲜柜', 'confirmation_basis' => '已核对隔离样本合同',
+            'material_status' => 'missing', 'material_verified' => 1, 'missing_material_reason' => '已人工核实记录',
+        ]);
+        $equipmentPaymentSource = $equipment['confirmed_result']['created_sources'][0];
+        $record('equipment_payment', $money + ['amount' => '600', 'reason' => '支付原设备款',
+            'allocations' => [['source' => $equipmentPaymentSource, 'amount' => '600']]]);
+        $due = $record('equipment_refund_due', [
+            'subject_id' => $vendor, 'actual_date' => $date, 'original_equipment_document_id' => $equipment['id'], 'amount' => '300',
+            'refund_verified' => 1, 'reason' => '设备商同意退回一部分', 'confirmation_basis' => '隔离样本退款约定',
+        ]);
+        $equipmentRefundSource = $due['confirmed_result']['created_sources'][0];
+        self::assertSame('3900.00', $ledger->account($this->accountId)['balance']);
+        self::assertSame('300.00', $ledger->source($equipmentRefundSource)['balance']);
+        foreach (['supplier_advance_refund' => $advanceSource, 'equipment_refund' => $equipmentRefundSource] as $type => $source) {
+            $options = FinanceBusinessLogic::options(['type' => $type, 'subject_id' => $vendor]);
+            self::assertNotFalse($options, FinanceBusinessLogic::getError());
+            self::assertSame([$source], array_column($options['sources'], 'reference'));
+        }
+
+        $record('supplier_advance_refund', $money + ['amount' => '300', 'fund_source' => $advanceSource, 'reason' => '收到预付款退款']);
+        self::assertSame('200.00', $ledger->source($advanceSource)['balance']);
+        self::assertSame('300.00', $ledger->source($equipmentRefundSource)['balance']);
+        self::assertSame('4200.00', $ledger->account($this->accountId)['balance']);
+        $equipmentReceipt = $money + ['amount' => '300', 'reason' => '收到保鲜柜退款',
+            'allocations' => [['source' => $equipmentRefundSource, 'amount' => '300']]];
+        self::assertFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'equipment_refund', 'payload' => $equipmentReceipt]));
+        self::assertStringContainsString('同方向、同金额', FinanceBusinessLogic::getError());
+        self::assertSame('300.00', $ledger->source($equipmentRefundSource)['balance']);
+        $record('equipment_refund', $equipmentReceipt + ['duplicate_risk_reason' => '核实为两笔到账，分别对应采购预付款和保鲜柜购置']);
+        self::assertSame('200.00', $ledger->source($advanceSource)['balance']);
+        self::assertSame('0.00', $ledger->source($equipmentRefundSource)['balance']);
+        self::assertSame('4500.00', $ledger->account($this->accountId)['balance']);
+        self::assertSame(4, Db::name('finance_money_transaction')->where('tenant_id', self::TENANT_ID)->count());
+        $equipmentStatus = FinanceBusinessLogic::options(['type' => 'equipment_refund_adjustment', 'original_refund_document_id' => $due['id']]);
+        self::assertSame('300.00', $equipmentStatus['selected_refund']['received_amount']);
+        self::assertSame('0.00', $equipmentStatus['selected_refund']['remaining_amount']);
     }
 
     public function test_correction_registers_new_channel_identity_and_preserves_old_alias(): void
@@ -5471,20 +5698,32 @@ final class FinanceBusinessWorkflowTest extends TestCase
     {
         $this->activate(); $fixture = $this->deliveredSale();
         $command = ['order_id' => $fixture['order_id'], 'expected_version' => 0, 'idempotency_key' => 'finance-sales-first-confirm',
-            'due_date' => date('Y-m-d'), 'lines' => [['order_goods_id' => $fixture['line_id'], 'customer_settlement_weight' => '2', 'pricing_unit_id' => $fixture['unit_id'], 'price' => '10']]];
+            'due_date' => date('Y-m-d'), 'lines' => [['order_goods_id' => $fixture['line_id'], 'customer_settlement_weight' => '2', 'pricing_unit_id' => $fixture['unit_id'], 'price' => '100']]];
         $sale = SalesSettlementLogic::submit($command);
         self::assertNotFalse($sale, SalesSettlementLogic::getError());
         self::assertSame($sale, SalesSettlementLogic::submit($command));
         $ledger = new FinanceLedger(self::TENANT_ID);
         $sources = array_values(array_filter($ledger->sources('receivable', $this->customerId), static fn(array $row): bool => str_starts_with($row['reference'], 'n:')));
-        self::assertCount(1, $sources); self::assertSame('20.00', $sources[0]['balance']); self::assertSame(date('Y-m-d'), $sources[0]['due_date']);
-        self::assertSame('1020.00', $sale['debt_after_order']);
-        self::assertEquals(20, Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('metric', 'revenue')->sum('amount'));
-        $payload = $this->receipt('20', '20'); $payload['allocations'][0]['source'] = $sources[0]['reference'];
+        self::assertCount(1, $sources); self::assertSame('200.00', $sources[0]['balance']); self::assertSame(date('Y-m-d'), $sources[0]['due_date']);
+        self::assertSame('1200.00', $sale['debt_after_order']);
+        self::assertEquals(200, Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('metric', 'revenue')->sum('amount'));
+        self::assertSame('5000.00', $ledger->account($this->accountId)['balance']);
+        $receivable = $sources[0]['reference'];
+        $advance = $ledger->createSource(0, 'advance', $this->customerId, '80', date('Y-m-d'), null, []);
+        self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'advance_allocate', 'payload' => [
+            'subject_id' => $this->customerId, 'advance_source' => $advance, 'reason' => '用客户原预收款抵同一张销售单',
+            'allocations' => [['source' => $receivable, 'amount' => '80']],
+        ]]), FinanceBusinessLogic::getError());
+        self::assertSame('120.00', $ledger->source($receivable)['balance']);
+        self::assertSame('5000.00', $ledger->account($this->accountId)['balance']);
+        $payload = $this->receipt('120', '120'); $payload['allocations'][0]['source'] = $receivable;
         self::assertNotFalse(FinanceBusinessLogic::action('record', $this->command(0) + ['type' => 'receipt', 'payload' => $payload]));
-        self::assertSame('0.00', $ledger->source($sources[0]['reference'])['balance']);
-        self::assertSame('5020.00', $ledger->account($this->accountId)['balance']);
-        self::assertEquals(20, Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('metric', 'revenue')->sum('amount'));
+        self::assertSame('0.00', $ledger->source($receivable)['balance']);
+        self::assertSame('5120.00', $ledger->account($this->accountId)['balance']);
+        self::assertEquals(200, Db::name('finance_entry')->where('tenant_id', self::TENANT_ID)->where('metric', 'revenue')->sum('amount'));
+        $statement = \app\api\jxc\logic\FinanceStatements::action('generate', $this->command(0) + ['customer_id' => $this->customerId]);
+        self::assertSame('1000.00', $statement['snapshot']['balances']['receivable']['closing']);
+        self::assertSame(1, Db::name('finance_money_transaction')->where('tenant_id', self::TENANT_ID)->count());
         self::assertSame(0, Db::name('stock_flow')->where('tenant_id', self::TENANT_ID)->count(), '金额确认不再次出库');
     }
 

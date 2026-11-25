@@ -46,7 +46,7 @@ final class FinancePayments
         if ($type === 'deferred_amortization_cancel') { return FinanceDeferredAmortizations::cancel($this->ledger, $document, $data); }
         if ($type === 'deferred_plan_adjustment') { return FinanceDeferredPlanChanges::confirm($this->ledger, $document, $data); }
         if ($type === 'expense_adjustment') { return FinanceExpenseAdjustments::confirm($this->ledger, $document, $data); }
-        if (in_array($type, ['expense', 'deferred_expense'], true)) { return FinanceExpenses::confirm($this->ledger, $document, $data); }
+        if (in_array($type, ['expense', 'deferred_expense'], true)) { return FinanceExpenses::confirm($this->ledger, $document, $data, $originalTransaction); }
         if ($type === 'expense_category') { return FinanceExpenseCategories::confirm($document, $data); }
         if ($type === 'legacy_return_cost') { return FinanceLegacyReturnCosts::confirm($this->ledger, $document, $data); }
         if ($type === 'inventory_loss') { return FinanceInventoryLosses::confirm($this->ledger, $document, $data); }

@@ -141,11 +141,12 @@ final class FinanceSetupLogic extends BaseLogic
         $prepare = $owner || (self::isUserIdentity() && WorkforceLogic::hasPermission('finance.opening.prepare'));
         $mode = $opening['guide']['mode'] ?? ($opening['status'] === 'active' ? 'carryover' : null);
         $guide = new FinanceOpeningGuide(self::tenantId());
+        $total = count(FinanceOpeningGuide::CARDS) - (self::isUserIdentity() ? 2 : 0);
         $result = ['tenant_id' => self::tenantId(), 'operator_id' => self::operatorId(), 'actor_type' => self::actor()['type'], 'mode' => $mode,
             'legacy_operating_allowed' => $opening['status'] !== 'active' && $guide->legacyOperatingAllowed(),
             'activation_available' => $opening['activation_available'],
             'capabilities' => ['prepare_opening' => $prepare, 'confirm_opening' => $owner],
-            'cards' => [], 'current_card' => null, 'progress' => ['completed' => 0, 'total' => 21, 'pending' => 21]];
+            'cards' => [], 'current_card' => null, 'progress' => ['completed' => 0, 'total' => $total, 'pending' => $total]];
         $summary = array_intersect_key($opening, array_flip(['tenant_id', 'status', 'version', 'activation_date', 'activation_available', 'confirmed_at']));
         if (!$prepare) {
             return $result + ['start_status' => $opening['status'] === 'active' ? 'active' : 'waiting_owner', 'opening' => $summary, 'preparation' => null];
@@ -153,7 +154,7 @@ final class FinanceSetupLogic extends BaseLogic
         $result['preparation'] = self::preparationResult(self::preparationRow());
         $result['removed_account_ids'] = FinanceAccountLifecycle::removedIds(self::tenantId());
         $result['opening'] = FinanceOpeningCategory::visibleSnapshot($opening, self::salaryAccess());
-        if ($opening['status'] === 'active') { $result['start_status'] = 'active'; $result['progress'] = ['completed' => 21, 'total' => 21, 'pending' => 0]; return $result; }
+        if ($opening['status'] === 'active') { $result['start_status'] = 'active'; $result['progress'] = ['completed' => $total, 'total' => $total, 'pending' => 0]; return $result; }
         $conflicts = $mode === 'carryover' ? [] : $guide->zeroConflicts();
         if ($opening['status'] === 'pending') { $result['start_status'] = 'pending_confirm'; }
         elseif ($mode === 'carryover') { $result['start_status'] = 'reviewing'; }
@@ -166,7 +167,7 @@ final class FinanceSetupLogic extends BaseLogic
         $result['progress'] = ['completed' => $completed, 'total' => count($cards), 'pending' => count($cards) - $completed];
         $preferred = $opening['guide']['current_card'] ?? null;
         $states = array_column($cards, 'state', 'key');
-        if ($preferred && !in_array($states[$preferred] ?? '', ['none', 'complete', 'pending_supplement', 'restricted'], true)) { $result['current_card'] = $preferred; }
+        if ($preferred && isset($states[$preferred]) && !in_array($states[$preferred], ['none', 'complete', 'pending_supplement', 'restricted'], true)) { $result['current_card'] = $preferred; }
         else {
             foreach ($cards as $card) { if (!in_array($card['state'], ['none', 'complete', 'pending_supplement', 'restricted'], true)) { $result['current_card'] = $card['key']; break; } }
             if (!$result['current_card']) { foreach ($cards as $card) { if (!in_array($card['state'], ['none', 'complete'], true)) { $result['current_card'] = $card['key']; break; } } }
@@ -346,15 +347,27 @@ final class FinanceSetupLogic extends BaseLogic
     {
         if (!in_array($action, ['item', 'editor', 'remove', 'review', 'guide_card', 'guide_evidence'], true)) { return; }
         $category = is_string($data['category'] ?? null) ? trim($data['category']) : '';
+        if (self::isUserIdentity() && FinanceOpeningCategory::isEmployeeCategory($category)) {
+            throw new \DomainException('本版尚未开放员工专项期初');
+        }
         $salary = $category === 'salary';
         if (in_array($action, ['item', 'remove'], true)) {
             $id = self::integer($data['id'] ?? 0);
             if ($id > 0) {
-                $salary = $salary || Db::name('finance_opening_item')->where('tenant_id', self::tenantId())->where('id', $id)->value('category') === 'salary';
+                $stored = (string)Db::name('finance_opening_item')->where('tenant_id', self::tenantId())->where('id', $id)->value('category');
+                if (self::isUserIdentity() && FinanceOpeningCategory::isEmployeeCategory($stored)) {
+                    throw new \DomainException('本版尚未开放员工专项期初');
+                }
+                $salary = $salary || $stored === 'salary';
                 if ($existing) {
                     $before = json_decode($existing['before_data'], true, 512, JSON_THROW_ON_ERROR);
                     foreach ($before['items'] ?? [] as $item) {
-                        if ((int)$item['id'] === $id && $item['category'] === 'salary') { $salary = true; break; }
+                        if ((int)$item['id'] !== $id) { continue; }
+                        if (self::isUserIdentity() && FinanceOpeningCategory::isEmployeeCategory($item['category'])) {
+                            throw new \DomainException('本版尚未开放员工专项期初');
+                        }
+                        $salary = $salary || $item['category'] === 'salary';
+                        break;
                     }
                 }
             }

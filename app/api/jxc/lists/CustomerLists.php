@@ -5,7 +5,6 @@ namespace app\api\jxc\lists;
 use app\api\jxc\logic\CustomerLogic;
 use app\common\lists\BaseDataLists;
 use app\common\model\jxc\Customer;
-use app\common\model\jxc\CustomerGroup;
 
 class CustomerLists extends BaseDataLists
 {
@@ -22,7 +21,6 @@ class CustomerLists extends BaseDataLists
             'phone',
             'address',
             'remark',
-            'group_id',
             'parent_id',
             'is_store',
             'children_count',
@@ -42,17 +40,6 @@ class CustomerLists extends BaseDataLists
                     ->whereOr('phone', 'like', '%' . $keyword . '%')
                     ->whereOr('address', 'like', '%' . $keyword . '%');
             });
-        }
-
-        $groupId = (int)($this->params['group_id'] ?? 0);
-        $groupName = trim((string)($this->params['group_name'] ?? ''));
-        if ($groupId <= 0 && $groupName !== '') {
-            $groupId = (int)(CustomerGroup::where('group_name', $groupName)
-                ->where('tenant_id', $tenantId)
-                ->value('id') ?: 0);
-        }
-        if ($groupId > 0) {
-            $query->where('group_id', $groupId);
         }
 
         if (array_key_exists('parent_id', $this->params) && $this->params['parent_id'] !== '') {

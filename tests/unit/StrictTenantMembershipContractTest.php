@@ -47,7 +47,7 @@ final class StrictTenantMembershipContractTest extends TestCase
         }
     }
 
-    public function test_automatic_wechat_provisioning_service_is_absent_and_manual_flows_remain(): void
+    public function test_wechat_onboarding_exposes_store_creation_and_defers_member_invites(): void
     {
         self::assertFileDoesNotExist(dirname(__DIR__, 2) . '/app/common/service/jxc/TenantProvisionService.php');
 
@@ -57,7 +57,10 @@ final class StrictTenantMembershipContractTest extends TestCase
 
         $routes = self::source('app/api/route/jxc.php');
         self::assertStringContainsString("Route::post('user/store/create', 'jxc.Store/createStore');", $routes);
-        self::assertStringContainsString("Route::post('store/invite/accept', 'jxc.Store/join');", $routes);
+        foreach (["'store/invite/accept'", "'user/store/join'", "'user/store/invite'", "'user/store/member-invite'", "'user/store/member-invite/accept'"] as $path) {
+            self::assertStringNotContainsString($path, $routes);
+        }
+        self::assertStringContainsString("'user/store/hierarchy/invite/accept'", $routes);
     }
 
     private static function source(string $path): string

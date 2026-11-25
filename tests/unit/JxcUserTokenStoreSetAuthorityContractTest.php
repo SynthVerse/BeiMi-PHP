@@ -98,14 +98,14 @@ final class JxcUserTokenStoreSetAuthorityContractTest extends TestCase
         $routes = self::source('app/api/route/jxc.php');
         $onboardingStart = strpos($routes, "Route::group('', function () {");
         $onboardingEnd = strpos($routes, "})->middleware(\\app\\api\\http\\middleware\\LoginMiddleware::class, 'enforce-onboarding');");
-        $strictStart = strpos($routes, '// 店铺成员操作');
+        $strictStart = strpos($routes, '// 店铺管理要求');
 
         self::assertNotFalse($onboardingEnd);
         self::assertNotFalse($onboardingStart);
         self::assertNotFalse($strictStart);
         $onboarding = substr($routes, $onboardingStart, $onboardingEnd - $onboardingStart);
         $strict = substr($routes, $strictStart);
-        self::assertSame(13, preg_match_all('/Route::(?:get|post)\(/', $onboarding));
+        self::assertSame(11, preg_match_all('/Route::(?:get|post)\(/', $onboarding));
         self::assertStringNotContainsString("Route::get('user/info'", $onboarding);
         self::assertMatchesRegularExpression("/Route::get\('user\/info', 'User\/info'\)\\s*->middleware\(\\\\app\\\\api\\\\http\\\\middleware\\\\LoginMiddleware::class\);/", $routes);
 
@@ -120,9 +120,7 @@ final class JxcUserTokenStoreSetAuthorityContractTest extends TestCase
             "Route::get('user/stores',    'jxc.Store/lists');",
             "Route::post('user/open',     'jxc.Store/createStore');",
             "Route::post('user/store/create', 'jxc.Store/createStore');",
-            "Route::post('user/store/join',   'jxc.Store/join');",
-            "Route::post('store/invite/accept', 'jxc.Store/join');",
-            "Route::post('user/store/member-invite/accept', 'jxc.Store/acceptMemberInvite');",
+            "Route::post('user/store/switch', 'jxc.Store/switchStore');",
         ] as $route) {
             self::assertStringContainsString($route, $onboarding);
         }
@@ -130,8 +128,6 @@ final class JxcUserTokenStoreSetAuthorityContractTest extends TestCase
         foreach ([
             "Route::get('user/store',     'jxc.Store/detail');",
             "Route::post('user/storeset', 'jxc.Store/setStore');",
-            "Route::post('user/store/switch', 'jxc.Store/switchStore');",
-            "Route::get('user/store/member-invite', 'jxc.Store/memberInvite');",
         ] as $route) {
             self::assertStringContainsString($route, $strict);
             self::assertStringNotContainsString($route, $onboarding);

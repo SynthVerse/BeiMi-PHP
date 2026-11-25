@@ -25,7 +25,15 @@ final class FinanceCorrections
         if (in_array($original['type'], ['expense_recurring_plan', 'expense_recurring_plan_change', 'expense_recurring_none', 'expense_recurring_correct'], true)) { throw new \DomainException('周期计划及逐月处理须关联原计划更正，不能覆盖已有待办或确认结果'); }
         if ($original['type'] === 'deferred_expense') { throw new \DomainException('待摊计划须关联原服务计划调整，不得覆盖已确认义务或已摊费用'); }
         if (in_array($original['type'], ['deferred_amortization', 'deferred_amortization_cancel', 'deferred_plan_adjustment'], true)) { throw new \DomainException('已摊费用须保留原服务月份和来源，请通过关联调整处理'); }
-        if (in_array($original['type'], ['expense', 'expense_category', 'expense_adjustment', 'expense_estimate_final'], true)) { throw new \DomainException('费用请关联原费用调整；类别请按当前版本维护，不能覆盖历史确认'); }
+        $paidExpense = $original['type'] === 'expense' && (FinanceValue::decode($original['confirmed_result'])['payment_state'] ?? '') === 'paid';
+        if ($paidExpense) {
+            FinanceAccess::require('', true);
+            if (!$reverseOnly && !$duplicateOf && (FinanceValue::decode($replacement['payload'])['payment_state'] ?? '') !== 'paid') {
+                throw new \DomainException('已支付费用的关联更正须保留付款事实');
+            }
+        } elseif (in_array($original['type'], ['expense', 'expense_category', 'expense_adjustment', 'expense_estimate_final'], true)) {
+            throw new \DomainException('费用请关联原费用调整；类别请按当前版本维护，不能覆盖历史确认');
+        }
         if ($original['type'] === 'legacy_return_cost') { throw new \DomainException('旧售退回成本须关联原来源登记新的核实金额，不得覆盖历史确认'); }
         if (in_array($original['type'], ['inventory_loss', 'inventory_loss_resolution'], true)) { throw new \DomainException('库内实物损耗与核实结论须关联后续处理，不得覆盖原记录或重复出入库'); }
         if ($original['type'] === 'purchase_arrival_loss') { throw new \DomainException('已确认损失须保留原实物和成本份额，通过关联成本调整纠正，不能覆盖或重复还原库存'); }
@@ -101,6 +109,7 @@ final class FinanceCorrections
             $replacementPayload = FinanceValue::decode($replacement['payload']); $replacementPayload['source'] = $settlementRebase['terminal_source']; $replacement['payload'] = FinanceValue::json($replacementPayload);
         }
         $result = $duplicateOf || $reverseOnly ? ['type' => $original['type'], 'subject_id' => $originalResult['subject_id'], 'subject_name' => $originalResult['subject_name'],
+            ...($paidExpense ? ['payment_state' => 'paid'] : []),
             'allocated_amount' => '0.00', 'created_sources' => [], 'duplicate_of' => $duplicateOf, 'reversal_of' => $reverseOnly ? (int)$original['id'] : null, 'reason' => $reason]
             : (new FinancePayments($this->tenantId, $this->ledger))->confirm($replacement, $transaction, (int)$original['id'], $preservedAdvance);
         if ($transferOut && !$duplicateOf && !$reverseOnly && $transferOutHasSettlements) {

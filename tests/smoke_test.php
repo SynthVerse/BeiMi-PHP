@@ -402,22 +402,13 @@ if ($goodsId) {
 }
 
 // ══════════════════════════════════════════════
-// 步骤 7：客户 CRUD + 分组 + 启停
+// 步骤 7：客户 CRUD + 启停
 // ══════════════════════════════════════════════
-echo "\n── 步骤 7：客户 CRUD + 分组 + 启停 ──\n";
-$custGroupName = testName('SMOKE_测试分组-烟测');
+echo "\n── 步骤 7：客户 CRUD + 启停 ──\n";
 $custName      = testName('SMOKE_测试客户-烟测');
 $custEditName  = testName('SMOKE_测试客户-改');
 
-// 7.1 创建分组
-$custGroupAddRes = httpRequest('POST', "{$BASE_URL}/api/customer/groups", ['group_name' => $custGroupName], $token);
-assert_code($custGroupAddRes, 1, '客户分组新增');
-$custGroupId = extractId($custGroupAddRes);
-if ($custGroupId === null) {
-    $custGroupId = $custGroupAddRes['data']['id'] ?? null;
-}
-
-// 7.2 新增客户
+// 7.1 新增客户
 $custAddRes = httpRequest('POST', "{$BASE_URL}/api/customer/add", [
     'customer_name' => $custName,
     'contact'       => testName('SMOKE_李四'),
@@ -426,7 +417,7 @@ $custAddRes = httpRequest('POST', "{$BASE_URL}/api/customer/add", [
 assert_code($custAddRes, 1, '客户新增');
 $custId = extractId($custAddRes);
 
-// 7.3 列表
+// 7.2 列表
 $custListRes = httpRequest('GET', "{$BASE_URL}/api/customer/index", [], $token);
 assert_code($custListRes, 1, '客户列表');
 if ($custId === null) {
@@ -434,35 +425,28 @@ if ($custId === null) {
 }
 
 if ($custId) {
-    // 7.4 详情
+    // 7.3 详情
     $custDetailRes = httpRequest('GET', "{$BASE_URL}/api/customer/detail", ['id' => $custId], $token);
     assert_code($custDetailRes, 1, '客户详情');
 
-    // 7.5 编辑
+    // 7.4 编辑
     $custEditRes = httpRequest('POST', "{$BASE_URL}/api/customer/edit", ['id' => $custId, 'customer_name' => $custEditName], $token);
     assert_code($custEditRes, 1, '客户编辑');
 
-    // 7.6 停用
+    // 7.5 停用
     $custDisableRes = httpRequest('POST', "{$BASE_URL}/api/customer/status", ['id' => $custId, 'is_disabled' => 1], $token);
     assert_code($custDisableRes, 1, '客户停用');
 
-    // 7.7 启用
+    // 7.6 启用
     $custEnableRes = httpRequest('POST', "{$BASE_URL}/api/customer/status", ['id' => $custId, 'is_disabled' => 0], $token);
     assert_code($custEnableRes, 1, '客户启用');
 
-    // 7.8 删除客户
+    // 7.7 删除客户
     $custDelRes = httpRequest('DELETE', "{$BASE_URL}/api/customer/del", ['id' => $custId], $token);
     assert_code($custDelRes, 1, '客户删除');
     $custId = null;
 } else {
     echo "[SKIP] 客户详情/编辑/启停/删除：无法获取 ID\n";
-}
-
-// 7.9 删除分组
-if ($custGroupId) {
-    $custGroupDelRes = httpRequest('POST', "{$BASE_URL}/api/customer/groups/delete", ['id' => $custGroupId], $token);
-    assert_code($custGroupDelRes, 1, '客户分组删除');
-    $custGroupId = null;
 }
 
 // ══════════════════════════════════════════════

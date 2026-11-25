@@ -183,7 +183,6 @@ class DefaultDataInitService
             'phone'              => '',
             'address'            => '',
             'remark'             => '系统默认客户',
-            'group_id'           => 0,
             'parent_id'          => 0,
             'is_store'           => 0,
             'children_count'     => 0,

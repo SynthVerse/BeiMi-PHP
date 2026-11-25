@@ -74,15 +74,6 @@ final class PurchaseReadHttpContractTest extends TestCase
         self::assertSame([], $this->get('demands', array_replace($query, ['page_no' => '2']))['data']['lists']);
     }
 
-    public function test_buyers_needs_no_business_parameters_and_filters_disabled_and_other_tenants(): void
-    {
-        $this->employee(self::TENANT_ID, '停用采购员', 0);
-        $this->employee(self::OTHER_TENANT_ID, '其他门店采购员');
-        $body = $this->get('buyers');
-        self::assertSame(1, $body['code'], $body['msg']);
-        self::assertSame([['id' => $this->fixture['buyer'], 'name' => '采购读取员']], $body['data']['lists']);
-    }
-
     public function test_plan_list_get_query_controls_status_date_and_pagination(): void
     {
         $plan = $this->createPlan();
@@ -96,22 +87,21 @@ final class PurchaseReadHttpContractTest extends TestCase
         self::assertSame(0, $this->get('lists', array_replace($query, ['delivery_date' => '2026-11-18']))['data']['count']);
     }
 
-    public function test_reads_require_login_and_electronic_permission_then_allow_an_explicit_view_grant(): void
+    public function test_reads_require_login_and_electronic_permission_reject_non_owner_with_a_view_grant(): void
     {
         $memberToken = $this->session(self::TENANT_ID, 'member');
         $memberId = $this->userIds[array_key_last($this->userIds)];
-        foreach (['demands', 'buyers', 'lists'] as $action) {
+        foreach (['demands', 'lists'] as $action) {
             self::assertSame('请求参数缺token', $this->get($action, [], '')['msg']);
             $denied = $this->get($action, [], $memberToken);
             self::assertSame(0, $denied['code']);
-            self::assertSame('没有执行该操作的电子权限', $denied['msg']);
         }
         $employeeId = $this->employee(self::TENANT_ID, '仅查看采购', 1, $memberId);
         Db::name('employee_permission')->insert(['tenant_id' => self::TENANT_ID,
             'employee_id' => $employeeId, 'permission_key' => 'purchase.plan.view', 'create_time' => time()]);
-        foreach (['demands', 'buyers', 'lists'] as $action) {
-            $allowed = $this->get($action, [], $memberToken);
-            self::assertSame(1, $allowed['code'], $allowed['msg']);
+        foreach (['demands', 'lists'] as $action) {
+            $denied = $this->get($action, [], $memberToken);
+            self::assertSame(0, $denied['code']);
         }
     }
 
@@ -120,22 +110,22 @@ final class PurchaseReadHttpContractTest extends TestCase
         $this->createPlan();
         $otherToken = $this->session(self::OTHER_TENANT_ID, 'owner');
         $query = ['tenant_id' => self::TENANT_ID, 'report_id' => $this->fixture['report']['id']];
-        foreach (['demands', 'buyers', 'lists'] as $action) {
+        foreach (['demands', 'lists'] as $action) {
             $body = $this->get($action, $query, $otherToken);
             self::assertSame(1, $body['code'], $body['msg']);
             self::assertSame([], $body['data']['lists']);
         }
     }
 
-    public function test_recall_accepts_json_confirmations_and_releases_only_unbought_quantity(): void
+    public function test_revision_preserves_original_paper_and_releases_only_unbought_quantity(): void
     {
         $fixture = $this->createDemand([
             ['桂鱼', 'RECALL-COUNT', '200', '条'],
             ['鲈鱼', 'RECALL-WEIGHT', '110', '斤'],
-        ], 'purchase-http-recall-demand');
+        ], 'purchase-http-revise-demand');
         $plan = $this->createPlan($fixture, ['条' => '200', '斤' => '110']);
         $lineIds = array_column($plan['lines'], 'id', 'unit_name');
-        // 布置收回前已经核实的采购进度。
+        // 准备已核实的采购进度。
         Db::name('purchase_plan_source')->where('id', $lineIds['条'])->update([
             'bought_qty' => '50',
             'fulfilled_qty' => '50',
@@ -144,18 +134,17 @@ final class PurchaseReadHttpContractTest extends TestCase
         $this->markPlanPrinted($plan);
         $query = ['report_id' => $fixture['report']['id']];
         self::assertSame([], $this->get('demands', $query)['data']['lists']);
-        $payload = $this->recallPayload($plan, [$lineIds['条'] => '50', $lineIds['斤'] => '0']);
+        $payload = $this->revisionPayload($plan, [$lineIds['条'] => '50', $lineIds['斤'] => '0']);
 
-        $body = $this->request('POST', 'recall', $payload);
+        $body = $this->request('POST', 'revise', $payload);
 
         self::assertSame(1, $body['code'], $body['msg']);
-        self::assertSame($body, $this->request('POST', 'recall', $payload));
+        self::assertSame($body, $this->request('POST', 'revise', $payload));
 
         $detail = $this->get('detail', ['id' => $plan['id']])['data'];
-        self::assertSame('recalled', $detail['status']);
-        self::assertNull($detail['recall_note']);
+        self::assertSame('complete', $detail['status']);
         self::assertSame($plan['version'] + 1, $detail['version']);
-        self::assertSame(['voided'], array_column($detail['sheets'], 'status'));
+        self::assertSame(['printed'], array_column($detail['sheets'], 'status'));
         $lines = array_column($detail['lines'], null, 'unit_name');
         foreach (['planned_qty', 'bought_qty', 'fulfilled_qty'] as $field) {
             self::assertSame('50.0000', $lines['条'][$field]);
@@ -166,73 +155,6 @@ final class PurchaseReadHttpContractTest extends TestCase
         $released = array_column($demands, 'remaining_qty', 'unit_name');
         self::assertSame('150.0000', $released['条']);
         self::assertSame('110.0000', $released['斤']);
-    }
-
-    public function test_recall_rejects_missing_or_non_boolean_confirmations_without_releasing_scope(): void
-    {
-        $plan = $this->createPlan();
-        $this->markPlanPrinted($plan);
-        $payload = $this->recallPayload($plan, [$plan['lines'][0]['id'] => '0']);
-        $stoppedError = '请确认采购员已停止旧指令';
-        $paperError = '无法收回旧纸单时仅最高权限人员可核实作废';
-        foreach ([
-            'old_instruction_stopped' => $stoppedError,
-            'paper_recovered' => $paperError,
-        ] as $field => $message) {
-            $missing = $payload;
-            unset($missing[$field]);
-            $body = $this->request('POST', 'recall', $missing);
-            self::assertSame(0, $body['code']);
-            self::assertSame($message, $body['msg']);
-            foreach ([false, 'true', '1', 1] as $unconfirmed) {
-                $body = $this->request('POST', 'recall', array_replace($payload, [$field => $unconfirmed]));
-                self::assertSame(0, $body['code']);
-                self::assertSame($message, $body['msg']);
-            }
-        }
-        $detail = $this->get('detail', ['id' => $plan['id']])['data'];
-        self::assertSame($plan['status'], $detail['status']);
-        self::assertSame($plan['version'], $detail['version']);
-        self::assertSame(['printed'], array_column($detail['sheets'], 'status'));
-        self::assertSame('40.0000', $this->get('demands')['data']['lists'][0]['remaining_qty']);
-    }
-
-    public function test_recall_exception_requires_explicit_owner_confirmation_and_reason(): void
-    {
-        $plan = $this->createPlan();
-        $payload = array_replace($this->recallPayload($plan, [$plan['lines'][0]['id'] => '0']), [
-            'reason' => '  纸单无法收回  ',
-            'paper_recovered' => false,
-            'owner_exception' => true,
-        ]);
-        $permissionError = '无法收回旧纸单时仅最高权限人员可核实作废';
-        foreach ([false, 'false', 'true', '1', 1] as $invalidChoice) {
-            $body = $this->request('POST', 'recall', array_replace($payload, ['owner_exception' => $invalidChoice]));
-            self::assertSame(0, $body['code']);
-            self::assertSame($permissionError, $body['msg']);
-        }
-
-        $memberToken = $this->session(self::TENANT_ID, 'member');
-        $memberId = $this->userIds[array_key_last($this->userIds)];
-        $employeeId = $this->employee(self::TENANT_ID, '采购调度员', 1, $memberId);
-        Db::name('employee_permission')->insert([
-            'tenant_id' => self::TENANT_ID,
-            'employee_id' => $employeeId,
-            'permission_key' => 'purchase.plan.manage',
-            'create_time' => time(),
-        ]);
-        $body = $this->request('POST', 'recall', $payload, $memberToken);
-        self::assertSame(0, $body['code']);
-        self::assertSame($permissionError, $body['msg']);
-
-        $body = $this->request('POST', 'recall', array_replace($payload, ['reason' => '  ']));
-        self::assertSame(0, $body['code']);
-        self::assertSame('请填写作废原因', $body['msg']);
-
-        $body = $this->request('POST', 'recall', $payload);
-        self::assertSame(1, $body['code'], $body['msg']);
-        self::assertSame('recalled', $body['data']['status']);
-        self::assertSame('纸单无法收回', $body['data']['recall_note']);
     }
 
     private function session(int $tenantId, string $role): string
@@ -262,7 +184,6 @@ final class PurchaseReadHttpContractTest extends TestCase
         string $key = 'purchase-http-demand'
     ): array {
         WorkforceLogic::saveProcess(['name' => '采购', 'trigger_type' => 'inventory_shortage', 'is_enabled' => 1, 'sort' => 1]);
-        $buyer = $this->employee(self::TENANT_ID, '采购读取员');
         $customer = $this->createCustomer('采购读取客户');
         $warehouse = $this->createCustomerReportWarehouse('采购读取仓');
         $baseUnit = $this->createCustomerReportUnit('斤');
@@ -293,7 +214,7 @@ final class PurchaseReadHttpContractTest extends TestCase
         }
         $report = CustomerReportLogic::submit($payload);
         self::assertNotFalse($report, CustomerReportLogic::getError());
-        return compact('buyer', 'warehouse', 'report');
+        return compact('warehouse', 'report');
     }
 
     private function createPlan(?array $fixture = null, array $quantitiesByUnit = ['斤' => '60']): array
@@ -304,7 +225,7 @@ final class PurchaseReadHttpContractTest extends TestCase
             $lines[] = ['report_item_id' => $item['id'],
                 'report_version' => $f['report']['version'], 'quantity' => $quantitiesByUnit[$item['unit_name']]];
         }
-        $plan = PurchasePlanLogic::create(['buyer_id' => $f['buyer'], 'warehouse_id' => $f['warehouse'],
+        $plan = PurchasePlanLogic::create(['warehouse_id' => $f['warehouse'],
             'delivery_date' => '2026-11-17', 'idempotency_key' => 'purchase-http-plan',
             'lines' => $lines]);
         self::assertNotFalse($plan, PurchasePlanLogic::getError());
@@ -328,11 +249,11 @@ final class PurchaseReadHttpContractTest extends TestCase
         self::assertSame('printed', $printed['data']['status']);
     }
 
-    private function recallPayload(array $plan, array $boughtQuantitiesByLine): array
+    private function revisionPayload(array $plan, array $boughtQuantitiesByLine): array
     {
         $lines = [];
         foreach ($boughtQuantitiesByLine as $lineId => $quantity) {
-            $lines[] = ['line_id' => $lineId, 'bought_qty' => $quantity];
+            $lines[] = ['line_id' => $lineId, 'planned_qty' => $quantity, 'bought_qty' => $quantity];
         }
         return [
             'id' => $plan['id'],
@@ -340,9 +261,6 @@ final class PurchaseReadHttpContractTest extends TestCase
             'idempotency_key' => 'purchase-http-recall',
             'lines' => $lines,
             'reason' => '',
-            'paper_recovered' => true,
-            'old_instruction_stopped' => true,
-            'owner_exception' => false,
         ];
     }
 

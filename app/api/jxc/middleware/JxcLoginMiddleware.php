@@ -6,6 +6,7 @@ namespace app\api\jxc\middleware;
 
 use app\api\service\UserTokenService;
 use app\common\service\auth\TenantSessionAuthorityService;
+use app\common\service\jxc\StoreMembershipService;
 use app\common\service\JsonService;
 use app\tenantapi\service\TenantTokenService;
 use think\facade\Config;
@@ -71,7 +72,7 @@ class JxcLoginMiddleware
         if (empty($userInfo['store_available'])) {
             return json([
                 'code' => 0,
-                'msg' => '请先创建或加入店铺',
+                'msg' => '请先创建店铺或进入本人创建的店铺',
                 'error_code' => 'STORE_REQUIRED',
                 'data' => ['requires_store' => true],
             ], 200);
@@ -121,21 +122,7 @@ class JxcLoginMiddleware
         }
 
         $tenantId = (int)($user['tenant_id'] ?? 0);
-        $tenant = $tenantId > 0
-            ? Db::name('tenant')
-                ->where('id', $tenantId)
-                ->where('disable', 0)
-                ->whereNull('delete_time')
-                ->find()
-            : null;
-        $member = !empty($tenant)
-            ? Db::name('tenant_member')
-                ->where('tenant_id', $tenantId)
-                ->where('user_id', (int)$user['id'])
-                ->where('status', 1)
-                ->whereNull('delete_time')
-                ->find()
-            : null;
+        $ownsStore = StoreMembershipService::isOperatingOwner((int)$user['id'], $tenantId);
 
         return [
             'user_id' => (int)$user['id'],
@@ -144,8 +131,8 @@ class JxcLoginMiddleware
             'mobile' => (string)($user['mobile'] ?? ''),
             'terminal' => $session['terminal'],
             'expire_time' => (int)$session['expire_time'],
-            'member_role' => (string)($member['role'] ?? ''),
-            'store_available' => !empty($tenant) && !empty($member),
+            'member_role' => $ownsStore ? StoreMembershipService::ROLE_OWNER : '',
+            'store_available' => $ownsStore,
         ];
     }
 }

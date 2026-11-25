@@ -8,7 +8,7 @@ Route::post('user/mnpLogin', 'login/mnpLogin');
 Route::get('user/info', 'User/info')
     ->middleware(\app\api\http\middleware\LoginMiddleware::class);
 
-// 新用户开店/入店入口：精确白名单允许已登录但尚未加入店铺的用户访问。
+// 新用户开店入口允许已登录但尚无本人店铺的用户访问。
 Route::group('', function () {
     Route::get('jxc/auth/info', 'jxc.Auth/info');
     Route::post('user/logout', 'jxc.Auth/logout');
@@ -21,16 +21,12 @@ Route::group('', function () {
     Route::get('user/stores',    'jxc.Store/lists');
     Route::post('user/open',     'jxc.Store/createStore');
     Route::post('user/store/create', 'jxc.Store/createStore');
-    Route::post('user/store/join',   'jxc.Store/join');
-    Route::post('store/invite/accept', 'jxc.Store/join');
-    Route::post('user/store/member-invite/accept', 'jxc.Store/acceptMemberInvite');
+    Route::post('user/store/switch', 'jxc.Store/switchStore');
 })->middleware(\app\api\http\middleware\LoginMiddleware::class, 'enforce-onboarding');
 
-// 店铺成员操作：继续要求当前店铺成员身份。
+// 店铺管理要求当前店铺的有效店主身份。
 Route::group('', function () {
     Route::get('user/store/closure/preview', 'jxc.Store/closurePreview');
-    Route::get('user/store/member-invite', 'jxc.Store/memberInvite');
-    Route::post('user/store/switch', 'jxc.Store/switchStore');
     Route::get('user/store',     'jxc.Store/detail');
     Route::post('user/storeset', 'jxc.Store/setStore');
 })->middleware(\app\api\http\middleware\LoginMiddleware::class, 'enforce');
@@ -180,12 +176,6 @@ Route::group('', function () {
     Route::get('customer/receivableSummary', 'jxc.Customer/receivableSummary');
     Route::post('customer/bindStore', 'jxc.Customer/bindStore');
     Route::post('customer/unbindStore', 'jxc.Customer/unbindStore');
-    Route::post('customer/groups/assign', 'jxc.Customer/assignGroup');
-    Route::get('customer/groups/detail', 'jxc.CustomerGroup/detail');
-    Route::post('customer/groups/rename', 'jxc.CustomerGroup/rename');
-    Route::post('customer/groups/delete', 'jxc.CustomerGroup/delete');
-    Route::get('customer/groups', 'jxc.CustomerGroup/lists');
-    Route::post('customer/groups', 'jxc.CustomerGroup/add');
     Route::post('customer/status', 'jxc.Customer/status');
     Route::post('customer/paymoney', 'jxc.Customer/paymoney');
     Route::get('customer/index', 'jxc.Customer/lists');
@@ -258,7 +248,6 @@ Route::group('', function () {
     Route::post('jxc/pending_goods/action', 'jxc.PendingGoods/action');
     Route::post('jxc/pending_goods/recover', 'jxc.PendingGoods/recover');
     Route::get('jxc/purchase_plans/demands', 'jxc.PurchasePlan/demands');
-    Route::get('jxc/purchase_plans/buyers', 'jxc.PurchasePlan/buyers');
     Route::get('jxc/purchase_plans/lists', 'jxc.PurchasePlan/lists');
     Route::get('jxc/purchase_plans/detail', 'jxc.PurchasePlan/detail');
     Route::get('jxc/purchase_plans/preview', 'jxc.PurchasePlan/preview');
@@ -268,7 +257,7 @@ Route::group('', function () {
     Route::post('jxc/purchase_plans/prepare_print', 'jxc.PurchasePlan/preparePrint');
     Route::post('jxc/purchase_plans/print_result', 'jxc.PurchasePlan/printResult');
     Route::post('jxc/purchase_plans/record_bought', 'jxc.PurchasePlan/recordBought');
-    Route::post('jxc/purchase_plans/recall', 'jxc.PurchasePlan/recall');
+    Route::post('jxc/purchase_plans/revise', 'jxc.PurchasePlan/revise');
     Route::post('jxc/purchase_plans/attach_arrival', 'jxc.PurchasePlan/attachArrival');
 
     // === 任务调度、纸质工票与员工系统 ===
@@ -320,12 +309,7 @@ Route::group('', function () {
     Route::post('jxc/line_vehicle/handoff_confirm', 'jxc.LineVehicle/handoffConfirm');
     Route::get('jxc/line_vehicle/loading_manifest', 'jxc.LineVehicle/manifest');
 
-    Route::get('jxc/workforce/permissions', 'jxc.Workforce/permissionCatalog');
     Route::get('jxc/workforce/me/permissions', 'jxc.Workforce/currentPermissions');
-    Route::get('jxc/workforce/employees', 'jxc.Workforce/employees');
-    Route::get('jxc/workforce/employee', 'jxc.Workforce/employee');
-    Route::post('jxc/workforce/employee/save', 'jxc.Workforce/saveEmployee');
-    Route::post('jxc/workforce/employee/status', 'jxc.Workforce/statusEmployee');
     Route::get('jxc/workforce/processes', 'jxc.Workforce/processes');
     Route::post('jxc/workforce/process/save', 'jxc.Workforce/saveProcess');
     Route::post('jxc/workforce/process/status', 'jxc.Workforce/statusProcess');
@@ -336,7 +320,6 @@ Route::group('', function () {
     Route::get('audit/lists', 'jxc.Audit/lists');
 
     // === 店铺管理 ===
-    Route::get('user/store/invite',  'jxc.Store/invite');
     Route::get('user/store/hierarchy', 'jxc.Store/hierarchy');
     Route::get('user/store/hierarchy/children', 'jxc.Store/hierarchyChildren');
     Route::get('user/store/hierarchy/tree', 'jxc.Store/hierarchyTree');

@@ -6,17 +6,30 @@ namespace app\api\jxc\logic;
 
 use think\facade\Db;
 
-/** 服务归属形成费用及应付；实际支付继续走来源核销，不重复确认费用。 */
+/** 普通费用可以同时记入已发生的付款，待付费用仍由原来源核销。 */
 final class FinanceExpenses
 {
-    public static function confirm(FinanceLedger $ledger, array $document, array $data): array
+    public static function confirm(FinanceLedger $ledger, array $document, array $data, ?array $originalTransaction = null): array
     {
         $tenant = FinanceAccess::tenant(); $id = (int)$document['id'];
-        $vendor = FinanceValue::id($data['subject_id'] ?? null);
-        $name = Db::name('vendor')->where('tenant_id', $tenant)->where('id', $vendor)->value('supplier_name');
-        if ($name === null) { throw new \DomainException('请选择本门店费用收款对象'); }
-        $date = FinanceValue::date($data['actual_date'] ?? null); $ledger->postingMonth($date);
         $deferred = $document['type'] === 'deferred_expense';
+        $paymentState = $data['payment_state'] ?? 'unpaid';
+        if (!in_array($paymentState, ['paid', 'unpaid'], true) || ($deferred && $paymentState === 'paid')) {
+            throw new \DomainException('请选择适用的费用付款状态');
+        }
+        $paid = $paymentState === 'paid';
+        if ($paid) {
+            FinanceAccess::require('', true);
+            if (!empty($data['recurring_plan_id']) || ($data['amount_status'] ?? 'final') !== 'final') {
+                throw new \DomainException('周期计划或暂估费用请按原费用来源办理');
+            }
+        }
+        if ($originalTransaction && !$paid) { throw new \DomainException('已支付费用的关联更正须保留付款事实'); }
+        $vendor = $paid ? 0 : FinanceValue::id($data['subject_id'] ?? null);
+        $name = $paid ? FinanceValue::text($data['payee_name'] ?? '', 100, false)
+            : Db::name('vendor')->where('tenant_id', $tenant)->where('id', $vendor)->value('supplier_name');
+        if ($name === null) { throw new \DomainException('请选择本门店费用收款对象'); }
+        $date = FinanceValue::date($data['actual_date'] ?? null); $paymentMonth = $ledger->postingMonth($date);
         $amount = FinanceValue::money($data['amount'] ?? null);
         $activation = (string)Db::name('finance_preparation')->where('tenant_id', $tenant)->value('activation_date');
         $details = $deferred ? FinanceDeferredPlans::details($data, $amount, $activation) : null; $benefit = null;
@@ -25,12 +38,13 @@ final class FinanceExpenses
             if ($benefit < substr($activation, 0, 7) || $benefit > date('Y-m')) { throw new \DomainException('普通费用归属须为启用后已发生的服务月份，未来受益请使用待摊费用'); }
         }
         $month = $ledger->postingMonth($deferred ? $date : max($benefit . '-01', $activation));
-        $reference = FinanceValue::text($data['source_reference'] ?? null, 160);
-        if (Db::name('finance_expense_bill')->where('tenant_id', $tenant)->where('vendor_id', $vendor)->where('source_reference', $reference)->lock(true)->find()) {
+        $reference = FinanceValue::text($data['source_reference'] ?? '', 160, !$paid);
+        if (!$paid && Db::name('finance_expense_bill')->where('tenant_id', $tenant)->where('vendor_id', $vendor)->where('source_reference', $reference)->lock(true)->find()) {
             throw new \DomainException('该收款对象的费用来源已登记，请打开原费用关联调整');
         }
-        $dueMode = $data['due_mode'] ?? null; $due = FinanceValue::date($data['due_date'] ?? null, true);
-        if (!in_array($dueMode, ['date', 'unspecified'], true) || ($dueMode === 'date') !== ($due !== null) || ($due && $due < $date)) {
+        $dueMode = $paid ? null : ($data['due_mode'] ?? null);
+        $due = $paid ? null : FinanceValue::date($data['due_date'] ?? null, true);
+        if (!$paid && (!in_array($dueMode, ['date', 'unspecified'], true) || ($dueMode === 'date') !== ($due !== null) || ($due && $due < $date))) {
             throw new \DomainException('请填写不早于发生日的付款日，或明确标记未约定');
         }
         $reason = FinanceValue::text($data['reason'] ?? null, 1000); $material = self::material($data);
@@ -43,11 +57,15 @@ final class FinanceExpenses
         if ($deferred) { $snapshot += ['details' => $details, 'plan_verified' => 1]; }
         else { $snapshot += FinanceExpenseEstimates::declaration($data); }
         if ($recurring) { $snapshot += ['recurring_plan_id' => $recurring['plan_id'], 'recurring_plan_document_id' => $recurring['document_id'], 'recurring_plan_reference' => $recurring['source_reference'], 'recurring_plan_version' => $recurring['version']]; }
-        $source = $ledger->createSource($id, 'expense_payable', $vendor, $amount, $date, $due, $snapshot);
+        $source = $paid ? '' : $ledger->createSource($id, 'expense_payable', $vendor, $amount, $date, $due, $snapshot);
         foreach ($lines as $line) {
             if (!$deferred) { $ledger->add($id, 'expense', $vendor, $line['amount'], $date, $month, 'ordinary_expense', $source, null,
                 $line + ['benefit_month' => $benefit, 'material_status' => $material['material_status']]); }
             Db::name('finance_expense_category')->where('tenant_id', $tenant)->where('id', $line['category_id'])->update(['used_at' => time()]);
+        }
+        if ($paid) {
+            $money = (new FinanceMoney($tenant, $ledger))->record($id, 'expense', $data, 'out', $date, $amount, $paymentMonth, $originalTransaction);
+            return $snapshot + ['payment_state' => 'paid', 'created_sources' => [], 'money' => $money];
         }
         $bill = (int)Db::name('finance_expense_bill')->insertGetId(['tenant_id' => $tenant, 'document_id' => $id, 'vendor_id' => $vendor,
             'source_reference' => $reference, 'source_ref' => $source, 'amount' => $amount, 'snapshot' => FinanceValue::json($snapshot), 'create_time' => time()]);

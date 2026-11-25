@@ -186,7 +186,6 @@ class StoreLogic extends BaseLogic
             'remark' => trim((string)($params['remark'] ?? '')),
             'parent_id' => $parentId,
             'is_store' => 1,
-            'group_id' => $parentId > 0 ? (int)($parent->group_id ?? 0) : 0,
         ]);
 
         // 更新主客户的 children_count
@@ -267,7 +266,7 @@ class StoreLogic extends BaseLogic
             'current_store' => $currentStore,
             'actions' => [
                 'create' => $canCreateStore,
-                'join' => true,
+                'join' => false,
                 'switch' => $needsStoreSwitch || $storeCount > 1,
             ],
         ]);
@@ -448,7 +447,6 @@ class StoreLogic extends BaseLogic
             'remark' => (string)($item['remark'] ?? ''),
             'parent_id' => (int)($item['parent_id'] ?? 0),
             'is_store' => (int)($item['is_store'] ?? 0),
-            'group_id' => (int)($item['group_id'] ?? 0),
             'create_time' => $item['create_time'] ?? '',
             'update_time' => $item['update_time'] ?? '',
         ];

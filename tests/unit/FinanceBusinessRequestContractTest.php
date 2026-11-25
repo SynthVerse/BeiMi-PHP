@@ -65,7 +65,7 @@ final class FinanceBusinessRequestContractTest extends TestCase
         self::assertSame('pending review', $result['params']['details']['note']);
     }
 
-    /** @dataProvider returnEntrypoints */
+    /** @dataProvider businessEntrypoints */
     public function test_return_source_confirmation_keeps_the_exact_json_type(string $endpoint, string $action): void
     {
         foreach ([1, 0, '1', ' 1 ', true, false, 1.0, [1], null] as $flag) {
@@ -85,7 +85,33 @@ final class FinanceBusinessRequestContractTest extends TestCase
         self::assertSame('invalid', $result['params']['payload']);
     }
 
-    public static function returnEntrypoints(): array
+    /** @dataProvider businessEntrypoints */
+    public function test_unclaimed_verification_keeps_the_exact_json_type(string $endpoint, string $action): void
+    {
+        foreach (['unclaimed_receipt' => 'funds_verified', 'unclaimed_customer_claim' => 'claim_verified'] as $type => $field) {
+            foreach ([1, 0, '1', true, false, 1.0, null] as $flag) {
+                $result = $this->submit(['action' => $action, 'type' => $type, 'payload' => [
+                    $field => $flag, 'reason' => ' 已核实 ',
+                ]], $endpoint);
+
+                self::assertSame($flag, $result['params']['payload'][$field]);
+                self::assertSame('已核实', $result['params']['payload']['reason']);
+            }
+        }
+    }
+
+    /** @dataProvider businessEntrypoints */
+    public function test_expense_material_verification_keeps_the_exact_json_type(string $endpoint, string $action): void
+    {
+        foreach ([1, '1', true, 1.0, null] as $flag) {
+            $result = $this->submit(['action' => $action, 'type' => 'expense', 'payload' => [
+                'payment_state' => 'paid', 'material_verified' => $flag,
+            ]], $endpoint);
+            self::assertSame($flag, $result['params']['payload']['material_verified']);
+        }
+    }
+
+    public static function businessEntrypoints(): array
     {
         return [
             'preview' => ['preview', 'record'],

@@ -6,10 +6,6 @@ class PurchasePlanController extends BaseJxcController {
     {
         return $this->respond('demands', 'get');
     }
-    public function buyers()
-    {
-        return $this->respond('buyers', 'get');
-    }
     public function lists()
     {
         return $this->respond('lists', 'get');
@@ -46,9 +42,9 @@ class PurchasePlanController extends BaseJxcController {
     {
         return $this->respond('recordBought');
     }
-    public function recall()
+    public function revise()
     {
-        return $this->respond('recall');
+        return $this->respond('revise');
     }
     public function attachArrival()
     {
@@ -57,15 +53,6 @@ class PurchasePlanController extends BaseJxcController {
     private function respond(string $action, string $method = 'post')
     {
         $params = $method === 'get'?$this->request->get():$this->request->post();
-        if ($action === 'recall') {
-            // 收回确认项保留原始 JSON 类型，由采购逻辑严格判断。
-            $confirmations = array_intersect_key($this->request->post(false), [
-                'old_instruction_stopped' => true,
-                'paper_recovered' => true,
-                'owner_exception' => true,
-            ]);
-            $params = array_replace($params, $confirmations);
-        }
         $result = PurchasePlanLogic::$action($params);
         return $result === false?$this->fail(PurchasePlanLogic::getError()):($method === 'get'?$this->data($result):$this->success('操作成功', $result, 1, 1));
     }

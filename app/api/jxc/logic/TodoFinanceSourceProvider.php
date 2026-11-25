@@ -633,6 +633,7 @@ final class TodoFinanceSourceProvider
     private static function canConfirm(string $type): bool
     {
         $policy = FinanceDocumentPolicy::TYPES[$type] ?? null;
+        if (FinanceDocumentPolicy::employeeModuleDeferred($type)) { return false; }
         if (!$policy) { return false; }
         if (in_array($type, ['salary_payment', 'salary_expense', 'salary_adjustment'], true) && !FinanceAccess::has('finance.salary.view')) { return false; }
         return $policy['owner'] ? FinanceAccess::owner() : ($policy['confirm'] !== '' && FinanceAccess::has($policy['confirm']));
@@ -642,6 +643,7 @@ final class TodoFinanceSourceProvider
     {
         $target = self::payableTarget($category);
         if ($target === []) { return false; }
+        if (FinanceAccess::userIdentity() && FinanceOpeningCategory::isEmployeeCategory($category)) { return false; }
         if ($category === 'salary' && !FinanceAccess::has('finance.salary.view')) { return false; }
         return FinanceAccess::has((string)$target['permission']);
     }

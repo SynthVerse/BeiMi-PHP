@@ -22,6 +22,11 @@ final class FinanceOpeningService
     public function __construct(private readonly int $tenantId, private readonly array $actor) {}
     private bool $lockStock = false;
 
+    private function categoryAvailable(string $category): bool
+    {
+        return $this->actor['type'] !== 'user' || !FinanceOpeningCategory::isEmployeeCategory($category);
+    }
+
     public function snapshot(): array
     {
         $book = $this->book();
@@ -32,11 +37,12 @@ final class FinanceOpeningService
             $snapshot['editor_drafts'] = $this->withEditorSourceBindings($snapshot['editor_drafts'] ?? []);
             return $snapshot;
         }
-        $items = $this->items();
+        $items = array_values(array_filter($this->items(), fn(array $row): bool => $this->categoryAvailable($row['category'])));
         $preparation = Db::name('finance_preparation')->where('tenant_id', $this->tenantId)->find() ?: [];
         $reviews = json_decode($book['reviews'], true, 512, JSON_THROW_ON_ERROR);
         $categories = [];
         foreach (self::CATEGORIES as $key => $title) {
+            if (!$this->categoryAvailable($key)) { continue; }
             $rows = array_values(array_filter($items, static fn(array $item): bool => $item['category'] === $key));
             $total = '0.00';
             $unknown = 0;
@@ -52,7 +58,9 @@ final class FinanceOpeningService
         $blockerDetails = $this->blockerDetails($preparation, $categories, $items);
         $unfinished = [];
         foreach (($reviews['_editors'] ?? []) as $drafts) {
-            foreach ($drafts as $category => $draft) { $unfinished[$category] = ($unfinished[$category] ?? 0) + 1; }
+            foreach ($drafts as $category => $draft) {
+                if ($this->categoryAvailable($category)) { $unfinished[$category] = ($unfinished[$category] ?? 0) + 1; }
+            }
         }
         foreach ($unfinished as $category => $count) { $blockerDetails[] = $this->blocker('opening_editor_unfinished', self::CATEGORIES[$category] . '还有未完成输入，请保存为准备资料或明确放弃', $category, 'opening_category'); }
 
@@ -70,7 +78,11 @@ final class FinanceOpeningService
             'confirmed_at' => 0,
             'guide' => $reviews['_guide'] ?? [],
             'unfinished_editor_counts' => $unfinished,
-            'editor_drafts' => $this->withEditorSourceBindings($reviews['_editors'][$this->actor['type'] . ':' . $this->actor['id']] ?? []),
+            'editor_drafts' => $this->withEditorSourceBindings(array_filter(
+                $reviews['_editors'][$this->actor['type'] . ':' . $this->actor['id']] ?? [],
+                $this->categoryAvailable(...),
+                ARRAY_FILTER_USE_KEY
+            )),
         ];
     }
 
@@ -86,6 +98,7 @@ final class FinanceOpeningService
     public function subjects(array $params): array
     {
         $category = self::text($params['category'] ?? '', 32);
+        if (!$this->categoryAvailable($category)) { throw new \DomainException('本版尚未开放员工专项期初'); }
         if (!FinanceOpeningCategory::supported($category)) { throw new \DomainException('该类别暂不支持明细录入'); }
         if (in_array($category, ['capital', 'loan'], true)) { return ['tenant_id' => $this->tenantId, 'lists' => [], 'page' => 1, 'has_more' => false, 'subject_input' => 'text']; }
         $keyword = self::text($params['keyword'] ?? '', 60);
@@ -137,7 +150,7 @@ final class FinanceOpeningService
                 if ($mode === 'zero') {
                     if (!self::isActivationAvailableForTenant($this->tenantId)) { throw new \DomainException('该门店暂不能正式启用财务，请联系负责人'); }
                     $conflicts = (new FinanceOpeningGuide($this->tenantId))->zeroConflicts();
-                    if ($conflicts || $before['items'] || array_filter($reviews, static fn(mixed $review, string $key): bool => $key !== '_guide', ARRAY_FILTER_USE_BOTH)) { throw new \DomainException('这家店已有需要接续的业务、余额或期初资料，请改为接续已有经营；系统不会清空资料'); }
+                    if ($conflicts || $this->items() || array_filter($reviews, static fn(mixed $review, string $key): bool => $key !== '_guide', ARRAY_FILTER_USE_BOTH)) { throw new \DomainException('这家店已有需要接续的业务、余额或期初资料，请改为接续已有经营；系统不会清空资料'); }
                     $reviews = ['_guide' => ['mode' => 'zero', 'current_card' => null, 'origin' => 'system_zero_initialization', 'started_by' => $this->actor, 'started_at' => time()]];
                     $book['status'] = 'active'; $book['confirmed_at'] = time();
                 } else {
@@ -350,7 +363,7 @@ final class FinanceOpeningService
             'declared_has' => !FinanceOpeningCategory::supported($key) && ($choice === 'has' || !empty($reviews[$key]['declared_has'])),
             'confirmed_by' => $this->actor, 'confirmed_at' => time(), 'origin' => 'guide_explicit_confirmation',
             'candidate_basis' => $guide->candidateBasis($snapshot, $key)];
-        $keys = array_keys(FinanceOpeningGuide::CARDS);
+        $keys = array_values(array_filter(array_keys(FinanceOpeningGuide::CARDS), $this->categoryAvailable(...)));
         $position = array_search($key, $keys, true);
         $reviews['_guide']['current_card'] = $choice === 'has' ? $key : ($keys[$position + 1] ?? null);
         $reviews['_guide']['updated_at'] = time();
@@ -382,6 +395,7 @@ final class FinanceOpeningService
         $guide = new FinanceOpeningGuide($this->tenantId);
         $candidates = $guide->candidates($snapshot);
         foreach (FinanceOpeningGuide::CARDS as $key => [$title]) {
+            if (!$this->categoryAvailable($key)) { continue; }
             $review = $reviews[$key] ?? [];
             if (!in_array($review['state'] ?? '', ['none', 'complete'], true)) { throw new \DomainException($title . '尚未核清，请返回这项继续补充'); }
             if ($review['state'] === 'none' && ($candidates[$key] ?? [])) { throw new \DomainException($title . '已有待核对资料，不能按没有启用'); }

@@ -104,7 +104,6 @@ CREATE TABLE IF NOT EXISTS `{{prefix}}customer` (
   `phone` varchar(20) NOT NULL DEFAULT '' COMMENT '联系电话',
   `address` varchar(255) NOT NULL DEFAULT '' COMMENT '地址',
   `remark` varchar(500) NOT NULL DEFAULT '' COMMENT '备注',
-  `group_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '分组ID',
   `parent_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '父级客户ID',
   `is_store` tinyint(1) NOT NULL DEFAULT 0 COMMENT '是否为门店',
   `children_count` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '下属门店数量',
@@ -116,24 +115,10 @@ CREATE TABLE IF NOT EXISTS `{{prefix}}customer` (
   `update_time` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新时间',
   PRIMARY KEY (`id`),
   KEY `idx_tenant_id` (`tenant_id`),
-  KEY `idx_group_id` (`group_id`),
   KEY `idx_parent_id` (`parent_id`),
   KEY `idx_customer_name` (`customer_name`),
   KEY `idx_is_disabled` (`is_disabled`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='客户表';
-
-CREATE TABLE IF NOT EXISTS `{{prefix}}customer_group` (
-  `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '分组ID',
-  `tenant_id` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '租户ID',
-  `group_name` varchar(100) NOT NULL DEFAULT '' COMMENT '分组名称',
-  `customer_count` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '客户数量',
-  `sort` int(11) NOT NULL DEFAULT 0 COMMENT '排序',
-  `create_time` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '创建时间',
-  `update_time` int(11) UNSIGNED NOT NULL DEFAULT 0 COMMENT '更新时间',
-  PRIMARY KEY (`id`),
-  KEY `idx_tenant_id` (`tenant_id`),
-  KEY `idx_group_name` (`group_name`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='客户分组表';
 
 CREATE TABLE IF NOT EXISTS `{{prefix}}sales_order` (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '销售单ID',

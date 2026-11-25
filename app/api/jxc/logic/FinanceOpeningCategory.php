@@ -76,6 +76,7 @@ final class FinanceOpeningCategory
     public static function supported(string $category): bool { return isset(self::SUBJECTS[$category]); }
     public static function subject(string $category): array { return self::SUBJECTS[$category]; }
     public static function hasBenefitMonth(string $category): bool { return in_array($category, ['salary', 'reimbursement'], true); }
+    public static function isEmployeeCategory(string $category): bool { return in_array($category, ['salary', 'reimbursement'], true); }
     public static function allowsSummary(string $category): bool
     {
         return in_array($category, ['account', 'receivable', 'payable', 'expense_payable', 'salary', 'reimbursement'], true);
@@ -130,6 +131,10 @@ final class FinanceOpeningCategory
     public static function visibleSnapshot(array $snapshot, array $salaryAccess): array
     {
         unset($snapshot['guide']['submitted_business_basis']);
+        if (FinanceAccess::userIdentity()) {
+            $snapshot['categories'] = array_values(array_filter($snapshot['categories'], static fn(array $row): bool => !self::isEmployeeCategory($row['key'])));
+            $snapshot['items'] = array_values(array_filter($snapshot['items'], static fn(array $row): bool => !self::isEmployeeCategory($row['category'])));
+        }
         foreach ($snapshot['categories'] as &$category) {
             $salary = $category['key'] === 'salary';
             $category = array_merge($category, self::metadata($category['key']));

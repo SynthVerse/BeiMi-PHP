@@ -357,7 +357,7 @@ final class FinanceBusinessLogic extends BaseLogic
             return ['tenant_id' => FinanceAccess::tenant(), 'type' => $type, 'policy' => $policy,
                 'supports_continue_later' => true,
                 'validation_rules' => FinanceBusinessValidation::rules($type, FinanceAccess::owner()),
-                'master_create_kinds' => FinanceAccess::owner() ? array_values(array_unique(array_filter([$masterSubject, $policy['direction'] !== 'none' ? 'finance_account' : '', $type === 'purchase_arrival' ? 'goods' : '', $type === 'purchase_arrival' ? 'warehouse' : ''], static fn(string $kind): bool => in_array($kind, ['customer', 'vendor', 'employee', 'finance_account', 'goods', 'warehouse'], true)))) : [],
+                'master_create_kinds' => FinanceAccess::owner() ? array_values(array_unique(array_filter([$masterSubject, $policy['direction'] !== 'none' || $type === 'expense' ? 'finance_account' : '', $type === 'purchase_arrival' ? 'goods' : '', $type === 'purchase_arrival' ? 'warehouse' : ''], static fn(string $kind): bool => in_array($kind, ['customer', 'vendor', 'employee', 'finance_account', 'goods', 'warehouse'], true)))) : [],
                 'active' => Db::name('finance_opening_book')->where('tenant_id', FinanceAccess::tenant())->value('status') === 'active',
                 'can_confirm' => FinanceAccess::owner() || (!$policy['owner'] && FinanceAccess::has($policy['confirm'])),
                 'can_prepare' => FinanceAccess::has($policy['prepare']),

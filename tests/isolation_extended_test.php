@@ -117,7 +117,6 @@ function cleanup_second_tenant_extended(): void
         'vendor',
         'warehouse',
         'goods_unit',
-        'customer_group',
     ];
 
     foreach ($businessTables as $table) {

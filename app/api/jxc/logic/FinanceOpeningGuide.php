@@ -151,6 +151,7 @@ final class FinanceOpeningGuide
         $candidates = $this->candidates($snapshot);
         $cards = [];
         foreach (self::CARDS as $key => [$title, $description]) {
+            if (FinanceAccess::userIdentity() && FinanceOpeningCategory::isEmployeeCategory($key)) { continue; }
             $category = $categories[$key] ?? ['review' => ['state' => 'unknown'], 'count' => 0];
             $review = $category['review'];
             $view = $key !== 'salary' || $salaryAccess['view'];

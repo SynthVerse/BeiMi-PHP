@@ -184,11 +184,6 @@ final class PurchasePlanLogic extends BaseLogic
         });
     }
 
-    public static function buyers(array $p = []): array|false
-    {
-        return self::run(static fn() => ['lists' => self::q('employee')->whereNull('delete_time')->where('is_enabled', 1)->field('id,name')->order('id')->select()->toArray()]);
-    }
-
     public static function verifyStock(array $p): array|false
     {
         return self::run(static fn() => Db::transaction(static function() use($p) {
@@ -278,9 +273,10 @@ final class PurchasePlanLogic extends BaseLogic
         return $r;
     }
 
-    private static function lines(int $id): array
+    private static function lines(int $id, bool $lock = false): array
     {
-        return self::q('purchase_plan_source')->where('purchase_plan_id', $id)->order('id')->select()->toArray();
+        $query = self::q('purchase_plan_source')->where('purchase_plan_id', $id)->order('id');
+        return ($lock ? $query->lock(true) : $query)->select()->toArray();
     }
 
     private static function present(array $p): array
@@ -290,14 +286,25 @@ final class PurchasePlanLogic extends BaseLogic
         foreach ($ls as &$l) {
             $requirements = self::q('customer_report_item')->where('id', $l['report_item_id'])->find();
             $l['requires_size_verification'] = (int)($requirements['piece_weight_confirmed'] ?? 0) === 1;
-            $l['report_sn'] = (string)self::q('customer_report')->where('id', $l['report_id'])->value('sn');
+            $demandUnitId = (int)($requirements['unit_id'] ?? 0);
+            $baseUnitId = (int)($requirements['base_unit_id'] ?? 0);
+            $l['same_allocation_unit'] = $demandUnitId > 0 && $baseUnitId > 0
+                ? $demandUnitId === $baseUnitId
+                : null;
+            $report = self::q('customer_report')->where('id', $l['report_id'])->field('sn,status')->find();
+            $l['report_sn'] = (string)($report['sn'] ?? '');
+            $l['source_closed'] = !$report || in_array($report['status'],
+                array_merge(['draft', 'cancelled'], CustomerReportSalesDocument::CLOSED_REPORT_STATUSES), true)
+                || !$requirements || in_array($requirements['status'], ['cancelled', 'undelivered'], true)
+                || in_array($requirements['fulfillment_status'] ?? '',
+                    ['delivered', 'partially_delivered_completed', 'undelivered', 'delivery_exception_completed'], true);
             $l['remaining_qty'] = bcsub($l['planned_qty'], $l['fulfilled_qty'], 4);
             $l['unbought_qty'] = bcsub($l['planned_qty'], $l['bought_qty'], 4);
             $u = $l['unit_name'];
             $summary[$u] = bcadd($summary[$u] ?? '0', $l['planned_qty'], 4);
         }
         unset($l);
-        foreach (['batch_id', 'goods_id', 'goods_name', 'sku_id', 'sku_name', 'base_unit_name', 'planned_qty', 'arrived_qty', 'allocated_qty', 'surplus_qty', 'active_scope_key', 'termination_reason']as$obsolete) {
+        foreach (['batch_id', 'goods_id', 'goods_name', 'sku_id', 'sku_name', 'base_unit_name', 'planned_qty', 'arrived_qty', 'allocated_qty', 'surplus_qty', 'active_scope_key', 'termination_reason', 'buyer_id', 'buyer_name', 'replaces_plan_id', 'recall_note']as$obsolete) {
             unset($p[$obsolete]);
         }
         $p['lines'] = $ls;
@@ -310,7 +317,6 @@ final class PurchasePlanLogic extends BaseLogic
     {
         $p = self::present(self::plan($id));
         $p['sheets'] = array_map([self::class, 'sheetView'], self::q('purchase_plan_sheet')->where('purchase_plan_id', $id)->order('id')->select()->toArray());
-        $p['can_owner_exception'] = FinanceAccess::owner();
         $p['arrivals'] = self::q('purchase_plan_hold')->where('purchase_plan_id', $id)->order('id')->select()->toArray();
         foreach ($p['arrivals']as&$a) {
             $a['allocated_qty'] = self::decimal(self::q('purchase_plan_allocation')->where('arrival_line_id', $a['arrival_line_id'])->sum('allocated_qty'));
@@ -334,11 +340,10 @@ final class PurchasePlanLogic extends BaseLogic
                 }
                 return self::detailById((int)$old['id']);
             }
-            $buyer = self::q('employee')->where('id', (int)($p['buyer_id'] ?? 0))->whereNull('delete_time')->where('is_enabled', 1)->find();
             $warehouse = self::q('warehouse')->where('id', (int)($p['warehouse_id'] ?? 0))->where('is_enabled', 1)->find();
             $date = (string)($p['delivery_date'] ?? '');
-            if (!$buyer || !$warehouse || !preg_match('/^\d{4}-\d{2}-\d{2}$/D', $date) || !($p['lines'] ?? [])) {
-                throw new \DomainException('请选择有效采购员、仓库、日期及需求');
+            if (!$warehouse || !preg_match('/^\d{4}-\d{2}-\d{2}$/D', $date) || !($p['lines'] ?? [])) {
+                throw new \DomainException('请选择有效仓库、日期及需求');
             }
             $entries = $p['lines'];
             usort($entries, static fn($a, $b) => (int)$a['report_item_id'] <=> (int)$b['report_item_id']);
@@ -371,13 +376,6 @@ final class PurchasePlanLogic extends BaseLogic
                 }
                 $lines[] = [$i, $d, $quantity];
             }
-            $replaces = (int)($p['replaces_plan_id'] ?? 0);
-            if ($replaces > 0) {
-                $original = self::plan($replaces, true);
-                if ($original['status'] !== 'recalled' || (int)$original['warehouse_id'] !== (int)$warehouse['id'] || $original['delivery_date'] !== $date) {
-                    throw new \DomainException('原采购指令尚未收回停止，或仓库日期不一致');
-                }
-            }
             // 重放检查在来源锁后再次执行，防止同请求并发创建。
             $old = self::q('purchase_plan')->where('idempotency_key', $key)->lock(true)->find();
             if ($old) {
@@ -387,11 +385,13 @@ final class PurchasePlanLogic extends BaseLogic
                 return self::detailById((int)$old['id']);
             }
             $now = time();
-            $id = (int)self::q('purchase_plan')->insertGetId(['tenant_id' => self::tenantId(), 'plan_no' => 'PP' . date('ymdHis') . bin2hex(random_bytes(3)), 'buyer_id' => $buyer['id'], 'buyer_name' => $buyer['name'], 'warehouse_id' => $warehouse['id'], 'warehouse_name' => $warehouse['name'], 'delivery_date' => $date, 'status' => 'pending', 'version' => 1, 'idempotency_key' => $key, 'request_fingerprint' => $fp, 'replaces_plan_id' => $replaces, 'create_time' => $now, 'update_time' => $now]);
+            $id = (int)self::q('purchase_plan')->insertGetId(['tenant_id' => self::tenantId(), 'plan_no' => 'PP' . date('ymdHis') . bin2hex(random_bytes(3)), 'warehouse_id' => $warehouse['id'], 'warehouse_name' => $warehouse['name'], 'delivery_date' => $date, 'status' => 'pending', 'version' => 1, 'idempotency_key' => $key, 'request_fingerprint' => $fp, 'create_time' => $now, 'update_time' => $now]);
             foreach ($lines as [$i, $d, $qty]) {
                 self::q('purchase_plan_source')->insert(['tenant_id' => self::tenantId(), 'purchase_plan_id' => $id, 'report_id' => $i['report_id'], 'report_item_id' => $i['id'], 'report_version' => $i['report_version'], 'customer_name' => $d['customer_name'], 'delivery_date' => $date, 'goods_id' => $i['goods_id'], 'goods_name' => $i['goods_name'], 'sku_id' => $i['sku_id'], 'sku_name' => $i['sku_name'], 'unit_name' => $i['unit_name'], 'base_unit_name' => $i['base_unit_name'], 'planned_qty' => $qty, 'shortage_qty' => '0', 'requirement' => $d['requirement'], 'create_time' => $now, 'update_time' => $now]);
             }
-            return self::detailById($id);
+            $result = self::detailById($id);
+            AuditService::logWithinTransaction('purchase_plan', AuditService::ACTION_CREATE, $id, $result['plan_no'], null, $result);
+            return $result;
         }), true);
     }
 
@@ -410,7 +410,7 @@ final class PurchasePlanLogic extends BaseLogic
             $fp = hash('sha256', json_encode($p));
             $old = self::q('purchase_plan_action')->where('idempotency_key', $key)->find();
             if ($old) {
-                if ((int)$old['purchase_plan_id'] !== (int)$plan['id'] || $old['fingerprint'] !== $fp) {
+                if ((int)$old['purchase_plan_id'] !== (int)$plan['id'] || $old['action'] !== $action || $old['fingerprint'] !== $fp) {
                     throw new \DomainException('原请求内容与本次不同');
                 }
                 return json_decode($old['result'], true);
@@ -428,8 +428,8 @@ final class PurchasePlanLogic extends BaseLogic
     public static function recordBought(array $p): array|false
     {
         return self::mutate($p, 'bought', static function($plan)use($p) {
-            if ($plan['status'] === 'recalled') {
-                throw new \DomainException('旧指令已收回，不能新增采购');
+            if ($plan['status'] === 'cancelled') {
+                throw new \DomainException('采购计划已取消，不能登记已买');
             }
             if (!($p['lines'] ?? [])) {
                 throw new \DomainException('请填写本次已买数量');
@@ -460,62 +460,113 @@ final class PurchasePlanLogic extends BaseLogic
         return $r;
     }
 
-    public static function recall(array $p): array|false
+    public static function revise(array $p): array|false
     {
-        return self::mutate($p, 'recall', static function($plan)use($p) {
-            $reason = trim((string)($p['reason'] ?? ''));
-            $reason = preg_replace('/\A[\s\p{Z}\x{FEFF}]+|[\s\p{Z}\x{FEFF}]+\z/u', '', $reason) ?? $reason;
-            if (($p['old_instruction_stopped'] ?? false) !== true) {
-                throw new \DomainException('请确认采购员已停止旧指令');
+        return self::mutate($p, 'revise', static function ($plan) use ($p) {
+            $entries = $p['lines'] ?? [];
+            if (!is_array($entries) || !$entries || in_array($plan['status'], ['complete', 'cancelled'], true)) {
+                throw new \DomainException('当前采购计划没有可调整的数量');
             }
+            $reason = trim((string)($p['reason'] ?? ''));
             if (mb_strlen($reason) > 500) {
                 throw new \DomainException('原因最多填写500字');
             }
-            $paperRecovered = ($p['paper_recovered'] ?? false) === true;
-            $ownerException = ($p['owner_exception'] ?? false) === true;
-            if (!$paperRecovered && (!$ownerException || !FinanceAccess::owner())) {
-                throw new \DomainException('无法收回旧纸单时仅最高权限人员可核实作废');
-            }
-            if (!$paperRecovered && $reason === '') {
-                throw new \DomainException('请填写作废原因');
-            }
-            if (self::q('purchase_plan_sheet')->where('purchase_plan_id', $plan['id'])->where('status', 'pending')->count() > 0) {
-                throw new \DomainException('请先核实结果未知的纸单');
-            }
-            $map = [];
-            foreach ((array)($p['lines'] ?? []) as $e) {
-                if (isset($map[(int)$e['line_id']])) {
-                    throw new \DomainException('核实明细重复');
+            $seen = [];
+            foreach ($entries as $entry) {
+                $line = self::line((int)($entry['line_id'] ?? 0), (int)$plan['id']);
+                if (isset($seen[$line['id']])) {
+                    throw new \DomainException('采购明细重复');
                 }
-                $map[(int)$e['line_id']] = self::quantity($e['bought_qty'] ?? '', true);
-            }
-            $lines = self::lines((int)$plan['id']);
-            if (count($map) !== count($lines)) {
-                throw new \DomainException('必须核实全部明细已买与未买范围');
-            }
-            foreach ($lines as $l) {
-                $bought = $map[(int)$l['id']] ?? null;
-                if ($bought !== null) {
-                    self::quantityForUnit($bought, (int)self::q('customer_report_item')->where('id', $l['report_item_id'])->value('unit_id'), true);
+                $seen[$line['id']] = true;
+                $item = self::item((int)$line['report_item_id'], true);
+                $target = self::quantityForUnit($entry['planned_qty'] ?? '', (int)$item['unit_id'], true);
+                $bought = self::quantityForUnit($entry['bought_qty'] ?? $line['bought_qty'], (int)$item['unit_id'], true);
+                if (bccomp($bought, $line['bought_qty'], 4) < 0 || bccomp($bought, $line['fulfilled_qty'], 4) < 0
+                    || bccomp($bought, $line['planned_qty'], 4) > 0 || bccomp($target, $bought, 4) < 0) {
+                    throw new \DomainException('调整数量不能少于已买、在途或已分配数量，请核对采购事实');
                 }
-                if ($bought === null || bccomp($bought, $l['fulfilled_qty'], 4) < 0 || bccomp($bought, $l['bought_qty'], 4) < 0 || bccomp($bought, $l['planned_qty'], 4) > 0) {
-                    throw new \DomainException('已买数量不能少于已登记事实或超过安排');
+                $difference = bcsub($target, $line['planned_qty'], 4);
+                if (bccomp($difference, '0', 4) < 0) {
+                    self::requireArrivalsResolved((int)$plan['id'], (int)$line['sku_id']);
+                } elseif (bccomp($difference, '0', 4) > 0) {
+                    $demand = self::demand($item, true);
+                    if ($demand['stock_verification_required'] || bccomp($difference, $demand['remaining_qty'], 4) > 0) {
+                        throw new \DomainException('增加数量超过可安排范围，或库存尚待核实');
+                    }
                 }
-                // 已入库未分配也属于已买，不允许整单释放。存在未分配实物时先分配/核实再回收。
-                $held = self::q('purchase_plan_hold')->where('purchase_plan_id', $plan['id'])->where('sku_id', $l['sku_id'])->where('remaining_qty', '>', 0)->count();
-                if ($held > 0 && bccomp($bought, $l['planned_qty'], 4) < 0) {
-                    throw new \DomainException('先核实分配已到货实物，再释放该商品未买范围');
-                }
-                self::q('purchase_plan_source')->where('id', $l['id'])->update(['planned_qty' => $bought, 'bought_qty' => $bought, 'status' => bccomp($bought, $l['fulfilled_qty'], 4) === 0?'fulfilled':'pending', 'update_time' => time()]);
+                self::updateSourceQuantities($line, $target, $bought);
             }
-            self::q('purchase_plan')->where('id', $plan['id'])->update(['status' => 'recalled', 'recall_note' => $reason === '' ? null : $reason]);
-            self::q('purchase_plan_sheet')->where('purchase_plan_id', $plan['id'])->where('status', '<>', 'pending')->update(['status' => 'voided', 'update_time' => time()]);
+            self::refreshPlanStatus((int)$plan['id']);
         });
+    }
+
+    private static function requireArrivalsResolved(int $planId, int $skuId): void
+    {
+        $hasPending = self::q('purchase_plan_hold')->where('purchase_plan_id', $planId)
+            ->where('sku_id', $skuId)->where('remaining_qty', '>', 0)->lock(true)->field('id')->find();
+        if ($hasPending) {
+            throw new \DomainException('请先核实已到货实物的分配与去向，再调减未买数量');
+        }
+    }
+
+    private static function updateSourceQuantities(array $line, string $planned, string $bought): void
+    {
+        $status = 'pending';
+        if (bccomp($planned, '0', 4) === 0) {
+            $status = 'released';
+        } elseif (bccomp($line['fulfilled_qty'], $planned, 4) === 0) {
+            $status = 'fulfilled';
+        } elseif (bccomp($line['fulfilled_qty'], '0', 4) > 0) {
+            $status = 'partial';
+        }
+        self::q('purchase_plan_source')->where('id', $line['id'])->update([
+            'planned_qty' => $planned, 'bought_qty' => $bought, 'status' => $status, 'update_time' => time(),
+        ]);
+    }
+
+    private static function refreshPlanStatus(int $planId): void
+    {
+        $hasQuantity = false;
+        $hasOutstanding = false;
+        $hasFulfilled = false;
+        foreach (self::lines($planId, true) as $line) {
+            $hasQuantity = $hasQuantity || bccomp($line['planned_qty'], '0', 4) > 0;
+            $hasOutstanding = $hasOutstanding || bccomp($line['planned_qty'], $line['fulfilled_qty'], 4) > 0;
+            $hasFulfilled = $hasFulfilled || bccomp($line['fulfilled_qty'], '0', 4) > 0;
+        }
+        $hasPendingArrival = self::q('purchase_plan_hold')->where('purchase_plan_id', $planId)
+            ->where('remaining_qty', '>', 0)->lock(true)->field('id')->find();
+        $status = !$hasQuantity ? 'cancelled' : (!$hasOutstanding && !$hasPendingArrival ? 'complete' :
+            ($hasFulfilled || $hasPendingArrival ? 'partial' : 'pending'));
+        self::q('purchase_plan')->where('id', $planId)->update(['status' => $status]);
     }
 
     public static function preview(array $p): array|false
     {
-        return self::run(static fn() => ['sheets' => self::previewSheets(self::plan((int)($p['id'] ?? 0)), (string)($p['mode'] ?? 'merged'))]);
+        return self::run(static function () use ($p) {
+            $plan = self::plan((int)($p['id'] ?? 0));
+            return ['sheets' => !empty($p['original_sheet_id'])
+                ? [self::historicalSheet($plan, (int)$p['original_sheet_id'])]
+                : self::previewSheets($plan, (string)($p['mode'] ?? 'merged'))];
+        });
+    }
+
+    private static function historicalSheet(array $plan, int $sheetId): array
+    {
+        if (!WorkforceLogic::requirePermission('task.reprint')) {
+            throw new \DomainException('没有纸单补打权限');
+        }
+        $sheet = self::q('purchase_plan_sheet')->where('purchase_plan_id', $plan['id'])
+            ->where('id', $sheetId)->where('status', '<>', 'pending')->find();
+        if (!$sheet) {
+            throw new \DomainException('原纸单不存在或结果待核实');
+        }
+        $view = self::sheetView($sheet);
+        $view['ticket']['is_reprint'] = true;
+        $view['ticket']['ticket_no'] = '';
+        $view['ticket']['copy_no'] = 1 + (int)self::q('purchase_plan_sheet')
+            ->where('purchase_plan_id', $plan['id'])->where('sheet_key', $sheet['sheet_key'])->max('copy_no');
+        return $view;
     }
 
     private static function previewSheets(array $plan, string $mode): array
@@ -523,8 +574,8 @@ final class PurchasePlanLogic extends BaseLogic
         if (!in_array($mode, ['merged', 'customer'], true)) {
             throw new \DomainException('打印方式无效');
         }
-        if (in_array($plan['status'], ['recalled', 'complete'], true)) {
-            throw new \DomainException('该采购指令已结束，不能继续打印执行单');
+        if (in_array($plan['status'], ['cancelled', 'complete'], true)) {
+            throw new \DomainException('当前采购清单已结束');
         }
         $groups = [];
         foreach (self::lines((int)$plan['id']) as $l) {
@@ -553,8 +604,6 @@ final class PurchasePlanLogic extends BaseLogic
                 'is_reprint' => $previousCopies !== [],
                 'process_name' => '采购',
                 'delivery_date' => $plan['delivery_date'],
-                'main_customer' => ['name' => $plan['buyer_name']],
-                'buyer_name' => $plan['buyer_name'],
                 'warehouse_name' => $plan['warehouse_name'],
                 'print_lines' => [],
             ];
@@ -612,7 +661,9 @@ final class PurchasePlanLogic extends BaseLogic
                 return ['recover_only' => true, 'sheets' => []];
             }
             self::version($plan, $p);
-            $sheets = self::previewSheets($plan, $mode);
+            $sheets = !empty($p['original_sheet_id'])
+                ? [self::historicalSheet($plan, (int)$p['original_sheet_id'])]
+                : self::previewSheets($plan, $mode);
             if (isset($p['sheet_keys'])) {
                 $keys = array_values(array_unique(array_map('strval', (array)$p['sheet_keys'])));
                 $sheets = array_values(array_filter($sheets, static fn($s) => in_array($s['sheet_key'], $keys, true)));
@@ -627,7 +678,7 @@ final class PurchasePlanLogic extends BaseLogic
             foreach ($sheets as &$s) {
                 $copy = $s['ticket']['copy_no'];
                 $s['ticket']['ticket_no'] = $plan['plan_no'] . '-' . str_replace(':', '-', $s['sheet_key']) . '-' . $copy;
-                $id = self::q('purchase_plan_sheet')->insertGetId(['tenant_id' => self::tenantId(), 'purchase_plan_id' => $plan['id'], 'plan_version' => $plan['version'], 'request_key' => $key, 'request_fingerprint' => $fp, 'print_permission' => $permission, 'sheet_key' => $s['sheet_key'], 'copy_no' => $copy, 'status' => 'pending', 'ticket' => json_encode($s['ticket'], JSON_UNESCAPED_UNICODE), 'create_time' => time(), 'update_time' => time()]);
+                $id = self::q('purchase_plan_sheet')->insertGetId(['tenant_id' => self::tenantId(), 'purchase_plan_id' => $plan['id'], 'plan_version' => $s['ticket']['content_version'], 'request_key' => $key, 'request_fingerprint' => $fp, 'print_permission' => $permission, 'sheet_key' => $s['sheet_key'], 'copy_no' => $copy, 'status' => 'pending', 'ticket' => json_encode($s['ticket'], JSON_UNESCAPED_UNICODE), 'create_time' => time(), 'update_time' => time()]);
                 $s = self::sheetView(self::q('purchase_plan_sheet')->where('id', $id)->find());
             }
             unset($s);
@@ -669,7 +720,8 @@ final class PurchasePlanLogic extends BaseLogic
     {
         try {
             $plan = self::plan($planId, true);
-            $allowed = array_unique(array_column(self::lines($planId), 'sku_id'));
+            $outstanding = array_filter(self::lines($planId, true), static fn(array $line): bool => bccomp($line['planned_qty'], $line['fulfilled_qty'], 4) > 0);
+            $allowed = array_unique(array_column($outstanding, 'sku_id'));
             $batch = self::q('purchase_batch')->where('id', $batchId)->where('purchase_plan_id', $planId)->find();
             if (!$batch || (int)$batch['warehouse_id'] !== (int)$plan['warehouse_id']) {
                 throw new \DomainException('采购批次与计划仓库不一致');
@@ -810,15 +862,7 @@ final class PurchasePlanLogic extends BaseLogic
                 $h = $byId[$a];
                 self::q('purchase_plan_hold')->where('id', $h['id'])->update(['remaining_qty' => bcsub($h['remaining_qty'], $n, 4)]);
             }
-            $all = true;
-            foreach (self::lines((int)$plan['id'])as$l) {
-                if (bccomp($l['fulfilled_qty'], $l['planned_qty'], 4) !== 0) {
-                    $all = false;
-                }
-            }
-            if ($plan['status'] !== 'recalled') {
-                self::q('purchase_plan')->where('id', $plan['id'])->update(['status' => $all && self::q('purchase_plan_hold')->where('purchase_plan_id', $plan['id'])->where('remaining_qty', '>', 0)->count() === 0?'complete':'partial']);
-            }
+            self::refreshPlanStatus((int)$plan['id']);
         });
     }
 
@@ -841,8 +885,7 @@ final class PurchasePlanLogic extends BaseLogic
     {
         foreach (self::q('purchase_plan_source')->where('report_item_id', $itemId)->where('status', '<>', 'released')->select()->toArray() as $source) {
             if (bccomp($source['planned_qty'], $source['fulfilled_qty'], 4) > 0) {
-                $plan = self::plan((int)$source['purchase_plan_id']);
-                return $plan['status'] === 'recalled'?'原采购已有在途货物，请先核实到货去向后再调整本商品':'采购指令仍在执行，请先收回并核实已买与未买范围';
+                return '仍有采购安排，请先调整未买数量或核实已买货物去向';
             }
         }
         return '';
@@ -850,12 +893,28 @@ final class PurchasePlanLogic extends BaseLogic
 
     public static function releaseReportSourcesWithinTransaction(int $reportId, string $reason): void
     {
-        foreach (self::q('purchase_plan_source')->where('report_id', $reportId)->order('id')->lock(true)->select()->toArray()as$l) {
-            $p = self::plan((int)$l['purchase_plan_id'], true);
-            if (bccomp($l['planned_qty'], $l['fulfilled_qty'], 4) > 0 && $p['status'] !== 'recalled') {
-                throw new \DomainException('采购指令仍在执行，请先收回并核实已买范围后取消报货');
+        $sources = self::q('purchase_plan_source')->where('report_id', $reportId)
+            ->where('status', '<>', 'released')->order('purchase_plan_id,id')->lock(true)->select()->toArray();
+        foreach (array_unique(array_column($sources, 'purchase_plan_id')) as $planId) {
+            self::plan((int)$planId, true);
+            $before = self::detailById((int)$planId);
+            foreach ($sources as $line) {
+                if ((int)$line['purchase_plan_id'] !== (int)$planId || bccomp($line['planned_qty'], $line['bought_qty'], 4) <= 0) {
+                    continue;
+                }
+                self::requireArrivalsResolved((int)$planId, (int)$line['sku_id']);
+                self::updateSourceQuantities($line, $line['bought_qty'], $line['bought_qty']);
             }
-            self::q('purchase_plan_source')->where('id', $l['id'])->update(['status' => 'released', 'update_time' => time()]);
+            self::refreshPlanStatus((int)$planId);
+            self::q('purchase_plan')->where('id', $planId)->inc('version')->update(['update_time' => time()]);
+            self::q('purchase_plan_action')->insert([
+                'tenant_id' => self::tenantId(), 'purchase_plan_id' => $planId, 'action' => 'report_cancel',
+                'idempotency_key' => 'report-cancel-' . $reportId . '-' . $planId,
+                'fingerprint' => hash('sha256', $reason),
+                'payload' => json_encode(['report_id' => $reportId, 'reason' => $reason, 'before' => $before], JSON_UNESCAPED_UNICODE),
+                'result' => json_encode(self::detailById((int)$planId), JSON_UNESCAPED_UNICODE),
+                'operator_id' => FinanceAccess::operator(), 'create_time' => time(),
+            ]);
         }
     }
 

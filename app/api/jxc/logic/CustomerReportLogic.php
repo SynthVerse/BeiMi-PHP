@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace app\api\jxc\logic;
 
 use app\common\logic\BaseLogic;
+use app\common\model\jxc\Customer;
 use app\common\model\jxc\CustomerReport;
 use app\common\model\jxc\CustomerReportItem;
 use app\common\model\jxc\CustomerReportReservation;
@@ -68,37 +69,11 @@ class CustomerReportLogic extends BaseLogic
         return self::detailById((int)($params['id'] ?? 0));
     }
 
-    /** @return array{lists:array<int,array<string,mixed>>,count:int,page_no:int,page_size:int,tenant_id?:int,delivery_date_counts?:list<array{delivery_date:?string,count:int}>}|false */
+    /** @return array{lists:array<int,array<string,mixed>>,count:int,page_no:int,page_size:int,tenant_id?:int,main_customer_id?:int,delivery_date_counts?:list<array{delivery_date:?string,count:int}>}|false */
     public static function lists(array $params): array|false
     {
         self::clearError();
         if (!WorkforceLogic::requirePermission('report.view')) {
-            return false;
-        }
-        if (array_key_exists('sn', $params)) {
-            return self::findByReportNumber($params);
-        }
-        $pageNo = max(1, (int)($params['page_no'] ?? 1));
-        $pageSize = min(100, max(1, (int)($params['page_size'] ?? 20)));
-        $statusScope = (string)($params['status_scope'] ?? '');
-        if ($statusScope === 'pending') {
-            return self::pendingLists($pageNo, $pageSize, (string)($params['priority_delivery_date'] ?? ''));
-        }
-        $count = self::listQuery($statusScope)->count();
-        $order = $statusScope === 'cancelled' ? ['cancelled_time' => 'desc', 'id' => 'desc'] : ['id' => 'desc'];
-        return [
-            'lists' => self::listQuery($statusScope)->order($order)->page($pageNo, $pageSize)->select()->toArray(),
-            'count' => $count,
-            'page_no' => $pageNo,
-            'page_size' => $pageSize,
-        ];
-    }
-
-    private static function findByReportNumber(array $params): array|false
-    {
-        $sn = $params['sn'];
-        if (!is_string($sn) || !preg_match('/^CR[0-9]{18}$/D', $sn)) {
-            self::setError('请输入完整报货单号');
             return false;
         }
         $tenantId = self::tenantId();
@@ -107,15 +82,54 @@ class CustomerReportLogic extends BaseLogic
             self::setError('门店已变化，请返回后重新查询');
             return false;
         }
-        $rows = CustomerReport::where('tenant_id', $tenantId)->where('sn', $sn)
-            ->field('id,tenant_id,sn,status,delivery_date')->limit(2)->select()->toArray();
-        return ['tenant_id' => $tenantId, 'lists' => $rows, 'count' => count($rows), 'page_no' => 1, 'page_size' => 2];
+        $scope = [];
+        $mainCustomerId = 0;
+        if (array_key_exists('main_customer_id', $params)) {
+            $id = $params['main_customer_id'];
+            if ((!is_int($id) && !is_string($id)) || !ctype_digit((string)$id) || (int)$id <= 0
+                || !Customer::where('tenant_id', $tenantId)->where('id', (int)$id)->where('parent_id', 0)->find()) {
+                self::setError('请选择本门店的主客户');
+                return false;
+            }
+            $mainCustomerId = (int)$id;
+            $scope = ['tenant_id' => $tenantId, 'main_customer_id' => $mainCustomerId];
+        }
+        $statusScope = (string)($params['status_scope'] ?? '');
+        if (array_key_exists('sn', $params)) {
+            $result = self::findByReportNumber($params['sn'], $mainCustomerId, $mainCustomerId ? $statusScope : '');
+            return $result === false ? false : $scope + $result;
+        }
+        $pageNo = max(1, (int)($params['page_no'] ?? 1));
+        $pageSize = min(100, max(1, (int)($params['page_size'] ?? 20)));
+        if ($statusScope === 'pending') {
+            return $scope + self::pendingLists($pageNo, $pageSize, (string)($params['priority_delivery_date'] ?? ''), $mainCustomerId);
+        }
+        $query = self::listQuery($statusScope, $mainCustomerId);
+        $count = (clone $query)->count();
+        $order = $statusScope === 'cancelled' ? ['cancelled_time' => 'desc', 'id' => 'desc'] : ['id' => 'desc'];
+        return $scope + [
+            'lists' => $query->order($order)->page($pageNo, $pageSize)->select()->toArray(),
+            'count' => $count,
+            'page_no' => $pageNo,
+            'page_size' => $pageSize,
+        ];
     }
 
-    private static function pendingLists(int $pageNo, int $pageSize, string $priorityDate): array
+    private static function findByReportNumber(mixed $sn, int $mainCustomerId, string $statusScope): array|false
     {
-        return Db::transaction(static function () use ($pageNo, $pageSize, $priorityDate): array {
-            $query = self::listQuery('pending');
+        if (!is_string($sn) || !preg_match('/^CR[0-9]{18}$/D', $sn)) {
+            self::setError('请输入完整报货单号');
+            return false;
+        }
+        $rows = self::listQuery($statusScope, $mainCustomerId)->where('sn', $sn)
+            ->field('id,tenant_id,main_customer_id,sn,status,delivery_date')->limit(2)->select()->toArray();
+        return ['tenant_id' => self::tenantId(), 'lists' => $rows, 'count' => count($rows), 'page_no' => 1, 'page_size' => 2];
+    }
+
+    private static function pendingLists(int $pageNo, int $pageSize, string $priorityDate, int $mainCustomerId): array
+    {
+        return Db::transaction(static function () use ($pageNo, $pageSize, $priorityDate, $mainCustomerId): array {
+            $query = self::listQuery('pending', $mainCustomerId);
             $dateCounts = (clone $query)->fieldRaw('delivery_date, COUNT(*) AS report_count')
                 ->group('delivery_date')->order('delivery_date', 'desc')->select()->toArray();
             $dateCounts = array_map(static fn(array $row): array => [
@@ -138,9 +152,12 @@ class CustomerReportLogic extends BaseLogic
         });
     }
 
-    private static function listQuery(string $statusScope)
+    private static function listQuery(string $statusScope, int $mainCustomerId)
     {
         $query = CustomerReport::where('tenant_id', self::tenantId());
+        if ($mainCustomerId) {
+            $query->where('main_customer_id', $mainCustomerId);
+        }
         return match ($statusScope) {
             'pending' => $query->whereIn('status', self::SUBMITTED),
             'completed' => $query->where('status', 'completed'),
@@ -244,7 +261,7 @@ class CustomerReportLogic extends BaseLogic
                 $reportTasks = Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('report_id', $reportId)
                     ->order('id asc')->lock(true)->field('id,status')->select()->toArray();
                 if (self::hasActivePurchasePlanSource($reportId, true)) {
-                    self::setError('报货缺货来源已有采购安排，请先收回采购指令并核清在途与实物去向后再编辑');
+                    self::setError('报货已有采购安排，请先调整未买数量并核清在途与实物去向');
                     return false;
                 }
                 $startedTaskIds = [];
@@ -314,7 +331,7 @@ class CustomerReportLogic extends BaseLogic
                 Db::name('fulfillment_task')->where('tenant_id', self::tenantId())->where('report_id', $reportId)
                     ->order('id')->lock(true)->field('id')->select()->toArray();
                 if (self::hasActivePurchasePlanSource($reportId, true)) {
-                    self::setError('报货缺货来源已归入活动采购计划，请先终止采购计划后再重试缺货预留');
+                    self::setError('报货缺货已归入采购计划，请先调整采购清单再重试缺货预留');
                     return false;
                 }
                 $rows = CustomerReportItem::where('tenant_id', self::tenantId())->where('report_id', $reportId)->order(['sku_id' => 'asc', 'goods_id' => 'asc', 'warehouse_id' => 'asc', 'id' => 'asc'])->lock(true)->select()->toArray();
@@ -905,7 +922,7 @@ class CustomerReportLogic extends BaseLogic
                 'blocked_reason' => !$canEditReport
                     ? '没有执行该操作的电子权限'
                     : ($hasActivePurchasePlanSource
-                        ? '报货缺货来源已归入活动采购计划，请先终止采购计划'
+                        ? '报货缺货已归入采购计划，请先调整采购清单'
                         : ((string)($report['status'] ?? '') === 'submitted_shortage' ? '' : '当前报货单没有可重试的缺货预留')),
             ],
             'cancel' => $cancellation,

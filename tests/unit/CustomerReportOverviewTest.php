@@ -5,6 +5,7 @@ namespace tests\unit;
 
 use app\api\jxc\logic\CustomerReportOverviewLogic;
 use app\api\jxc\logic\CustomerReportLogic;
+use app\api\jxc\logic\CustomerLogic;
 use PHPUnit\Framework\TestCase;
 use think\facade\Db;
 
@@ -129,6 +130,72 @@ final class CustomerReportOverviewTest extends TestCase
         $this->prepareCustomerReportRequestContext();
         request()->adminInfo = []; request()->userId = 0; request()->adminId = 0;
         self::assertFalse(CustomerReportLogic::lists($params));
+    }
+
+    public function test_primary_customer_report_scope_applies_to_pages_counts_cancelled_and_numbers(): void
+    {
+        $cancelled = $this->report('陈记', '一店', '1', '条', ['status' => 'cancelled', 'sn' => 'CR202611211942555101']);
+        $pending = $this->report('陈记', '二店', '2', '条');
+        $secondCancelled = $this->report('陈记', '二店', '1', '条', ['status' => 'cancelled']);
+        $knownReports = [$cancelled, $pending, $secondCancelled];
+        for ($i = 0; $i < 18; $i++) {
+            $knownReports[] = $this->report('陈记', '一店', '1', '条', ['status' => 'completed']);
+        }
+        $mainId = (int)Db::name('customer_report')->where('id', $pending)->value('main_customer_id');
+        $otherReport = $this->report('另一主客户', '分店', '1', '条', ['main_customer_name' => '陈记', 'sn' => 'CR202611211942555102']);
+        $scope = ['main_customer_id' => (string)$mainId, 'expected_tenant_id' => self::TENANT_ID];
+
+        $firstPage = CustomerReportLogic::lists($scope + ['page_size' => 20]);
+        self::assertSame(self::TENANT_ID, $firstPage['tenant_id']);
+        self::assertSame($mainId, $firstPage['main_customer_id']);
+        self::assertSame(21, $firstPage['count']);
+        self::assertSame(array_slice(array_reverse($knownReports), 0, 20), array_map('intval', array_column($firstPage['lists'], 'id')));
+        $secondPage = CustomerReportLogic::lists($scope + ['page_no' => 2, 'page_size' => 20]);
+        self::assertSame(21, $secondPage['count']);
+        self::assertSame([$cancelled], array_map('intval', array_column($secondPage['lists'], 'id')));
+        $pendingPage = CustomerReportLogic::lists($scope + ['status_scope' => 'pending']);
+        self::assertSame(1, $pendingPage['count']);
+        self::assertSame(1, $pendingPage['delivery_date_counts'][0]['count']);
+        $cancelledPage = CustomerReportLogic::lists($scope + ['status_scope' => 'cancelled']);
+        self::assertSame(2, $cancelledPage['count']);
+        self::assertSame([$secondCancelled, $cancelled], array_map('intval', array_column($cancelledPage['lists'], 'id')));
+        self::assertSame(1, CustomerReportLogic::lists($scope + ['sn' => 'CR202611211942555101'])['count']);
+        self::assertSame(0, CustomerReportLogic::lists($scope + ['sn' => 'CR202611211942555102'])['count']);
+        self::assertFalse(CustomerReportLogic::lists($scope + ['sn' => 'CR20261121']));
+        self::assertSame($otherReport, (int)CustomerReportLogic::lists(['sn' => 'CR202611211942555102'])['lists'][0]['id']);
+        self::assertFalse(CustomerReportLogic::lists(['main_customer_id' => 0]));
+        $child = (int)Db::name('customer_report_item')->where('report_id', $pending)->value('delivery_customer_id');
+        self::assertFalse(CustomerReportLogic::lists(['main_customer_id' => $child]));
+        $this->prepareCustomerReportRequestContext(self::OTHER_TENANT_ID);
+        self::assertFalse(CustomerReportLogic::lists($scope));
+        self::assertFalse(CustomerReportLogic::lists(['main_customer_id' => $mainId]));
+        $this->prepareCustomerReportRequestContext();
+        request()->adminInfo = []; request()->userId = 0; request()->adminId = 0;
+        self::assertFalse(CustomerReportLogic::lists($scope));
+    }
+
+    public function test_customer_sales_history_routes_each_report_and_direct_order_to_its_own_document(): void
+    {
+        $report = $this->report('销售主客户', '销售收货点', '2', '斤');
+        $parties = Db::name('customer_report_item')->where('report_id', $report)->find();
+        $issuedId = (int)Db::name('customer_report_sales_document')->insertGetId([
+            'tenant_id' => self::TENANT_ID, 'report_id' => $report, 'order_sn' => uniqid('issued-'),
+            'snapshot' => '{}', 'approval_actor' => '{}', 'create_time' => time(), 'update_time' => time(),
+        ]);
+        foreach (['customer_report', 'direct'] as $kind) {
+            Db::name('sales_order')->insert([
+                'tenant_id' => self::TENANT_ID, 'order_sn' => uniqid('history-'),
+                'customer_id' => $kind === 'direct' ? $parties['delivery_customer_id'] : $parties['main_customer_id'],
+                'source_type' => $kind, 'source_id' => $report,
+            ]);
+        }
+        $history = CustomerLogic::salesHistory(['customer_id' => $parties['main_customer_id']]);
+        self::assertSame(2, $history['total']);
+        $byType = array_column($history['data'], null, 'source_type');
+        self::assertSame($report, $byType['customer_report']['source_report_id']);
+        self::assertSame($issuedId, $byType['customer_report']['issued_sales_document_id']);
+        self::assertSame(0, $byType['direct']['source_report_id']);
+        self::assertSame(0, $byType['direct']['issued_sales_document_id']);
     }
 
     public function test_receipt_badge_follows_actual_balance_without_changing_word_snapshot(): void

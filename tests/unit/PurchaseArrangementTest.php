@@ -1,6 +1,7 @@
 <?php
 declare(strict_types=1);
 namespace tests\unit;
+use app\api\jxc\lists\SupplyOrderLists;
 use app\api\jxc\logic\ {
     CustomerReportLogic,PurchasePlanLogic,FulfillmentTaskLogic,WorkforceLogic,WarehouseSkuBalanceService
 };
@@ -20,7 +21,6 @@ final class PurchaseArrangementTest extends TestCase {
     }
     private function fixture(string $requirement=''):array {
         WorkforceLogic::saveProcess(['name'=>'采购','trigger_type'=>'inventory_shortage','is_enabled'=>1,'sort'=>1]);
-        $buyer=(int)Db::name('employee')->insertGetId(['tenant_id'=>self::TENANT_ID,'name'=>'采购甲','is_enabled'=>1,'create_time'=>time(),'update_time'=>time()]);
         $customer=$this->createCustomer('采购需求客户');
         $goods=$this->createCustomerReportGoods('采购鲈鱼','PURCHASE-V2');
         $warehouse=$this->createCustomerReportWarehouse('采购仓');
@@ -36,11 +36,11 @@ final class PurchaseArrangementTest extends TestCase {
         $payload['items'][0]['sku_id']=$sku;
         $report=CustomerReportLogic::submit($payload);
         self::assertNotFalse($report,CustomerReportLogic::getError());
-        return compact('buyer','warehouse','report','goods','sku','payload');
+        return compact('warehouse','report','goods','sku','payload');
     }
     private function arrange(array $f,string $quantity='100',string $key='arrange-plan-first'):array|false {
         $i=$f['report']['items'][0];
-        return PurchasePlanLogic::create(['buyer_id'=>$f['buyer'],'warehouse_id'=>$f['warehouse'],'delivery_date'=>$f['report']['delivery_date'],'idempotency_key'=>$key,'lines'=>[['report_item_id'=>$i['id'],'report_version'=>$f['report']['version'],'quantity'=>$quantity]]]);
+        return PurchasePlanLogic::create(['warehouse_id'=>$f['warehouse'],'delivery_date'=>$f['report']['delivery_date'],'idempotency_key'=>$key,'lines'=>[['report_item_id'=>$i['id'],'report_version'=>$f['report']['version'],'quantity'=>$quantity]]]);
     }
     public function test_explicit_arrangement_is_idempotent_and_cannot_duplicate_source():void {
         $f=$this->fixture();
@@ -124,17 +124,57 @@ final class PurchaseArrangementTest extends TestCase {
         $ticket['ticket_no'] = $plan['plan_no'] . '-merged-2';
         self::assertSame($ticket, $paper['sheets'][0]['ticket']);
     }
-    public function test_recall_releases_only_unbought_scope_and_allows_new_plan():void {
-        $f=$this->fixture();
-        $p=$this->arrange($f);
-        self::assertNotFalse($p,PurchasePlanLogic::getError());
-        $r=PurchasePlanLogic::recall(['id'=>$p['id'],'version'=>$p['version'],'idempotency_key'=>'recall-plan-first','paper_recovered'=>true,'old_instruction_stopped'=>true,'reason'=>"\u{3000}\t",'lines'=>[['line_id'=>$p['lines'][0]['id'],'bought_qty'=>'60']]]);
-        self::assertNotFalse($r,PurchasePlanLogic::getError());
-        self::assertNull($r['recall_note']);
-        self::assertSame('60.0000',$r['lines'][0]['planned_qty']);
-        $d=PurchasePlanLogic::demands([]);
-        self::assertSame('40.0000',$d['lists'][0]['remaining_qty']);
-        self::assertNotFalse($this->arrange($f,'40','arrange-remaining-third'));
+    public function test_printed_plan_can_be_revised_without_losing_paper_or_bought_quantity():void
+    {
+        $fixture = $this->fixture();
+        $plan = $this->arrange($fixture, '80');
+        self::assertNotFalse($plan, PurchasePlanLogic::getError());
+        $lineId = $plan['lines'][0]['id'];
+        $print = PurchasePlanLogic::preparePrint([
+            'id' => $plan['id'], 'version' => $plan['version'], 'mode' => 'merged',
+            'idempotency_key' => 'revision-original-paper',
+        ]);
+        self::assertNotFalse($print, PurchasePlanLogic::getError());
+        $sheet = $print['sheets'][0];
+        $request = [
+            'id' => $plan['id'], 'version' => $plan['version'], 'idempotency_key' => 'revision-to-sixty',
+            'lines' => [['line_id' => $lineId, 'planned_qty' => '60', 'bought_qty' => '40']],
+        ];
+        $saved = PurchasePlanLogic::revise($request);
+        self::assertNotFalse($saved, PurchasePlanLogic::getError());
+        self::assertSame($saved, PurchasePlanLogic::revise($request));
+        self::assertSame('60.0000', $saved['lines'][0]['planned_qty']);
+        self::assertSame('40.0000', $saved['lines'][0]['bought_qty']);
+        self::assertSame('40.0000', PurchasePlanLogic::demands([])['lists'][0]['remaining_qty']);
+        self::assertFalse(PurchasePlanLogic::revise(array_replace($request, [
+            'idempotency_key' => 'revision-stale-version',
+        ])));
+        self::assertFalse(PurchasePlanLogic::revise(array_replace($request, [
+            'version' => $saved['version'], 'idempotency_key' => 'revision-below-bought',
+            'lines' => [['line_id' => $lineId, 'planned_qty' => '39']],
+        ])));
+        self::assertFalse(PurchasePlanLogic::revise(array_replace($request, [
+            'version' => $saved['version'], 'idempotency_key' => 'revision-over-demand',
+            'lines' => [['line_id' => $lineId, 'planned_qty' => '101']],
+        ])));
+        $increased = PurchasePlanLogic::revise(array_replace($request, [
+            'version' => $saved['version'], 'idempotency_key' => 'revision-valid-increase',
+            'lines' => [['line_id' => $lineId, 'planned_qty' => '70']],
+        ]));
+        self::assertNotFalse($increased, PurchasePlanLogic::getError());
+        self::assertSame('30.0000', PurchasePlanLogic::demands([])['lists'][0]['remaining_qty']);
+        $receipt = PurchasePlanLogic::printResult(['sheet_id' => $sheet['id'], 'success' => 1]);
+        self::assertSame($sheet['ticket'], $receipt['ticket']);
+        $historical = PurchasePlanLogic::preparePrint([
+            'id' => $plan['id'], 'version' => $increased['version'], 'original_sheet_id' => $sheet['id'],
+            'idempotency_key' => 'revision-print-original',
+        ]);
+        self::assertNotFalse($historical, PurchasePlanLogic::getError());
+        self::assertSame($sheet['plan_version'], $historical['sheets'][0]['plan_version']);
+        self::assertSame($sheet['ticket']['print_lines'], $historical['sheets'][0]['ticket']['print_lines']);
+        $current = PurchasePlanLogic::preview(['id' => $plan['id']]);
+        self::assertSame('30.0000', $current['sheets'][0]['ticket']['print_lines'][0]['quantity']);
+        self::assertSame($increased['version'], $current['sheets'][0]['ticket']['content_version']);
     }
     private function countReport(array $f, array $requirements = []):array {
         $count=$this->createCustomerReportUnit('条');
@@ -169,12 +209,28 @@ final class PurchaseArrangementTest extends TestCase {
         self::assertSame(2,$ds['count']);
         self::assertFalse($ds['lists'][1]['stock_verification_required']);
         self::assertSame('100.0000',$ds['lists'][1]['remaining_qty']);
-        $p=PurchasePlanLogic::create(['buyer_id'=>$f['buyer'],'warehouse_id'=>$f['warehouse'],'delivery_date'=>$r['delivery_date'],'idempotency_key'=>'arrange-mixed-first','lines'=>[['report_item_id'=>$a['id'],'report_version'=>$f['report']['version'],'quantity'=>'100'],['report_item_id'=>$b['id'],'report_version'=>$r['version'],'quantity'=>'100']]]);
+        $p=PurchasePlanLogic::create(['warehouse_id'=>$f['warehouse'],'delivery_date'=>$r['delivery_date'],'idempotency_key'=>'arrange-mixed-first','lines'=>[['report_item_id'=>$a['id'],'report_version'=>$f['report']['version'],'quantity'=>'100'],['report_item_id'=>$b['id'],'report_version'=>$r['version'],'quantity'=>'100']]]);
         self::assertNotFalse($p,PurchasePlanLogic::getError());
         self::assertSame('100斤＋100条',$p['quantity_summary']);
-        file_put_contents(dirname(__DIR__,3).'/.scratch/purchase-v2-runtime-fixture.json',json_encode(['demands'=>$ds,'buyers'=>PurchasePlanLogic::buyers(),'lists'=>PurchasePlanLogic::lists([]),'detail'=>$p,'preview'=>PurchasePlanLogic::preview(['id'=>$p['id'],'mode'=>'merged']),'customer_preview'=>PurchasePlanLogic::preview(['id'=>$p['id'],'mode'=>'customer'])],JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT));
         self::assertCount(1,PurchasePlanLogic::preview(['id'=>$p['id'],'mode'=>'merged'])['sheets']);
         self::assertCount(2,PurchasePlanLogic::preview(['id'=>$p['id'],'mode'=>'customer'])['sheets']);
+
+        // A matching display name does not make two different unit IDs equivalent.
+        Db::name('purchase_plan_source')->where('tenant_id',self::TENANT_ID)->where('report_item_id',$b['id'])
+            ->update(['unit_name'=>'斤']);
+        $detail = PurchasePlanLogic::detail(['id'=>$p['id']]);
+        self::assertNotFalse($detail,PurchasePlanLogic::getError());
+        $lines = array_column($detail['lines'],null,'report_item_id');
+        self::assertSame(true,$lines[$a['id']]['same_allocation_unit'] ?? null);
+        self::assertSame(false,$lines[$b['id']]['same_allocation_unit'] ?? null);
+
+        Db::name('customer_report_item')->where('tenant_id',self::TENANT_ID)->where('id',$a['id'])
+            ->update(['base_unit_id'=>0]);
+        $detail = PurchasePlanLogic::detail(['id'=>$p['id']]);
+        self::assertNotFalse($detail,PurchasePlanLogic::getError());
+        $lines = array_column($detail['lines'],null,'report_item_id');
+        self::assertArrayHasKey('same_allocation_unit',$lines[$a['id']]);
+        self::assertNull($lines[$a['id']]['same_allocation_unit']);
     }
     public function test_count_stock_verification_reserves_real_base_stock_and_only_uncovered_count_can_be_arranged():void {
         $f=$this->fixture();
@@ -195,10 +251,10 @@ final class PurchaseArrangementTest extends TestCase {
         $f['report']['version']=$d['report_version'];
         self::assertNotFalse($this->arrange($f,'75'));
     }
-    private function arrival(array $f,array $plan,array $rows):array {
+    private function arrival(array $f,array $plan,array $rows,int $supplierId=0):array {
         $now=time();
         $batch=(int)Db::name('purchase_batch')->insertGetId(['tenant_id'=>self::TENANT_ID,'purchase_plan_id'=>$plan['id'],'batch_no'=>'PB-'.uniqid(),'warehouse_id'=>$f['warehouse'],'warehouse_name'=>'采购仓','datetimesingle'=>$now,'status'=>'submitted','idempotency_key'=>uniqid('batch-'),'request_fingerprint'=>hash('sha256',uniqid()),'admin_id'=>self::ADMIN_ID,'create_time'=>$now,'update_time'=>$now]);
-        $order=(int)Db::name('supply_order')->insertGetId(['tenant_id'=>self::TENANT_ID,'order_sn'=>'PO-'.uniqid(),'warehouse_id'=>$f['warehouse'],'create_time'=>$now,'update_time'=>$now]);
+        $order=(int)Db::name('supply_order')->insertGetId(['tenant_id'=>self::TENANT_ID,'order_sn'=>'PO-'.uniqid(),'warehouse_id'=>$f['warehouse'],'supplier_id'=>$supplierId,'create_time'=>$now,'update_time'=>$now]);
         Db::name('purchase_batch_supply_order')->insert(['tenant_id'=>self::TENANT_ID,'purchase_batch_id'=>$batch,'supply_order_id'=>$order,'create_time'=>$now,'update_time'=>$now]);
         $ids=[];
         foreach($rows as $r) {
@@ -206,8 +262,44 @@ final class PurchaseArrangementTest extends TestCase {
             $ids[]=(int)Db::name('order_goods')->insertGetId(['tenant_id'=>self::TENANT_ID,'order_type'=>'supply','order_id'=>$order,'goods_id'=>$r['goods_id'],'sku_id'=>$r['sku_id'],'actual_base_qty'=>$r['base_qty'],'create_time'=>$now,'update_time'=>$now]);
         }
         self::assertNotFalse(Db::transaction(static fn()=>PurchasePlanLogic::holdArrivalWithinTransaction((int)$plan['id'],$batch)),PurchasePlanLogic::getError());
-        return ['id'=>$batch,'rows'=>$ids];
+        return ['id'=>$batch,'rows'=>$ids,'order'=>$order];
     }
+    public function test_shared_plan_keeps_both_arrivals_and_supplier_lists_scope_each_batch_before_paging():void
+    {
+        $fixture = $this->fixture();
+        $plan = $this->arrange($fixture, '20');
+        self::assertNotFalse($plan, PurchasePlanLogic::getError());
+        $arrivals = [];
+        foreach ([55001 => '12', 55002 => '8'] as $supplier => $quantity) {
+            $arrivals[$supplier] = $this->arrival($fixture, $plan, [
+                ['goods_id' => $fixture['goods'], 'sku_id' => $fixture['sku'], 'base_qty' => $quantity],
+            ], $supplier);
+        }
+        $detail = PurchasePlanLogic::detail(['id' => $plan['id']]);
+        self::assertNotFalse($detail, PurchasePlanLogic::getError());
+        self::assertSame('20.0000', $detail['lines'][0]['planned_qty']);
+        self::assertSame(['12.0000', '8.0000'], array_column($detail['arrivals'], 'arrival_qty'));
+        self::assertSame(array_column($arrivals, 'id'), array_map('intval', array_column($detail['arrivals'], 'purchase_batch_id')));
+
+        $originalRequest = request();
+        try {
+            foreach ($arrivals as $supplier => $arrival) {
+                foreach ([1, 2] as $page) {
+                    $request = app()->make('request', [], true)->setMethod('GET')->withGet([
+                        'supplier_id' => $supplier, 'page_no' => $page, 'page_size' => 1,
+                    ]);
+                    $request->tenantId = self::TENANT_ID;
+                    app()->instance('request', $request);
+                    $list = new SupplyOrderLists();
+                    self::assertSame(1, $list->count());
+                    self::assertSame($page === 1 ? [$arrival['order']] : [], array_column($list->lists(), 'id'));
+                }
+            }
+        } finally {
+            app()->instance('request', $originalRequest);
+        }
+    }
+
     public function test_count_receipt_uses_real_weight_but_requires_explicit_count_coverage():void {
         $f=$this->fixture();
         $r=$this->countReport($f);
@@ -224,28 +316,20 @@ final class PurchaseArrangementTest extends TestCase {
         self::assertSame('complete',$saved['status']);
         self::assertSame($saved,PurchasePlanLogic::attachArrival($req));
     }
-    public function test_recalled_purchased_scope_can_still_receive_after_original_customer_cancels():void {
+    public function test_bought_scope_still_receives_after_customer_cancellation_releases_only_unbought():void {
         $f=$this->fixture();
         $p=$this->arrange($f);
         self::assertNotFalse($p, PurchasePlanLogic::getError());
-        $recall = [
-            'id' => $p['id'],
-            'version' => $p['version'],
-            'idempotency_key' => 'recall-for-cancel',
-            'paper_recovered' => false,
-            'owner_exception' => true,
-            'old_instruction_stopped' => true,
-            'reason' => "\u{3000}\u{00A0}",
-            'lines' => [['line_id' => $p['lines'][0]['id'], 'bought_qty' => '60']],
-        ];
-        self::assertFalse(PurchasePlanLogic::recall($recall));
-        self::assertSame('请填写作废原因', PurchasePlanLogic::getError());
-        $recall['reason'] = "\u{3000}客户取消，已买60斤\u{00A0}";
-        $p = PurchasePlanLogic::recall($recall);
-        self::assertNotFalse($p,PurchasePlanLogic::getError());
-        self::assertSame('客户取消，已买60斤', $p['recall_note']);
+        $p = PurchasePlanLogic::recordBought([
+            'id' => $p['id'], 'version' => $p['version'], 'idempotency_key' => 'bought-before-cancel',
+            'lines' => [['line_id' => $p['lines'][0]['id'], 'quantity' => '60']],
+        ]);
+        self::assertNotFalse($p, PurchasePlanLogic::getError());
         $cancel=CustomerReportLogic::cancel(['id'=>$f['report']['id'],'version'=>$f['report']['version'],'reason'=>'客户取消']);
         self::assertNotFalse($cancel,CustomerReportLogic::getError());
+        $p = PurchasePlanLogic::detail(['id' => $p['id']]);
+        self::assertSame('60.0000', $p['lines'][0]['planned_qty']);
+        self::assertTrue($p['lines'][0]['source_closed']);
         $a=$this->arrival($f,$p,[['goods_id'=>$f['goods'],'sku_id'=>$f['sku'],'base_qty'=>'60']]);
         $saved=PurchasePlanLogic::attachArrival(['id'=>$p['id'],'version'=>$p['version'],'purchase_batch_id'=>$a['id'],'idempotency_key'=>'allocate-cancelled-pending','allocations'=>[['line_id'=>$p['lines'][0]['id'],'arrival_line_id'=>$a['rows'][0],'quantity'=>'60','base_qty'=>'60']],'surplus'=>[]]);
         self::assertNotFalse($saved,PurchasePlanLogic::getError());
@@ -270,7 +354,7 @@ final class PurchaseArrangementTest extends TestCase {
     public function test_partial_paper_failure_retries_only_selected_sheet_without_new_demand():void {
         $f=$this->fixture();
         $r=$this->countReport($f);
-        $p=PurchasePlanLogic::create(['buyer_id'=>$f['buyer'],'warehouse_id'=>$f['warehouse'],'delivery_date'=>$r['delivery_date'],'idempotency_key'=>'paper-two-customer-plan','lines'=>[['report_item_id'=>$f['report']['items'][0]['id'],'report_version'=>$f['report']['version'],'quantity'=>'100'],['report_item_id'=>$r['items'][0]['id'],'report_version'=>$r['version'],'quantity'=>'100']]]);
+        $p=PurchasePlanLogic::create(['warehouse_id'=>$f['warehouse'],'delivery_date'=>$r['delivery_date'],'idempotency_key'=>'paper-two-customer-plan','lines'=>[['report_item_id'=>$f['report']['items'][0]['id'],'report_version'=>$f['report']['version'],'quantity'=>'100'],['report_item_id'=>$r['items'][0]['id'],'report_version'=>$r['version'],'quantity'=>'100']]]);
         $req=['id'=>$p['id'],'version'=>1,'mode'=>'customer','idempotency_key'=>'prepare-two-customers'];
         $s=PurchasePlanLogic::preparePrint($req);
         self::assertNotFalse($s,PurchasePlanLogic::getError());
@@ -297,7 +381,7 @@ final class PurchaseArrangementTest extends TestCase {
         $payload['items'][0]['sku_id']=$sku;
         $r=CustomerReportLogic::submit($payload);
         self::assertNotFalse($r,CustomerReportLogic::getError());
-        $p=PurchasePlanLogic::create(['buyer_id'=>$f['buyer'],'warehouse_id'=>$f['warehouse'],'delivery_date'=>$r['delivery_date'],'idempotency_key'=>'plan-multi-sku-arrival','lines'=>[['report_item_id'=>$f['report']['items'][0]['id'],'report_version'=>$f['report']['version'],'quantity'=>'100'],['report_item_id'=>$r['items'][0]['id'],'report_version'=>$r['version'],'quantity'=>'100']]]);
+        $p=PurchasePlanLogic::create(['warehouse_id'=>$f['warehouse'],'delivery_date'=>$r['delivery_date'],'idempotency_key'=>'plan-multi-sku-arrival','lines'=>[['report_item_id'=>$f['report']['items'][0]['id'],'report_version'=>$f['report']['version'],'quantity'=>'100'],['report_item_id'=>$r['items'][0]['id'],'report_version'=>$r['version'],'quantity'=>'100']]]);
         self::assertNotFalse($p,PurchasePlanLogic::getError());
         $a=$this->arrival($f,$p,[['goods_id'=>$f['goods'],'sku_id'=>$f['sku'],'base_qty'=>'100'],['goods_id'=>$goods,'sku_id'=>$sku,'base_qty'=>'100']]);
         $saved=PurchasePlanLogic::attachArrival(['id'=>$p['id'],'version'=>1,'purchase_batch_id'=>$a['id'],'idempotency_key'=>'allocate-multi-sku','allocations'=>[['line_id'=>$p['lines'][0]['id'],'arrival_line_id'=>$a['rows'][0],'quantity'=>'100','base_qty'=>'100'],['line_id'=>$p['lines'][1]['id'],'arrival_line_id'=>$a['rows'][1],'quantity'=>'100','base_qty'=>'100']],'surplus'=>[]]);
@@ -308,6 +392,7 @@ final class PurchaseArrangementTest extends TestCase {
         self::assertSame('0.0000',WarehouseSkuBalanceService::available($f['warehouse'],$f['sku']));
     }
     public function test_reduction_changes_effective_purchase_need_and_active_instructions_block_direct_reduction():void {
+        $this->prepareLegacyOperatingStore();
         $f=$this->fixture();
         $item=$f['report']['items'][0];
         $r=\app\api\jxc\logic\FulfillmentChangeLogic::reduceItem(['report_item_id'=>$item['id'],'processing_group_id'=>$item['processing_groups'][0]['id'],'new_expected_base_qty'=>'60','processed_reduction_qty'=>'0','reason'=>'客户减至60斤','idempotency_key'=>'reduce-before-arrange']);
@@ -339,15 +424,13 @@ final class PurchaseArrangementTest extends TestCase {
         self::assertSame('complete',$done['status']);
         self::assertSame('100.0000',$done['lines'][0]['fulfilled_qty']);
     }
-    public function test_active_instruction_blocks_cancellation_and_closed_reports_never_reappear_as_demands():void {
+    public function test_cancellation_releases_unbought_and_closed_report_never_reappears_as_a_demand():void {
         $f=$this->fixture();
         $p=$this->arrange($f);
-        self::assertFalse(CustomerReportLogic::cancel(['id'=>$f['report']['id'],'version'=>$f['report']['version'],'reason'=>'取消但尚未收回采购']));
-        self::assertStringContainsString('收回',CustomerReportLogic::getError());
-        $p=PurchasePlanLogic::recall(['id'=>$p['id'],'version'=>1,'idempotency_key'=>'recall-active-cancel-zero','paper_recovered'=>true,'old_instruction_stopped'=>true,'reason'=>'停止采购','lines'=>[['line_id'=>$p['lines'][0]['id'],'bought_qty'=>'0']]]);
         self::assertNotFalse($p,PurchasePlanLogic::getError());
-        $r=CustomerReportLogic::cancel(['id'=>$f['report']['id'],'version'=>$f['report']['version'],'reason'=>'已收回取消']);
+        $r=CustomerReportLogic::cancel(['id'=>$f['report']['id'],'version'=>$f['report']['version'],'reason'=>'客户取消且没有已买']);
         self::assertNotFalse($r,CustomerReportLogic::getError());
+        self::assertSame('cancelled', PurchasePlanLogic::detail(['id' => $p['id']])['status']);
         self::assertSame(0,PurchasePlanLogic::demands([])['count']);
     }
     public function test_tenant_and_electronic_permissions_are_checked_on_plan_reads_and_print_recovery():void {
@@ -398,7 +481,7 @@ final class PurchaseArrangementTest extends TestCase {
                 $output=tempnam(sys_get_temp_dir(),'purchase-out-');
                 $paths[]=$input;
                 $paths[]=$output;
-                file_put_contents($input,json_encode(['tenant_id'=>self::TENANT_ID,'admin_id'=>self::ADMIN_ID,'request'=>['buyer_id'=>$f['buyer'],'warehouse_id'=>$f['warehouse'],'delivery_date'=>$f['report']['delivery_date'],'idempotency_key'=>$key,'lines'=>[['report_item_id'=>$f['report']['items'][0]['id'],'report_version'=>$f['report']['version'],'quantity'=>'60']]]]));
+                file_put_contents($input,json_encode(['tenant_id'=>self::TENANT_ID,'admin_id'=>self::ADMIN_ID,'request'=>['warehouse_id'=>$f['warehouse'],'delivery_date'=>$f['report']['delivery_date'],'idempotency_key'=>$key,'lines'=>[['report_item_id'=>$f['report']['items'][0]['id'],'report_version'=>$f['report']['version'],'quantity'=>'60']]]]));
                 $process=proc_open([PHP_BINARY,dirname(__DIR__).'/fixtures/purchase_arrangement_worker.php',$input,$output,$start],[1=>['pipe','w'],2=>['pipe','w']],$pipes);
                 $workers[]=[$process,$pipes,$output];
             }

@@ -94,7 +94,7 @@ final class PreparationHttpWorkflowTest extends TestCase
             $this->runStatements($this->prepareMigration((string)file_get_contents($root . '/database/migrations/' . $migration)));
         }
         $schema = (string)file_get_contents($root . '/database/sql/jxc_phase1_schema.sql');
-        foreach (['customer', 'customer_group', 'vendor'] as $table) {
+        foreach (['customer', 'vendor'] as $table) {
             $this->runStatements($this->authoritativeCreateTable($schema, $table));
         }
         $this->clean();
@@ -353,13 +353,38 @@ final class PreparationHttpWorkflowTest extends TestCase
         self::assertSame('完整备注', $first['remark']);
         $query = ['kind' => 'customer', 'idempotency_key' => $payload['idempotency_key']];
         self::assertSame($first, $this->ok($this->http('GET', 'master-data/creation/result', $query))['result']);
-        foreach ([self::HTTP_ACTORS[1], self::HTTP_ACTORS[2], 'admin'] as $actor) {
+        foreach ([self::HTTP_ACTORS[2], 'admin'] as $actor) {
             $unknown = $this->ok($this->http('GET', 'master-data/creation/result', $query, $actor));
             self::assertSame('unknown', $unknown['state']); self::assertNull($unknown['result']);
         }
         self::assertSame(0, $this->http('POST', 'customer/add', array_replace($payload, ['remark' => '变更备注']))['code']);
         self::assertSame(1, Db::name('customer')->where('tenant_id', self::HTTP_TENANTS[0])->count());
-        self::assertSame(1, (int)Db::name('customer_group')->where('tenant_id', self::HTTP_TENANTS[0])->value('customer_count'));
+    }
+
+    public function test_only_the_store_creator_can_use_miniapp_business_and_opening(): void
+    {
+        $owner = self::HTTP_ACTORS[0];
+        $other = self::HTTP_ACTORS[1];
+        $member = Db::name('tenant_member')->where('tenant_id', self::HTTP_TENANTS[0])->where('user_id', $other);
+        $opening = $this->ok($this->http('GET', 'finance/opening', [], $owner));
+        $keys = array_column($opening['categories'], 'key');
+        self::assertContains('expense_payable', $keys);
+        self::assertNotContains('salary', $keys);
+        self::assertNotContains('reimbursement', $keys);
+        self::assertSame(0, $this->http('GET', 'finance/opening/subjects', ['category' => 'reimbursement'], $owner)['code']);
+        self::assertSame(0, $this->http('POST', 'finance/opening/review/save',
+            $this->command($opening['version']) + ['category' => 'salary', 'state' => 'none', 'evidence' => '不应接受'], $owner)['code']);
+        $catalog = $this->ok($this->http('GET', 'finance/business/catalog', [], $owner));
+        self::assertStringNotContainsString('salary_payment', json_encode($catalog));
+        foreach (['member', 'admin', 'owner'] as $role) {
+            $member->update(['role' => $role, 'inviter_id' => $owner, 'status' => 1]);
+            $read = $this->http('GET', 'finance/workbench', [], $other);
+            self::assertSame('STORE_REQUIRED', $read['error_code']);
+            $write = $this->http('POST', 'customer/add', $this->customer('denied-operator-' . $role), $other);
+            self::assertSame('STORE_REQUIRED', $write['error_code']);
+        }
+        $this->ok($this->http('GET', 'finance/workbench', [], 'admin'));
+        self::assertSame(0, Db::name('customer')->where('tenant_id', self::HTTP_TENANTS[0])->count());
     }
 
     public function test_unknown_lookup_is_read_only_and_changed_store_cannot_replay_original_creation(): void

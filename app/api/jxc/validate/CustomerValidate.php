@@ -19,8 +19,6 @@ class CustomerValidate extends BaseValidate
         'customer_mobile' => 'max:20',
         'address' => 'max:255',
         'remark' => 'max:500',
-        'group_id' => 'integer|egt:0',
-        'group_name' => 'max:100',
         'status' => 'max:20',
         'is_disabled' => 'integer|in:0,1',
         'cascade_children' => 'in:0,1,true,false',
@@ -57,8 +55,6 @@ class CustomerValidate extends BaseValidate
         'customer_mobile' => '联系电话',
         'address' => '地址',
         'remark' => '备注',
-        'group_id' => '分组ID',
-        'group_name' => '分组名称',
         'status' => '客户状态',
         'is_disabled' => '禁用状态',
         'money' => '付款金额',
@@ -79,8 +75,6 @@ class CustomerValidate extends BaseValidate
             'customer_mobile',
             'address',
             'remark',
-            'group_id',
-            'group_name',
             'parent_id',
             'customer_type',
             'customer_type_label',
@@ -99,8 +93,6 @@ class CustomerValidate extends BaseValidate
             'customer_mobile',
             'address',
             'remark',
-            'group_id',
-            'group_name',
             'parent_id',
             'customer_type',
             'customer_type_label',
@@ -141,12 +133,6 @@ class CustomerValidate extends BaseValidate
     public function sceneUnbindStore()
     {
         return $this->only(['id', 'store_id'])
-            ->remove('id', 'require');
-    }
-
-    public function sceneAssignGroup()
-    {
-        return $this->only(['id', 'customer_id', 'group_id', 'group_name'])
             ->remove('id', 'require');
     }
 

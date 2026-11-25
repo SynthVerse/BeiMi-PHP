@@ -83,13 +83,23 @@ final class JxcLoginMiddlewareAuthorityContractTest extends TestCase
             self::assertSame(404, self::dispatch('GET', 'api/' . $path)->getCode(), '/api/' . $path);
         }
 
+        foreach ([
+            ['GET', 'customer/groups'],
+            ['GET', 'customer/groups/detail'],
+            ['POST', 'customer/groups'],
+            ['POST', 'customer/groups/assign'],
+            ['POST', 'customer/groups/rename'],
+            ['POST', 'customer/groups/delete'],
+        ] as [$method, $path]) {
+            self::assertSame(404, self::dispatch($method, 'api/' . $path)->getCode(), $method . ' /api/' . $path);
+        }
+
         $explicit = [
             'audit/lists',
             'user/info',
             'goods/cloud/index',
             'customer/index',
             'jxc/customer_report/lists',
-            'customer/groups',
             'goods/index',
             'units/index',
             'purchase-return/lists',

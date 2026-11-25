@@ -36,14 +36,14 @@ final class MasterCreationReceiptWorkflowTest extends TestCase
             label varchar(100) NOT NULL, payload longtext NOT NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
         $schema = (string)file_get_contents($root . '/database/sql/jxc_phase1_schema.sql');
-        foreach (['customer', 'customer_group', 'vendor'] as $table) {
+        foreach (['customer', 'vendor'] as $table) {
             $this->runStatements($this->authoritativeCreateTable($schema, $table));
         }
         // Earlier workflow fixtures deliberately use reduced master schemas.
         // Add only current adapter fields; never drop or rewrite other tables.
         $this->ensureMasterColumns('customer', [
             'contact' => "varchar(50) NOT NULL DEFAULT ''", 'remark' => "varchar(500) NOT NULL DEFAULT ''",
-            'group_id' => 'int unsigned NOT NULL DEFAULT 0', 'is_store' => 'tinyint NOT NULL DEFAULT 0',
+            'is_store' => 'tinyint NOT NULL DEFAULT 0',
             'children_count' => 'int unsigned NOT NULL DEFAULT 0', 'order_pay_money' => 'decimal(12,2) NOT NULL DEFAULT 0.00',
         ]);
         $this->ensureMasterColumns('vendor', [
@@ -187,7 +187,7 @@ final class MasterCreationReceiptWorkflowTest extends TestCase
             }
             self::assertNotNull($caught, 'A successful business adapter must reach the injected receipt write failure.');
             self::assertStringContainsString($constraint, $caught->getMessage());
-            foreach (['customer', 'customer_group', 'vendor', 'employee', 'employee_permission'] as $table) {
+            foreach (['customer', 'vendor', 'employee', 'employee_permission'] as $table) {
                 self::assertSame(0, Db::name($table)->where('tenant_id', self::RECEIPT_TENANT)->count(), $table);
             }
             self::assertSame(0, $this->receiptCount());
@@ -271,7 +271,7 @@ final class MasterCreationReceiptWorkflowTest extends TestCase
         self::assertSame(0, Db::name('vendor')->where('tenant_id', self::RECEIPT_TENANT)->count());
     }
 
-    public function test_customer_adapter_replays_full_response_and_preserves_group_side_effects(): void
+    public function test_customer_adapter_replays_full_response_without_customer_group_fields(): void
     {
         $params = $this->params('real-customer') + ['customer_name' => '回执客户', 'customer_type' => 'customer', 'parent_id' => 0,
             'contact' => '原客户联系人', 'phone' => '13800005311', 'address' => '客户地址', 'remark' => '客户完整说明'];
@@ -279,8 +279,8 @@ final class MasterCreationReceiptWorkflowTest extends TestCase
         self::assertNotFalse($first, CustomerLogic::getError());
         self::assertSame($first, CustomerLogic::add($params), CustomerLogic::getError());
         self::assertSame(1, Db::name('customer')->where('tenant_id', self::RECEIPT_TENANT)->count());
-        self::assertSame(1, Db::name('customer_group')->where('tenant_id', self::RECEIPT_TENANT)->count());
-        self::assertSame(1, (int)Db::name('customer_group')->where('tenant_id', self::RECEIPT_TENANT)->value('customer_count'));
+        self::assertArrayNotHasKey('group_id', $first);
+        self::assertArrayNotHasKey('group_name', $first);
         self::assertSame('客户完整说明', Db::name('customer')->where('id', (int)$first['id'])->value('remark'));
         $changed = $params;
         $changed['remark'] = '不允许悄悄替换的说明';
@@ -379,7 +379,7 @@ final class MasterCreationReceiptWorkflowTest extends TestCase
     private function cleanReceiptFixtures(): void
     {
         foreach (['master_creation_receipt', 'master_receipt_test_effect', 'employee_permission', 'employee_process',
-            'employee', 'customer', 'customer_group', 'vendor'] as $table) {
+            'employee', 'customer', 'vendor'] as $table) {
             Db::name($table)->whereIn('tenant_id', [self::RECEIPT_TENANT, self::RECEIPT_OTHER_TENANT])->delete();
         }
     }

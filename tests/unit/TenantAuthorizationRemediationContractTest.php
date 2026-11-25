@@ -60,8 +60,6 @@ final class TenantAuthorizationRemediationContractTest extends TestCase
         $previousTenantId = $request->tenantId ?? null;
         $tenantA = 0;
         $tenantB = 0;
-        $groupA = 0;
-        $groupB = 0;
         $rootA = 0;
         $rootB = 0;
         $childA = 0;
@@ -80,25 +78,8 @@ final class TenantAuthorizationRemediationContractTest extends TestCase
                 'disable' => 0,
                 'create_time' => $now,
             ]);
-            $groupA = (int)Db::name('customer_group')->insertGetId([
-                'tenant_id' => $tenantA,
-                'group_name' => 'Group A ' . $suffix,
-                'customer_count' => 1,
-                'sort' => 0,
-                'create_time' => $now,
-                'update_time' => $now,
-            ]);
-            $groupB = (int)Db::name('customer_group')->insertGetId([
-                'tenant_id' => $tenantB,
-                'group_name' => 'Group B ' . $suffix,
-                'customer_count' => 1,
-                'sort' => 0,
-                'create_time' => $now,
-                'update_time' => $now,
-            ]);
             $rootA = (int)Db::name('customer')->insertGetId(self::customerFixture(
                 $tenantA,
-                $groupA,
                 0,
                 'Root A ' . $suffix,
                 '10.00',
@@ -107,7 +88,6 @@ final class TenantAuthorizationRemediationContractTest extends TestCase
             ));
             $rootB = (int)Db::name('customer')->insertGetId(self::customerFixture(
                 $tenantB,
-                $groupB,
                 0,
                 'Root B ' . $suffix,
                 '30.00',
@@ -116,7 +96,6 @@ final class TenantAuthorizationRemediationContractTest extends TestCase
             ));
             $childA = (int)Db::name('customer')->insertGetId(self::customerFixture(
                 $tenantA,
-                $groupA,
                 $rootA,
                 'Child A ' . $suffix,
                 '5.00',
@@ -125,7 +104,6 @@ final class TenantAuthorizationRemediationContractTest extends TestCase
             ));
             $childB = (int)Db::name('customer')->insertGetId(self::customerFixture(
                 $tenantB,
-                $groupB,
                 $rootA,
                 'Child B ' . $suffix,
                 '70.00',
@@ -143,14 +121,10 @@ final class TenantAuthorizationRemediationContractTest extends TestCase
             self::assertSame($rootA, $summary['customers'][0]['id']);
             self::assertSame([$childA], array_column($summary['customers'][0]['children'], 'id'));
 
-            $groups = CustomerLogic::groupedCustomers([
-                ['id' => $groupA, 'group_name' => 'Group A ' . $suffix],
-                ['id' => $groupB, 'group_name' => 'Group B ' . $suffix],
-            ], []);
-            self::assertCount(1, $groups);
-            self::assertSame($groupA, (int)$groups[0]['id']);
-            self::assertSame([$rootA], array_column($groups[0]['customers'], 'id'));
-            self::assertSame([$childA], array_column($groups[0]['customers'][0]['children'], 'id'));
+            $detail = CustomerLogic::detail(['id' => $rootA]);
+            self::assertSame([$childA], array_column($detail['children'], 'id'));
+            self::assertArrayNotHasKey('group_id', $detail);
+            self::assertArrayNotHasKey('group_name', $detail);
 
             $deleted = CustomerLogic::delete(['id' => $rootA]);
             self::assertIsArray($deleted);
@@ -172,9 +146,6 @@ final class TenantAuthorizationRemediationContractTest extends TestCase
             self::assertSame([], $emptySummary['customers']);
             self::assertSame(0, $emptySummary['total']);
             self::assertSame('0.00', $emptySummary['total_amount']);
-            self::assertSame([], CustomerLogic::groupedCustomers([
-                ['id' => $groupB, 'group_name' => 'Group B ' . $suffix],
-            ], []));
             self::assertFalse(CustomerLogic::delete(['id' => $rootB]));
             $after = Db::name('customer')
                 ->whereIn('id', [$rootB, $childB])
@@ -186,12 +157,10 @@ final class TenantAuthorizationRemediationContractTest extends TestCase
             $request->tenantId = $previousTenantId;
             if ($tenantA > 0) {
                 Db::name('customer')->where('tenant_id', $tenantA)->whereIn('id', array_filter([$rootA, $childA]))->delete();
-                Db::name('customer_group')->where('tenant_id', $tenantA)->where('id', $groupA)->delete();
                 Db::name('tenant')->where('id', $tenantA)->delete();
             }
             if ($tenantB > 0) {
                 Db::name('customer')->where('tenant_id', $tenantB)->whereIn('id', array_filter([$rootB, $childB]))->delete();
-                Db::name('customer_group')->where('tenant_id', $tenantB)->where('id', $groupB)->delete();
                 Db::name('tenant')->where('id', $tenantB)->delete();
             }
         }
@@ -216,7 +185,6 @@ final class TenantAuthorizationRemediationContractTest extends TestCase
 
     private static function customerFixture(
         int $tenantId,
-        int $groupId,
         int $parentId,
         string $name,
         string $receivable,
@@ -230,7 +198,6 @@ final class TenantAuthorizationRemediationContractTest extends TestCase
             'phone' => '',
             'address' => '',
             'remark' => '',
-            'group_id' => $groupId,
             'parent_id' => $parentId,
             'is_store' => $isStore,
             'children_count' => 0,

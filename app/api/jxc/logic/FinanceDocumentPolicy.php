@@ -94,9 +94,17 @@ final class FinanceDocumentPolicy
         return self::TYPES[$type] ?? throw new \DomainException('不支持的财务业务类型');
     }
 
+    public static function employeeModuleDeferred(string $type): bool
+    {
+        return FinanceAccess::userIdentity() && (self::TYPES[$type]['subject'] ?? '') === 'employee';
+    }
+
     public static function authorize(string $type, bool $confirm = false): array
     {
         $policy = self::type($type);
+        if (self::employeeModuleDeferred($type)) {
+            throw FinanceBusinessException::classified('本版尚未开放员工专项记账', 'FINANCE_ACTION_FORBIDDEN');
+        }
         if (in_array($type, ['salary_payment', 'salary_expense', 'salary_adjustment'], true)) {
             try { FinanceAccess::require('finance.salary.view'); }
             catch (\DomainException $error) { throw FinanceBusinessException::forRead($error); }
@@ -109,6 +117,9 @@ final class FinanceDocumentPolicy
     public static function read(string $type): array
     {
         try {
+            if (self::employeeModuleDeferred($type)) {
+                throw FinanceBusinessException::classified('本版尚未开放员工专项记账', 'FINANCE_ACTION_FORBIDDEN');
+            }
             if (in_array($type, ['inventory_count_start', 'inventory_count_cancel'], true) && FinanceAccess::has('finance.inventory.confirm')) { return self::type($type); }
             if (in_array($type, ['salary_expense', 'salary_payment', 'salary_adjustment'], true)) { FinanceAccess::require('finance.salary.view'); return self::type($type); }
             if ($type === 'sales_batch' && FinanceAccess::has('settlement.view')) { return self::type($type); }

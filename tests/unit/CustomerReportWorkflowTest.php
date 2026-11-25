@@ -461,13 +461,16 @@ final class CustomerReportWorkflowTest extends TestCase
     {
         $customerId = $this->createCustomer('待处理计数客户');
         $goodsId = $this->createCustomerReportGoods('待处理计数商品', 'CR-PENDING-COUNT');
+        $unitId = $this->createCustomerReportUnit('件');
+        Db::name('goods')->where('id', $goodsId)->update(['unit_id' => $unitId]);
+        Db::name('goods_sku')->where('id', $this->customerReportSkuId($goodsId))->update(['base_unit_id' => $unitId]);
         $warehouseId = $this->createCustomerReportWarehouse('待处理计数仓');
         self::assertNotFalse(WarehouseGoodsBalanceService::inbound($warehouseId, $goodsId, '2.0000'));
 
         foreach (['pending-count-a', 'pending-count-b'] as $key) {
-            self::assertNotFalse(CustomerReportLogic::submit(
-                $this->submitPayload($customerId, $goodsId, $warehouseId, $key, '1', '1.00', '1.00')
-            ), CustomerReportLogic::getError());
+            $payload = $this->submitPayload($customerId, $goodsId, $warehouseId, $key, '1', '1.00', '1.00');
+            $payload['items'][0]['unit_id'] = $unitId;
+            self::assertNotFalse(CustomerReportLogic::submit($payload), CustomerReportLogic::getError());
         }
 
         $pending = CustomerReportLogic::lists([

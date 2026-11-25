@@ -64,8 +64,12 @@ class FinanceBusinessController extends BaseJxcController
         $raw = $this->request->post(false);
         // 保留需要严格校验的 JSON 标记，普通文本仍使用请求过滤器。
         if (array_key_exists('continue_later', $raw)) { $params['continue_later'] = $raw['continue_later']; }
-        if (is_array($raw['payload'] ?? null) && array_key_exists('pending_source_confirmed', $raw['payload'])) {
-            $params['payload']['pending_source_confirmed'] = $raw['payload']['pending_source_confirmed'];
+        if (is_array($raw['payload'] ?? null)) {
+            foreach (['pending_source_confirmed', 'funds_verified', 'claim_verified', 'material_verified'] as $field) {
+                if (array_key_exists($field, $raw['payload'])) {
+                    $params['payload'][$field] = $raw['payload'][$field];
+                }
+            }
         }
         return $params;
     }

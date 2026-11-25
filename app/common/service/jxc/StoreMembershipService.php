@@ -60,8 +60,7 @@ class StoreMembershipService
                 throw new \RuntimeException('创建店铺失败');
             }
 
-            self::createMember($tenantId, $userId, self::ROLE_OWNER, 0, self::generateInviteCode());
-            self::ensureTenantInvite($tenantId, $userId);
+            self::createMember($tenantId, $userId, self::ROLE_OWNER);
             DefaultDataInitService::initForTenant($tenantId);
             self::setCurrentTenant($userId, $tenantId, $token);
 
@@ -128,8 +127,7 @@ class StoreMembershipService
         if ($userId <= 0) {
             throw new \RuntimeException('请先登录');
         }
-        if (!self::hasActiveMembership($userId, $tenantId)) {
-            self::rejectMembership($userId);
+        if (!self::isOperatingOwner($userId, $tenantId)) {
             throw new \RuntimeException('无权访问该店铺');
         }
 
@@ -152,6 +150,8 @@ class StoreMembershipService
             ->alias('m')
             ->join('tenant t', 't.id = m.tenant_id')
             ->where('m.user_id', $userId)
+            ->where('m.role', self::ROLE_OWNER)
+            ->where('m.inviter_id', 0)
             ->where('m.status', self::STATUS_ACTIVE)
             ->whereNull('m.delete_time')
             ->whereNull('t.delete_time')
@@ -175,6 +175,7 @@ class StoreMembershipService
             ->join('tenant t', 't.id = m.tenant_id')
             ->where('m.user_id', $userId)
             ->where('m.role', self::ROLE_OWNER)
+            ->where('m.inviter_id', 0)
             ->where('m.status', self::STATUS_ACTIVE)
             ->whereNull('m.delete_time')
             ->whereNull('t.delete_time')
@@ -188,8 +189,7 @@ class StoreMembershipService
             return [];
         }
         $tenant = Db::name('tenant')->where('id', $tenantId)->whereNull('delete_time')->find();
-        if (!$tenant || (int)($tenant['disable'] ?? 0) !== 0 || !self::hasActiveMembership($userId, $tenantId)) {
-            self::rejectMembership($userId);
+        if (!$tenant || (int)($tenant['disable'] ?? 0) !== 0 || !self::isOperatingOwner($userId, $tenantId)) {
             return [];
         }
         return self::formatTenant((array)$tenant, $userId);
@@ -197,14 +197,7 @@ class StoreMembershipService
 
     public static function requireCurrentMembership(int $userId, int $tenantId): bool
     {
-        if ($userId <= 0 || $tenantId <= 0) {
-            return false;
-        }
-        $allowed = self::hasActiveMembership($userId, $tenantId);
-        if (!$allowed) {
-            self::rejectMembership($userId);
-        }
-        return $allowed;
+        return self::isOperatingOwner($userId, $tenantId);
     }
 
     public static function getInviteCode(int $userId, int $tenantId): string
@@ -354,7 +347,7 @@ class StoreMembershipService
         ]);
     }
 
-    private static function hasActiveMembership(int $userId, int $tenantId): bool
+    public static function isOperatingOwner(int $userId, int $tenantId): bool
     {
         if ($userId <= 0 || $tenantId <= 0) {
             return false;
@@ -365,6 +358,8 @@ class StoreMembershipService
             ->join('tenant t', 't.id = m.tenant_id')
             ->where('m.tenant_id', $tenantId)
             ->where('m.user_id', $userId)
+            ->where('m.role', self::ROLE_OWNER)
+            ->where('m.inviter_id', 0)
             ->where('m.status', self::STATUS_ACTIVE)
             ->whereNull('m.delete_time')
             ->where('t.disable', 0)
@@ -433,7 +428,6 @@ class StoreMembershipService
             'disable' => (int)($tenant['disable'] ?? 0),
             'notes' => (string)($tenant['notes'] ?? ''),
             'role' => (string)($member['role'] ?? $tenant['role'] ?? ''),
-            'invite_code' => (string)($member['invite_code'] ?? $tenant['invite_code'] ?? ''),
             'create_time' => $tenant['create_time'] ?? '',
         ];
     }

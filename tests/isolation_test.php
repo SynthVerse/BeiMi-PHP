@@ -357,7 +357,6 @@ function cleanupSecondTenant(): void
         'jxc_goods_unit',
         'jxc_warehouse',
         'jxc_customer',
-        'jxc_customer_group',
         'jxc_supplier',
         'jxc_audit_log',
     ];
