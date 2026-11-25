@@ -89,7 +89,7 @@ final class CustomerReportWordDocument
             foreach ($customer['reports'] as $index => $report) {
                 $order = count($customer['reports']) > 1 ? '第 ' . ($index + 1) . ' 单' : '';
                 $label = self::reportLabel($report, $data['query']['status']);
-                $continuation = $order === '' ? '' : $order . '（续）' . ($label !== '' ? ' · ' . $label : '');
+                $continuation = $order === '' ? $label : $order . '（续）' . ($label !== '' ? ' · ' . $label : '');
                 $rows[] = [
                     'text' => implode(' · ', array_filter([$order, $label, self::delivery($report['delivery_arrangement'])])),
                     'keep_next' => true, 'continuation' => $continuation,
@@ -442,18 +442,25 @@ final class CustomerReportWordDocument
 
     private static function ordinalRun(string $number, string $prefix, string $suffix = '', int $size = 20, string $color = '424C55'): string
     {
-        if (!ctype_digit($number)) {
+        if (str_ends_with($number, '.')) {
             return self::run($prefix . $number . $suffix, $size, false, $color);
         }
-        // ㊿之后没有预组圈号，用普通文字叠印圆圈和数字，复制或搜索时仍能找到行号。
-        [$tracking, $scale] = match (strlen($number)) {
-            2 => [-204, 100],
-            3 => [-304, 142],
-            default => [-391, 180],
-        };
-        $ring = '<w:spacing w:val="' . $tracking . '"/><w:w w:val="' . $scale . '"/>';
-        return self::run($prefix, $size, false, $color) . self::run('◯', 24, false, $color, $ring)
-            . self::run($number, 14, false, $color, '<w:position w:val="3"/>') . self::run($suffix, $size, false, $color);
+        if (!ctype_digit($number)) {
+            $font = preg_match('/^[①-⑳]$/u', $number) ? 'Cambria Math' : 'Microsoft YaHei';
+            $marker = self::run($number, $size, false, $color, font: $font);
+        } else {
+            // ㊿之后没有预组圈号，按圈和数字的实际字体叠印，复制时仍能取得原数字。
+            [$tracking, $scale] = match (strlen($number)) {
+                2 => [-204, 100],
+                3 => [-304, 142],
+                default => [-391, 180],
+            };
+            $ring = '<w:spacing w:val="' . $tracking . '"/><w:w w:val="' . $scale . '"/>';
+            $marker = self::run('◯', 24, false, $color, $ring, 'Cambria Math')
+                . self::run($number, 14, false, $color, '<w:position w:val="3"/>', 'Microsoft YaHei');
+        }
+        return ($prefix === '' ? '' : self::run($prefix, $size, false, $color)) . $marker
+            . ($suffix === '' ? '' : self::run($suffix, $size, false, $color));
     }
 
     private static function wrapText(string $text, int $limit): array
@@ -503,9 +510,10 @@ final class CustomerReportWordDocument
         return self::paperLine(implode('<w:r><w:br/></w:r>', $runs), $lineHeight, $before);
     }
 
-    private static function run(string $line, int $size, bool $bold = false, string $color = '000000', string $format = ''): string
+    private static function run(string $line, int $size, bool $bold = false, string $color = '000000', string $format = '', string $font = ''): string
     {
-        return '<w:r><w:rPr>' . ($bold ? '<w:b/>' : '') . '<w:color w:val="' . $color . '"/>' . $format . '<w:sz w:val="' . $size
+        $fonts = $font === '' ? '' : '<w:rFonts w:ascii="' . $font . '" w:hAnsi="' . $font . '" w:eastAsia="' . $font . '" w:cs="' . $font . '"/>';
+        return '<w:r><w:rPr>' . $fonts . ($bold ? '<w:b/>' : '') . '<w:color w:val="' . $color . '"/>' . $format . '<w:sz w:val="' . $size
             . '"/><w:szCs w:val="' . $size . '"/></w:rPr><w:t xml:space="preserve">'
             . htmlspecialchars($line, ENT_XML1 | ENT_QUOTES | ENT_SUBSTITUTE | ENT_DISALLOWED, 'UTF-8') . '</w:t></w:r>';
     }

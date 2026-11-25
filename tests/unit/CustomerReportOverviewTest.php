@@ -426,11 +426,13 @@ final class CustomerReportOverviewTest extends TestCase
         $continued = $path->query('//w:p[w:r/w:br[@w:type="column"]]/following-sibling::w:p[not(w:pPr/w:shd)][1]');
         self::assertGreaterThan(0, count(array_filter(iterator_to_array($continued), static fn(\DOMNode $node) =>
             str_starts_with($node->textContent, '第 1 单（续）'))));
-        $resumedItems = $path->query('//w:body/w:p/w:r/w:t[contains(., "桂鱼 中号（续）")]');
+        $resumedItems = $path->query('//w:body/w:p[w:r/w:t[contains(., "桂鱼 中号（续）")]]');
         self::assertGreaterThan(0, $resumedItems->length);
         foreach ($resumedItems as $resumed) {
-            $lastMarker = $path->evaluate('string(preceding::w:p[w:r/w:t[starts-with(., "□ ")]][1]/w:r[1]/w:t)', $resumed);
-            self::assertSame(str_replace('□ ', '', $lastMarker) . ' 桂鱼 中号（续）', $resumed->textContent);
+            $item = $path->query('preceding-sibling::w:p[w:r/w:t[starts-with(., "□ ")]][1]', $resumed)->item(0);
+            self::assertNotNull($item);
+            $marker = explode(' ', trim($this->paperText($item)))[1];
+            self::assertStringEndsWith($marker . ' 桂鱼 中号（续）', $resumed->textContent);
         }
         self::assertStringContainsString('补报 · 交接  第三方配送', $path->document->textContent);
 
@@ -447,7 +449,8 @@ final class CustomerReportOverviewTest extends TestCase
 
     public function test_word_keeps_goods_numbers_circled_beyond_fifty_in_both_documents(): void
     {
-        $id = $this->report('海味饭店', '海味饭店', '1', '条');
+        $original = $this->report('海味饭店', '海味饭店', '1', '条', ['status' => 'completed']);
+        $id = $this->report('海味饭店', '海味饭店', '1', '条', ['supplement_for_report_id' => $original]);
         $item = Db::name('customer_report_item')->where('report_id', $id)->find();
         unset($item['id']);
         $items = [];
@@ -459,14 +462,23 @@ final class CustomerReportOverviewTest extends TestCase
             ]);
         }
         Db::name('customer_report_item')->insertAll($items);
-        $query = ['delivery_date' => '2026-10-10', 'expected_tenant_id' => self::TENANT_ID];
+        $query = ['delivery_date' => '2026-10-10', 'status' => 'pending', 'expected_tenant_id' => self::TENANT_ID];
         $snapshot = CustomerReportOverviewLogic::overview($query);
         foreach (['customers', 'goods'] as $type) {
             $file = CustomerReportOverviewLogic::exportWord($query + ['document_type' => $type, 'snapshot_hash' => $snapshot['snapshot_hash']]);
             self::assertNotFalse($file, CustomerReportOverviewLogic::getError());
-            $text = $this->paperText($this->wordPart($file, 'document'));
+            $document = $this->wordPart($file, 'document');
+            $text = $this->paperText($document);
             foreach ([11 => '⑪', 20 => '⑳', 21 => '㉑', 50 => '㊿', 51 => '◯51', 100 => '◯100'] as $position => $marker) {
                 self::assertStringContainsString($marker . ' 样品' . $position . ' ', $text);
+            }
+            if ($type === 'customers') {
+                $path = new \DOMXPath($document);
+                $path->registerNamespace('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main');
+                $break = '//w:body/w:p[w:r/w:br[@w:type="column"]]';
+                self::assertGreaterThan(0, $path->query($break)->length);
+                self::assertSame($path->query($break)->length,
+                    $path->query($break . '/following-sibling::w:p[not(w:pPr/w:shd)][1][w:r/w:t="补报"]')->length);
             }
         }
     }
