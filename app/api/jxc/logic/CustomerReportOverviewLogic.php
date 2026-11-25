@@ -49,6 +49,11 @@ final class CustomerReportOverviewLogic extends BaseLogic
             self::setError('请先加载报货汇总，再导出 Word');
             return false;
         }
+        $documentType = $params['document_type'] ?? null;
+        if (!is_string($documentType) || !isset(CustomerReportWordDocument::TITLES[$documentType])) {
+            self::setError('请选择有效的 Word 单据类型');
+            return false;
+        }
         $snapshot = self::overview($params);
         if ($snapshot === false) { return false; }
         if ($snapshot['query']['status'] === 'cancelled') {
@@ -64,9 +69,10 @@ final class CustomerReportOverviewLogic extends BaseLogic
             return false;
         }
         return ['tenant_id' => $snapshot['tenant_id'], 'query' => $snapshot['query'], 'snapshot_hash' => $snapshot['snapshot_hash'],
-            'filename' => '报货汇总_' . $snapshot['query']['delivery_date'] . '.docx',
+            'document_type' => $documentType,
+            'filename' => CustomerReportWordDocument::TITLES[$documentType] . '_' . $snapshot['query']['delivery_date'] . '.docx',
             'mime' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            'base64' => base64_encode(CustomerReportWordDocument::create($snapshot))];
+            'base64' => base64_encode(CustomerReportWordDocument::create($snapshot, $documentType))];
     }
 
     private static function filters(array $params): array
@@ -256,16 +262,27 @@ final class CustomerReportOverviewLogic extends BaseLogic
             if (trim((string)$item[$field]) !== '') { $requirements .= ($requirements !== '' ? '；' : '') . $label . ' ' . $item[$field]; }
         }
         if ((int)$item['piece_weight_confirmed'] === 1) {
-            $requirements .= ($requirements !== '' ? '；' : '') . '单体重量 ' . $item['piece_weight_min'] . '–' . $item['piece_weight_max'] . '斤';
+            $requirements .= ($requirements !== '' ? '；' : '') . '单体重量 '
+                . self::weightRange($item['piece_weight_min'], $item['piece_weight_max']);
         }
         if (bccomp((string)($item['acceptable_base_qty_max'] ?? '0'), '0', 4) > 0) {
-            $requirements .= ($requirements !== '' ? '；' : '') . '总重范围 ' . $item['acceptable_base_qty_min'] . '–' . $item['acceptable_base_qty_max'] . '斤';
+            $requirements .= ($requirements !== '' ? '；' : '') . '总重范围 '
+                . self::weightRange($item['acceptable_base_qty_min'], $item['acceptable_base_qty_max']);
         }
-        return ['id' => (int)$item['id'], 'goods_name' => (string)$item['goods_name'], 'sku_name' => (string)$item['sku_name'],
+        return ['id' => (int)$item['id'], 'goods_id' => (int)$item['goods_id'], 'sku_id' => (int)$item['sku_id'],
+            'unit_id' => (int)$item['unit_id'], 'spec_id' => (int)$item['spec_id'],
+            'goods_name' => (string)$item['goods_name'], 'sku_name' => (string)$item['sku_name'],
+            'specification' => trim((string)$item['specification_snapshot']),
             'quantity' => (string)$item['order_qty'], 'unit_name' => (string)$item['unit_name'],
             'requirements' => $requirements, 'remark' => (string)$item['line_remark'], 'processing_groups' => $groups,
             'pending_measurement' => $pending, 'shortage_quantity' => $shortage, 'base_unit_name' => (string)$item['base_unit_name'],
             'fulfillment_status' => (string)($item['fulfillment_status'] ?? ''),
             'undelivered_reason' => (string)($item['undelivered_reason'] ?? '')];
+    }
+
+    private static function weightRange(string $minimum, string $maximum): string
+    {
+        $display = static fn(string $value) => str_contains($value, '.') ? rtrim(rtrim($value, '0'), '.') : $value;
+        return $display($minimum) . '–' . $display($maximum) . ' 斤';
     }
 }
