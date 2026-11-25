@@ -37,7 +37,7 @@ final class CustomerReportWordDocument
                 '_rels/.rels' => self::relationships(['officeDocument' => 'word/document.xml']),
                 'word/_rels/document.xml.rels' => self::relationships(['styles' => 'styles.xml', 'header' => 'header1.xml', 'footer' => 'footer1.xml']),
                 'word/styles.xml' => self::styles(),
-                'word/document.xml' => self::document($blocks, $topMargin),
+                'word/document.xml' => self::document($blocks, $topMargin, $documentType),
                 'word/header1.xml' => self::wrap('hdr', implode('', $header)),
                 'word/footer1.xml' => self::wrap('ftr', '<w:p><w:pPr><w:jc w:val="center"/></w:pPr>'
                     . '<w:r><w:rPr><w:sz w:val="19"/></w:rPr><w:t xml:space="preserve">第 </w:t></w:r>'
@@ -243,8 +243,11 @@ final class CustomerReportWordDocument
         return [...$alerts, ...$details, ...array_diff(array_unique($notes), ['', ...$alerts, ...$details])];
     }
 
-    private static function document(array $blocks, int $topMargin): string
+    private static function document(array $blocks, int $topMargin, string $documentType): string
     {
+        $customerSheet = $documentType === 'customers';
+        $headingSize = $customerSheet ? 24 : 26;
+        $boldHeading = !$customerSheet;
         // 固定行高并为栏分隔段落和字体替换留出余量，换栏位置可以显式补印名称。
         $capacity = self::PAGE_HEIGHT - $topMargin - self::BOTTOM_MARGIN - 500;
         $body = '';
@@ -259,7 +262,7 @@ final class CustomerReportWordDocument
                 $used = 0;
             }
             $gap = $used ? self::HEADING_GAP : 0;
-            $body .= self::paragraph($heading, 26, true, self::BODY_LINE, $gap);
+            $body .= self::paragraph($heading, $headingSize, $boldHeading, self::BODY_LINE, $gap);
             $used += count($heading) * self::BODY_LINE + $gap;
             $continuationHeight = count($continuation) * self::BODY_LINE;
             foreach ($rows as $index => $row) {
@@ -272,7 +275,7 @@ final class CustomerReportWordDocument
                     $contextHeight = count($context) * self::BODY_LINE;
                     $freshLines = max(1, intdiv($capacity - $continuationHeight - $contextHeight, self::BODY_LINE));
                     if (!$available || ($index > 0 && $available < min($required, $freshLines))) {
-                        $body .= self::COLUMN_BREAK . self::paragraph($continuation, 26, true, self::BODY_LINE);
+                        $body .= self::COLUMN_BREAK . self::paragraph($continuation, $headingSize, $boldHeading, self::BODY_LINE);
                         if ($context) {
                             $body .= self::paragraph($context);
                         }
