@@ -89,10 +89,12 @@ final class FinancePayments
         $lines = $data['allocations'] ?? [];
         if (!is_array($lines)) { throw new \DomainException('请核对所选来源组成'); }
         $returnContext = $type === 'customer_refund' ? FinanceCustomerReturnRefunds::validate($this->ledger, $data) : [];
+        $resolvedSourceCategories = [];
         if ($type === 'supplier_payment') {
             foreach ($lines as $line) {
                 if (!is_array($line)) { throw new \DomainException('付款组成格式无效'); }
                 $reference = FinanceValue::text($line['source'] ?? '', 40); $source = $this->ledger->source($reference);
+                $resolvedSourceCategories[] = $source['category'];
                 $available = bcsub($source['balance'], FinanceStatements::disputedAmount($reference), 2);
                 if (bccomp(FinanceValue::money($line['amount'] ?? null), $available, 2) > 0) { throw FinanceBusinessException::classified('本次付款超过无争议可付金额，请先核实争议并完成正式调整', 'FINANCE_SOURCE_CONFLICT', [['field' => 'allocations', 'source' => $source['reference'], 'message' => '本次付款超过该来源无争议可付金额']]); }
             }
@@ -103,7 +105,7 @@ final class FinancePayments
             $advance = FinanceValue::money($data['advance_amount'] ?? '0', true);
             if (bccomp(bcadd($total, $advance, 2), $amount, 2) !== 0) { throw new \DomainException('到账须等于所选欠款核销合计加明确转入的预收金额'); }
         } elseif (bccomp($total, $amount, 2) !== 0) { throw new \DomainException('本次金额必须等于所选来源的处理合计，不能超付或转为预付款'); }
-        $money = (new FinanceMoney($this->tenantId, $this->ledger))->record((int)$document['id'], $type, $data, $policy['direction'], $date, $amount, $month, $originalTransaction);
+        $money = (new FinanceMoney($this->tenantId, $this->ledger))->record((int)$document['id'], $type, $data, $policy['direction'], $date, $amount, $month, $originalTransaction, $resolvedSourceCategories);
         $created = [];
         if ($preservedAdvance) {
             FinanceAdvanceRevisions::append($this->ledger, (int)$document['id'], $preservedAdvance, $advance, $date, $month, $preservedAdvance['revision_reason'] ?? $reason);

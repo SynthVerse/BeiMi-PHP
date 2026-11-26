@@ -9,6 +9,8 @@ use think\facade\Db;
 /** 只供已验证的业务确认调用；接口不接受自由填写的余额影响。 */
 final class FinanceLedger
 {
+    private const SOURCE_REFERENCE = '/^([on]):([1-9][0-9]{0,17})$/D';
+
     public function __construct(private readonly int $tenantId) {}
 
     public function lockBook(): array
@@ -33,7 +35,7 @@ final class FinanceLedger
 
     public function source(string $reference): array
     {
-        if (!preg_match('/^([on]):([1-9][0-9]{0,17})$/D', $reference, $match)) { throw new \DomainException('未结来源标识无效'); }
+        if (!preg_match(self::SOURCE_REFERENCE, $reference, $match)) { throw new \DomainException('未结来源标识无效'); }
         $opening = $match[1] === 'o';
         $row = Db::name($opening ? 'finance_opening_source' : 'finance_source')->where('tenant_id', $this->tenantId)->where('id', $match[2])->find();
         if (!$row) { throw FinanceBusinessException::classified('未结来源不存在或不属于本门店，请重新核对来源', 'FINANCE_SOURCE_CONFLICT'); }
@@ -59,6 +61,32 @@ final class FinanceLedger
             foreach ($query->order('id')->column('id') as $id) { $sources[] = $this->source($prefix . ':' . $id); }
         }
         return $sources;
+    }
+
+    /** 付款草稿、已结清单据及更正都显示账本中的来源类别。 */
+    public function supplierPaymentAllocations(mixed $subjectId, array $allocations): array
+    {
+        try { $subjectId = FinanceValue::id($subjectId); }
+        catch (\DomainException) { $subjectId = 0; }
+        $positions = [];
+        foreach ($allocations as $index => $line) {
+            if (!is_array($line)) { continue; }
+            unset($allocations[$index]['category']);
+            $reference = $line['source'] ?? null;
+            if ($subjectId && is_string($reference) && preg_match(self::SOURCE_REFERENCE, $reference, $match)) {
+                $positions[$match[1]][$match[2]][] = $index;
+            }
+        }
+        foreach ($positions as $kind => $indices) {
+            $table = $kind === 'o' ? 'finance_opening_source' : 'finance_source';
+            $categories = Db::name($table)->where('tenant_id', $this->tenantId)->where('subject_id', $subjectId)
+                ->whereIn('category', FinanceDocumentPolicy::TYPES['supplier_payment']['sources'])
+                ->whereIn('id', array_keys($indices))->column('category', 'id');
+            foreach ($categories as $id => $category) {
+                foreach ($indices[$id] as $index) { $allocations[$index]['category'] = $category; }
+            }
+        }
+        return $allocations;
     }
 
     public function account(int $id, bool $requireEnabled = true): array

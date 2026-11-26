@@ -70,6 +70,19 @@ class FinanceBusinessController extends BaseJxcController
                     $params['payload'][$field] = $raw['payload'][$field];
                 }
             }
+            // 采购确认只恢复原生整数，避免浮点 1.0 被存储 JSON 折叠为已确认的整数 1。
+            if (is_int($raw['payload']['supplier_confirmed'] ?? null)) {
+                $params['payload']['supplier_confirmed'] = $raw['payload']['supplier_confirmed'];
+            }
+            if (is_array($raw['payload']['lines'] ?? null)) {
+                foreach ($raw['payload']['lines'] as $index => $line) {
+                    foreach (['arrival_difference_confirmed', 'difference_confirmed'] as $field) {
+                        if (is_array($line) && is_int($line[$field] ?? null)) {
+                            $params['payload']['lines'][$index][$field] = $line[$field];
+                        }
+                    }
+                }
+            }
         }
         return $params;
     }

@@ -11,11 +11,12 @@ final class FinanceMoney
 {
     public function __construct(private readonly int $tenantId, private readonly FinanceLedger $ledger) {}
 
-    public function record(int $documentId, string $type, array $payload, string $direction, string $date, string $amount, string $month, ?array $originalTransaction = null): array
+    public function record(int $documentId, string $type, array $payload, string $direction, string $date, string $amount, string $month, ?array $originalTransaction = null, array $resolvedSourceCategories = []): array
     {
         try { $account = $this->ledger->account(FinanceValue::id($payload['account_id'] ?? 0)); }
         catch (\DomainException $error) { throw FinanceBusinessException::validation([['field' => 'account_id', 'code' => 'unavailable', 'message' => '资金账户无效、已停用或不属于本门店，请重新选择账户']]); }
-        $evidence = $this->evidence($type, $payload, $account['account_type'] !== 'cash');
+        $requiresScreenshot = $account['account_type'] !== 'cash' && FinanceBusinessValidation::requiresElectronicScreenshot($type, $resolvedSourceCategories);
+        $evidence = $this->evidence($type, $payload, $requiresScreenshot);
         $number = FinanceBusinessValidation::text('transaction_no', $payload['transaction_no'] ?? '', 120, false, '交易号');
         $scope = FinanceBusinessValidation::text('transaction_scope', $payload['transaction_scope'] ?? '', 160, false, '交易所属渠道范围');
         if ($number !== '' && $scope === '') { throw FinanceBusinessException::validation([['field' => 'transaction_scope', 'code' => 'required', 'message' => '填写交易号时须明确银行账户或收款商户范围']]); }
@@ -50,10 +51,10 @@ final class FinanceMoney
             'posting_month' => $month, 'evidence' => $evidence];
     }
 
-    private function evidence(string $type, array $payload, bool $electronic): array
+    private function evidence(string $type, array $payload, bool $requiresScreenshot): array
     {
         $ids = $payload['evidence_ids'] ?? [];
-        $errors = FinanceBusinessValidation::evidenceErrors($payload, $electronic, FinanceAccess::owner());
+        $errors = FinanceBusinessValidation::evidenceErrors($payload, $requiresScreenshot, FinanceAccess::owner());
         if ($errors) { throw FinanceBusinessException::validation($errors); }
         $screenshots = [];
         foreach ($ids as $id) {
@@ -63,8 +64,7 @@ final class FinanceMoney
             if (!$row) { throw FinanceBusinessException::validation([['field' => 'evidence_ids', 'code' => 'unavailable', 'message' => '截图不存在、不属于本门店或不属于当前业务类型，请移除后重新上传']]); }
             $screenshots[] = FinanceEvidence::metadata($row);
         }
-        $exceptionReason = trim($payload['missing_evidence_reason'] ?? '');
-        return ['screenshots' => $screenshots, 'missing_screenshot' => $electronic && !$screenshots,
-            'exception_reason' => $exceptionReason, 'alternative_evidence' => trim($payload['alternative_evidence'] ?? '')];
+        return ['screenshots' => $screenshots, 'missing_screenshot' => $requiresScreenshot && !$screenshots,
+            'exception_reason' => trim($payload['missing_evidence_reason'] ?? ''), 'alternative_evidence' => trim($payload['alternative_evidence'] ?? '')];
     }
 }

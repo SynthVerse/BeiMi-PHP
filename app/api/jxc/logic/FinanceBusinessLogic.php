@@ -234,6 +234,10 @@ final class FinanceBusinessLogic extends BaseLogic
                 }
             }
             $presented = self::present($document);
+            if ($presented['type'] === 'supplier_payment' && is_array($presented['payload']['allocations'] ?? null)) {
+                $presented['payload']['allocations'] = (new FinanceLedger(FinanceAccess::tenant()))->supplierPaymentAllocations(
+                    $presented['payload']['subject_id'] ?? null, $presented['payload']['allocations']);
+            }
             if ($presented['type'] === 'purchase_return_actual' && $presented['status'] === 'confirmed') {
                 $presented['return_progress'] = FinanceReturnQuery::purchaseProgress((int)$presented['id']);
             }
