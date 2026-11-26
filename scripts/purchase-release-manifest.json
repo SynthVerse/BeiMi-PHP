@@ -16,6 +16,11 @@
   "remove": ["app/api/jxc/validate/PurchasePlanValidate.php"],
   "dependencies": [
     "app/api/controller/jxc/PurchasePlanController.php",
+    "app/api/jxc/middleware/JxcLoginMiddleware.php",
+    "app/common/service/jxc/StoreMembershipService.php",
+    "app/api/jxc/logic/CustomerReportSalesDocument.php",
+    "app/api/jxc/logic/FinanceAccess.php",
+    "app/api/jxc/logic/WorkforceLogic.php",
     "database/migrations/20260827_000001_create_purchase_batch.sql",
     "database/migrations/20260925_000002_processing_groups_and_purchase_plans.sql",
     "database/migrations/20260930_000004_purchase_plan_delivery_priority.sql",
@@ -25,7 +30,6 @@
   ],
   "routes": [
     ["GET", "demands", "demands"],
-    ["GET", "buyers", "buyers"],
     ["GET", "lists", "lists"],
     ["GET", "detail", "detail"],
     ["GET", "preview", "preview"],
@@ -35,20 +39,20 @@
     ["POST", "prepare_print", "preparePrint"],
     ["POST", "print_result", "printResult"],
     ["POST", "record_bought", "recordBought"],
-    ["POST", "recall", "recall"],
+    ["POST", "revise", "revise"],
     ["POST", "attach_arrival", "attachArrival"]
   ],
   "databasePrerequisites": {
-    "requiredExistingTables": ["purchase_plan", "purchase_plan_source", "purchase_plan_arrival", "purchase_plan_allocation", "purchase_batch", "customer_report", "customer_report_item", "warehouse_sku_balance", "employee"],
+    "requiredExistingTables": ["purchase_plan", "purchase_plan_source", "purchase_plan_arrival", "purchase_plan_allocation", "purchase_batch", "customer_report", "customer_report_item", "warehouse_sku_balance", "employee", "employee_permission"],
     "newTables": ["purchase_demand_coverage", "purchase_plan_sheet", "purchase_plan_hold", "purchase_plan_action"],
     "newMigrationOperations": ["ALTER TABLE 添加当前契约字段及索引", "CREATE TABLE 创建四张当前业务表", "DROP INDEX 移除旧采购来源及分配唯一索引"],
-    "note": "依赖清单用于核对现有基础，不授权重放历史迁移。新迁移不是纯建表；仅在目标结构与批准范围确认后执行。"
+    "note": "员工与权限表用于核对非店主的操作权限。店主建单、修订和登记到货均可在零员工时办理。仅在目标结构与批准范围确认后执行迁移。"
   },
   "releaseSteps": [
     "核对目标域名实际站点目录、执行版本及路由配置；旧单数 lists 可用不代表新复数接口已生效。",
     "审核代码差异、删除项及目标结构；确认备份和本次获准的具体迁移集合。",
     "先准备批准的配套结构，再同步启用完整后端集合；按目标环境机制刷新必要缓存。",
-    "通过原业务账号读取当前 demands、buyers、lists，确认 HTTP 200 与当前 JSON 契约后再验收小程序入口。"
+    "通过店主账号读取 demands、lists、detail，验证无需采购员的采购清单；在隔离账套通过 revise 修订清单，回读已买数量、已打印单据和版本后再验收小程序入口。"
   ],
   "limitations": [
     "本地预检通过只证明清单、文件及路由静态契约完整，不能直接认定可上线。",

@@ -27,11 +27,25 @@ test('真实采购集合给出审批摘要，但不声称已验证远端或数�
   const result = inspectPurchaseRelease(root, manifest);
   assert.equal(result.ok, true, result.errors.join('\n'));
   assert.equal(result.files.length, 9);
-  assert.equal(result.routes.length, 13);
+  assert.ok(result.routes.some(([method, action, target]) => method === 'POST' && action === 'revise' && target === 'revise'));
+  assert.ok(result.routes.every(([, action]) => !['buyers', 'recall'].includes(action)));
   assert.equal(result.remoteChecked, false);
   assert.equal(result.databaseChecked, false);
   assert.equal(result.deploymentReady, false);
   assert.match(result.digest, /^[a-f0-9]{64}$/);
+});
+
+test('新增路由及遗漏修订动作都会使审批清单失效', t => {
+  const directory = fixture(t);
+  const route = path.join(directory, 'app/api/route/jxc.php');
+  const source = fs.readFileSync(route, 'utf8');
+  for (const action of ['create', 'revise', 'attach_arrival']) {
+    const incomplete = { ...manifest, routes: manifest.routes.filter(row => row[1] !== action) };
+    fs.writeFileSync(route, source.split('\n').filter(line => !line.includes("'jxc/purchase_plans/" + action + "'")).join('\n'));
+    assert.ok(inspectPurchaseRelease(directory, incomplete).errors.some(error => error.includes('公开契约动作：POST ' + action)));
+  }
+  fs.writeFileSync(route, source + "\nRoute::get('jxc/purchase_plans/extra', 'jxc.PurchasePlan/extra');\n");
+  assert.equal(inspectPurchaseRelease(directory, manifest).ok, false);
 });
 
 test('遗漏协作文件、恢复旧验证器和旧路由均拒绝通过', t => {
@@ -57,6 +71,10 @@ test('清单不能漏掉发布文件或声明外部文件，内容变化使审�
   const incomplete = structuredClone(manifest);
   incomplete.files.pop();
   assert.equal(inspectPurchaseRelease(directory, incomplete).ok, false);
+  for (const dependency of ['FinanceAccess.php', 'JxcLoginMiddleware.php', 'StoreMembershipService.php']) {
+    const missingAccess = { ...manifest, dependencies: manifest.dependencies.filter(file => !file.endsWith('/' + dependency)) };
+    assert.equal(inspectPurchaseRelease(directory, missingAccess).ok, false);
+  }
   const unsafe = structuredClone(manifest);
   unsafe.files[0] = '../.env';
   assert.equal(inspectPurchaseRelease(directory, unsafe).ok, false);

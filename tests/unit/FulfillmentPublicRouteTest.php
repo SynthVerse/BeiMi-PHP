@@ -9,24 +9,18 @@ final class FulfillmentPublicRouteTest extends TestCase
     /** @return array<string,array{string,string,string}> */
     public static function missingFulfillmentRoutes(): array
     {
+        $purchaseRoutes = json_decode(file_get_contents(__DIR__ . '/../fixtures/purchase_public_routes.json'), true, 512, JSON_THROW_ON_ERROR);
+        $purchaseCases = [];
+        foreach ($purchaseRoutes as $name => [$method, $action, $target]) {
+            $purchaseCases[$name] = [$method, 'purchase_plans/' . $action, 'jxc.PurchasePlan/' . $target];
+        }
         return [
             'pending goods list' => ['GET', 'pending_goods/lists', 'jxc.PendingGoods/lists'],
             'pending goods detail' => ['GET', 'pending_goods/detail', 'jxc.PendingGoods/detail'],
             'pending goods recovery preview' => ['GET', 'pending_goods/recovery_preview', 'jxc.PendingGoods/recoveryPreview'],
             'pending goods action' => ['POST', 'pending_goods/action', 'jxc.PendingGoods/action'],
             'pending goods recover' => ['POST', 'pending_goods/recover', 'jxc.PendingGoods/recover'],
-            'purchase demands' => ['GET', 'purchase_plans/demands', 'jxc.PurchasePlan/demands'],
-            'purchase plan list' => ['GET', 'purchase_plans/lists', 'jxc.PurchasePlan/lists'],
-            'purchase plan detail' => ['GET', 'purchase_plans/detail', 'jxc.PurchasePlan/detail'],
-            'purchase plan preview' => ['GET', 'purchase_plans/preview', 'jxc.PurchasePlan/preview'],
-            'purchase arrival preview' => ['GET', 'purchase_plans/arrival_preview', 'jxc.PurchasePlan/arrivalPreview'],
-            'purchase stock verification' => ['POST', 'purchase_plans/verify_stock', 'jxc.PurchasePlan/verifyStock'],
-            'purchase plan create' => ['POST', 'purchase_plans/create', 'jxc.PurchasePlan/create'],
-            'purchase print preparation' => ['POST', 'purchase_plans/prepare_print', 'jxc.PurchasePlan/preparePrint'],
-            'purchase print receipt' => ['POST', 'purchase_plans/print_result', 'jxc.PurchasePlan/printResult'],
-            'purchase bought quantity' => ['POST', 'purchase_plans/record_bought', 'jxc.PurchasePlan/recordBought'],
-            'purchase plan revise' => ['POST', 'purchase_plans/revise', 'jxc.PurchasePlan/revise'],
-            'purchase arrival attach' => ['POST', 'purchase_plans/attach_arrival', 'jxc.PurchasePlan/attachArrival'],
+            ...$purchaseCases,
             'processing weights' => ['POST', 'customer_report/processing_weights', 'jxc.CustomerReport/processingWeights'],
             'pending print recovery' => ['GET', 'tasks/pending_print', 'jxc.FulfillmentTask/pendingPrint'],
         ];

@@ -1,0 +1,14 @@
+{
+  "purchase demands": ["GET", "demands", "demands"],
+  "purchase plan list": ["GET", "lists", "lists"],
+  "purchase plan detail": ["GET", "detail", "detail"],
+  "purchase plan preview": ["GET", "preview", "preview"],
+  "purchase arrival preview": ["GET", "arrival_preview", "arrivalPreview"],
+  "purchase stock verification": ["POST", "verify_stock", "verifyStock"],
+  "purchase plan create": ["POST", "create", "create"],
+  "purchase print preparation": ["POST", "prepare_print", "preparePrint"],
+  "purchase print receipt": ["POST", "print_result", "printResult"],
+  "purchase bought quantity": ["POST", "record_bought", "recordBought"],
+  "purchase plan revise": ["POST", "revise", "revise"],
+  "purchase arrival attach": ["POST", "attach_arrival", "attachArrival"]
+}
