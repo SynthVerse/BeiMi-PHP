@@ -287,12 +287,14 @@ final class CustomerReportOverviewTest extends TestCase
         $xpath->registerNamespace('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main');
         self::assertSame(1, $xpath->query('//w:pgSz[@w:w="11906" and @w:h="16838"]')->length);
         self::assertSame(1, $xpath->query('//w:cols[@w:num="2"]')->length);
+        self::assertSame(1, $xpath->query('//w:p[w:pPr/w:shd and w:r/w:t[contains(., "甲分店")]]')->length);
+        self::assertSame(1, $xpath->query('//w:p[w:pPr/w:tabs/w:tab[@w:val="right"] and w:r[w:rPr/w:b]/w:t="5 斤"]')->length);
         self::assertStringContainsString($snapshot['store_name'] . ' · 客户报货单 · 送货 2026-10-10', $header->textContent);
         self::assertStringContainsString('待交付', $header->textContent);
         self::assertStringContainsString('甲分', $header->textContent);
-        self::assertStringContainsString('甲<&总店 / 甲分店', $doc->textContent);
+        self::assertStringContainsString('1. 甲<&总店 / 甲分店', $this->paperText($doc));
         self::assertStringContainsString('客户自提', $doc->textContent);
-        self::assertStringContainsString('5 斤', $doc->textContent);
+        self::assertStringContainsString('□ ① 鲈鱼 5 斤', $this->paperText($doc));
         self::assertStringContainsString('缺 1 斤', $doc->textContent);
         self::assertSame(1, substr_count($doc->textContent, '鲈鱼'));
         foreach (['商品需求汇总', '备货人', '核对人', '导出时间', '备注', $snapshot['customers'][0]['reports'][0]['sn']] as $omitted) {
@@ -332,7 +334,9 @@ final class CustomerReportOverviewTest extends TestCase
         Db::name('customer_report_item')->whereIn('report_id', [$first, $supplement, $vehicle, $weight])->update([
             'goods_name' => '鲈鱼', 'sku_name' => '鲈鱼', 'processing_requirement' => '', 'line_remark' => '',
         ]);
-        Db::name('customer_report_item')->where('report_id', $missing)->update(['estimate_status' => 'unknown']);
+        Db::name('customer_report_item')->where('report_id', $missing)->update([
+            'goods_id' => 777, 'sku_id' => 778, 'estimate_status' => 'unknown', 'unit_name' => "箱\x0B装",
+        ]);
         foreach ([['7头', 701, '6'], ['8头', 801, '9']] as [$specification, $specId, $quantity]) {
             $id = $this->report('海味饭店', '海味饭店', $quantity, '斤');
             Db::name('customer_report_item')->where('report_id', $id)->update([
@@ -363,28 +367,32 @@ final class CustomerReportOverviewTest extends TestCase
         $command = $query + ['snapshot_hash' => $snapshot['snapshot_hash']];
         $customers = CustomerReportOverviewLogic::exportWord($command + ['document_type' => 'customers']);
         self::assertNotFalse($customers, CustomerReportOverviewLogic::getError());
-        $customerText = $this->wordPart($customers, 'document')->textContent;
+        $customerText = $this->paperText($this->wordPart($customers, 'document'));
         foreach (['交给后厨', '补报 · 交接  第三方配送', '补报单独装', '05:10', '辽A12345', '东门二号位',
-            '19900000000', '待补 车牌、地点', '待称重', '5 条 去鳞→去内脏', '3 条 打包（留头）'] as $expected) {
+            '19900000000', '待补 车牌、地点', '待称重', '5 条 去鳞→去内脏', '3 条 打包（留头）',
+            '1. 海味饭店', '2. 渔家坊 / 老街分店', '□ ① 鲈鱼 3 条', '□ ② 鲈鱼 2 条',
+            '□ ③ 鲍鱼 7头', '□ ④ 鲍鱼 8头', '□ ① 鲈鱼 8 条', '□ ② 鲈鱼 4.5 斤'] as $expected) {
             self::assertStringContainsString($expected, $customerText);
         }
         self::assertSame(1, substr_count($customerText, '交给后厨'));
         self::assertSame(1, substr_count($customerText, '补报单独装'));
+        self::assertStringContainsString("2 箱\u{FFFD}装", $customerText);
 
         $goods = CustomerReportOverviewLogic::exportWord($command + ['document_type' => 'goods']);
         self::assertNotFalse($goods, CustomerReportOverviewLogic::getError());
         self::assertSame('goods', $goods['document_type']);
         self::assertSame('商品分货单_2026-10-10.docx', $goods['filename']);
         self::assertSame($customers['snapshot_hash'], $goods['snapshot_hash']);
-        $goodsText = $this->wordPart($goods, 'document')->textContent;
-        foreach (['鲈鱼　13 条', '海味饭店　5 条', '渔家坊 / 老街分店　8 条', '补报 2 条',
-            '鲈鱼　4.5 斤', '鲍鱼 7头　6 斤', '鲍鱼 8头　9 斤',
+        $goodsText = $this->paperText($this->wordPart($goods, 'document'));
+        foreach (['① 鲈鱼 合计 13 条', '□ 1. 海味饭店 5 条', '□ 2. 渔家坊 / 老街分店 8 条', '补报 2 条',
+            '② 鲈鱼 合计 4.5 斤', '□ 2. 渔家坊 / 老街分店 4.5 斤', '③ 鲍鱼 7头 合计 6 斤', '④ 鲍鱼 8头 合计 9 斤',
             '5 条 去鳞→去内脏', '3 条 打包（留头）', '单体重量 1.5–1.7 斤', '待称重'] as $expected) {
             self::assertStringContainsString($expected, $goodsText);
         }
         self::assertStringNotContainsString('15 条', $goodsText);
         self::assertStringNotContainsString('19900000000', $goodsText);
         self::assertStringNotContainsString('交给后厨', $goodsText);
+        self::assertStringContainsString("2 箱\u{FFFD}装", $goodsText);
     }
 
     public function test_word_repeats_the_active_order_or_receiver_when_details_continue_in_the_next_column(): void
@@ -410,17 +418,84 @@ final class CustomerReportOverviewTest extends TestCase
         self::assertNotFalse($customers, CustomerReportOverviewLogic::getError());
         $path = new \DOMXPath($this->wordPart($customers, 'document'));
         $path->registerNamespace('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main');
-        $continued = $path->query('//w:p[w:r/w:br[@w:type="column"]]/following-sibling::w:p[2]');
-        self::assertContains('第 1 单（续）', array_map(static fn(\DOMNode $node) => $node->textContent, iterator_to_array($continued)));
+        self::assertGreaterThan(
+            0,
+            $path->query('//w:p[w:r/w:br[@w:type="column"]]/following-sibling::w:p[1][w:pPr/w:shd][w:r/w:t=" 1."]')->length
+        );
+        self::assertStringContainsString($receiver . '（续）', $path->document->textContent);
+        $continued = $path->query('//w:p[w:r/w:br[@w:type="column"]]/following-sibling::w:p[not(w:pPr/w:shd)][1]');
+        self::assertGreaterThan(0, count(array_filter(iterator_to_array($continued), static fn(\DOMNode $node) =>
+            str_starts_with($node->textContent, '第 1 单（续）'))));
+        $resumedItems = $path->query('//w:body/w:p[w:r/w:t[contains(., "桂鱼 中号（续）")]]');
+        self::assertGreaterThan(0, $resumedItems->length);
+        foreach ($resumedItems as $resumed) {
+            $item = $path->query('preceding-sibling::w:p[w:r/w:t[starts-with(., "□ ")]][1]', $resumed)->item(0);
+            self::assertNotNull($item);
+            $marker = explode(' ', trim($this->paperText($item)))[1];
+            self::assertStringEndsWith($marker . ' 桂鱼 中号（续）', $resumed->textContent);
+        }
         self::assertStringContainsString('补报 · 交接  第三方配送', $path->document->textContent);
 
         $goods = CustomerReportOverviewLogic::exportWord($command + ['document_type' => 'goods']);
         self::assertNotFalse($goods, CustomerReportOverviewLogic::getError());
         $path = new \DOMXPath($this->wordPart($goods, 'document'));
         $path->registerNamespace('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main');
-        $continued = $path->query('//w:p[w:r/w:br[@w:type="column"]]/following-sibling::w:p[2]');
-        self::assertContains($main . ' / ' . $receiver . '（续）', array_map(static fn(\DOMNode $node) => $node->textContent, iterator_to_array($continued)));
+        $headings = $path->query('//w:p[w:r/w:br[@w:type="column"]]/following-sibling::w:p[1]');
+        self::assertContains('① 桂鱼 中号（续） 合计 63 条', array_map(fn(\DOMNode $node) => trim($this->paperText($node)), iterator_to_array($headings)));
+        $continued = $path->query('//w:p[w:r/w:br[@w:type="column"]]/following-sibling::w:p[not(w:pPr/w:shd)][1]');
+        self::assertContains('1. ' . $main . ' / ' . $receiver . '（续）', array_map(static fn(\DOMNode $node) => $node->textContent, iterator_to_array($continued)));
         self::assertStringContainsString('末尾10', $path->document->textContent);
+    }
+
+    public function test_word_keeps_goods_numbers_circled_beyond_fifty_in_both_documents(): void
+    {
+        $original = $this->report('海味饭店', '海味饭店', '1', '条', ['status' => 'completed']);
+        $id = $this->report('海味饭店', '海味饭店', '1', '条', ['supplement_for_report_id' => $original]);
+        $item = Db::name('customer_report_item')->where('report_id', $id)->find();
+        unset($item['id']);
+        $items = [];
+        for ($position = 2; $position <= 100; $position++) {
+            $name = '样品' . $position;
+            $items[] = array_replace($item, [
+                'sort' => $position, 'goods_id' => 10000 + $position, 'sku_id' => 20000 + $position,
+                'goods_name' => $name, 'sku_name' => $name, 'specification_snapshot' => '',
+            ]);
+        }
+        Db::name('customer_report_item')->insertAll($items);
+        $query = ['delivery_date' => '2026-10-10', 'status' => 'pending', 'expected_tenant_id' => self::TENANT_ID];
+        $snapshot = CustomerReportOverviewLogic::overview($query);
+        foreach (['customers', 'goods'] as $type) {
+            $file = CustomerReportOverviewLogic::exportWord($query + ['document_type' => $type, 'snapshot_hash' => $snapshot['snapshot_hash']]);
+            self::assertNotFalse($file, CustomerReportOverviewLogic::getError());
+            $document = $this->wordPart($file, 'document');
+            $text = $this->paperText($document);
+            foreach ([11 => '⑪', 20 => '⑳', 21 => '㉑', 50 => '㊿', 51 => '◯51', 100 => '◯100'] as $position => $marker) {
+                self::assertStringContainsString($marker . ' 样品' . $position . ' ', $text);
+            }
+            if ($type === 'customers') {
+                $path = new \DOMXPath($document);
+                $path->registerNamespace('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main');
+                $break = '//w:body/w:p[w:r/w:br[@w:type="column"]]';
+                self::assertGreaterThan(0, $path->query($break)->length);
+                self::assertSame($path->query($break)->length,
+                    $path->query($break . '/following-sibling::w:p[not(w:pPr/w:shd)][1][w:r/w:t="补报"]')->length);
+            }
+        }
+    }
+
+    private function paperText(\DOMNode $node): string
+    {
+        if ($node instanceof \DOMElement && $node->localName === 'tab' && $node->parentNode->localName === 'r') {
+            return ' ';
+        }
+        if ($node instanceof \DOMText) {
+            return $node->nodeValue;
+        }
+        $text = '';
+        foreach ($node->childNodes as $child) {
+            $text .= $this->paperText($child);
+        }
+        return $text;
     }
 
     private function wordPart(array $file, string $part): \DOMDocument

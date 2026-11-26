@@ -13,11 +13,13 @@ final class CustomerReportWordDocument
     private const BOTTOM_MARGIN = 740;
     private const HEADER_DISTANCE = 320;
     private const HEADER_LINE = 280;
-    private const BODY_LINE = 310;
-    private const HEADING_GAP = 100;
+    private const BODY_LINE = 285;
+    private const HEADING_GAP = 135;
+    private const NAME_TAB = 780;
+    private const QUANTITY_TAB = 4800;
     // 折行宽度以一个全宽字的四分之一计。
-    private const HEADING_WIDTH = 72;
     private const BODY_WIDTH = 84;
+    private const DETAIL_WIDTH = 66;
     private const COLUMN_BREAK = '<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="20" w:lineRule="exact"/>'
         . '</w:pPr><w:r><w:br w:type="column"/></w:r></w:p>';
 
@@ -26,7 +28,9 @@ final class CustomerReportWordDocument
         $title = self::TITLES[$documentType];
         $header = self::header($snapshot, $title);
         $topMargin = max(890, self::HEADER_DISTANCE + self::HEADER_LINE * count($header) + 220);
-        $blocks = $documentType === 'customers' ? self::customerBlocks($snapshot) : self::goodsBlocks($snapshot);
+        $blocks = $documentType === 'customers'
+            ? self::customerBlocks($snapshot)
+            : self::goodsBlocks($snapshot);
         $path = tempnam(sys_get_temp_dir(), 'beimi-report-');
         if ($path === false) { throw new \RuntimeException('Word 临时文件创建失败'); }
         $zip = new \ZipArchive();
@@ -37,7 +41,7 @@ final class CustomerReportWordDocument
                 '_rels/.rels' => self::relationships(['officeDocument' => 'word/document.xml']),
                 'word/_rels/document.xml.rels' => self::relationships(['styles' => 'styles.xml', 'header' => 'header1.xml', 'footer' => 'footer1.xml']),
                 'word/styles.xml' => self::styles(),
-                'word/document.xml' => self::document($blocks, $topMargin),
+                'word/document.xml' => self::document($blocks, $topMargin, $documentType),
                 'word/header1.xml' => self::wrap('hdr', implode('', $header)),
                 'word/footer1.xml' => self::wrap('ftr', '<w:p><w:pPr><w:jc w:val="center"/></w:pPr>'
                     . '<w:r><w:rPr><w:sz w:val="19"/></w:rPr><w:t xml:space="preserve">第 </w:t></w:r>'
@@ -79,93 +83,120 @@ final class CustomerReportWordDocument
     private static function customerBlocks(array $data): array
     {
         $blocks = [];
-        foreach ($data['customers'] as $customer) {
+        foreach ($data['customers'] as $position => $customer) {
             $rows = [];
+            $itemPosition = 0;
             foreach ($customer['reports'] as $index => $report) {
                 $order = count($customer['reports']) > 1 ? '第 ' . ($index + 1) . ' 单' : '';
                 $label = self::reportLabel($report, $data['query']['status']);
-                $continuation = $order === '' ? '' : $order . '（续）' . ($label !== '' ? ' · ' . $label : '');
+                $continuation = $order === '' ? $label : $order . '（续）' . ($label !== '' ? ' · ' . $label : '');
                 $rows[] = [
                     'text' => implode(' · ', array_filter([$order, $label, self::delivery($report['delivery_arrangement'])])),
                     'keep_next' => true, 'continuation' => $continuation,
                 ];
                 foreach ($report['items'] as $line) {
-                    $item = '□ ' . self::goodsName($line) . '　' . self::amount($line['quantity'], $line['unit_name']);
-                    $details = self::lineDetails($line);
+                    $number = self::goodsOrdinal(++$itemPosition);
+                    $name = self::goodsName($line);
                     $rows[] = [
-                        'text' => $item . ($details ? '　' . implode(' · ', $details) : ''),
+                        'entry' => [$number, $name, self::amount($line['quantity'], $line['unit_name'])],
+                        'text' => implode(' · ', self::lineDetails($line)),
                         'continuation' => $continuation, 'repeat_before' => true,
+                        'repeat_item' => true,
                     ];
                 }
                 if (trim($report['remark']) !== '') {
                     $rows[] = ['text' => '备注  ' . trim($report['remark']), 'continuation' => $continuation, 'repeat_before' => true];
                 }
             }
-            $blocks[] = ['heading' => self::receiverName($customer), 'rows' => $rows];
+            $blocks[] = ['heading' => self::receiverEntry($customer, $position + 1), 'rows' => $rows];
         }
         return $blocks;
     }
 
     private static function goodsBlocks(array $data): array
     {
-        $goods = [];
-        $keysByProduct = [];
-        foreach ($data['customers'] as $customer) {
+        $products = [];
+        foreach ($data['customers'] as $position => $customer) {
             $receiverKey = $customer['key'];
-            $receiverName = self::receiverName($customer);
+            $receiverEntry = self::receiverEntry($customer, $position + 1);
             foreach ($customer['reports'] as $report) {
                 $label = self::reportLabel($report, $data['query']['status']);
                 foreach ($report['items'] as $line) {
-                    $key = json_encode([$line['goods_id'], $line['sku_id'], $line['spec_id'], $line['unit_id'], $line['unit_name']], JSON_THROW_ON_ERROR);
-                    if (!isset($goods[$key])) {
-                        $goods[$key] = ['name' => self::goodsName($line), 'unit' => $line['unit_name'], 'quantity' => '0', 'receivers' => []];
-                        $keysByProduct[$line['goods_id']][] = $key;
-                    }
-                    $goods[$key]['quantity'] = bcadd($goods[$key]['quantity'], $line['quantity'], 4);
-                    $goods[$key]['receivers'][$receiverKey] ??= ['name' => $receiverName, 'quantity' => '0', 'items' => []];
-                    $receiver = &$goods[$key]['receivers'][$receiverKey];
+                    $key = self::goodsKey($line);
+                    $good = &$products[$line['goods_id']][$key];
+                    $good ??= ['name' => self::goodsName($line), 'unit' => $line['unit_name'], 'quantity' => '0', 'receivers' => []];
+                    $good['quantity'] = bcadd($good['quantity'], $line['quantity'], 4);
+                    $receiver = &$good['receivers'][$receiverKey];
+                    $receiver ??= ['entry' => $receiverEntry, 'quantity' => '0', 'items' => []];
                     $receiver['quantity'] = bcadd($receiver['quantity'], $line['quantity'], 4);
                     $receiver['items'][] = [
                         'quantity' => $line['quantity'],
                         'label' => $label,
                         'details' => implode(' · ', self::lineDetails($line)),
                     ];
-                    unset($receiver);
+                    unset($receiver, $good);
                 }
             }
         }
 
         $blocks = [];
-        foreach (array_merge(...array_values($keysByProduct)) as $key) {
-            $good = $goods[$key];
-            $rows = [];
-            foreach ($good['receivers'] as $receiver) {
-                $text = '□ ' . $receiver['name'] . '　' . self::amount($receiver['quantity'], $good['unit']);
-                if (count($receiver['items']) === 1) {
-                    $item = $receiver['items'][0];
-                    $details = array_filter([$item['label'], $item['details']]);
-                    $text .= $details ? '　' . implode(' · ', $details) : '';
-                } else {
-                    foreach ($receiver['items'] as $item) {
-                        if ($item['label'] !== '' || $item['details'] !== '') {
-                            $text .= "\n　" . ($item['label'] !== '' ? $item['label'] . ' ' : '')
-                                . self::amount($item['quantity'], $good['unit'])
-                                . ($item['details'] !== '' ? '　' . $item['details'] : '');
-                        }
-                    }
-                }
-                $rows[] = ['text' => $text, 'continuation' => $receiver['name'] . '（续）'];
+        foreach ($products as $variants) {
+            foreach ($variants as $good) {
+                $blocks[] = self::goodsBlock($good, count($blocks) + 1);
             }
-            $blocks[] = ['heading' => $good['name'] . '　' . self::amount($good['quantity'], $good['unit']), 'rows' => $rows];
         }
         return $blocks;
     }
 
-    private static function receiverName(array $customer): string
+    private static function goodsBlock(array $good, int $position): array
+    {
+        $rows = [];
+        foreach ($good['receivers'] as $receiver) {
+            $details = [];
+            if (count($receiver['items']) === 1) {
+                $item = $receiver['items'][0];
+                $details[] = implode(' · ', array_filter([$item['label'], $item['details']]));
+            } else {
+                foreach ($receiver['items'] as $item) {
+                    if ($item['label'] !== '' || $item['details'] !== '') {
+                        $details[] = ($item['label'] !== '' ? $item['label'] . ' ' : '')
+                            . self::amount($item['quantity'], $good['unit'])
+                            . ($item['details'] !== '' ? '　' . $item['details'] : '');
+                    }
+                }
+            }
+            $rows[] = [
+                'entry' => [$receiver['entry'][0], $receiver['entry'][1], self::amount($receiver['quantity'], $good['unit'])],
+                'text' => implode("\n", $details),
+                'continuation' => implode(' ', $receiver['entry']) . '（续）',
+            ];
+        }
+        return [
+            'heading' => [self::goodsOrdinal($position), $good['name'], '合计 ' . self::amount($good['quantity'], $good['unit'])],
+            'rows' => $rows,
+        ];
+    }
+
+    private static function goodsOrdinal(int $position): string
+    {
+        $circles = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳㉑㉒㉓㉔㉕㉖㉗㉘㉙㉚㉛㉜㉝㉞㉟㊱㊲㊳㊴㊵㊶㊷㊸㊹㊺㊻㊼㊽㊾㊿';
+        return $position <= 50 ? mb_substr($circles, $position - 1, 1, 'UTF-8') : (string)$position;
+    }
+
+    private static function goodsKey(array $line): string
+    {
+        return json_encode(
+            [$line['goods_id'], $line['sku_id'], $line['spec_id'], $line['unit_id'], $line['unit_name']],
+            JSON_THROW_ON_ERROR
+        );
+    }
+
+    private static function receiverEntry(array $customer, int $position): array
     {
         $main = $customer['main_customer_name'];
         $receiver = $customer['delivery_customer_name'];
-        return $receiver === '' || $receiver === $main ? $main : $main . ' / ' . $receiver;
+        $name = $receiver === '' || $receiver === $main ? $main : $main . ' / ' . $receiver;
+        return [$position . '.', $name];
     }
 
     private static function goodsName(array $line): string
@@ -243,47 +274,59 @@ final class CustomerReportWordDocument
         return [...$alerts, ...$details, ...array_diff(array_unique($notes), ['', ...$alerts, ...$details])];
     }
 
-    private static function document(array $blocks, int $topMargin): string
+    private static function document(array $blocks, int $topMargin, string $documentType): string
     {
+        $boldHeading = $documentType === 'goods';
         // 固定行高并为栏分隔段落和字体替换留出余量，换栏位置可以显式补印名称。
         $capacity = self::PAGE_HEIGHT - $topMargin - self::BOTTOM_MARGIN - 500;
+        $blocks = array_map(static function (array $block) use ($boldHeading): array {
+            $block['heading_lines'] = self::entryLines($block['heading'], true, $boldHeading);
+            foreach ($block['rows'] as &$row) {
+                $row['lines'] = self::rowLines($row);
+            }
+            unset($row);
+            return $block;
+        }, $blocks);
+        $columnBreak = self::balancedColumnBreak($blocks, $capacity);
         $body = '';
         $used = 0;
-        foreach ($blocks as $block) {
-            $heading = self::wrapText($block['heading'], self::HEADING_WIDTH);
-            $continuation = self::wrapText($block['heading'] . '（续）', self::HEADING_WIDTH);
-            $rows = array_map(static fn(array $row) => $row + ['lines' => self::wrapText($row['text'], self::BODY_WIDTH)], $block['rows']);
+        foreach ($blocks as $blockIndex => $block) {
+            $heading = $block['heading_lines'];
+            $continuedEntry = $block['heading'];
+            $continuedEntry[1] .= '（续）';
+            $continuation = self::entryLines($continuedEntry, true, $boldHeading);
+            $rows = $block['rows'];
             $opening = (count($heading) + self::requiredLines($rows, 0)) * self::BODY_LINE;
-            if ($used && $used + self::HEADING_GAP + $opening > $capacity) {
+            if ($used && ($blockIndex === $columnBreak || $used + self::HEADING_GAP + $opening > $capacity)) {
                 $body .= self::COLUMN_BREAK;
                 $used = 0;
             }
             $gap = $used ? self::HEADING_GAP : 0;
-            $body .= self::paragraph($heading, 26, true, self::BODY_LINE, $gap);
+            $body .= implode('', $gap ? self::entryLines($block['heading'], true, $boldHeading, $gap) : $heading);
             $used += count($heading) * self::BODY_LINE + $gap;
             $continuationHeight = count($continuation) * self::BODY_LINE;
             foreach ($rows as $index => $row) {
                 $lines = $row['lines'];
                 $required = self::requiredLines($rows, $index);
-                $resume = !empty($row['repeat_before']);
+                $started = false;
                 do {
                     $available = max(0, intdiv($capacity - $used, self::BODY_LINE));
-                    $context = $resume && !empty($row['continuation']) ? self::wrapText($row['continuation'], self::BODY_WIDTH) : [];
+                    $context = self::continuationRuns($row, $started);
                     $contextHeight = count($context) * self::BODY_LINE;
                     $freshLines = max(1, intdiv($capacity - $continuationHeight - $contextHeight, self::BODY_LINE));
                     if (!$available || ($index > 0 && $available < min($required, $freshLines))) {
-                        $body .= self::COLUMN_BREAK . self::paragraph($continuation, 26, true, self::BODY_LINE);
+                        $body .= self::COLUMN_BREAK . implode('', $continuation);
                         if ($context) {
-                            $body .= self::paragraph($context);
+                            $body .= self::paperLine(implode('<w:r><w:br/></w:r>', $context));
                         }
                         $used = $continuationHeight + $contextHeight;
                         $available = $freshLines;
                     }
                     $part = array_splice($lines, 0, $available);
-                    $body .= self::paragraph($part);
+                    $body .= implode('', $part);
                     $used += count($part) * self::BODY_LINE;
                     $required = 1;
-                    $resume = true;
+                    $started = true;
                 } while ($lines);
             }
         }
@@ -295,10 +338,129 @@ final class CustomerReportWordDocument
         return self::wrap('document', '<w:body>' . $body . '</w:body>');
     }
 
+    private static function continuationRuns(array $row, bool $started): array
+    {
+        $runs = [];
+        if (($started || !empty($row['repeat_before'])) && !empty($row['continuation'])) {
+            foreach (self::wrapText($row['continuation'], self::BODY_WIDTH) as $text) {
+                $runs[] = self::run($text, 22);
+            }
+        }
+        if ($started && !empty($row['repeat_item'])) {
+            [$number, $name] = $row['entry'];
+            foreach (self::wrapText($number . ' ' . $name . '（续）', self::BODY_WIDTH) as $index => $text) {
+                $runs[] = $index === 0
+                    ? self::ordinalRun($number, '', substr($text, strlen($number)), 22, '000000')
+                    : self::run($text, 22);
+            }
+        }
+        return $runs;
+    }
+
+    private static function balancedColumnBreak(array $blocks, int $capacity): ?int
+    {
+        // 一张纸能放下完整分组时，在组与组之间换栏，让两栏接近等高。
+        $heights = [];
+        foreach ($blocks as $block) {
+            $lines = count($block['heading_lines']);
+            foreach ($block['rows'] as $row) {
+                $lines += count($row['lines']);
+            }
+            $heights[] = $lines * self::BODY_LINE + self::HEADING_GAP;
+        }
+        $total = array_sum($heights);
+        if ($total - self::HEADING_GAP <= $capacity || $total > 2 * ($capacity + self::HEADING_GAP)) {
+            return null;
+        }
+        $left = 0;
+        $bestBreak = null;
+        $bestDifference = $total;
+        foreach ($heights as $index => $height) {
+            $right = $total - $left;
+            $difference = abs($left - $right);
+            if ($left > 0 && max($left, $right) - self::HEADING_GAP <= $capacity && $difference < $bestDifference) {
+                $bestBreak = $index;
+                $bestDifference = $difference;
+            }
+            $left += $height;
+        }
+        return $bestBreak;
+    }
+
     private static function requiredLines(array $rows, int $index): int
     {
         $count = count($rows[$index]['lines']);
         return empty($rows[$index]['keep_next']) ? min($count, 3) : $count + min(count($rows[$index + 1]['lines'] ?? []), 3);
+    }
+
+    private static function rowLines(array $row): array
+    {
+        if (!isset($row['entry'])) {
+            return array_map(
+                static fn(string $line) => self::paperLine(self::run($line, 22, false, '3E464D')),
+                self::wrapText($row['text'], self::BODY_WIDTH)
+            );
+        }
+        $lines = self::entryLines($row['entry']);
+        if ($row['text'] !== '') {
+            foreach (self::wrapText($row['text'], self::DETAIL_WIDTH) as $detail) {
+                $lines[] = self::paperLine(self::run($detail, 22, false, '3E464D'), indent: self::NAME_TAB);
+            }
+        }
+        return $lines;
+    }
+
+    private static function entryLines(array $entry, bool $heading = false, bool $boldName = false, int $before = 0): array
+    {
+        [$number, $name] = $entry;
+        $amount = $entry[2] ?? '';
+        $size = $heading ? 24 : 22;
+        $amountWidth = self::textWidth($amount);
+        $separateAmount = $amountWidth > 35;
+        $nameWidth = ($heading ? 62 : 67) - ($amount === '' || $separateAmount ? 0 : $amountWidth + 6);
+        $shade = $heading ? '<w:shd w:val="clear" w:fill="EFF1F3"/>' : '';
+        $rightTab = '<w:tab w:val="right" w:pos="' . self::QUANTITY_TAB . '"/>';
+        $format = $shade . '<w:tabs><w:tab w:val="left" w:pos="' . self::NAME_TAB . '"/>' . $rightTab . '</w:tabs>';
+        $tab = '<w:r><w:tab/></w:r>';
+        $lines = [];
+        foreach (self::wrapText($name, $nameWidth) as $index => $line) {
+            $runs = $index === 0 ? self::ordinalRun($number, $heading ? ' ' : '□ ') : '';
+            $runs .= $tab . self::run($line, $size, $boldName);
+            if ($index === 0 && $amount !== '' && !$separateAmount) {
+                $runs .= $tab . self::run($amount, $size, true);
+            }
+            $lines[] = self::paperLine($runs, before: $index === 0 ? $before : 0, format: $format);
+        }
+        if ($separateAmount) {
+            $amountFormat = $shade . '<w:tabs>' . $rightTab . '</w:tabs>';
+            foreach (self::wrapText($amount, $heading ? 74 : 80) as $amountLine) {
+                $lines[] = self::paperLine($tab . self::run($amountLine, $size, true), format: $amountFormat);
+            }
+        }
+        return $lines;
+    }
+
+    private static function ordinalRun(string $number, string $prefix, string $suffix = '', int $size = 20, string $color = '424C55'): string
+    {
+        if (str_ends_with($number, '.')) {
+            return self::run($prefix . $number . $suffix, $size, false, $color);
+        }
+        if (!ctype_digit($number)) {
+            $font = preg_match('/^[①-⑳]$/u', $number) ? 'Cambria Math' : 'Microsoft YaHei';
+            $marker = self::run($number, $size, false, $color, font: $font);
+        } else {
+            // ㊿之后没有预组圈号，按圈和数字的实际字体叠印，复制时仍能取得原数字。
+            [$tracking, $scale] = match (strlen($number)) {
+                2 => [-204, 100],
+                3 => [-304, 142],
+                default => [-391, 180],
+            };
+            $ring = '<w:spacing w:val="' . $tracking . '"/><w:w w:val="' . $scale . '"/>';
+            $marker = self::run('◯', 24, false, $color, $ring, 'Cambria Math')
+                . self::run($number, 14, false, $color, '<w:position w:val="3"/>', 'Microsoft YaHei');
+        }
+        return ($prefix === '' ? '' : self::run($prefix, $size, false, $color)) . $marker
+            . ($suffix === '' ? '' : self::run($suffix, $size, false, $color));
     }
 
     private static function wrapText(string $text, int $limit): array
@@ -309,7 +471,7 @@ final class CustomerReportWordDocument
         foreach (explode("\n", $text) as $source) {
             // 按显示宽度折行，同时保留电话、车牌、重量范围和数量单位。
             preg_match_all(
-                '/车牌 \p{Han}[A-Z][A-Z0-9]{5,7}|司机电话 \+?[0-9-]{7,18}|最早 \d{2}:\d{2}|\p{Han}[A-Z][A-Z0-9]{5,7}'
+                '/\p{Han}?（续）|车牌 \p{Han}[A-Z][A-Z0-9]{5,7}|司机电话 \+?[0-9-]{7,18}|最早 \d{2}:\d{2}|\p{Han}[A-Z][A-Z0-9]{5,7}'
                     . '|单体重量|总重范围|\d{1,6}(?:\.\d{1,4})?[–-]\d{1,6}(?:\.\d{1,4})?(?: \p{Han}{1,3}(?=\P{Han}|$))?'
                     . '|\d{1,14}(?:\.\d{1,4})? (?:\p{Han}{1,4}(?=\P{Han}|$)|[A-Za-z]{1,6}\b)'
                     . '|[A-Za-z0-9][A-Za-z0-9.+@%\/:_-]{0,17}|\X/u',
@@ -318,9 +480,7 @@ final class CustomerReportWordDocument
             $line = '';
             $width = 0;
             foreach ($tokens[0] as $token) {
-                $size = 4 * mb_strlen($token, 'UTF-8')
-                    - preg_match_all('/[A-LNPR-VX-Za-lnpr-vx-z0-9]/', $token)
-                    - 2 * preg_match_all('/[ .,;:!\'\/-]/', $token);
+                $size = self::textWidth($token);
                 if ($width > 0 && $width + $size > $limit
                     && ($width + $size > $limit + 4 || !preg_match('/^[，。！？；：、）】》]$/u', $token))) {
                     $lines[] = trim($token) === '' ? $line . $token : $line;
@@ -337,14 +497,32 @@ final class CustomerReportWordDocument
         return $lines;
     }
 
+    private static function textWidth(string $text): int
+    {
+        return 4 * mb_strlen($text, 'UTF-8')
+            - preg_match_all('/[A-LNPR-VX-Za-lnpr-vx-z0-9]/', $text)
+            - 2 * preg_match_all('/[ .,;:!\'\/-]/', $text);
+    }
+
     private static function paragraph(array $lines, int $size = 22, bool $bold = false, int $lineHeight = self::BODY_LINE, int $before = 0): string
     {
-        $runs = array_map(static fn(string $line) => '<w:t xml:space="preserve">'
-            . htmlspecialchars($line, ENT_XML1 | ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</w:t>', $lines);
-        return '<w:p><w:pPr><w:widowControl w:val="0"/><w:snapToGrid w:val="0"/>'
+        $runs = array_map(static fn(string $line) => self::run($line, $size, $bold), $lines);
+        return self::paperLine(implode('<w:r><w:br/></w:r>', $runs), $lineHeight, $before);
+    }
+
+    private static function run(string $line, int $size, bool $bold = false, string $color = '000000', string $format = '', string $font = ''): string
+    {
+        $fonts = $font === '' ? '' : '<w:rFonts w:ascii="' . $font . '" w:hAnsi="' . $font . '" w:eastAsia="' . $font . '" w:cs="' . $font . '"/>';
+        return '<w:r><w:rPr>' . $fonts . ($bold ? '<w:b/>' : '') . '<w:color w:val="' . $color . '"/>' . $format . '<w:sz w:val="' . $size
+            . '"/><w:szCs w:val="' . $size . '"/></w:rPr><w:t xml:space="preserve">'
+            . htmlspecialchars($line, ENT_XML1 | ENT_QUOTES | ENT_SUBSTITUTE | ENT_DISALLOWED, 'UTF-8') . '</w:t></w:r>';
+    }
+
+    private static function paperLine(string $runs, int $lineHeight = self::BODY_LINE, int $before = 0, string $format = '', int $indent = 0): string
+    {
+        return '<w:p><w:pPr><w:widowControl w:val="0"/>' . $format . '<w:snapToGrid w:val="0"/>'
             . '<w:spacing w:before="' . $before . '" w:after="0" w:line="' . $lineHeight . '" w:lineRule="exact"/>'
-            . '</w:pPr><w:r><w:rPr>' . ($bold ? '<w:b/>' : '') . '<w:sz w:val="' . $size . '"/><w:szCs w:val="' . $size
-            . '"/></w:rPr>' . implode('<w:br/>', $runs) . '</w:r></w:p>';
+            . ($indent ? '<w:ind w:left="' . $indent . '"/>' : '') . '</w:pPr>' . $runs . '</w:p>';
     }
 
     private static function amount(string $quantity, string $unit): string
