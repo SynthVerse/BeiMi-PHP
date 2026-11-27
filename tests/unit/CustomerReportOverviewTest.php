@@ -36,9 +36,8 @@ final class CustomerReportOverviewTest extends TestCase
         self::assertNotFalse($result, CustomerReportOverviewLogic::getError());
         self::assertSame(2, $result['summary']['customer_count']);
         self::assertSame(3, $result['summary']['report_count']);
-        self::assertCount(2, $result['customers']);
-        self::assertCount(2, $result['customers'][0]['reports']);
-        self::assertSame($first, $result['customers'][0]['reports'][1]['supplement_for_report_id']);
+        self::assertCount(3, $result['reports']);
+        self::assertSame($first, $result['reports'][1]['supplement_for_report_id']);
         self::assertSame(['5.5000', '7.0000'], array_column($result['goods_summary'], 'quantity'));
         self::assertSame(['斤', '条'], array_column($result['goods_summary'], 'unit_name'));
     }
@@ -57,7 +56,7 @@ final class CustomerReportOverviewTest extends TestCase
         $history = CustomerReportOverviewLogic::overview(['delivery_date' => '2026-10-10', 'status' => 'cancelled']);
         self::assertNotFalse($history, CustomerReportOverviewLogic::getError());
         self::assertSame(1, $history['summary']['report_count']);
-        $report = $history['customers'][0]['reports'][0];
+        $report = $history['reports'][0];
         self::assertSame($id, $report['id']);
         self::assertSame('已取消', $report['status_label']);
         self::assertSame('客户撤回报货', $report['cancellation_reason']);
@@ -81,15 +80,15 @@ final class CustomerReportOverviewTest extends TestCase
         $query = ['delivery_date' => '2026-10-10', 'keyword' => '陈记'];
 
         $all = CustomerReportOverviewLogic::overview($query);
-        self::assertSame([$pending, $delivered, $settled, $partial], array_column($all['customers'][0]['reports'], 'id'));
+        self::assertSame([$pending, $delivered, $settled, $partial], array_column($all['reports'], 'id'));
         self::assertSame(4, $all['summary']['report_count']);
         $completed = CustomerReportOverviewLogic::overview($query + ['status' => 'completed']);
-        self::assertSame([$delivered, $settled], array_column($completed['customers'][0]['reports'], 'id'));
-        self::assertSame(['已交付', '已交付'], array_column($completed['customers'][0]['reports'], 'status_label'));
+        self::assertSame([$delivered, $settled], array_column($completed['reports'], 'id'));
+        self::assertSame(['已交付', '已交付'], array_column($completed['reports'], 'status_label'));
         self::assertSame('待补价', $completed['settlement_notices'][$delivered]['pricing']);
         self::assertSame('7.0000', $completed['summary']['unit_totals']['条']);
         $open = CustomerReportOverviewLogic::overview($query + ['status' => 'pending']);
-        self::assertSame([$pending], array_column($open['customers'][0]['reports'], 'id'));
+        self::assertSame([$pending], array_column($open['reports'], 'id'));
         self::assertNotFalse(CustomerReportOverviewLogic::exportWord($query + [
             'status' => 'completed', 'expected_tenant_id' => self::TENANT_ID, 'snapshot_hash' => $completed['snapshot_hash'],
             'document_type' => 'customers',
@@ -287,17 +286,19 @@ final class CustomerReportOverviewTest extends TestCase
         $xpath->registerNamespace('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main');
         self::assertSame(1, $xpath->query('//w:pgSz[@w:w="11906" and @w:h="16838"]')->length);
         self::assertSame(1, $xpath->query('//w:cols[@w:num="2"]')->length);
-        self::assertSame(1, $xpath->query('//w:p[w:pPr/w:shd and w:r/w:t[contains(., "甲分店")]]')->length);
-        self::assertSame(1, $xpath->query('//w:p[w:pPr/w:tabs/w:tab[@w:val="right"] and w:r[w:rPr/w:b]/w:t="5 斤"]')->length);
-        self::assertStringContainsString($snapshot['store_name'] . ' · 客户报货单 · 送货 2026-10-10', $header->textContent);
+        self::assertStringContainsString($snapshot['store_name'], $header->textContent);
+        self::assertStringContainsString('客户报货单', $header->textContent);
+        self::assertStringContainsString('2026-10-10', $header->textContent);
         self::assertStringContainsString('待交付', $header->textContent);
         self::assertStringContainsString('甲分', $header->textContent);
-        self::assertStringContainsString('1. 甲<&总店 / 甲分店', $this->paperText($doc));
-        self::assertStringContainsString('客户自提', $doc->textContent);
-        self::assertStringContainsString('□ ① 鲈鱼 5 斤', $this->paperText($doc));
-        self::assertStringContainsString('缺 1 斤', $doc->textContent);
+        $lines = $this->wordLines($doc);
+        self::assertContains('客户：1. 甲<&总店 / 甲分店', $lines);
+        self::assertContains('送货：客户自提', $lines);
+        self::assertContains('□ 商品：① 鲈鱼', $lines);
+        self::assertContains('报货数量：5 斤', $lines);
+        self::assertContains('缺货数量：1 斤', $lines);
         self::assertSame(1, substr_count($doc->textContent, '鲈鱼'));
-        foreach (['商品需求汇总', '备货人', '核对人', '导出时间', '备注', $snapshot['customers'][0]['reports'][0]['sn']] as $omitted) {
+        foreach (['商品需求汇总', '备货人', '核对人', '导出时间', '备注', '车牌：', '最早：', $snapshot['reports'][0]['sn']] as $omitted) {
             self::assertStringNotContainsString($omitted, $doc->textContent);
         }
         foreach ([null, ['goods'], 'other'] as $value) {
@@ -311,6 +312,106 @@ final class CustomerReportOverviewTest extends TestCase
         self::assertFalse(CustomerReportOverviewLogic::exportWord($command));
         self::assertStringContainsString('门店', CustomerReportOverviewLogic::getError());
         $this->prepareCustomerReportRequestContext();
+    }
+
+    public function test_word_prints_the_vehicle_handoff_together_and_checks_each_report_separately(): void
+    {
+        $vehicle = [
+            'delivery_method' => 'customer_vehicle',
+            'delivery_arrangement_snapshot' => json_encode([
+                'plate_number' => '测A2794', 'vehicle_location' => '验收装车位',
+            ], JSON_UNESCAPED_UNICODE),
+        ];
+        $late = $this->report('渔港甲', '渔港甲', '1', '件', $vehicle + ['earliest_delivery_time' => '08:00']);
+        $middle = $this->report('桥东乙', '桥东乙', '1', '件', $vehicle + ['earliest_delivery_time' => '05:00']);
+        $early = $this->report('渔港甲', '渔港甲', '1', '件', $vehicle + ['earliest_delivery_time' => '04:00']);
+
+        $query = ['delivery_date' => '2026-10-10', 'expected_tenant_id' => self::TENANT_ID];
+        $snapshot = CustomerReportOverviewLogic::overview($query);
+        self::assertSame([$early, $middle, $late], array_column($snapshot['reports'], 'id'));
+        $command = $query + ['snapshot_hash' => $snapshot['snapshot_hash']];
+        $customers = CustomerReportOverviewLogic::exportWord($command + ['document_type' => 'customers']);
+        self::assertNotFalse($customers, CustomerReportOverviewLogic::getError());
+        $customerLines = $this->wordLines($this->wordPart($customers, 'document'));
+        self::assertSame([
+            '客户：1. 渔港甲',
+            '报货次序：第 1 单',
+            '送货：客户车辆　车牌：测A2794　最早：04:00',
+            '客户：2. 桥东乙',
+            '送货：客户车辆　车牌：测A2794　最早：05:00',
+            '客户：1. 渔港甲',
+            '报货次序：第 2 单',
+            '送货：客户车辆　车牌：测A2794　最早：08:00',
+        ], array_values(preg_grep('/^(客户|报货次序|送货)：/u', $customerLines)));
+        self::assertContains('交接地点：验收装车位', $customerLines);
+        self::assertContains('□ 商品：① 桂鱼 中号', $customerLines);
+        self::assertContains('□ 商品：② 桂鱼 中号', $customerLines);
+        self::assertContains('报货数量：1 件', $customerLines);
+
+        $goods = CustomerReportOverviewLogic::exportWord($command + ['document_type' => 'goods']);
+        self::assertNotFalse($goods, CustomerReportOverviewLogic::getError());
+        $goodsLines = $this->wordLines($this->wordPart($goods, 'document'));
+        self::assertSame([
+            '总报货量：3 件',
+            '客户：1. 渔港甲',
+            '客户合计：2 件',
+            '□ 报货次序：第 1 单',
+            '本单分货量：1 件',
+            '最早送货时间：04:00',
+            '□ 报货次序：第 2 单',
+            '本单分货量：1 件',
+            '最早送货时间：08:00',
+            '客户：2. 桥东乙',
+            '□ 本单分货量：1 件',
+            '最早送货时间：05:00',
+        ], array_values(preg_grep('/^(?:□ )?(总报货量|客户|客户合计|报货次序|本单分货量|最早送货时间)：/u', $goodsLines)));
+        self::assertSame(3, substr_count(implode("\n", $goodsLines), '□'));
+    }
+
+    public function test_overview_orders_customer_vehicle_times_before_pending_times_and_pickup(): void
+    {
+        $pickup = $this->report('自提客户', '自提客户', '1', '条', [
+            'delivery_method' => 'counter_pickup', 'submitted_time' => 1,
+        ]);
+        $vehicle = ['delivery_method' => 'customer_vehicle'];
+        $missing = $this->report('缺时客户', '缺时客户', '1', '条', $vehicle + ['submitted_time' => 2]);
+        $laterSubmission = $this->report('同时间晚提交', '同时间晚提交', '1', '条', $vehicle + [
+            'earliest_delivery_time' => '05:00', 'submitted_time' => 5,
+        ]);
+        $sameTimeFirst = $this->report('同时间先提交', '同时间先提交', '1', '条', $vehicle + [
+            'earliest_delivery_time' => '05:00', 'submitted_time' => 4,
+        ]);
+        $sameTimeNext = $this->report('同时间同提交', '同时间同提交', '1', '条', $vehicle + [
+            'earliest_delivery_time' => '05:00', 'submitted_time' => 4,
+        ]);
+        $midnight = $this->report('零点客户', '零点客户', '1', '条', $vehicle + [
+            'earliest_delivery_time' => '00:00', 'submitted_time' => 7,
+        ]);
+        $query = ['delivery_date' => '2026-10-10', 'expected_tenant_id' => self::TENANT_ID];
+        $snapshot = CustomerReportOverviewLogic::overview($query);
+        self::assertSame(
+            [$midnight, $sameTimeFirst, $sameTimeNext, $laterSubmission, $missing, $pickup],
+            array_column($snapshot['reports'], 'id')
+        );
+        self::assertSame(0, $snapshot['reports'][0]['delivery_arrangement']['source_vehicle_id']);
+
+        $word = CustomerReportOverviewLogic::exportWord($query + [
+            'snapshot_hash' => $snapshot['snapshot_hash'], 'document_type' => 'customers',
+        ]);
+        self::assertNotFalse($word, CustomerReportOverviewLogic::getError());
+        $lines = $this->wordLines($this->wordPart($word, 'document'));
+        self::assertContains('送货：客户车辆　车牌：待补　最早：00:00', $lines);
+        self::assertContains('送货：客户车辆　车牌：待补　最早：待补', $lines);
+
+        Db::name('customer_report')->where('id', $missing)->update(['earliest_delivery_time' => '04:30']);
+        self::assertFalse(CustomerReportOverviewLogic::exportWord($query + [
+            'snapshot_hash' => $snapshot['snapshot_hash'], 'document_type' => 'customers',
+        ]));
+        self::assertStringContainsString('刷新', CustomerReportOverviewLogic::getError());
+        self::assertSame(
+            [$midnight, $missing, $sameTimeFirst, $sameTimeNext, $laterSubmission, $pickup],
+            array_column(CustomerReportOverviewLogic::overview($query)['reports'], 'id')
+        );
     }
 
     public function test_word_separates_customer_handoffs_and_reconciles_goods_by_receiver_specification_and_unit(): void
@@ -348,6 +449,9 @@ final class CustomerReportOverviewTest extends TestCase
         $itemId = (int)Db::name('customer_report_item')->where('report_id', $vehicle)->value('id');
         Db::name('customer_report_item')->where('id', $itemId)->update([
             'piece_weight_confirmed' => 1, 'piece_weight_min' => '1.5', 'piece_weight_max' => '1.7',
+            'processing_requirement' => '鱼背留皮；鱼腹留鳞',
+            'quality_snapshot' => '活鲜；当天',
+            'line_remark' => '分两袋；避重压',
         ]);
         foreach ([['第1组', '5', ['去鳞', '去内脏']], ['留头', '3', ['打包']]] as $index => [$name, $quantity, $processes]) {
             $group = (int)Db::name('customer_report_processing_group')->insertGetId([
@@ -367,11 +471,13 @@ final class CustomerReportOverviewTest extends TestCase
         $command = $query + ['snapshot_hash' => $snapshot['snapshot_hash']];
         $customers = CustomerReportOverviewLogic::exportWord($command + ['document_type' => 'customers']);
         self::assertNotFalse($customers, CustomerReportOverviewLogic::getError());
-        $customerText = $this->paperText($this->wordPart($customers, 'document'));
-        foreach (['交给后厨', '补报 · 交接  第三方配送', '补报单独装', '05:10', '辽A12345', '东门二号位',
-            '19900000000', '待补 车牌、地点', '待称重', '5 条 去鳞→去内脏', '3 条 打包（留头）',
-            '1. 海味饭店', '2. 渔家坊 / 老街分店', '□ ① 鲈鱼 3 条', '□ ② 鲈鱼 2 条',
-            '□ ③ 鲍鱼 7头', '□ ④ 鲍鱼 8头', '□ ① 鲈鱼 8 条', '□ ② 鲈鱼 4.5 斤'] as $expected) {
+        $customerDocument = $this->wordPart($customers, 'document');
+        $customerText = $this->paperText($customerDocument);
+        foreach (['整单备注：交给后厨', '补报', '送货：第三方配送', '整单备注：补报单独装',
+            '送货：客户车辆　车牌：辽A12345　最早：05:10', '交接地点：东门二号位', '司机电话：19900000000',
+            '车牌：待补', '交接地点：待补', '待称重', '5 条 去鳞→去内脏', '3 条 打包（留头）',
+            '客户：3. 海味饭店', '客户：1. 渔家坊 / 老街分店', '商品：③ 鲈鱼', '商品：④ 鲈鱼',
+            '商品：① 鲍鱼 7头', '商品：② 鲍鱼 8头', '报货数量：8 条', '报货数量：4.5 斤'] as $expected) {
             self::assertStringContainsString($expected, $customerText);
         }
         self::assertSame(1, substr_count($customerText, '交给后厨'));
@@ -383,16 +489,24 @@ final class CustomerReportOverviewTest extends TestCase
         self::assertSame('goods', $goods['document_type']);
         self::assertSame('商品分货单_2026-10-10.docx', $goods['filename']);
         self::assertSame($customers['snapshot_hash'], $goods['snapshot_hash']);
-        $goodsText = $this->paperText($this->wordPart($goods, 'document'));
-        foreach (['① 鲈鱼 合计 13 条', '□ 1. 海味饭店 5 条', '□ 2. 渔家坊 / 老街分店 8 条', '补报 2 条',
-            '② 鲈鱼 合计 4.5 斤', '□ 2. 渔家坊 / 老街分店 4.5 斤', '③ 鲍鱼 7头 合计 6 斤', '④ 鲍鱼 8头 合计 9 斤',
-            '5 条 去鳞→去内脏', '3 条 打包（留头）', '单体重量 1.5–1.7 斤', '待称重'] as $expected) {
+        $goodsDocument = $this->wordPart($goods, 'document');
+        $goodsText = $this->paperText($goodsDocument);
+        foreach (['商品：① 鲈鱼', '总报货量：13 条', '客户：3. 海味饭店', '客户合计：5 条',
+            '客户：1. 渔家坊 / 老街分店', '本单分货量：8 条', '补报', '本单分货量：2 条',
+            '商品：② 鲈鱼', '总报货量：4.5 斤', '本单分货量：4.5 斤', '鲍鱼 7头', '总报货量：6 斤', '鲍鱼 8头', '总报货量：9 斤',
+            '5 条 去鳞→去内脏', '3 条 打包（留头）', '单体重量：1.5–1.7 斤', '待称重'] as $expected) {
             self::assertStringContainsString($expected, $goodsText);
         }
         self::assertStringNotContainsString('15 条', $goodsText);
         self::assertStringNotContainsString('19900000000', $goodsText);
         self::assertStringNotContainsString('交给后厨', $goodsText);
         self::assertStringContainsString("2 箱\u{FFFD}装", $goodsText);
+        foreach ([$customerDocument, $goodsDocument] as $document) {
+            $lines = $this->wordLines($document);
+            self::assertContains('加工要求：鱼背留皮；鱼腹留鳞', $lines);
+            self::assertContains('品质：活鲜；当天', $lines);
+            self::assertContains('商品备注：分两袋；避重压', $lines);
+        }
     }
 
     public function test_word_repeats_the_active_order_or_receiver_when_details_continue_in_the_next_column(): void
@@ -418,33 +532,31 @@ final class CustomerReportOverviewTest extends TestCase
         self::assertNotFalse($customers, CustomerReportOverviewLogic::getError());
         $path = new \DOMXPath($this->wordPart($customers, 'document'));
         $path->registerNamespace('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main');
-        self::assertGreaterThan(
-            0,
-            $path->query('//w:p[w:r/w:br[@w:type="column"]]/following-sibling::w:p[1][w:pPr/w:shd][w:r/w:t=" 1."]')->length
-        );
-        self::assertStringContainsString($receiver . '（续）', $path->document->textContent);
-        $continued = $path->query('//w:p[w:r/w:br[@w:type="column"]]/following-sibling::w:p[not(w:pPr/w:shd)][1]');
-        self::assertGreaterThan(0, count(array_filter(iterator_to_array($continued), static fn(\DOMNode $node) =>
-            str_starts_with($node->textContent, '第 1 单（续）'))));
-        $resumedItems = $path->query('//w:body/w:p[w:r/w:t[contains(., "桂鱼 中号（续）")]]');
-        self::assertGreaterThan(0, $resumedItems->length);
-        foreach ($resumedItems as $resumed) {
-            $item = $path->query('preceding-sibling::w:p[w:r/w:t[starts-with(., "□ ")]][1]', $resumed)->item(0);
-            self::assertNotNull($item);
-            $marker = explode(' ', trim($this->paperText($item)))[1];
-            self::assertStringEndsWith($marker . ' 桂鱼 中号（续）', $resumed->textContent);
+        $continued = $path->query('//w:p[w:r/w:br[@w:type="column"]]/following-sibling::w:p[1]');
+        $restart = [];
+        foreach ($continued as $firstLine) {
+            $context = $firstLine->textContent;
+            foreach ($path->query('following-sibling::w:p[position() <= 3]', $firstLine) as $line) {
+                $context .= $line->textContent;
+            }
+            $restart[] = $context;
         }
-        self::assertStringContainsString('补报 · 交接  第三方配送', $path->document->textContent);
+        self::assertNotEmpty(preg_grep('/^客户：1\..*南门分店（续）报货次序：第 1 单/u', $restart), implode("\n", $restart));
+        self::assertStringContainsString($receiver, $path->document->textContent);
+        self::assertStringContainsString('末尾10', $path->document->textContent);
+        self::assertStringContainsString('送货：第三方配送', $path->document->textContent);
+        self::assertSame(12, substr_count($path->document->textContent, '□'));
 
         $goods = CustomerReportOverviewLogic::exportWord($command + ['document_type' => 'goods']);
         self::assertNotFalse($goods, CustomerReportOverviewLogic::getError());
         $path = new \DOMXPath($this->wordPart($goods, 'document'));
         $path->registerNamespace('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main');
-        $headings = $path->query('//w:p[w:r/w:br[@w:type="column"]]/following-sibling::w:p[1]');
-        self::assertContains('① 桂鱼 中号（续） 合计 63 条', array_map(fn(\DOMNode $node) => trim($this->paperText($node)), iterator_to_array($headings)));
-        $continued = $path->query('//w:p[w:r/w:br[@w:type="column"]]/following-sibling::w:p[not(w:pPr/w:shd)][1]');
-        self::assertContains('1. ' . $main . ' / ' . $receiver . '（续）', array_map(static fn(\DOMNode $node) => $node->textContent, iterator_to_array($continued)));
+        $continued = $path->query('//w:p[w:r/w:br[@w:type="column"]]/following-sibling::w:p[1]');
+        self::assertContains('商品：① 桂鱼 中号（续）', array_map(fn(\DOMNode $node) => trim($this->paperText($node)), iterator_to_array($continued)));
+        self::assertStringContainsString($receiver, $path->document->textContent);
+        self::assertStringContainsString('总报货量：63 条', $path->document->textContent);
         self::assertStringContainsString('末尾10', $path->document->textContent);
+        self::assertSame(2, substr_count($path->document->textContent, '□'));
     }
 
     public function test_word_keeps_goods_numbers_circled_beyond_fifty_in_both_documents(): void
@@ -470,17 +582,27 @@ final class CustomerReportOverviewTest extends TestCase
             $document = $this->wordPart($file, 'document');
             $text = $this->paperText($document);
             foreach ([11 => '⑪', 20 => '⑳', 21 => '㉑', 50 => '㊿', 51 => '◯51', 100 => '◯100'] as $position => $marker) {
-                self::assertStringContainsString($marker . ' 样品' . $position . ' ', $text);
+                self::assertStringContainsString('商品：' . $marker . ' 样品' . $position, $text);
             }
             if ($type === 'customers') {
                 $path = new \DOMXPath($document);
                 $path->registerNamespace('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main');
                 $break = '//w:body/w:p[w:r/w:br[@w:type="column"]]';
                 self::assertGreaterThan(0, $path->query($break)->length);
-                self::assertSame($path->query($break)->length,
-                    $path->query($break . '/following-sibling::w:p[not(w:pPr/w:shd)][1][w:r/w:t="补报"]')->length);
+                self::assertStringContainsString('补报', $text);
+                self::assertSame(100, substr_count($text, '□'));
             }
         }
+    }
+
+    private function wordLines(\DOMDocument $document): array
+    {
+        $path = new \DOMXPath($document);
+        $path->registerNamespace('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main');
+        return array_values(array_filter(array_map(
+            fn(\DOMNode $paragraph) => trim($this->paperText($paragraph)),
+            iterator_to_array($path->query('//w:p'))
+        )));
     }
 
     private function paperText(\DOMNode $node): string
@@ -523,8 +645,8 @@ final class CustomerReportOverviewTest extends TestCase
         $query = ['delivery_date' => '2026-10-10', 'keyword' => '甲分'];
         $result = CustomerReportOverviewLogic::overview($query);
         self::assertSame(1, $result['summary']['report_count']);
-        self::assertTrue($result['customers'][0]['reports'][0]['items'][0]['pending_measurement']);
-        self::assertNull($result['customers'][0]['reports'][0]['items'][0]['shortage_quantity']);
+        self::assertTrue($result['reports'][0]['items'][0]['pending_measurement']);
+        self::assertNull($result['reports'][0]['items'][0]['shortage_quantity']);
         self::assertSame(1, CustomerReportOverviewLogic::overview(['delivery_date' => '2026-10-10', 'status' => 'completed'])['summary']['report_count']);
         self::assertFalse(CustomerReportOverviewLogic::overview(['delivery_date' => '2026-02-30']));
         self::assertFalse(CustomerReportOverviewLogic::overview(['keyword' => ['invalid']]));
@@ -554,10 +676,10 @@ final class CustomerReportOverviewTest extends TestCase
             }
         }
         $result = CustomerReportOverviewLogic::overview(['delivery_date' => '2026-10-10']);
-        self::assertCount(10, $result['customers']);
+        self::assertSame(10, $result['summary']['customer_count']);
         self::assertSame('50.0000', $result['goods_summary'][0]['quantity']);
         self::assertSame(10, $result['goods_summary'][0]['customer_count']);
-        $line = $result['customers'][0]['reports'][0]['items'][0];
+        $line = $result['reports'][0]['items'][0];
         self::assertCount(2, $line['processing_groups']);
         self::assertSame(['去鳞', '去内脏'], $line['processing_groups'][0]['processes']);
         self::assertStringContainsString('总重范围', $line['requirements']);
